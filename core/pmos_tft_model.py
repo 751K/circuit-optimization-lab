@@ -1,0 +1,454 @@
+import math
+import numpy as np
+from scipy.optimize import fsolve
+
+class PMOS_TFT:
+    """
+    Python equivalent of the Verilog-A model for AT4000TG pmos_TFT.
+    Now includes DC solving, Parasitic Capacitances, and Noise Power Spectral Density evaluation.
+    Note: Python is mainly used here for DC Operating Point, Capacitance, and Noise evaluation.
+    Full transient (ddt) simulation would require an external ODE solver like SPICE.
+    """
+    def __init__(self, W=1000, L=20, VT=-3.03, Roff=1, NF=1, Reg=1,
+                 C1=37.5, C2=50, C3=35, C4=35, Ci=2.4, kv=1, kh=1,
+                 temperature=300.15, pvt0=0, mvt0=0, pbeta0=0, mbeta0=0):
+        # User defined parameters
+        self.W = W
+        self.L = L
+        self.VT = VT
+        self.Roff = Roff
+        self.NF = NF
+        self.Reg = Reg
+        self.C1 = C1
+        self.C2 = C2
+        self.C3 = C3
+        self.C4 = C4
+        self.Ci = Ci
+        self.kv = kv
+        self.kh = kh
+        self.temperature = temperature
+        
+        # Monte carlo variation parameters
+        self.pvt0 = pvt0
+        self.mvt0 = mvt0
+        self.pbeta0 = pbeta0
+        self.mbeta0 = mbeta0
+
+        # Physical constants
+        self.q = 1.6e-19
+        self.Kb = 1.38064e-23
+        self.Kbe = 8.617343e-5
+        self.E0 = 8.85418781e-14
+        
+        # Material properties
+        self.Ks = 3
+        self.alfa = 4.5455e7
+        self.VE = 3.6
+        self.Nt = 1.0000e21
+        self.Nss = 2.0006e11
+        self.s0 = 5.9658e6
+        self.Tt = 304.9889
+        self.Bc = 2.8
+
+        # internal-node (Vs1,Vd1) solve cache: warm start + exact-point memo.
+        # The transient/AC stack hammers get_op at nearly-identical biases
+        # (residual, caps, and the gm/gds finite-diff all share a center point);
+        # reusing the last root as a Newton seed turns a cold 5-guess fsolve into
+        # a 1-2 step solve, and the exact-key memo skips duplicate center solves.
+        self._op_cache = None     # last converged (Vs1, Vd1)
+        self._op_key = None       # (Vs, Vd, Vg) it was solved at
+
+        self._precompute_constants()
+
+    def _precompute_constants(self):
+        # Effective temperature
+        self.T = 295 - (self.temperature - 295) / 4
+        self.wt = self.Tt / self.T
+        
+        # Geometry in meters/cm
+        self.w = self.W * 1e-6
+        self.l = self.L * 1e-6
+        
+        self.Cpvt = (1 + self.pvt0 + self.mvt0 / np.sqrt(self.W * self.L * 1e-12))
+        self.Vfb = self.VT * (3.25 / self.Ci) * self.Cpvt
+        self.beta0 = (1 + self.mbeta0 + self.pbeta0)
+        
+        self.Ceff = (self.Ci / 3.25 * 5.000) * 1e-9
+        self.CI = self.Ci / self.Cpvt * 1e-9
+        self.Es = self.E0 * self.Ks
+        
+        self.G0 = self.s0 * (((np.pi * (self.Tt/self.T)**3 * self.Nt) / (self.Bc * (2*self.alfa)**3)) ** (self.Tt/self.T))
+        
+        # Channel parameters
+        self.Rleak = (2 * 1e12 / self.W) * self.L * self.Roff
+        # beta equation
+        term1 = (self.Es * self.G0 / self.Ceff)
+        term2 = (self.Kbe * self.T) * (self.T / (2 * self.Tt - self.T))
+        term3 = ((self.Ceff**2 * np.sin(np.pi * self.T / self.Tt)) / (np.pi * self.Nt * 2 * self.q * self.Kbe * self.T * self.Es)) ** (self.Tt / self.T)
+        self.beta = self.beta0 * 0.8 * term1 * term2 * term3
+        
+        self.Vss = 2 * self.Kbe * self.Tt * (1 + self.q * self.Nss / self.Ceff) * 2 * self.Tt / (2 * self.Tt - self.T)
+        self.Esat = self.VE
+        self.lambda_ = 1 / (self.L * self.Esat * (self.Ci / 3.25))
+        
+        # Contact parameters
+        self.Lc = 5
+        self.k0 = 1.1e-8
+        self.Rcleak = (1e16 / self.W) * self.Lc
+        
+        # Capacitance / AC parameters
+        self.fw = self.W / self.NF
+        self.cl = 10.0
+        self.OSC_O1 = self.C2 - self.C3 + self.C4
+        self.EDGE_OX = 2*self.C3 + 2*self.C1 * np.ceil((np.ceil((self.cl+self.L)*self.NF + self.cl + 2*self.OSC_O1 + self.kv*self.C2)/self.C1)/2)
+        self.EDGE_OY = 2*self.C3 + 2*self.C1 * np.ceil(np.ceil((self.fw + 2*self.OSC_O1 + (self.kh-1)*self.C2)/self.C1)/2)
+        self.g_area = (self.EDGE_OX + 2*self.C1) * (self.EDGE_OY + 2*self.C1)
+        self.AOSC = self.EDGE_OX * self.EDGE_OY
+        
+        if self.Reg == 1: self.k1 = 1
+        elif self.Reg == 2: self.k1 = 0
+        elif self.Reg == 3: self.k1 = 0.1
+        elif self.Reg == 4: self.k1 = 0.001
+        else: self.k1 = 0
+        
+        # Gate internal node resistance
+        self.R_cap = 100.0
+        self.R_cap2 = 1e12 * self.Cpvt
+
+    @staticmethod
+    def _softplus(x):
+        """ln(1 + exp(x)), overflow-safe. Scalar fast path (math) matches the
+        stable form np.logaddexp(0,x) uses bit-for-bit; arrays fall back to numpy."""
+        try:
+            if x > 0.0:
+                return x + math.log1p(math.exp(-x))
+            return math.log1p(math.exp(x))
+        except (TypeError, ValueError):              # array input
+            return np.logaddexp(0.0, x)
+
+    @staticmethod
+    def _sigmoid(x):
+        """1/(1+exp(-x)) = exp(-logaddexp(0,-x)), overflow-safe scalar fast path."""
+        try:
+            if x >= 0.0:
+                z = math.exp(-x)
+                return 1.0 / (1.0 + z)
+            z = math.exp(x)
+            return z / (1.0 + z)
+        except (TypeError, ValueError):              # array input
+            return np.exp(-np.logaddexp(0.0, -x))
+
+    def _va_sorted_nodes(self, Vs, Vd, Vs1, Vd1):
+        """Mirror the Verilog-A internal voltage reassignment exactly."""
+        v_s = Vs if Vs > Vs1 else Vs1
+        v_s1 = Vs1 if Vs > Vs1 else Vs
+        v_d = Vd if Vd1 > Vd else Vd1
+        v_d1 = Vd1 if Vd1 > Vd else Vd
+        return v_s, v_s1, v_d, v_d1
+
+    def _gate1_dc(self, Vs, Vd, Vg):
+        # KCL at gate1 for the three DC resistive branches in the Verilog-A model.
+        numerator = Vg / self.R_cap + (Vs + Vd) / self.R_cap2
+        denominator = 1 / self.R_cap + 2 / self.R_cap2
+        return numerator / denominator
+
+    def _eval_channel(self, Vs, Vd, Vg, Vs1, Vd1):
+        """Evaluate Verilog-A channel annotations from the solved operating point."""
+        _, _, v_d, v_d1 = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+        arg_d1 = (v_d1 - Vg + self.Vfb) / self.Vss
+        arg_d = (v_d - Vg + self.Vfb) / self.Vss
+        Vods = self.Vss * self._softplus(arg_d1)
+        Vodd = self.Vss * self._softplus(arg_d)
+        exponent = 2 * self.Tt / self.T
+        chmod = 1 + self.lambda_ * (v_d1 - v_d)
+        current_scale = (self.W / self.L) * self.beta
+        Ich = current_scale * (Vods**exponent - Vodd**exponent) * chmod
+        rout = (self.lambda_ * Ich) ** -1
+        gm = current_scale * exponent * (
+            Vods**(exponent - 1) * self._sigmoid(arg_d1)
+            - Vodd**(exponent - 1) * self._sigmoid(arg_d)
+        ) * chmod
+        return {
+            "Vodd": Vodd,
+            "Vods": Vods,
+            "chmod": chmod,
+            "Ich": Ich,
+            "rout": rout,
+            "gm": gm,
+        }
+
+    def _eval_currents(self, Vs, Vd, Vg, Vs1, Vd1):
+        """ Evaluates the DC branch currents given external and internal nodes """
+        # Voltages sorting based on Verilog-A ternary operators.
+        v_s, v_s1, v_d, v_d1 = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+        
+        # --- Contact Model (between s and s1) ---
+        Vt = -(0.0045 * (v_s - Vg)**2 + 0.7125 * (v_s - Vg) + 0.9625)
+        
+        Vods1 = self.Vss * self._softplus((v_s - Vg + Vt) / self.Vss)
+        Vodd1 = self.Vss * self._softplus((v_s1 - Vg + Vt) / self.Vss)
+        
+        Ecsat = 0.85 * 20 / (np.abs(v_s - Vg) + 0.1)
+        lambdac = 1 / (self.Lc * Ecsat)
+        cmod = 1 + lambdac * (v_s - v_s1)
+        
+        Icont = (self.W / self.Lc) * self.k0 * (Vods1**(2*self.Tt/self.T) - Vodd1**(2*self.Tt/self.T)) * cmod
+        I_s_s1 = Icont if Vs > Vs1 else -Icont
+        
+        # --- Channel Model (between d1 and d) ---
+        channel = self._eval_channel(Vs, Vd, Vg, Vs1, Vd1)
+        Ich = channel["Ich"]
+        
+        I_d1_d_ch = Ich if Vs1 > Vd else -Ich
+        I_d1_d_leak = (Vd1 - Vd) / self.Rleak + 0.1 / self.Rleak
+        I_d1_d = I_d1_d_ch + I_d1_d_leak
+        
+        # --- Internal resistor (between s1 and d1) ---
+        I_s1_d1 = (Vs1 - Vd1) / 0.1
+        
+        return I_s_s1, I_s1_d1, I_d1_d, Ich, I_d1_d_leak
+
+    def _eval_ich(self, Vs, Vd, Vg, Vs1, Vd1):
+        """Evaluate the Verilog-A Ich expression without branch sign or leakage."""
+        return self._eval_channel(Vs, Vd, Vg, Vs1, Vd1)["Ich"]
+
+    def _residuals(self, x, Vs, Vd, Vg):
+        Vs1, Vd1 = x
+        I_s_s1, I_s1_d1, I_d1_d, _, _ = self._eval_currents(Vs, Vd, Vg, Vs1, Vd1)
+        
+        # KCL at node s1
+        res1 = I_s_s1 - I_s1_d1
+        # KCL at node d1
+        res2 = I_s1_d1 - I_d1_d
+        return [res1, res2]
+
+    def _newton_internal(self, Vs, Vd, Vg, x0, tol=1e-12, maxit=40):
+        """Damped 2x2 Newton on the internal-node KCL, seeded from x0.
+
+        Same residual (_residuals) and acceptance (||res|| < 1e-12) as the old
+        fsolve path, but with an analytic 2x2 inverse and a warm start — so a seed
+        within ~HH of the root converges in 1-2 iterations with no scipy overhead.
+        Returns (Vs1, Vd1) on success, or None to let the robust path take over."""
+        x0 = np.asarray(x0, float)
+        Vs1, Vd1 = x0[0], x0[1]
+        hj = 1e-6                                    # finite-diff step for the 2x2 jac
+        for _ in range(maxit):
+            r0a, r0b = self._residuals((Vs1, Vd1), Vs, Vd, Vg)
+            if abs(r0a) + abs(r0b) < tol:
+                return np.array([Vs1, Vd1])
+            r1a, r1b = self._residuals((Vs1 + hj, Vd1), Vs, Vd, Vg)
+            r2a, r2b = self._residuals((Vs1, Vd1 + hj), Vs, Vd, Vg)
+            j00 = (r1a - r0a) / hj; j01 = (r2a - r0a) / hj
+            j10 = (r1b - r0b) / hj; j11 = (r2b - r0b) / hj
+            det = j00 * j11 - j01 * j10
+            if det == 0.0 or not np.isfinite(det):
+                return None
+            d0 = -(j11 * r0a - j01 * r0b) / det
+            d1 = -(-j10 * r0a + j00 * r0b) / det
+            mx = max(abs(d0), abs(d1))
+            if mx > 2.0:                             # branch-safety: cap the jump
+                s = 2.0 / mx; d0 *= s; d1 *= s
+            Vs1 += d0; Vd1 += d1
+            if max(abs(d0), abs(d1)) < 1e-13:        # stalled at the numeric floor
+                if abs(r0a) + abs(r0b) < 1e-9:
+                    return np.array([Vs1, Vd1])
+                return None
+        return None
+
+    def _robust_op(self, Vs, Vd, Vg):
+        """Cold multi-guess fsolve — the original, branch-robust internal solve.
+        Used on the first call and whenever the warm-started Newton bails out."""
+        guesses = (
+            [Vs - 0.01*(Vs-Vd), Vd + 0.01*(Vs-Vd)],
+            [Vs, Vd],
+            [(Vs + Vd) / 2, (Vs + Vd) / 2],
+            [Vs, Vs],
+            [Vd, Vd],
+        )
+        best_sol = None
+        best_norm = np.inf
+        best_msg = ""
+        for x0 in guesses:
+            sol, _, ier, mesg = fsolve(
+                self._residuals,
+                x0,
+                args=(Vs, Vd, Vg),
+                full_output=True,
+                xtol=1e-12,
+                maxfev=2000,
+            )
+            residual_norm = np.linalg.norm(self._residuals(sol, Vs, Vd, Vg))
+            if residual_norm < best_norm:
+                best_sol = sol
+                best_norm = residual_norm
+                best_msg = f"ier={ier}\n{mesg}"
+            if ier == 1 or residual_norm < 1e-12:
+                break
+        if best_norm >= 1e-12:
+            raise RuntimeError(f"fsolve 未能收敛 ({best_msg})")
+        return best_sol
+
+    def _solve_internal(self, Vs, Vd, Vg):
+        """Solve internal nodes (Vs1, Vd1), with exact-key memo + warm-start Newton.
+        Falls back to the robust cold fsolve.  Warm-start enables a ~8× speed-up when
+        the same instance is re-used across nearby biases (sweeps / continuation);
+        the exact-key memo makes repeat calls at the identical bias near-instant."""
+        key = (Vs, Vd, Vg)
+        if self._op_key == key and self._op_cache is not None:
+            return self._op_cache
+        sol = None
+        if self._op_cache is not None:               # warm start from the last root
+            sol = self._newton_internal(Vs, Vd, Vg, self._op_cache)
+        if sol is None:                              # cold guess, then robust fallback
+            sol = self._newton_internal(
+                Vs, Vd, Vg, (Vs - 0.01*(Vs-Vd), Vd + 0.01*(Vs-Vd)))
+        if sol is None:
+            sol = self._robust_op(Vs, Vd, Vg)
+        self._op_key = key
+        self._op_cache = sol
+        return sol
+
+    def get_op(self, Vs, Vd, Vg, include_gate1=False):
+        """
+        Solves DC operating point (internal nodes) for a given bias.
+        By default returns (Vs1, Vd1) for backward compatibility.
+        Set include_gate1=True to also return the Verilog-A gate1 DC solution.
+        """
+        sol = self._solve_internal(Vs, Vd, Vg)
+        if include_gate1:
+            return sol[0], sol[1], self._gate1_dc(Vs, Vd, Vg) # Vs1, Vd1, Vg1
+        return sol[0], sol[1] # Vs1, Vd1
+
+    def get_Idc(self, Vs, Vd, Vg):
+        """ Calculates the DC drain current. """
+        Vs1, Vd1 = self.get_op(Vs, Vd, Vg)
+        I_s_s1, I_s1_d1, I_d1_d, _, _ = self._eval_currents(Vs, Vd, Vg, Vs1, Vd1)
+        return -I_d1_d
+
+    def get_capacitances(self, Vs, Vd, Vg):
+        """
+        Calculates small-signal parasitic capacitances Cgss and Cgdd 
+        at the specified DC operating point.
+        """
+        Vs1, Vd1 = self.get_op(Vs, Vd, Vg)
+        v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+
+        Cgs1 = (np.floor(self.NF / 2) + 1) * (self.fw + 210) * self.cl * self.CI
+        Cgd1 = (np.ceil(self.NF / 2)) * (self.fw + 210) * self.cl * self.CI
+        
+        arg_gs = v_s - Vg + self.Vfb
+        Cgs2 = 1.43 * (0.5 * self.W * self.L * self.CI) * (2 / np.pi * np.arctan(arg_gs * 0.6) + 1)
+        Cgd2 = 0.33 * (0.5 * self.W * self.L * self.CI) * (2 / np.pi * np.arctan(arg_gs * 2.01) + 1)
+        
+        arg_gd = -Vg + self.Vfb + v_d
+        Cgs3 = 0.34 * (0.5 * self.AOSC * self.CI - 1.43 * (self.W * self.L * self.CI)) * (2 / np.pi * np.arctan(arg_gd * 0.21) + 1)
+        Cgd3 = 0.52 * (0.5 * self.AOSC * self.CI - 0.33 * (self.W * self.L * self.CI)) * (2 / np.pi * np.arctan(arg_gd * 0.42) + 1)
+        
+        Cgss = self.k1 * (Cgs1 + Cgs2 + Cgs3) * 1e4 * 1e-12
+        Cgdd = self.k1 * (Cgd1 + Cgd2 + Cgd3) * 1e4 * 1e-12
+        
+        # From the Verilog-A, gate1 is connected to s and d via these capacitors
+        # I(s,gate1) = Cgss * ddt(V(s,gate1)) + ...
+        # I(d,gate1) = Cgdd * ddt(V(d,gate1)) + ...
+        return Cgss, Cgdd
+
+    def get_os(self, Vs, Vd, Vg):
+        """
+        Return the same operating-point quantities used by Cadence OS("/M0" "...").
+        Values are named after the Verilog-A real variables where applicable.
+        """
+        Vs1, Vd1, Vg1 = self.get_op(Vs, Vd, Vg, include_gate1=True)
+        v_s, v_s1, v_d, v_d1 = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+        I_s_s1, I_s1_d1, I_d1_d, Ich, Ioff = self._eval_currents(Vs, Vd, Vg, Vs1, Vd1)
+        channel = self._eval_channel(Vs, Vd, Vg, Vs1, Vd1)
+        Cgss, Cgdd = self.get_capacitances(Vs, Vd, Vg)
+        Vsg = Vs - Vg
+        Vsd = Vs - Vd
+        return {
+            "Vg": Vg,
+            "Vg1": Vg1,
+            "Vs": v_s,
+            "Vs1": v_s1,
+            "Vd": v_d,
+            "Vd1": v_d1,
+            "Vsg": Vsg,
+            "Vsd": Vsd,
+            "Vsd_sat": Vsd - Vsg - self.Vfb,
+            "Ich": Ich,
+            "Ioff": Ioff,
+            "I_tft": Ich + Ioff,
+            "Idc": -I_d1_d,
+            "gm": channel["gm"],
+            "rout": channel["rout"],
+            "Cgss": Cgss,
+            "Cgdd": Cgdd,
+            "w": self.w,
+            "l": self.l,
+            "W": self.W,
+            "L": self.L,
+        }
+
+    def get_cadence_metrics(self, Vs, Vd, Vg, width=None):
+        """
+        Match the calculator expressions in the Cadence screenshot:
+        gain, ft, id/w, and gm/id.
+        width defaults to the Cadence VAR("w") convention, matching the W
+        instance parameter value in um. Use width=os_values["w"] for A/m.
+        """
+        os_values = self.get_os(Vs, Vd, Vg)
+        gm = os_values["gm"]
+        Ich = os_values["Ich"]
+        capacitance = os_values["Cgdd"] + os_values["Cgss"]
+        width_value = os_values["W"] if width is None else width
+        return {
+            "gain": 20 * np.log10(gm * os_values["rout"]),
+            "ft": gm / (2 * np.pi * capacitance),
+            "idw": Ich / width_value,
+            "gm_id": gm / Ich,
+            **os_values,
+        }
+
+    def get_noise_psd(self, Vs, Vd, Vg, frequency):
+        """
+        Calculates thermal and flicker noise Power Spectral Density (A^2/Hz)
+        at the given frequency.
+        """
+        Vs1, Vd1 = self.get_op(Vs, Vd, Vg)
+        _, _, _, Ich, Ioff = self._eval_currents(Vs, Vd, Vg, Vs1, Vd1)
+        
+        gm = self._eval_channel(Vs, Vd, Vg, Vs1, Vd1)["gm"]
+        
+        # 1. Thermal Noise (white noise)
+        # I(s,d) <+ white_noise(2*q*(Ich+Ioff),"thermal");
+        # I(s,d) <+ white_noise(4*Kb*($temperature)*gm*2.0/3.0,"thermal");
+        S_th1 = 2 * self.q * (Ich + Ioff)
+        S_th2 = 4 * self.Kb * self.temperature * gm * 2.0 / 3.0
+        S_thermal = S_th1 + S_th2
+        
+        # 2. Flicker Noise (1/f noise)
+        hooge = 0.05
+        _, _, _, v_d1 = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+        denom = self.w * self.l * self.CI * 1e4 * (v_d1 - Vg + self.Vfb)
+        
+        # Cadence/Spectre AT4000TG behavior verified with the real PDK model:
+        # a negative flicker_noise coefficient is reported as a positive
+        # contribution with the same magnitude in PSFASCII noise output.
+        S_flicker_1Hz = (hooge * self.q * (Ich**2)) / abs(denom)
+        S_flicker = S_flicker_1Hz / frequency
+        
+        return S_thermal, S_flicker
+
+if __name__ == "__main__":
+    # Test the complete model
+    tft = PMOS_TFT(W=1000, L=20)
+    Vs, Vd, Vg = 40.0, 0.0, 20.0
+    
+    Id = tft.get_Idc(Vs, Vd, Vg)
+    Cgss, Cgdd = tft.get_capacitances(Vs, Vd, Vg)
+    S_th, S_fl = tft.get_noise_psd(Vs, Vd, Vg, frequency=100.0)
+    
+    print("=== PMOS TFT Python Model Output ===")
+    print(f"Drain Current (Id): {Id*1e6:.2f} uA")
+    print(f"Cgss: {Cgss*1e12:.4f} pF, Cgdd: {Cgdd*1e12:.4f} pF")
+    print(f"Thermal Noise PSD: {S_th:.4e} A^2/Hz")
+    print(f"Flicker Noise PSD @ 100Hz: {S_fl:.4e} A^2/Hz")

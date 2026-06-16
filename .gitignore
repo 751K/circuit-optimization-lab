@@ -1,0 +1,70 @@
+# macOS
+.DS_Store
+
+# Python cache and environments
+__pycache__/
+*.py[cod]
+*.pyo
+.python-version
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local configuration and secrets
+.env
+.env.*
+*.local
+
+# Generated data and reports
+outputs/
+results/
+runs/
+tmp/
+temp/
+
+# Figures can be regenerated; remove this rule if final figures should be tracked.
+figures/generated/
+
+# Cadence/Spectre simulation outputs
+psf/
+psfbin/
+netlist/
+simulation/
+simulations/
+spectre.out
+spectre.ic
+*.raw
+*.trn
+*.ac
+*.dc
+*.noise
+*.stb
+*.mt0
+*.ms0
+*.measure
+*.ahdlSimDB/
+*.ahdlcmi/
+*.cdslck*
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
