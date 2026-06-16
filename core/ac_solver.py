@@ -89,8 +89,8 @@ def _symmetric_continuation(sizes, bias, Id, gmin):
             Id("M13", net20, vfb, vop) - Id("M15", vfb, 0.0, 0.0) - vfb * gmin,
             Id("M11", Vdd, net20, Vc) - 2 * Id("M12", net20, vfb, vop) - net20 * gmin,
         ]
-    u = np.array([VCM, VCM, VCM, VCM]) * 0.2
-    for sc in np.linspace(0.2, 1.0, 9):
+    u = np.array([VCM, VCM, VCM, VCM]) * 0.1          # near powered-down
+    for sc in np.linspace(0.1, 1.0, 19):
         ok = False
         for seed in (u, np.array([VCM+7, VCM-4, VCM-8, VCM+15]) * sc):
             try:
@@ -217,7 +217,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         #     multistable regions instead of jumping to an alternate equilibrium.
         x = np.array(base_g) * 0.2
         ramp_ok = True
-        for lam in np.linspace(0.2, 1.0, 9):
+        for lam in np.linspace(0.2, 1.0, 17):
             bl = {k: v * lam for k, v in bias.items()}
             s = _solve(bl, gmin, x)
             if s is None:
@@ -283,7 +283,8 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
 
     # ── 2. Small-signal params at the true per-device DC op ──
     ss = {name: get_ss_params(sizes[name][0], sizes[name][1], *bpts[name],
-                              corner=_dev_corner(corner, name), nf=_dev_nf(nf, name))
+                              corner=_dev_corner(corner, name), nf=_dev_nf(nf, name),
+                              dev_inst=_dev_inst[name])
           for name, *_ in topo.devices}
 
     # ── 3. Build & solve the small-signal MNA (terminals from the topology) ──
