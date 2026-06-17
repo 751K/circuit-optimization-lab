@@ -1,0 +1,1355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OTFT AFE Interactive Tuner</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #f5f7fb;
+  --panel: #ffffff;
+  --surface: #ffffff;
+  --surface-hover: #f8fafc;
+  --surface2: #eef2f7;
+  --border: #d8dee9;
+  --border-strong: #b9c3d0;
+  --text: #263241;
+  --text-dim: #667085;
+  --text-bright: #111827;
+  --accent: #1f5d8f;
+  --accent-dim: #496a86;
+  --green: #2e7d32;
+  --red: #b3261e;
+  --orange: #b7791f;
+  --purple: #6f5a8f;
+  --blue: #2f6f9f;
+  --yellow: #a06a00;
+
+  --c-tail: #2f6f9f;
+  --c-input: #2f7d5a;
+  --c-output: #9a6a15;
+  --c-fb: #b14d4f;
+  --c-lsload: #6f5a8f;
+  --c-lstail: #546a7b;
+
+  --radius: 6px;
+  --transition: 0.18s ease;
+}
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, -apple-system, sans-serif; font-size: 13px; overflow: hidden; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Layout
+   ═══════════════════════════════════════════════════════════════════════ */
+#app { display: grid; grid-template-columns: 1fr 480px; grid-template-rows: 54px 1fr; height: 100vh; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Header
+   ═══════════════════════════════════════════════════════════════════════ */
+#header { display: flex; align-items: center; gap: 16px; padding: 0 24px; background: #ffffff; border-bottom: 1px solid var(--border); z-index: 100; grid-column: 1 / -1; }
+#header h1 { font-size: 16px; font-weight: 650; color: var(--text-bright); letter-spacing: 0; }
+#header .badge { font-size: 11px; padding: 4px 10px; border-radius: 4px; background: #eef7ef; color: var(--green); border: 1px solid #bfdbc3; font-weight: 600; }
+#header .badge.warn { background: #fff0ee; color: var(--red); border-color: #efc4bf; }
+#header .spacer { flex: 1; }
+#header select, #header button { font-family: inherit; font-weight: 500; font-size: 12px; padding: 6px 14px; border-radius: 4px; border: 1px solid var(--border-strong); background: #ffffff; color: var(--text-bright); cursor: pointer; transition: var(--transition); outline: none; }
+#header button:hover, #header select:hover { background: var(--surface-hover); border-color: var(--accent); }
+#header button.primary { background: #eaf2f8; border-color: var(--accent); color: var(--accent); }
+#header button.primary:hover { background: #dcebf5; }
+#header .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+#header .status-dot.loading { background: var(--orange); animation: pulse 1s infinite; }
+#header .status-dot.error { background: var(--red); }
+@keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.2); } }
+
+#circuit-panel { position: relative; overflow: auto; padding: 32px; display: flex; align-items: center; justify-content: center; background: #f8fafc; }
+
+#convergence-error-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(248, 250, 252, 0.86);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+#convergence-error-overlay .error-card {
+  background: #ffffff;
+  border: 1px solid #efc4bf;
+  box-shadow: 0 18px 40px rgba(17, 24, 39, 0.12);
+  border-radius: 6px;
+  padding: 32px;
+  max-width: 420px;
+  text-align: center;
+  color: var(--text-bright);
+  transform: translateY(0);
+  animation: slideUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+#convergence-error-overlay .error-icon {
+  font-size: 40px;
+  margin-bottom: 16px;
+  animation: pulseWarning 1.5s infinite;
+}
+
+@keyframes pulseWarning {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+}
+
+#convergence-error-overlay h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--red);
+  margin-bottom: 12px;
+  letter-spacing: 0.5px;
+}
+
+#convergence-error-overlay p {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  margin-bottom: 24px;
+}
+
+#convergence-error-overlay button {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+  background: var(--red);
+  border: 1px solid var(--red);
+  padding: 10px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+#convergence-error-overlay button:hover {
+  background: #921f19;
+  transform: translateY(-1px);
+}
+
+#convergence-error-overlay button:active {
+  transform: translateY(0);
+}
+#circuit-panel svg { width: 100%; height: auto; min-height: 500px; }
+
+#control-panel { display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; border-left: 1px solid var(--border); z-index: 1; background: var(--panel); }
+#panel-header { position: sticky; top: 0; z-index: 11; flex-shrink: 0; background: #ffffff; border-bottom: 1px solid var(--border); }
+#panel-header .metrics { margin: 10px 12px; }
+#tabs { display: flex; border-bottom: 1px solid var(--border); background: transparent; }
+#tabs button { flex: 1; padding: 12px 8px; font-family: inherit; font-size: 12px; font-weight: 500; background: none; border: none; color: var(--text-dim); cursor: pointer; transition: var(--transition); border-bottom: 2px solid transparent; letter-spacing: 0.3px; }
+#tabs button.active { color: var(--accent); border-bottom-color: var(--accent); background: #edf4fa; }
+#tabs button:hover:not(.active) { color: var(--text-bright); background: var(--surface-hover); }
+
+.tab-content { display: none; padding: 16px; }
+.tab-content.active { display: block; }
+
+.slider-group { background: #ffffff; border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px; border-left: 3px solid var(--accent); transition: var(--transition); }
+.slider-group:hover { background: #fbfcfe; border-color: var(--border-strong); }
+.slider-group.tail { border-left-color: var(--c-tail); }
+.slider-group.input { border-left-color: var(--c-input); }
+.slider-group.output { border-left-color: var(--c-output); }
+.slider-group.fb { border-left-color: var(--c-fb); }
+.slider-group.lsload { border-left-color: var(--c-lsload); }
+.slider-group.lstail { border-left-color: var(--c-lstail); }
+
+.slider-group .sg-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.slider-group .sg-name { font-weight: 600; font-size: 13px; color: var(--text-bright); letter-spacing: 0.3px; }
+.slider-group .sg-desc { font-size: 11px; color: var(--text-dim); }
+.slider-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.slider-row label { width: 20px; font-size: 12px; font-weight: 500; color: var(--text-dim); text-align: right; flex-shrink: 0; }
+.slider-row input[type="range"] { flex: 1; -webkit-appearance: none; height: 4px; border-radius: 2px; background: #dbe3ec; outline: none; }
+.slider-row input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); border: 2px solid #ffffff; cursor: pointer; box-shadow: 0 0 0 1px var(--accent); transition: 0.1s; }
+.slider-row input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+.slider-row .val { width: 60px; font-size: 12px; font-weight: 500; color: var(--accent); text-align: left; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.slider-row .unit { width: 24px; font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Results Panel
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.metrics { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.metric-card {
+  position: relative;
+  background: #ffffff;
+  border-radius: var(--radius);
+  padding: 14px 10px 10px 10px;
+  text-align: center;
+  border: 1px solid var(--border);
+  transition: var(--transition);
+}
+.metric-card.pass {
+  border-color: #bdd8c1;
+  background: #f6fbf7;
+}
+.metric-card.pass:hover {
+  border-color: var(--green);
+}
+.metric-card.fail {
+  border-color: #efc4bf;
+  background: #fff8f7;
+}
+.metric-card.fail:hover {
+  border-color: var(--red);
+}
+.metric-card .mc-status-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 8px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.metric-card.pass .mc-status-badge {
+  background: #e8f3ea;
+  color: var(--green);
+  border: 1px solid #bdd8c1;
+}
+.metric-card.fail .mc-status-badge {
+  background: #fae8e6;
+  color: var(--red);
+  border: 1px solid #efc4bf;
+}
+.metric-card .mc-label { font-size: 10px; font-weight: 600; color: var(--text-dim); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+.metric-card .mc-value { font-size: 20px; font-weight: 700; color: var(--text-bright); }
+.metric-card .mc-unit { font-size: 11px; color: var(--text-dim); margin-left: 2px; }
+.metric-card .mc-spec { font-size: 10px; color: var(--text-dim); margin-top: 4px; }
+.chart-wrap { background: #ffffff; border-radius: var(--radius); padding: 12px; border: 1px solid var(--border); }
+.chart-wrap canvas { width: 100% !important; height: 200px !important; }
+
+/* noise tab */
+.noise-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.noise-table th, .noise-table td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--border); }
+.noise-table th { color: var(--text-dim); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
+.noise-table td:first-child, .noise-table th:first-child { text-align: left; }
+.noise-table .bar-cell { width: 100px; }
+.noise-table .bar-fill { height: 6px; border-radius: 3px; display: inline-block; vertical-align: middle; margin-right: 4px; }
+.noise-table tr.total { font-weight: 700; border-top: 2px solid var(--border); color: var(--text-bright); background: #f5f7fb; }
+
+/* DC op tab */
+.dc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.dc-item { background: #ffffff; border-radius: 6px; padding: 10px 12px; border: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+.dc-item .dc-node { font-size: 12px; font-weight: 500; color: var(--text-dim); }
+.dc-item .dc-volt { font-size: 15px; font-weight: 600; color: var(--text-bright); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   SVG Circuit Styles
+   ═══════════════════════════════════════════════════════════════════════ */
+svg text { user-select: none; }
+svg .wire { stroke: #7b8794; stroke-width: 2; fill: none; }
+svg .wire-rail { stroke: #4b5563; stroke-width: 2.5; fill: none; }
+svg .wire-xcouple { stroke: #9aa4b2; stroke-width: 1.5; fill: none; stroke-dasharray: 6 4; }
+svg .wire-feedback { stroke: var(--c-fb); stroke-width: 1.5; fill: none; stroke-dasharray: 4 3; opacity: 0.9; }
+svg .channel { stroke-width: 3; fill: none; stroke-linecap: round; }
+svg .gate-plate { stroke-width: 2; fill: none; stroke-linecap: round; }
+svg .gate-line { stroke-width: 1.5; fill: none; }
+svg .gate-bubble { stroke-width: 1.5; fill: var(--panel); }
+svg .node-dot { fill: #64748b; }
+svg .node-label { font-size: 10px; fill: #64748b; }
+svg .dev-label { font-size: 11px; font-weight: 600; }
+svg .dev-wl { font-size: 9px; fill: #667085; font-weight: 500; }
+svg .dev-curr { font-size: 8.5px; fill: #667085; font-weight: 500; }
+svg .bias-label { font-size: 11px; fill: #475467; }
+svg .pin-label { font-size: 12px; fill: #344054; font-weight: 600; }
+
+/* transistor highlight */
+svg g.transistor { cursor: pointer; transition: opacity 0.2s; }
+svg g.transistor:hover { opacity: 1 !important; }
+svg g.transistor:hover .channel { stroke-width: 4; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Scrollbar
+   ═══════════════════════════════════════════════════════════════════════ */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Tooltip
+   ═══════════════════════════════════════════════════════════════════════ */
+#tooltip { position: fixed; pointer-events: none; background: #ffffff; border: 1px solid var(--border-strong); border-radius: 4px; padding: 6px 10px; font-size: 10px; color: var(--text-bright); display: none; z-index: 100; white-space: nowrap; box-shadow: 0 8px 22px rgba(17, 24, 39, 0.12); }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <!-- ═══ HEADER ═══ -->
+  <div id="header">
+    <h1>OTFT AFE Interactive Tuner</h1>
+    <span class="badge" id="pass-badge" style="display:none">Pass All</span>
+    <span class="badge warn" id="fail-badge" style="display:none">Failed</span>
+    <span class="spacer"></span>
+    <span class="status-dot" id="status-dot" title="Ready"></span>
+    <span style="font-size:10px;color:var(--text-dim)" id="status-text">Ready</span>
+    <select id="preset-select">
+      <option value="">Load Preset...</option>
+    </select>
+    <button id="btn-reset">Reset</button>
+    <button id="btn-export">Export</button>
+  </div>
+
+  <!-- ═══ CIRCUIT PANEL ═══ -->
+  <div id="circuit-panel">
+    <svg viewBox="-40 0 830 530" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <filter id="glow"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#b14d4f" />
+        </marker>
+      </defs>
+
+      <!-- ── Rails ── -->
+      <line x1="30" y1="35" x2="720" y2="35" class="wire-rail"/>
+      <text x="715" y="32" class="bias-label" text-anchor="end">VDD = 40V</text>
+      <line x1="30" y1="455" x2="720" y2="455" class="wire-rail"/>
+      <text x="35" y="470" class="bias-label">GND</text>
+
+      <!-- ── Section labels ── -->
+      <text x="180" y="22" class="node-label" font-size="12">Main Amp (Left Stage)</text>
+      <text x="375" y="22" class="node-label" text-anchor="middle" font-size="12">Level Shifter / Feedback</text>
+      <text x="570" y="22" class="node-label" text-anchor="end" font-size="12">Main Amp (Right Stage)</text>
+
+      <!-- ═══════════════ MAIN AMPLIFIER TAIL ═══════════════ -->
+
+      <!-- M6: tail (S=VDD, D=net2, G=VB) -->
+      <g class="transistor" id="svg-M6" data-group="tail">
+        <line x1="310" y1="35" x2="310" y2="135" class="channel" style="stroke:var(--c-tail)"/>
+        <polygon points="306,35 314,35 310,42" style="fill:var(--c-tail)"/>
+        <line x1="302" y1="70" x2="302" y2="100" class="gate-plate" style="stroke:var(--c-tail)"/>
+        <line x1="294" y1="85" x2="270" y2="85" class="gate-line" style="stroke:var(--c-tail)"/>
+        <circle cx="297.5" cy="85" r="3.5" class="gate-bubble" style="color:var(--c-tail)"/>
+        <text x="325" y="77" class="dev-label" style="fill:var(--c-tail)">M6</text>
+        <text x="325" y="91" class="dev-wl">Tail</text>
+        <text x="325" y="103" class="dev-curr">I: -- µA</text>
+      </g>
+      <text x="265" y="88" class="bias-label" font-size="8" text-anchor="end" id="val-VB">VB</text>
+      <circle cx="270" cy="85" r="2" fill="var(--c-tail)"/>
+
+      <!-- net2 -->
+      <line x1="80" y1="135" x2="670" y2="135" class="wire"/>
+      <circle cx="310" cy="135" r="2.5" class="node-dot"/>
+      <text x="315" y="130" class="node-label" id="val-net2">net2</text>
+
+      <!-- ═══════════════ COLUMN 1: M7 / M9 (Far Left) ═══════════════ -->
+
+      <!-- M7: input+ (S=net2, D=VOP, G=VIP) -->
+      <g class="transistor" id="svg-M7" data-group="input">
+        <line x1="80" y1="135" x2="80" y2="250" class="channel" style="stroke:var(--c-input)"/>
+        <polygon points="76,135 84,135 80,142" style="fill:var(--c-input)"/>
+        <line x1="72" y1="177.5" x2="72" y2="207.5" class="gate-plate" style="stroke:var(--c-input)"/>
+        <line x1="64" y1="192.5" x2="40" y2="192.5" class="gate-line" style="stroke:var(--c-input)"/>
+        <circle cx="67.5" cy="192.5" r="3.5" class="gate-bubble" style="color:var(--c-input)"/>
+        <text x="95" y="185" class="dev-label" style="fill:var(--c-input)">M7</text>
+        <text x="95" y="199" class="dev-wl">Input+</text>
+        <text x="95" y="211" class="dev-curr">I: -- µA</text>
+      </g>
+      <text x="35" y="195.5" class="pin-label" fill="#2f7d5a" font-size="11" text-anchor="end" id="val-VIP">VIP</text>
+      <circle cx="40" cy="192.5" r="2" fill="var(--c-input)"/>
+
+      <!-- M9: out+ (S=VOP, D=GND, G=vfbp) -->
+      <g class="transistor" id="svg-M9" data-group="output">
+        <line x1="80" y1="315" x2="80" y2="455" class="channel" style="stroke:var(--c-output)"/>
+        <polygon points="76,315 84,315 80,322" style="fill:var(--c-output)"/>
+        <line x1="88" y1="370" x2="88" y2="400" class="gate-plate" style="stroke:var(--c-output)"/>
+        <line x1="96" y1="385" x2="110" y2="385" class="gate-line" style="stroke:var(--c-output)"/>
+        <circle cx="92.5" cy="385" r="3.5" class="gate-bubble" style="color:var(--c-output)"/>
+        <text x="65" y="380" class="dev-label" style="fill:var(--c-output)" text-anchor="end">M9</text>
+        <text x="65" y="394" class="dev-wl" text-anchor="end">Output+</text>
+        <text x="65" y="406" class="dev-curr" text-anchor="end">I: -- µA</text>
+      </g>
+
+      <!-- ═══════════════ COLUMN 2: M12 / M14 (Inner Left) ═══════════════ -->
+
+      <!-- M12: cross-coupled (S=net20, D=vfbn, G=VOP) -->
+      <g class="transistor" id="svg-M12" data-group="fb">
+        <line x1="260" y1="110" x2="260" y2="250" class="channel" style="stroke:var(--c-fb)"/>
+        <polygon points="256,110 264,110 260,117" style="fill:var(--c-fb)"/>
+        <line x1="252" y1="225" x2="252" y2="255" class="gate-plate" style="stroke:var(--c-fb)"/>
+        <line x1="244" y1="240" x2="220" y2="240" class="gate-line" style="stroke:var(--c-fb)"/>
+        <circle cx="247.5" cy="240" r="3.5" class="gate-bubble" style="color:var(--c-fb)"/>
+        <text x="275" y="232.5" class="dev-label" style="fill:var(--c-fb)">M12</text>
+        <text x="275" y="246.5" class="dev-wl">Cross-</text>
+        <text x="275" y="258.5" class="dev-curr">I: -- µA</text>
+      </g>
+
+      <!-- M14: LS load (S=vfbn, D=GND, G=GND) -->
+      <g class="transistor" id="svg-M14" data-group="lsload">
+        <line x1="260" y1="315" x2="260" y2="455" class="channel" style="stroke:var(--c-lsload)"/>
+        <polygon points="256,315 264,315 260,322" style="fill:var(--c-lsload)"/>
+        <line x1="268" y1="370" x2="268" y2="400" class="gate-plate" style="stroke:var(--c-lsload)"/>
+        <line x1="276" y1="385" x2="375" y2="385" class="gate-line" style="stroke:var(--c-lsload)"/>
+        <circle cx="272.5" cy="385" r="3.5" class="gate-bubble" style="color:var(--c-lsload)"/>
+        <text x="235" y="380" class="dev-label" style="fill:var(--c-lsload)" text-anchor="end">M14</text>
+        <text x="235" y="394" class="dev-wl" text-anchor="end">Load-</text>
+        <text x="235" y="406" class="dev-curr" text-anchor="end">I: -- µA</text>
+      </g>
+
+      <!-- ═══════════════ COLUMN 3: M13 / M15 (Inner Right) ═══════════════ -->
+
+      <!-- M13: cross-coupled (S=net20, D=vfbp, G=VON) -->
+      <g class="transistor" id="svg-M13" data-group="fb">
+        <line x1="490" y1="110" x2="490" y2="250" class="channel" style="stroke:var(--c-fb)"/>
+        <polygon points="486,110 494,110 490,117" style="fill:var(--c-fb)"/>
+        <line x1="498" y1="225" x2="498" y2="255" class="gate-plate" style="stroke:var(--c-fb)"/>
+        <line x1="506" y1="240" x2="530" y2="240" class="gate-line" style="stroke:var(--c-fb)"/>
+        <circle cx="502.5" cy="240" r="3.5" class="gate-bubble" style="color:var(--c-fb)"/>
+        <text x="475" y="232.5" class="dev-label" style="fill:var(--c-fb)" text-anchor="end">M13</text>
+        <text x="475" y="246.5" class="dev-wl" text-anchor="end">Cross+</text>
+        <text x="475" y="258.5" class="dev-curr" text-anchor="end">I: -- µA</text>
+      </g>
+
+      <!-- M15: LS load (S=vfbp, D=GND, G=GND) -->
+      <g class="transistor" id="svg-M15" data-group="lsload">
+        <line x1="490" y1="315" x2="490" y2="455" class="channel" style="stroke:var(--c-lsload)"/>
+        <polygon points="486,315 494,315 490,322" style="fill:var(--c-lsload)"/>
+        <line x1="482" y1="370" x2="482" y2="400" class="gate-plate" style="stroke:var(--c-lsload)"/>
+        <line x1="474" y1="385" x2="375" y2="385" class="gate-line" style="stroke:var(--c-lsload)"/>
+        <circle cx="477.5" cy="385" r="3.5" class="gate-bubble" style="color:var(--c-lsload)"/>
+        <text x="515" y="380" class="dev-label" style="fill:var(--c-lsload)">M15</text>
+        <text x="515" y="394" class="dev-wl">Load+</text>
+        <text x="515" y="406" class="dev-curr">I: -- µA</text>
+      </g>
+
+      <!-- ═══════════════ COLUMN 4: M8 / M10 (Far Right) ═══════════════ -->
+
+      <!-- M8: input- (S=net2, D=VON, G=VIN) -->
+      <g class="transistor" id="svg-M8" data-group="input">
+        <line x1="670" y1="135" x2="670" y2="250" class="channel" style="stroke:var(--c-input)"/>
+        <polygon points="666,135 674,135 670,142" style="fill:var(--c-input)"/>
+        <line x1="678" y1="177.5" x2="678" y2="207.5" class="gate-plate" style="stroke:var(--c-input)"/>
+        <line x1="686" y1="192.5" x2="710" y2="192.5" class="gate-line" style="stroke:var(--c-input)"/>
+        <circle cx="682.5" cy="192.5" r="3.5" class="gate-bubble" style="color:var(--c-input)"/>
+        <text x="655" y="185" class="dev-label" style="fill:var(--c-input)" text-anchor="end">M8</text>
+        <text x="655" y="199" class="dev-wl" text-anchor="end">Input-</text>
+        <text x="655" y="211" class="dev-curr" text-anchor="end">I: -- µA</text>
+      </g>
+      <text x="715" y="195.5" class="pin-label" fill="#2f7d5a" font-size="11" text-anchor="start" id="val-VIN">VIN</text>
+      <circle cx="710" cy="192.5" r="2" fill="var(--c-input)"/>
+
+      <!-- M10: out- (S=VON, D=GND, G=vfbn) -->
+      <g class="transistor" id="svg-M10" data-group="output">
+        <line x1="670" y1="315" x2="670" y2="455" class="channel" style="stroke:var(--c-output)"/>
+        <polygon points="666,315 674,315 670,322" style="fill:var(--c-output)"/>
+        <line x1="662" y1="370" x2="662" y2="400" class="gate-plate" style="stroke:var(--c-output)"/>
+        <line x1="654" y1="385" x2="640" y2="385" class="gate-line" style="stroke:var(--c-output)"/>
+        <circle cx="657.5" cy="385" r="3.5" class="gate-bubble" style="color:var(--c-output)"/>
+        <text x="685" y="380" class="dev-label" style="fill:var(--c-output)">M10</text>
+        <text x="685" y="394" class="dev-wl">Output-</text>
+        <text x="685" y="406" class="dev-curr">I: -- µA</text>
+      </g>
+
+      <!-- ═══════════════ LEVEL SHIFTER TAIL ═══════════════ -->
+
+      <!-- M11: LS tail (S=VDD, D=net20, G=VC) -->
+      <g class="transistor" id="svg-M11" data-group="lstail">
+        <line x1="440" y1="35" x2="440" y2="110" class="channel" style="stroke:var(--c-lstail)"/>
+        <polygon points="436,35 444,35 440,42" style="fill:var(--c-lstail)"/>
+        <line x1="432" y1="57.5" x2="432" y2="87.5" class="gate-plate" style="stroke:var(--c-lstail)"/>
+        <line x1="424" y1="72.5" x2="400" y2="72.5" class="gate-line" style="stroke:var(--c-lstail)"/>
+        <circle cx="427.5" cy="72.5" r="3.5" class="gate-bubble" style="color:var(--c-lstail)"/>
+        <text x="455" y="64.5" class="dev-label" style="fill:var(--c-lstail)">M11</text>
+        <text x="455" y="78.5" class="dev-wl">LS Tail</text>
+        <text x="455" y="90.5" class="dev-curr">I: -- µA</text>
+      </g>
+      <text x="395" y="64" class="bias-label" font-size="8" text-anchor="end" id="val-VC">VC</text>
+      <circle cx="400" cy="72.5" r="2" fill="var(--c-lstail)"/>
+
+      <!-- net20 -->
+      <line x1="260" y1="110" x2="490" y2="110" class="wire"/>
+      <circle cx="440" cy="110" r="2.5" class="node-dot"/>
+      <text x="445" y="105" class="node-label" id="val-net20">net20</text>
+
+      <!-- ═══════════════ INTER-STAGE WIRES ═══════════════ -->
+
+      <!-- VOP / VON node segments -->
+      <line x1="80" y1="250" x2="80" y2="315" class="wire"/>
+      <line x1="670" y1="250" x2="670" y2="315" class="wire"/>
+
+      <!-- vfbn / vfbp node segments -->
+      <line x1="260" y1="250" x2="260" y2="315" class="wire"/>
+      <line x1="490" y1="250" x2="490" y2="315" class="wire"/>
+
+      <!-- ═══════════════ OUTPUT PORTS (No Capacitors) ═══════════════ -->
+
+      <!-- Left side Output Port (VOP) -->
+      <line x1="80" y1="280" x2="40" y2="280" class="wire" stroke-width="1.5"/>
+      <circle cx="80" cy="280" r="3" class="node-dot"/>
+      <circle cx="40" cy="280" r="2.5" fill="none" stroke="#9a6a15" stroke-width="1.5"/>
+      <text x="32" y="283" class="pin-label" fill="#9a6a15" font-size="11" text-anchor="end">VOP</text>
+      <text x="92" y="277" class="node-label" font-size="9" fill="#64748b" id="val-VOP">VOP</text>
+
+      <!-- Right side Output Port (VON) -->
+      <line x1="670" y1="280" x2="710" y2="280" class="wire" stroke-width="1.5"/>
+      <circle cx="670" cy="280" r="3" class="node-dot"/>
+      <circle cx="710" cy="280" r="2.5" fill="none" stroke="#9a6a15" stroke-width="1.5"/>
+      <text x="718" y="283" class="pin-label" fill="#9a6a15" font-size="11" text-anchor="start">VON</text>
+      <text x="658" y="277" class="node-label" font-size="9" fill="#64748b" text-anchor="end" id="val-VON">VON</text>
+
+      <!-- ── Feedback Connections ── -->
+      <!-- VOP (80, 240) to M12 gate (220, 240) -->
+      <circle cx="80" cy="240" r="2.5" class="node-dot"/>
+      <path d="M 80 240 L 220 240" class="wire-feedback" marker-end="url(#arrow)"/>
+      
+      <!-- VON (670, 240) to M13 gate (530, 240) -->
+      <circle cx="670" cy="240" r="2.5" class="node-dot"/>
+      <path d="M 670 240 L 530 240" class="wire-feedback" marker-end="url(#arrow)"/>
+      
+      <!-- vfbp (490, 280) to M9 gate (110, 385) -->
+      <path d="M 490 280 L 490 296 L 110 296 L 110 385" class="wire-feedback" marker-end="url(#arrow)"/>
+      <circle cx="490" cy="280" r="3" class="node-dot"/>
+      <text x="480" y="277" class="node-label" font-size="9" fill="#64748b" text-anchor="end" id="val-vfbp">vfbp</text>
+
+      <!-- vfbn (260, 280) to M10 gate (640, 385) -->
+      <path d="M 260 280 L 260 306 L 640 306 L 640 385" class="wire-feedback" marker-end="url(#arrow)"/>
+      <circle cx="260" cy="280" r="3" class="node-dot"/>
+      <text x="270" y="277" class="node-label" font-size="9" fill="#64748b" id="val-vfbn">vfbn</text>
+
+      <!-- M14 / M15 Ground connection -->
+      <line x1="375" y1="385" x2="375" y2="455" class="wire" stroke-width="1.2"/>
+      <circle cx="375" cy="455" r="2.5" class="node-dot"/>
+      <circle cx="375" cy="385" r="2" class="node-dot"/>
+
+      <!-- ═══════════════ LEGEND ═══════════════ -->
+      <g transform="translate(30,498)">
+        <rect x="0" y="0" width="10" height="10" rx="2" fill="var(--c-tail)"/><text x="14" y="9" font-size="9" fill="#667085">Tail</text>
+        <rect x="60" y="0" width="10" height="10" rx="2" fill="var(--c-input)"/><text x="74" y="9" font-size="9" fill="#667085">Input</text>
+        <rect x="120" y="0" width="10" height="10" rx="2" fill="var(--c-output)"/><text x="134" y="9" font-size="9" fill="#667085">Output</text>
+        <rect x="186" y="0" width="10" height="10" rx="2" fill="var(--c-fb)"/><text x="200" y="9" font-size="9" fill="#667085">Pos. FB</text>
+        <rect x="258" y="0" width="10" height="10" rx="2" fill="var(--c-lsload)"/><text x="272" y="9" font-size="9" fill="#667085">LS Load</text>
+        <rect x="330" y="0" width="10" height="10" rx="2" fill="var(--c-lstail)"/><text x="344" y="9" font-size="9" fill="#667085">LS Tail</text>
+      </g>
+    </svg>
+  </div>
+
+
+  <!-- ═══ CONTROL + RESULTS PANEL ═══ -->
+  <div id="control-panel">
+    <div id="panel-header">
+      <!-- GLOBAL METRICS BANNER -->
+      <div class="metrics" id="metrics"></div>
+      <div id="tabs">
+        <button class="active" data-tab="sliders">Parameters</button>
+
+        <button data-tab="noise-tab">Noise Analysis</button>
+        <button data-tab="dc-tab">DC Operating Point</button>
+      </div>
+    </div>
+
+    <!-- ═══ SLIDERS TAB ═══ -->
+    <div class="tab-content active" id="sliders">
+      <div id="slider-groups"></div>
+      <div style="margin-top:8px; padding:8px; background:var(--surface); border-radius:var(--radius); font-size:10px; color:var(--text-dim); text-align:center;">
+        Drag sliders to compute real-time · W is log scale · Pairs (M7/8, M9/10, M12/13, M14/15) are synced
+      </div>
+    </div>
+
+
+
+    <!-- ═══ NOISE ANALYSIS TAB ═══ -->
+    <div class="tab-content" id="noise-tab">
+      <div class="chart-wrap" style="margin-bottom:10px;"><canvas id="chart-noise"></canvas></div>
+      <div class="chart-wrap" style="margin-bottom:10px;"><canvas id="chart-noisebar"></canvas></div>
+      <table class="noise-table" id="noise-table"></table>
+    </div>
+
+    <!-- ═══ DC OP TAB ═══ -->
+    <div class="tab-content" id="dc-tab">
+      <div class="dc-grid" id="dc-grid"></div>
+      <div class="chart-wrap" style="margin-top:10px;"><canvas id="chart-ss"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════
+   State & Configuration
+   ═══════════════════════════════════════════════════════════════════════ */
+const API = '/api/solve';
+const PRESETS_API = '/api/presets';
+const DEBOUNCE_MS = 400;
+
+// Default: Final Locked design
+const DEFAULT_SIZES = {
+  M6:[2264,78], M7:[61365,61], M8:[61365,61], M9:[3175,468], M10:[3175,468],
+  M11:[465,66], M12:[894,85], M13:[894,85], M14:[5224,46], M15:[5224,46]
+};
+const DEFAULT_BIAS = { VDD:40, VCM:30.65, VB:9.84, VC:16.0 };
+
+// Paired transistors: changing one auto-updates the other
+const PAIRS = [['M7','M8'], ['M9','M10'], ['M12','M13'], ['M14','M15']];
+const PAIR_MAP = {};
+PAIRS.forEach(([a,b]) => { PAIR_MAP[a]=b; PAIR_MAP[b]=a; });
+
+// Slider config: { group, label, param, min, max, step, log, unit, color }
+const SLIDER_CFG = [
+  // Device W
+  {g:'tail',   l:'M6',     p:'M6_W',   min:100, max:200000, step:0.01, log:true,  unit:'µm', color:'var(--c-tail)',   desc:'Tail源'},
+  {g:'tail',   l:'M6',     p:'M6_L',   min:10,  max:800,    step:1,    log:false, unit:'µm', color:'var(--c-tail)',   desc:'Tail源'},
+  {g:'input',  l:'M7/M8',  p:'M7_W',   min:1000,max:200000, step:0.01, log:true,  unit:'µm', color:'var(--c-input)',  desc:'Input Differential Pair'},
+  {g:'input',  l:'M7/M8',  p:'M7_L',   min:10,  max:500,    step:1,    log:false, unit:'µm', color:'var(--c-input)',  desc:'Input Differential Pair'},
+  {g:'output', l:'M9/M10', p:'M9_W',   min:500, max:50000,  step:0.01, log:true,  unit:'µm', color:'var(--c-output)', desc:'Output Common Source'},
+  {g:'output', l:'M9/M10', p:'M9_L',   min:10,  max:800,    step:1,    log:false, unit:'µm', color:'var(--c-output)', desc:'Output Common Source'},
+  {g:'lstail', l:'M11',    p:'M11_W',  min:100, max:10000,  step:0.01, log:true,  unit:'µm', color:'var(--c-lstail)', desc:'LS Tail'},
+  {g:'lstail', l:'M11',    p:'M11_L',  min:10,  max:500,    step:1,    log:false, unit:'µm', color:'var(--c-lstail)', desc:'LS Tail'},
+  {g:'fb',     l:'M12/13', p:'M12_W',  min:100, max:20000,  step:0.01, log:true,  unit:'µm', color:'var(--c-fb)',    desc:'Cross-coupled FB (Noise Dominated)'},
+  {g:'fb',     l:'M12/13', p:'M12_L',  min:10,  max:500,    step:1,    log:false, unit:'µm', color:'var(--c-fb)',    desc:'Cross-coupled FB (Noise Dominated)'},
+  {g:'lsload', l:'M14/15', p:'M14_W',  min:100, max:50000,  step:0.01, log:true,  unit:'µm', color:'var(--c-lsload)',desc:'LS Diode Load'},
+  {g:'lsload', l:'M14/15', p:'M14_L',  min:10,  max:500,    step:1,    log:false, unit:'µm', color:'var(--c-lsload)',desc:'LS Diode Load'},
+  // Bias voltages
+  {g:'bias',   l:'VCM',    p:'VCM',    min:18,  max:38,     step:0.1,  log:false, unit:'V',  color:'#a06a00', desc:'Input Common Mode'},
+  {g:'bias',   l:'VB',     p:'VB',     min:1,   max:35,     step:0.1,  log:false, unit:'V',  color:'#a06a00', desc:'M6 Gate Bias'},
+  {g:'bias',   l:'VC',     p:'VC',     min:5,   max:35,     step:0.1,  log:false, unit:'V',  color:'#a06a00', desc:'M11 Gate Bias'},
+];
+
+// Group metadata
+const GROUPS = {
+  tail:   {name:'M6 Tail源',    cls:'tail',   icon:''},
+  input:  {name:'M7/M8 Input Differential Pair', cls:'input',  icon:''},
+  output: {name:'M9/M10 Output Common Source', cls:'output', icon:''},
+  lstail: {name:'M11 LS Tail',  cls:'lstail', icon:''},
+  fb:     {name:'M12/M13 Cross-coupled', cls:'fb',     icon:''},
+  lsload: {name:'M14/M15 LS Load', cls:'lsload', icon:''},
+  bias:   {name:'Bias Voltages',     cls:'bias',   icon:''},
+};
+
+// Current state
+let state = { sizes: {...DEFAULT_SIZES}, bias: {...DEFAULT_BIAS} };
+let lastResult = null;
+let solveTimer = null;
+let charts = {};
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Helpers
+   ═══════════════════════════════════════════════════════════════════════ */
+function logToLin(val, min, max) {
+  // val in [0,1] → log-spaced value in [min, max]
+  return Math.pow(10, Math.log10(min) + val * (Math.log10(max) - Math.log10(min)));
+}
+function linToLog(val, min, max) {
+  return (Math.log10(val) - Math.log10(min)) / (Math.log10(max) - Math.log10(min));
+}
+
+function getParamValue(cfg) {
+  const param = cfg.p;
+  if (param.endsWith('_W')) {
+    const dev = param.replace('_W','');
+    return state.sizes[dev] ? state.sizes[dev][0] : 1000;
+  } else if (param.endsWith('_L')) {
+    const dev = param.replace('_L','');
+    return state.sizes[dev] ? state.sizes[dev][1] : 100;
+  } else {
+    return state.bias[param] || 0;
+  }
+}
+
+function setParamValue(cfg, value) {
+  const param = cfg.p;
+  if (param.endsWith('_W')) {
+    const dev = param.replace('_W','');
+    state.sizes[dev][0] = value;
+    // Sync pair
+    if (PAIR_MAP[dev]) {
+      state.sizes[PAIR_MAP[dev]][0] = value;
+    }
+  } else if (param.endsWith('_L')) {
+    const dev = param.replace('_L','');
+    state.sizes[dev][1] = value;
+    if (PAIR_MAP[dev]) {
+      state.sizes[PAIR_MAP[dev]][1] = value;
+    }
+  } else {
+    state.bias[param] = value;
+  }
+}
+
+function sliderPos(cfg) {
+  const v = getParamValue(cfg);
+  if (cfg.log) return linToLog(v, cfg.min, cfg.max);
+  return (v - cfg.min) / (cfg.max - cfg.min);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Build Slider UI
+   ═══════════════════════════════════════════════════════════════════════ */
+function buildSliders() {
+  const container = document.getElementById('slider-groups');
+  container.innerHTML = '';
+
+  // Group configs
+  const grouped = {};
+  SLIDER_CFG.forEach(c => {
+    const g = c.g;
+    if (!grouped[g]) grouped[g] = [];
+    grouped[g].push(c);
+  });
+
+  Object.entries(grouped).forEach(([gkey, cfgs]) => {
+    const meta = GROUPS[gkey];
+    const div = document.createElement('div');
+    div.className = `slider-group ${meta.cls}`;
+    div.innerHTML = `<div class="sg-header">
+      <span class="sg-name">${meta.icon} ${meta.name}</span>
+      <span class="sg-desc">${cfgs[0].desc}</span>
+    </div>`;
+
+    cfgs.forEach(cfg => {
+      const row = document.createElement('div');
+      row.className = 'slider-row';
+      const isW = cfg.p.endsWith('_W');
+      const label = isW ? 'W' : (cfg.p.endsWith('_L') ? 'L' : cfg.p);
+      const val = getParamValue(cfg);
+      const pos = sliderPos(cfg);
+
+      row.innerHTML = `
+        <label>${label}</label>
+        <input type="range" min="0" max="1" step="0.001" value="${pos}" data-param="${cfg.p}">
+        <span class="val">${val.toFixed(isW ? 0 : 1)}</span>
+        <span class="unit">${cfg.unit}</span>
+      `;
+      div.appendChild(row);
+    });
+
+    container.appendChild(div);
+  });
+
+  // Attach listeners
+  container.querySelectorAll('input[type="range"]').forEach(input => {
+    input.addEventListener('input', onSliderInput);
+  });
+
+  // SVG hover ↔ slider highlight
+  document.querySelectorAll('svg g.transistor').forEach(g => {
+    g.addEventListener('mouseenter', () => {
+      const group = g.dataset.group;
+      const sg = container.querySelector(`.slider-group.${group}`);
+      if (sg) sg.style.boxShadow = '0 0 0 2px rgba(31, 93, 143, 0.14)';
+    });
+    g.addEventListener('mouseleave', () => {
+      const group = g.dataset.group;
+      const sg = container.querySelector(`.slider-group.${group}`);
+      if (sg) sg.style.boxShadow = '';
+    });
+  });
+}
+
+function onSliderInput(e) {
+  const input = e.target;
+  const param = input.dataset.param;
+  const cfg = SLIDER_CFG.find(c => c.p === param);
+  if (!cfg) return;
+
+  const pos = parseFloat(input.value);
+  let val;
+  if (cfg.log) {
+    val = logToLin(pos, cfg.min, cfg.max);
+  } else {
+    val = cfg.min + pos * (cfg.max - cfg.min);
+  }
+
+  // Update state
+  setParamValue(cfg, val);
+
+  // Update display value
+  const valSpan = input.nextElementSibling;
+  const isW = param.endsWith('_W');
+  valSpan.textContent = val.toFixed(isW ? 0 : 1);
+
+  // Also update paired input if exists
+  syncPairedSliders(param);
+
+  // Debounced solve
+  if (solveTimer) clearTimeout(solveTimer);
+  solveTimer = setTimeout(doSolve, DEBOUNCE_MS);
+  setStatus('loading', 'Computing...');
+}
+
+function syncPairedSliders(changedParam) {
+  // If M7_W changed, also update M8_W slider (they share the same param key, so only
+  // W/L sliders for individual devices need syncing)
+  const devMatch = changedParam.match(/^(M\d+)_([WL])$/);
+  if (!devMatch) return;
+  const dev = devMatch[1], wl = devMatch[2];
+  const pair = PAIR_MAP[dev];
+  if (!pair) return;
+
+  // The paired device's slider uses a different param key
+  // In our config, we only have M7_W, M9_W, M12_W, M14_W (one per pair)
+  // So only the "primary" device has a slider - no need to sync across sliders
+  // because the pair already shares one slider
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   API Calls
+   ═══════════════════════════════════════════════════════════════════════ */
+async function doSolve() {
+  setStatus('loading', 'Computing...');
+  try {
+    const resp = await fetch(API, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ sizes: state.sizes, bias: state.bias }),
+    });
+    const data = await resp.json();
+
+    if (!data.converged) {
+      setStatus('error', data.error || '未收敛');
+      showDivergedUI(data.error);
+      return;
+    }
+
+    lastResult = data;
+    setStatus('ok', 'Ready');
+    hideDivergedUI();
+    updateResultBadges(data);
+    updateCharts(data);
+    updateNoiseTab(data);
+    updateDcTab(data);
+    updateSVGLabels();
+  } catch (err) {
+    setStatus('error', 'Connection Error');
+    console.error(err);
+  }
+}
+
+function setStatus(state, text) {
+  const dot = document.getElementById('status-dot');
+  const txt = document.getElementById('status-text');
+  dot.className = 'status-dot' + (state === 'loading' ? ' loading' : state === 'error' ? ' error' : '');
+  txt.textContent = text;
+}
+
+function showDivergedUI(errorMsg) {
+  let overlay = document.getElementById('convergence-error-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'convergence-error-overlay';
+    overlay.innerHTML = `
+      <div class="error-card">
+        <div class="error-icon">⚠️</div>
+        <h3>DC Operating Point Diverged</h3>
+        <p class="error-msg"></p>
+        <button id="btn-error-reset">Reset to Default Settings</button>
+      </div>
+    `;
+    document.getElementById('circuit-panel').appendChild(overlay);
+    document.getElementById('btn-error-reset').addEventListener('click', resetToDefault);
+  }
+  overlay.querySelector('.error-msg').textContent = errorMsg || 'The solver could not converge for these parameters. Please adjust sizes or bias voltages.';
+  overlay.style.display = 'flex';
+  
+  const passBadge = document.getElementById('pass-badge');
+  const failBadge = document.getElementById('fail-badge');
+  passBadge.style.display = 'none';
+  failBadge.style.display = 'inline';
+  failBadge.textContent = 'Diverged';
+  failBadge.className = 'badge warn';
+  
+  const metricsDiv = document.getElementById('metrics');
+  metricsDiv.innerHTML = `
+    <div class="metric-card fail">
+      <span class="mc-status-badge">ERROR</span>
+      <div class="mc-label">Gain</div>
+      <div class="mc-value" style="font-size: 14px; color: var(--red); line-height: 30px;">Diverged</div>
+      <div class="mc-unit"></div>
+      <div class="mc-spec">Spec ≥ 20 dB</div>
+    </div>
+    <div class="metric-card fail">
+      <span class="mc-status-badge">ERROR</span>
+      <div class="mc-label">Bandwidth</div>
+      <div class="mc-value" style="font-size: 14px; color: var(--red); line-height: 30px;">Diverged</div>
+      <div class="mc-unit"></div>
+      <div class="mc-spec">Spec ≥ 100 Hz</div>
+    </div>
+    <div class="metric-card fail">
+      <span class="mc-status-badge">ERROR</span>
+      <div class="mc-label">Input Noise (IRN)</div>
+      <div class="mc-value" style="font-size: 14px; color: var(--red); line-height: 30px;">Diverged</div>
+      <div class="mc-unit"></div>
+      <div class="mc-spec">Spec ≤ 44.5 µV</div>
+    </div>
+  `;
+  
+  document.getElementById('chart-noise').parentElement.style.opacity = '0.15';
+  document.getElementById('chart-noisebar').parentElement.style.opacity = '0.15';
+  document.getElementById('noise-table').style.opacity = '0.15';
+  document.getElementById('dc-grid').style.opacity = '0.15';
+  if (document.getElementById('chart-ss')) {
+    document.getElementById('chart-ss').parentElement.style.opacity = '0.15';
+  }
+}
+
+function hideDivergedUI() {
+  const overlay = document.getElementById('convergence-error-overlay');
+  if (overlay) {
+    overlay.style.display = 'none';
+  }
+  
+  document.getElementById('chart-noise').parentElement.style.opacity = '1';
+  document.getElementById('chart-noisebar').parentElement.style.opacity = '1';
+  document.getElementById('noise-table').style.opacity = '1';
+  document.getElementById('dc-grid').style.opacity = '1';
+  if (document.getElementById('chart-ss')) {
+    document.getElementById('chart-ss').parentElement.style.opacity = '1';
+  }
+}
+
+function updateResultBadges(data) {
+  const passBadge = document.getElementById('pass-badge');
+  const failBadge = document.getElementById('fail-badge');
+
+  if (!data) {
+    passBadge.style.display = 'none';
+    failBadge.style.display = 'none';
+    return;
+  }
+
+  failBadge.textContent = 'Failed';
+  const allOk = data.status.all_ok;
+  passBadge.style.display = allOk ? 'inline' : 'none';
+  failBadge.style.display = allOk ? 'none' : 'inline';
+
+  // Update metric cards
+  const metricsDiv = document.getElementById('metrics');
+  metricsDiv.innerHTML = `
+    <div class="metric-card ${data.status.gain_ok ? 'pass' : 'fail'}">
+      <span class="mc-status-badge">${data.status.gain_ok ? 'PASS' : 'FAIL'}</span>
+      <div class="mc-label">Gain</div>
+      <div class="mc-value">${data.gain_dB}</div>
+      <div class="mc-unit">dB</div>
+      <div class="mc-spec">Spec ≥ 20 dB</div>
+    </div>
+    <div class="metric-card ${data.status.bw_ok ? 'pass' : 'fail'}">
+      <span class="mc-status-badge">${data.status.bw_ok ? 'PASS' : 'FAIL'}</span>
+      <div class="mc-label">Bandwidth</div>
+      <div class="mc-value">${data.bw_Hz}</div>
+      <div class="mc-unit">Hz</div>
+      <div class="mc-spec">Spec ≥ 100 Hz</div>
+    </div>
+    <div class="metric-card ${data.status.irn_ok ? 'pass' : 'fail'}">
+      <span class="mc-status-badge">${data.status.irn_ok ? 'PASS' : 'FAIL'}</span>
+      <div class="mc-label">Input Noise (IRN)</div>
+      <div class="mc-value">${data.irn_uV}</div>
+      <div class="mc-unit">µVrms</div>
+      <div class="mc-spec">Spec ≤ 44.5 µV</div>
+    </div>
+  `;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Charts
+   ═══════════════════════════════════════════════════════════════════════ */
+function updateCharts(data) {
+  if (!data) return;
+
+
+
+
+
+  // ── Noise PSD vs Frequency ──
+  if (charts.noise) charts.noise.destroy();
+  const noiseCtx = document.getElementById('chart-noise').getContext('2d');
+  charts.noise = new Chart(noiseCtx, {
+    type: 'line',
+    data: {
+      datasets: [
+        {
+          label: 'IRN PSD',
+          data: data.freqs.map((f, i) => ({ x: f, y: Math.sqrt(Math.max(data.irn_psd[i], 1e-30)) })),
+          borderColor: '#b3261e',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          tension: 0.3,
+          yAxisID: 'y',
+        },
+        {
+          label: 'Output PSD',
+          data: data.freqs.map((f, i) => ({ x: f, y: Math.sqrt(Math.max(data.out_psd[i], 1e-30)) })),
+          borderColor: '#9a6a15',
+          borderWidth: 1,
+          pointRadius: 0,
+          tension: 0.3,
+          borderDash: [4, 4],
+          yAxisID: 'y1',
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 200 },
+      scales: {
+        x: { 
+          type: 'logarithmic', 
+          title: { text: 'Frequency (Hz)', display: true, color: '#667085' }, 
+          ticks: { 
+            color: '#667085', 
+            font: { size: 9 },
+            callback: function(value) {
+              const val = Number(value);
+              const remain = Math.abs(Math.log10(val) % 1);
+              if (remain < 1e-9 || remain > 1 - 1e-9) {
+                if (val >= 1) return val.toFixed(0);
+                return val.toString();
+              }
+              return null;
+            }
+          }, 
+          grid: { color: '#e5e7eb' } 
+        },
+        y: { type: 'logarithmic', position: 'left', title: { text: 'IRN (V/√Hz)', display: true, color: '#b3261e' }, ticks: { color: '#b3261e', font: { size: 9 }, callback: v => v.toExponential(2) }, grid: { color: '#e5e7eb' } },
+        y1: { type: 'logarithmic', position: 'right', title: { text: 'Output (V/√Hz)', display: true, color: '#9a6a15' }, ticks: { color: '#9a6a15', font: { size: 9 }, callback: v => v.toExponential(2) }, grid: { display: false } },
+      },
+      plugins: {
+        legend: { labels: { color: '#667085', font: { size: 10 }, usePointStyle: true, boxWidth: 6 } },
+      },
+    },
+  });
+}
+
+function updateNoiseTab(data) {
+  if (!data) return;
+
+  // Bar chart
+  if (charts.noisebar) charts.noisebar.destroy();
+  const ctx = document.getElementById('chart-noisebar').getContext('2d');
+
+  // Sort by contribution
+  const entries = Object.entries(data.dev_noise)
+    .filter(([n]) => !['M6','M11'].includes(n) || data.dev_noise[n] > 0.01)
+    .sort((a, b) => b[1] - a[1]);
+
+  const colors = {
+    M7:'#2f7d5a', M8:'#2f7d5a', M9:'#9a6a15', M10:'#9a6a15',
+    M12:'#b14d4f', M13:'#b14d4f', M14:'#6f5a8f', M15:'#6f5a8f',
+    M6:'#2f6f9f', M11:'#546a7b',
+  };
+
+  charts.noisebar = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: entries.map(([n]) => n),
+      datasets: [{
+        label: '噪声Contribution (µVrms)',
+        data: entries.map(([,v]) => v),
+        backgroundColor: entries.map(([n]) => colors[n] || '#667085'),
+        borderRadius: 3,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 200 },
+      scales: {
+        x: { title: { text: 'µVrms (0.05–100 Hz)', display: true, color: '#667085' }, ticks: { color: '#667085', font: { size: 9 } }, grid: { color: '#e5e7eb' } },
+        y: { ticks: { color: '#667085', font: { size: 10 } }, grid: { display: false } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+
+  // Table
+  const total = entries.reduce((s, [,v]) => s + v*v, 0);
+  const totalRms = Math.sqrt(total);
+  const tbl = document.getElementById('noise-table');
+  tbl.innerHTML = `
+    <thead><tr><th>Device</th><th>Contribution</th><th>µVrms</th><th>Percentage</th></tr></thead>
+    <tbody>
+      ${entries.map(([n, v]) => `
+        <tr>
+          <td>${n}</td>
+          <td class="bar-cell"><span class="bar-fill" style="width:${Math.max(v/totalRms*100,1)}%;background:${colors[n]||'#667085'}"></span></td>
+          <td>${v.toFixed(2)}</td>
+          <td>${(v*v/total*100).toFixed(1)}%</td>
+        </tr>`).join('')}
+      <tr class="total"><td>Total</td><td></td><td>${totalRms.toFixed(2)}</td><td>100%</td></tr>
+    </tbody>
+  `;
+}
+
+function updateDcTab(data) {
+  if (!data) return;
+
+  const dc = data.dc_op;
+  const grid = document.getElementById('dc-grid');
+  grid.innerHTML = `
+    <div class="dc-item"><div class="dc-node">net2</div><div class="dc-volt">${dc.net2} V</div></div>
+    <div class="dc-item"><div class="dc-node">VOP / VON</div><div class="dc-volt">${dc.VOP} V</div></div>
+    <div class="dc-item"><div class="dc-node">vfbp / vfbn</div><div class="dc-volt">${dc.vfb} V</div></div>
+    <div class="dc-item"><div class="dc-node">net20</div><div class="dc-volt">${dc.n20} V</div></div>
+    <div class="dc-item"><div class="dc-node">Power</div><div class="dc-volt">${data.power_uW} µW</div></div>
+    <div class="dc-item"><div class="dc-node">Output Noise</div><div class="dc-volt">${data.vout_uV} µV</div></div>
+  `;
+
+  // SS params chart
+  if (charts.ss) charts.ss.destroy();
+  const ctx = document.getElementById('chart-ss').getContext('2d');
+  const devs = ['M7', 'M9', 'M12', 'M14', 'M6', 'M11'];
+  const gmValues = devs.map(d => data.ss[d]?.gm_nS || 0);
+  const colors2 = { M6:'#2f6f9f', M7:'#2f7d5a', M9:'#9a6a15', M11:'#546a7b', M12:'#b14d4f', M14:'#6f5a8f' };
+
+  charts.ss = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: devs,
+      datasets: [{
+        label: 'gm (nS)',
+        data: gmValues,
+        backgroundColor: devs.map(d => colors2[d] || '#667085'),
+        borderRadius: 3,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 200 },
+      scales: {
+        y: { title: { text: 'gm (nS)', display: true, color: '#667085' }, ticks: { color: '#667085', font: { size: 9 } }, grid: { color: '#e5e7eb' } },
+        x: { ticks: { color: '#667085', font: { size: 10 } }, grid: { display: false } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+function updateSVGLabels() {
+  // Update W/L and current labels on SVG
+  const map = {
+    'svg-M6':  ['M6',  'Tail'],
+    'svg-M7':  ['M7',  'Input+'],
+    'svg-M8':  ['M8',  'Input-'],
+    'svg-M9':  ['M9',  'Output+'],
+    'svg-M10': ['M10', 'Output-'],
+    'svg-M11': ['M11', 'LS Tail'],
+    'svg-M12': ['M12', 'Cross-'],
+    'svg-M13': ['M13', 'Cross+'],
+    'svg-M14': ['M14', 'Load-'],
+    'svg-M15': ['M15', 'Load+'],
+  };
+  
+  const currentsMap = {
+    M6: 'M6',
+    M7: 'M7',
+    M8: 'M7',
+    M9: 'M9',
+    M10: 'M9',
+    M11: 'M11',
+    M12: 'M12',
+    M13: 'M12',
+    M14: 'M14',
+    M15: 'M14',
+  };
+
+  Object.entries(map).forEach(([svgId, [dev, role]]) => {
+    const g = document.getElementById(svgId);
+    if (!g) return;
+    
+    // W/L text
+    const wlText = g.querySelector('.dev-wl');
+    const s = state.sizes[dev];
+    if (wlText && s) {
+      wlText.textContent = `${role}  ${s[0].toFixed(0)}/${s[1].toFixed(0)}`;
+    }
+    
+    // Current text
+    const currText = g.querySelector('.dev-curr');
+    if (currText) {
+      const srcDev = currentsMap[dev];
+      if (lastResult && lastResult.ss && lastResult.ss[srcDev]) {
+        const val = lastResult.ss[srcDev].Ich_uA;
+        currText.textContent = `I: ${val.toFixed(2)} µA`;
+      } else {
+        currText.textContent = `I: -- µA`;
+      }
+    }
+  });
+
+  // Update node voltage labels if lastResult is available
+  if (lastResult && lastResult.dc_op) {
+    const dc = lastResult.dc_op;
+    
+    const setNodeVolt = (id, label, val) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.textContent = `${label}: ${val.toFixed(2)} V`;
+      }
+    };
+    
+    setNodeVolt('val-net2', 'net2', dc.net2);
+    setNodeVolt('val-net20', 'net20', dc.n20);
+    setNodeVolt('val-VOP', 'VOP', dc.VOP);
+    setNodeVolt('val-VON', 'VON', dc.VON);
+    setNodeVolt('val-vfbp', 'vfbp', dc.vfb);
+    setNodeVolt('val-vfbn', 'vfbn', dc.vfb);
+    
+    if (state.bias) {
+      setNodeVolt('val-VIP', 'VIP', state.bias.VCM);
+      setNodeVolt('val-VIN', 'VIN', state.bias.VCM);
+      setNodeVolt('val-VB', 'VB', state.bias.VB);
+      setNodeVolt('val-VC', 'VC', state.bias.VC);
+    }
+  } else {
+    const resetNode = (id, label) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = label;
+    };
+    resetNode('val-net2', 'net2');
+    resetNode('val-net20', 'net20');
+    resetNode('val-VOP', 'VOP');
+    resetNode('val-VON', 'VON');
+    resetNode('val-vfbp', 'vfbp');
+    resetNode('val-vfbn', 'vfbn');
+    resetNode('val-VIP', 'VIP');
+    resetNode('val-VIN', 'VIN');
+    resetNode('val-VB', 'VB');
+    resetNode('val-VC', 'VC');
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Presets & Reset
+   ═══════════════════════════════════════════════════════════════════════ */
+async function loadPresets() {
+  try {
+    const resp = await fetch(PRESETS_API);
+    const data = await resp.json();
+    const select = document.getElementById('preset-select');
+    Object.entries(data).forEach(([key, info]) => {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = info.label;
+      select.appendChild(opt);
+    });
+  } catch (e) {
+    console.warn('Could not load presets', e);
+  }
+}
+
+async function applyPreset(name) {
+  setStatus('loading', `Loading preset: ${name}…`);
+  try {
+    const resp = await fetch(`/api/preset/${name}`);
+    const data = await resp.json();
+    if (data.error) { console.error(data.error); return; }
+
+    // Update state
+    Object.entries(data.sizes).forEach(([dev, [w, l]]) => {
+      state.sizes[dev] = [w, l];
+    });
+    Object.entries(data.bias).forEach(([k, v]) => {
+      if (k !== 'VDD') state.bias[k] = v;
+    });
+
+    // Rebuild sliders
+    buildSliders();
+    updateSVGLabels();
+    doSolve();
+    document.getElementById('preset-select').value = '';
+  } catch (e) {
+    console.error(e);
+    setStatus('error', 'Failed to load preset');
+  }
+}
+
+function resetToDefault() {
+  state.sizes = JSON.parse(JSON.stringify(DEFAULT_SIZES));
+  state.bias = JSON.parse(JSON.stringify(DEFAULT_BIAS));
+  buildSliders();
+  updateSVGLabels();
+  doSolve();
+}
+
+function exportParams() {
+  const lines = ['// OTFT AFE Design Parameters', ''];
+  lines.push('// ── Device Sizes (W, L) in µm ──');
+  Object.entries(state.sizes).forEach(([dev, [w, l]]) => {
+    lines.push(`${dev}: ${w.toFixed(0)} / ${l.toFixed(0)}`);
+  });
+  lines.push('');
+  lines.push('// ── Bias Voltages ──');
+  Object.entries(state.bias).forEach(([k, v]) => {
+    lines.push(`${k} = ${v.toFixed(2)} V`);
+  });
+  if (lastResult) {
+    lines.push('');
+    lines.push('// ── Performance ──');
+    lines.push(`Gain: ${lastResult.gain_dB} dB`);
+    lines.push(`BW: ${lastResult.bw_Hz} Hz`);
+    lines.push(`IRN: ${lastResult.irn_uV} µVrms (0.05–100 Hz)`);
+    lines.push(`Power: ${lastResult.power_uW} µW`);
+  }
+
+  // Copy to clipboard
+  const text = lines.join('\n');
+  navigator.clipboard.writeText(text).then(() => {
+    setStatus('ok', 'Copied to clipboard');
+  }).catch(() => {
+    // Fallback: show in a textarea
+    console.log(text);
+    setStatus('ok', 'Printed to console');
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Tab Switching
+   ═══════════════════════════════════════════════════════════════════════ */
+document.querySelectorAll('#tabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const tabId = btn.dataset.tab;
+    document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+    const target = document.getElementById(tabId);
+    if (target) target.classList.add('active');
+
+    // Trigger chart resize when switching to a tab with charts
+    if (tabId === 'noise-tab') {
+      setTimeout(() => { 
+        if (charts.noise) charts.noise.resize();
+        if (charts.noisebar) charts.noisebar.resize(); 
+      }, 100);
+    } else if (tabId === 'dc-tab') {
+      setTimeout(() => { if (charts.ss) charts.ss.resize(); }, 100);
+    }
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Init
+   ═══════════════════════════════════════════════════════════════════════ */
+document.getElementById('preset-select').addEventListener('change', function() {
+  if (this.value) applyPreset(this.value);
+});
+document.getElementById('btn-reset').addEventListener('click', resetToDefault);
+document.getElementById('btn-export').addEventListener('click', exportParams);
+
+buildSliders();
+updateSVGLabels();
+loadPresets();
+doSolve();
+</script>
+</body>
+</html>

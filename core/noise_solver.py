@@ -23,10 +23,20 @@ Ground-truth check (Cadence Spectre, afe_gt/tb_noise.raw/noiseAnal.noise):
   M12=M13=47%, M14=M15=1.7%, M7=M8=1.1%, M9=M10=0.3%.
 """
 import numpy as np
-from pmos_tft_model import PMOS_TFT
-from ac_mna import _stamp_mos, _stamp_adm
-from ac_solver import ac_solve, _dev_corner, _dev_nf
-from topology import AFE_TOPO
+try:
+    from .pmos_tft_model import PMOS_TFT
+    from .ac_mna import _stamp_mos, _stamp_adm
+    from .ac_solver import ac_solve, _dev_corner, _dev_nf
+    from .topology import AFE_TOPO
+except ImportError:  # pragma: no cover - legacy direct module import
+    from pmos_tft_model import PMOS_TFT
+    from ac_mna import _stamp_mos, _stamp_adm
+    from ac_solver import ac_solve, _dev_corner, _dev_nf
+    from topology import AFE_TOPO
+
+
+_KB = 1.380649e-23          # Boltzmann constant [J/K]
+_TEMP = 300.15              # physical temperature for resistor thermal noise [K]
 
 
 def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1):
@@ -71,6 +81,10 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
     # ── 2/3. per-frequency: build Y, get transimpedance per device ──
     out_psd = np.zeros(len(freqs))                       # total output V^2/Hz
     dev_psd = {name: np.zeros(len(freqs)) for name in bpts}  # per-device output V^2/Hz
+    for rname, *_ in topo.resistors:                     # resistors are noise sources too
+        dev_psd[rname] = np.zeros(len(freqs))
+    res_inj = [(rname, topo.ac_term(a), topo.ac_term(b), 4.0 * _KB * _TEMP / R)
+               for rname, a, b, R in topo.resistors]     # (name, term_a, term_b, S_th)
     sense = np.zeros(NN, dtype=complex)
     for node, weight in topo.output_weights().items():
         sense[topo.idx[node]] = weight
@@ -82,22 +96,31 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
         for name, d, g, s in devs:
             p = ss[name]
             _stamp_mos(Y, RHS, d, g, s, p["gm"], p["gds"], p["Cgs"], p["Cgd"], jw)
-        for a, b, cap in topo.load_caps:
+        for a, b, cap in topo.cap_list():
             _stamp_adm(Y, RHS, topo.ac_term(a), topo.ac_term(b), jw * cap)
+        for name, a, b, R in topo.resistors:
+            _stamp_adm(Y, RHS, topo.ac_term(a), topo.ac_term(b), 1.0 / R)
 
         # transfer from injecting unit current at node j to (vop - von):
         #   t[j] = (e_vop - e_von)^T Y^-1[:,j]
         tvec = np.linalg.solve(Y.T, sense)
 
+        def transimpedance(term_d, term_s):
+            Z = 0.0 + 0.0j
+            if term_d[0] == "n":
+                Z += tvec[term_d[1]]
+            if term_s[0] == "n":
+                Z -= tvec[term_s[1]]
+            return Z
+
         for name in bpts:
             d, s = inj[name]
-            Z = 0.0 + 0.0j
-            if d[0] == "n":
-                Z += tvec[d[1]]
-            if s[0] == "n":
-                Z -= tvec[s[1]]
-            contrib = (abs(Z) ** 2) * psd[name][fi]
+            contrib = (abs(transimpedance(d, s)) ** 2) * psd[name][fi]
             dev_psd[name][fi] = contrib
+            out_psd[fi] += contrib
+        for rname, ta, tb, S_th in res_inj:              # resistor thermal noise 4kT/R
+            contrib = (abs(transimpedance(ta, tb)) ** 2) * S_th
+            dev_psd[rname][fi] = contrib
             out_psd[fi] += contrib
 
     # ── 4/5. integrate + input-refer ──

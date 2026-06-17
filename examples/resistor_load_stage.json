@@ -1,0 +1,33 @@
+{
+  "name": "pmos_cs_resistor_load",
+  "solved": ["OUT"],
+  "rails": {
+    "VDD": "VDD",
+    "GND": 0.0,
+    "IN": "VIN"
+  },
+  "devices": [
+    {"name": "MPU", "drain": "OUT", "gate": "IN", "source": "VDD", "W": 2000, "L": 80}
+  ],
+  "resistors": [
+    {"name": "RL", "a": "OUT", "b": "GND", "R": 4e6}
+  ],
+  "capacitors": [
+    {"name": "CL", "a": "OUT", "b": "GND", "C": 2e-12}
+  ],
+  "current_sources": [
+    {"name": "IB", "nplus": "OUT", "nminus": "GND", "I": 1e-6}
+  ],
+  "bias": {
+    "VDD": 40.0,
+    "VIN": 25.0
+  },
+  "outputs": ["OUT"],
+  "input_drives": {"MPU": 1.0},
+  "dc_guesses": [
+    {"OUT": 16.0},
+    {"OUT": 10.0},
+    {"OUT": 25.0}
+  ],
+  "transient_inputs": {"MPU": "vin"}
+}

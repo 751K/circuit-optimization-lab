@@ -18,16 +18,27 @@ The default AFE topology is `AFE_TOPO`.
 
 class Topology:
     def __init__(self, solved, devices, rails, outputs=None, input_drives=None,
-                 load_caps=None, dc_guesses=None, aliases=None, transient_inputs=None):
+                 load_caps=None, dc_guesses=None, aliases=None, transient_inputs=None,
+                 resistors=None, capacitors=None, isources=None, ac_drives=None):
         self.solved = list(solved)                 # MNA node order (index = position)
         self.idx = {n: i for i, n in enumerate(self.solved)}
         self.n = len(self.solved)
         self.devices = list(devices)               # (name, drain, gate, source) by node name
         self.rails = dict(rails)                   # rail name -> bias-key (str) or constant (float)
+        # Passive / source elements (two-terminal). Transistors stay in `devices`;
+        # these never touch the PMOS_TFT machinery.
+        self.resistors = list(resistors or [])     # (name, a, b, R[ohm])
+        self.capacitors = list(capacitors or [])   # (name, a, b, C[farad])
+        self.isources = list(isources or [])       # (name, nplus, nminus, I[amp]); I flows
+        #                                            nplus->nminus inside the source.
         # Analysis metadata. These keep the solvers topology-driven instead of
         # hard-coding AFE node/device names.
         self.outputs = tuple(outputs or ())
         self.input_drives = dict(input_drives or {})        # AC drive per device gate
+        # AC stimulus applied at (rail) NODES — used to drive a front-end network
+        # (electrode / coupling) instead of driving device gates directly. Treated
+        # as AC ground in noise analysis (inputs carry no signal there).
+        self.ac_drives = dict(ac_drives or {})              # node name -> AC drive value
         self.load_caps = list(load_caps or [])              # (node_a, node_b, C)
         self.dc_guesses = list(dc_guesses or [])            # dict guesses or callables
         self.aliases = dict(aliases or {})                  # dc_op alias -> solved node
@@ -43,8 +54,10 @@ class Topology:
 
     # ── DC: build the KCL residual vector from the topology ──────────
     def dc_residuals(self, x, bias, Idfun, gmin):
-        """KCL at every solved node: +I at a device's drain, -I at its source,
-        minus gmin*V. Idfun(name, Vs, Vd, Vg) returns the device current."""
+        """KCL at every solved node (residual = net current INTO node = 0):
+        +I at a device's drain, -I at its source, resistor branch currents,
+        ideal current-source injections, minus gmin*V. Idfun(name, Vs, Vd, Vg)
+        returns the device current; capacitors are open at DC."""
         nv = {self.solved[k]: x[k] for k in range(self.n)}
         res = [0.0] * self.n
         for name, d, g, s in self.devices:
@@ -54,9 +67,27 @@ class Topology:
                 res[self.idx[d]] += i
             if s in self.idx:
                 res[self.idx[s]] -= i
+        for name, a, b, R in self.resistors:
+            i_ab = (self.node_v(a, nv, bias) - self.node_v(b, nv, bias)) / R  # a -> b
+            if a in self.idx:
+                res[self.idx[a]] -= i_ab           # current leaves node a
+            if b in self.idx:
+                res[self.idx[b]] += i_ab           # current enters node b
+        for name, p, q, I in self.isources:
+            if p in self.idx:
+                res[self.idx[p]] -= I              # source draws I from nplus
+            if q in self.idx:
+                res[self.idx[q]] += I              # and injects I into nminus
         for k in range(self.n):
             res[k] -= x[k] * gmin
         return res
+
+    def cap_list(self):
+        """All linear capacitor branches as (a, b, C): explicit load_caps plus
+        capacitor elements. AC and transient stamp these identically."""
+        caps = list(self.load_caps)
+        caps.extend((a, b, C) for _, a, b, C in self.capacitors)
+        return caps
 
     def node_vals(self, sol):
         """Map a solved vector back to a {node_name: voltage} dict."""
@@ -137,10 +168,14 @@ class Topology:
         return [(name, term(d, "d", name), term(g, "g", name), term(s, "s", name))
                 for name, d, g, s in self.devices]
 
-    def ac_term(self, node, drive_value=0.0):
+    def ac_term(self, node, drives=None):
+        """AC terminal token for a node. Solved -> ("n", idx); otherwise a known AC
+        voltage ("v", val): a stimulus value from `drives` if listed, else AC ground."""
         if node in self.idx:
             return ("n", self.idx[node])
-        return ("v", float(drive_value))
+        if drives and node in drives:
+            return ("v", float(drives[node]))
+        return ("v", 0.0)
 
     def output_weights(self):
         """Linear output sense vector. One output means node-to-ground; two outputs

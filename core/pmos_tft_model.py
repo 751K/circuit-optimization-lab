@@ -2,9 +2,12 @@ import math
 import numpy as np
 from scipy.optimize import fsolve
 try:
-    from numba_kernels import eval_currents_numba
+    from .numba_kernels import eval_currents_numba
 except Exception:  # pragma: no cover - optional acceleration only
-    eval_currents_numba = None
+    try:
+        from numba_kernels import eval_currents_numba
+    except Exception:
+        eval_currents_numba = None
 
 class PMOS_TFT:
     """

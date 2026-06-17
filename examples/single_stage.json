@@ -28,5 +28,19 @@
   ],
   "transient_inputs": {
     "MPU": "vin"
+  },
+  "explore": {
+    "variables": {
+      "MPU.W": {"min": 1500, "max": 4000, "int": true},
+      "MLD.W": {"min": 800, "max": 2000, "int": true},
+      "VIN":   {"min": 22.0, "max": 28.0, "round": 2}
+    },
+    "constraints": {
+      "gain_dB": {"min": 0.5},
+      "bw_Hz":   {"min": 100.0}
+    },
+    "objectives": {"area": "min", "power_uW": "min"},
+    "band": [0.05, 100.0],
+    "freqs": {"start": -2, "stop": 3, "num": 61}
   }
 }

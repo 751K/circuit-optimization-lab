@@ -7,7 +7,10 @@ dependency-free so circuit definitions can live outside Python code.
 from dataclasses import dataclass
 import json
 
-from topology import Topology
+try:
+    from .topology import Topology
+except ImportError:  # pragma: no cover - legacy direct module import
+    from topology import Topology
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,34 @@ def _load_load_caps(raw_caps):
     return out
 
 
+def _load_elements(raw_items, label, term_keys, value_key, positive=False):
+    """Parse two-terminal elements into (name, term0, term1, value) tuples.
+
+    Object form: {"name", <term_keys[0]>, <term_keys[1]>, <value_key>}.
+    Tuple form:  [name, term0, term1, value]."""
+    out = []
+    for i, item in enumerate(raw_items or []):
+        where = f"{label}[{i}]"
+        if isinstance(item, dict):
+            try:
+                name = item["name"]
+                t0 = item[term_keys[0]]
+                t1 = item[term_keys[1]]
+                val = item[value_key]
+            except KeyError as exc:
+                raise ValueError(f"{where} missing {exc.args[0]!r}") from exc
+        elif isinstance(item, (list, tuple)) and len(item) == 4:
+            name, t0, t1, val = item
+        else:
+            raise ValueError(f"{where} must be an object or "
+                             f"[name, {term_keys[0]}, {term_keys[1]}, {value_key}]")
+        value = _as_number(val, f"{where}.{value_key}")
+        if positive and value <= 0:
+            raise ValueError(f"{where}.{value_key} must be positive")
+        out.append((str(name), str(t0), str(t1), value))
+    return out
+
+
 def _validate_nodes(topo):
     known = set(topo.solved) | set(topo.rails)
     for name, d, g, s in topo.devices:
@@ -98,6 +129,13 @@ def _validate_nodes(topo):
         for node in (a, b):
             if node not in known:
                 raise ValueError(f"load_caps references unknown node {node!r}")
+    for label, elements in (("Resistor", topo.resistors),
+                            ("Capacitor", topo.capacitors),
+                            ("Current source", topo.isources)):
+        for name, x, y, _ in elements:
+            for node in (x, y):
+                if node not in known:
+                    raise ValueError(f"{label} {name} references unknown node {node!r}")
     for node in topo.outputs:
         if node not in topo.idx:
             raise ValueError(f"Output node {node!r} must be a solved node")
@@ -151,6 +189,12 @@ def circuit_from_dict(data):
                     for guess in data.get("dc_guesses", [])],
         aliases={str(k): str(v) for k, v in data.get("aliases", {}).items()},
         transient_inputs={str(k): str(v) for k, v in data.get("transient_inputs", {}).items()},
+        resistors=_load_elements(data.get("resistors"), "resistors", ("a", "b"), "R",
+                                 positive=True),
+        capacitors=_load_elements(data.get("capacitors"), "capacitors", ("a", "b"), "C",
+                                  positive=True),
+        isources=_load_elements(data.get("current_sources"), "current_sources",
+                                ("nplus", "nminus"), "I"),
     )
     _validate_nodes(topo)
     bias = {str(k): float(v) for k, v in data.get("bias", {}).items()}

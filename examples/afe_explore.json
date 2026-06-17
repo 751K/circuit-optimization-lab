@@ -1,0 +1,30 @@
+{
+  "name": "afe_area_power_explore",
+  "builtin_topology": "AFE_TOPO",
+  "sizes": {
+    "M6": [2264, 78],
+    "M7": [61365, 61], "M8": [61365, 61],
+    "M9": [3175, 468], "M10": [3175, 468],
+    "M11": [465, 66],
+    "M12": [894, 85], "M13": [894, 85],
+    "M14": [5224, 46], "M15": [5224, 46]
+  },
+  "bias": {"VDD": 40.0, "VCM": 30.65, "VB": 9.84, "VC": 16.0},
+  "explore": {
+    "variables": {
+      "in_pair_W": {"min": 40000, "max": 90000, "int": true, "targets": ["M7.W", "M8.W"]},
+      "in_pair_L": {"min": 50, "max": 90, "int": true, "targets": ["M7.L", "M8.L"]},
+      "out_W":     {"min": 2000, "max": 5000, "int": true, "targets": ["M9.W", "M10.W"]},
+      "VCM":       {"min": 29.0, "max": 32.0, "round": 2},
+      "VB":        {"min": 8.0,  "max": 12.0, "round": 2}
+    },
+    "constraints": {
+      "gain_dB": {"min": 20.0},
+      "bw_Hz":   {"min": 100.0},
+      "irn_uV":  {"max": 44.5}
+    },
+    "objectives": {"area": "min", "power_uW": "min"},
+    "band": [0.05, 100.0],
+    "freqs": {"start": -2, "stop": 3, "num": 81}
+  }
+}

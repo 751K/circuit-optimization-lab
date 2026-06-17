@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/751K/circuit-optimization-lab/schemas/circuit.schema.json",
+  "title": "Circuit Optimization Lab Circuit Description",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["solved", "rails", "devices"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable circuit name."
+    },
+    "solved": {
+      "type": "array",
+      "description": "Unknown node names solved by DC/AC/noise/transient.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/name"}
+    },
+    "rails": {
+      "type": "object",
+      "description": "Known node mapping. Values are either numeric constants or bias keys.",
+      "minProperties": 1,
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "number"},
+          {"$ref": "#/$defs/name"}
+        ]
+      }
+    },
+    "devices": {
+      "type": "array",
+      "description": "PMOS_TFT devices. Object form may carry W/L/NF; array form is [name, drain, gate, source].",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/deviceObject"},
+          {"$ref": "#/$defs/deviceTuple"}
+        ]
+      }
+    },
+    "sizes": {
+      "type": "object",
+      "description": "Optional W/L sizes when not embedded in devices.",
+      "additionalProperties": {"$ref": "#/$defs/sizeTuple"}
+    },
+    "nf": {
+      "description": "Optional global NF integer or per-device NF map.",
+      "oneOf": [
+        {"type": "integer", "minimum": 1},
+        {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 1}
+        }
+      ]
+    },
+    "bias": {
+      "type": "object",
+      "description": "Bias-key numeric values referenced by rails.",
+      "additionalProperties": {"type": "number"}
+    },
+    "outputs": {
+      "type": "array",
+      "description": "One solved node for single-ended output, or two solved nodes for differential output.",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/name"}
+    },
+    "input_drives": {
+      "type": "object",
+      "description": "AC gate drive per device. Differential gain usually uses +0.5/-0.5.",
+      "additionalProperties": {"type": "number"}
+    },
+    "load_caps": {
+      "type": "array",
+      "description": "Fixed capacitances stamped in AC/noise/transient.",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/loadCapObject"},
+          {"$ref": "#/$defs/loadCapTuple"}
+        ]
+      }
+    },
+    "resistors": {
+      "type": "array",
+      "description": "Two-terminal resistors between nodes a and b (R in ohms).",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/resistorObject"},
+          {"$ref": "#/$defs/abValueTuple"}
+        ]
+      }
+    },
+    "capacitors": {
+      "type": "array",
+      "description": "Two-terminal capacitors between nodes a and b (C in farads).",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/capacitorObject"},
+          {"$ref": "#/$defs/abValueTuple"}
+        ]
+      }
+    },
+    "current_sources": {
+      "type": "array",
+      "description": "Ideal DC current sources; I (amps) flows nplus->nminus inside the source.",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/isourceObject"},
+          {"$ref": "#/$defs/isourceTuple"}
+        ]
+      }
+    },
+    "dc_guesses": {
+      "type": "array",
+      "description": "Optional DC initial guesses; each object maps solved node to voltage.",
+      "items": {
+        "type": "object",
+        "additionalProperties": {"type": "number"}
+      }
+    },
+    "aliases": {
+      "type": "object",
+      "description": "Optional dc_op aliases mapping alias name to solved node name.",
+      "additionalProperties": {"$ref": "#/$defs/name"}
+    },
+    "transient_inputs": {
+      "type": "object",
+      "description": "Map device name to transient input waveform key.",
+      "additionalProperties": {"$ref": "#/$defs/name"}
+    },
+    "explore": {
+      "$ref": "#/$defs/explore",
+      "description": "Optional design-space exploration spec (see core/explore.py)."
+    }
+  },
+  "$defs": {
+    "explore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variables", "objectives"],
+      "properties": {
+        "variables": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["min", "max"],
+            "properties": {
+              "min": {"type": "number"},
+              "max": {"type": "number"},
+              "targets": {"type": "array", "items": {"$ref": "#/$defs/name"}, "minItems": 1},
+              "round": {"type": "integer", "minimum": 0},
+              "int": {"type": "boolean"}
+            }
+          }
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "minProperties": 1,
+            "properties": {"min": {"type": "number"}, "max": {"type": "number"}}
+          }
+        },
+        "objectives": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"enum": ["min", "max"]}
+        },
+        "band": {
+          "type": "array",
+          "prefixItems": [{"type": "number"}, {"type": "number"}],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "freqs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "start": {"type": "number"},
+            "stop": {"type": "number"},
+            "num": {"type": "integer", "minimum": 2}
+          }
+        }
+      }
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "sizeTuple": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/positiveNumber"},
+        {"$ref": "#/$defs/positiveNumber"}
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "deviceObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "drain", "gate", "source"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "drain": {"$ref": "#/$defs/name"},
+        "gate": {"$ref": "#/$defs/name"},
+        "source": {"$ref": "#/$defs/name"},
+        "W": {"$ref": "#/$defs/positiveNumber"},
+        "L": {"$ref": "#/$defs/positiveNumber"},
+        "NF": {"type": "integer", "minimum": 1}
+      },
+      "dependentRequired": {
+        "W": ["L"],
+        "L": ["W"]
+      }
+    },
+    "deviceTuple": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"}
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "loadCapObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["a", "b", "C"],
+      "properties": {
+        "a": {"$ref": "#/$defs/name"},
+        "b": {"$ref": "#/$defs/name"},
+        "C": {"$ref": "#/$defs/positiveNumber"}
+      }
+    },
+    "loadCapTuple": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/positiveNumber"}
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "resistorObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "a", "b", "R"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "a": {"$ref": "#/$defs/name"},
+        "b": {"$ref": "#/$defs/name"},
+        "R": {"$ref": "#/$defs/positiveNumber"}
+      }
+    },
+    "capacitorObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "a", "b", "C"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "a": {"$ref": "#/$defs/name"},
+        "b": {"$ref": "#/$defs/name"},
+        "C": {"$ref": "#/$defs/positiveNumber"}
+      }
+    },
+    "isourceObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "nplus", "nminus", "I"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "nplus": {"$ref": "#/$defs/name"},
+        "nminus": {"$ref": "#/$defs/name"},
+        "I": {"type": "number"}
+      }
+    },
+    "abValueTuple": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/positiveNumber"}
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "isourceTuple": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"type": "number"}
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    }
+  }
+}

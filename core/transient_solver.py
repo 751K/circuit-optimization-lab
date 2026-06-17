@@ -36,18 +36,27 @@ timesteps expose it. Eigen-check at the op: slowest pole −4.0e3 rad/s ≈ −3
 This is the engine; chopper switches + charge injection are added on top (TODO).
 """
 import numpy as np
-from pmos_tft_model import PMOS_TFT
-from topology import AFE_TOPO
-from ac_solver import ac_solve, _dev_nf
+try:
+    from .pmos_tft_model import PMOS_TFT
+    from .topology import AFE_TOPO
+    from .ac_solver import ac_solve, _dev_nf
+except ImportError:  # pragma: no cover - legacy direct module import
+    from pmos_tft_model import PMOS_TFT
+    from topology import AFE_TOPO
+    from ac_solver import ac_solve, _dev_nf
 
 
 def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
-              topo=AFE_TOPO, inputs=None):
+              topo=AFE_TOPO, inputs=None, node_inputs=None):
     """Backward-Euler transient.
       tgrid : (N,) time points [s]
       vip,vin : legacy AFE M7/M8 gate waveforms [V]
       inputs : generic mapping {input_key: waveform}; device gates are mapped by
                topo.transient_inputs, e.g. {"M1": "in"}.
+      node_inputs : mapping {node_name: input_key} to drive a (rail) NODE with a
+               waveform — used for a testbench where the stimulus enters at source
+               nodes and propagates through a front-end network, e.g.
+               {"VINP": "vip", "VINN": "vin"}.
       V0    : optional initial solved-node vector.
     Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
     fields are included when those nodes exist.
@@ -69,6 +78,10 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     for key, val in inputs.items():
         if len(val) != N:
             raise ValueError(f"Input waveform {key!r} length {len(val)} != len(tgrid) {N}")
+    node_inputs = dict(node_inputs or {})
+    for node, key in node_inputs.items():
+        if key not in inputs:
+            raise ValueError(f"node_inputs[{node!r}] references missing waveform {key!r}")
 
     def gtok(name, g):
         """Gate token: solved node / rail / driven transient input."""
@@ -80,18 +93,22 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         return g
 
     def termv(term, V, input_vals):
-        """voltage of a terminal token: solved node / driven input / rail."""
+        """voltage of a terminal token: solved node / driven input / driven node / rail."""
         if isinstance(term, tuple) and term[0] == "input":
             return input_vals[term[1]]
         if term in idx:
             return V[idx[term]]
+        if term in node_inputs:
+            return input_vals[node_inputs[term]]
         return rails[term]
 
     dev_meta = []
     for name, d, g, s in devs:
         gt = gtok(name, g)
         dev_meta.append((name, d, gt, s, idx.get(d), idx.get(gt), idx.get(s)))
-    load_meta = [(a, b, idx.get(a), idx.get(b), cap) for a, b, cap in topo.load_caps]
+    load_meta = [(a, b, idx.get(a), idx.get(b), cap) for a, b, cap in topo.cap_list()]
+    res_meta = [(a, b, idx.get(a), idx.get(b), R) for _, a, b, R in topo.resistors]
+    isrc_meta = [(p, q, idx.get(p), idx.get(q), I) for _, p, q, I in topo.isources]
 
     def device_states(V, input_vals):
         """Per-Newton operating data shared by residual and Jacobian."""
@@ -129,6 +146,17 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 R[di] += I                               # KCL sign (drain current INTO
             if si is not None:
                 R[si] -= I                               # node); raw get_Idc is negative
+        for a, b, ai, bi, Rval in res_meta:              # resistor branch current a -> b
+            i_ab = (termv(a, V, input_now) - termv(b, V, input_now)) / Rval
+            if ai is not None:
+                R[ai] -= i_ab
+            if bi is not None:
+                R[bi] += i_ab
+        for p, q, pi, qi, Ival in isrc_meta:             # ideal DC current source p -> q
+            if pi is not None:
+                R[pi] -= Ival
+            if qi is not None:
+                R[qi] += Ival
         for k in range(n):
             R[k] -= V[k] * gmin
         # capacitor companion: C(V_now)·[(Va-Vb)_now - (Va-Vb)_prev]/h  (C implicit; Cmap
@@ -232,21 +260,29 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 for c, val in cols: J[si, c] -= val
         for k in range(n):
             J[k, k] -= gmin
+        def add_cond_jac(ai, bi, g):
+            """Stamp a plain conductance g between two solved terminals."""
+            if g == 0.0:
+                return
+            if ai is not None:
+                J[ai, ai] -= g
+                if bi is not None: J[ai, bi] += g
+            if bi is not None:
+                J[bi, bi] -= g
+                if ai is not None: J[bi, ai] += g
+
         def add_cap_jac(ai, bi, C):
             if C == 0.0:
                 return
-            gC = C / h
-            if ai is not None:
-                J[ai, ai] -= gC
-                if bi is not None: J[ai, bi] += gC
-            if bi is not None:
-                J[bi, bi] -= gC
-                if ai is not None: J[bi, ai] += gC
+            add_cond_jac(ai, bi, C / h)            # capacitor companion conductance C/h
         for _, _, _, _, di, gi, si, _, _, _, _, _, _, Cgs, Cgd in states:
             add_cap_jac(gi, si, Cgs)                    # gate-source
             add_cap_jac(gi, di, Cgd)                    # gate-drain
         for _, _, ai, bi, cap in load_meta:
             add_cap_jac(ai, bi, cap)
+        for _, _, ai, bi, Rval in res_meta:             # resistor conductance 1/R
+            add_cond_jac(ai, bi, 1.0 / Rval)
+        # ideal DC current sources are constant -> no Jacobian contribution.
         return J
 
     def newton(seed, Vp, input_now, input_prev, h, maxit=30, vtol=1e-8):

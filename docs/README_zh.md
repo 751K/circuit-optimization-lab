@@ -34,29 +34,35 @@
 python3 -m pip install -r requirements.txt
 ```
 
+`requirements.txt` 会以 editable 模式安装本项目，因此外部脚本和 notebook 可以直接 `from core...` 导入，不需要手动修改导入路径。
+
 可选的 Numba 加速后端用于高频标量模型内核。短任务默认不启用，避免首次 JIT 编译开销；大量 sweep 或长瞬态仿真时可安装并显式打开：
 
 ```bash
 python3 -m pip install -r requirements-numba.txt
-CIRCUIT_USE_NUMBA=1 python3 core/transient_solver.py
+CIRCUIT_USE_NUMBA=1 python3 -m benchmarks.bench_afe --skip-noise --warm-runs 3
+```
+
+固定性能基准可用：
+
+```bash
+python3 -m benchmarks.bench_afe --warm-runs 3
+CIRCUIT_USE_NUMBA=1 python3 -m benchmarks.bench_afe --warm-runs 3
 ```
 
 ## JSON 电路描述
 
-求解器现在支持从 JSON 加载通用电路描述，避免在 `core/*.py` 里硬编码节点名和器件名。示例见 `examples/single_stage.json`。
+求解器现在支持从 JSON 加载通用电路描述，避免在 `core/*.py` 里硬编码节点名和器件名。格式说明见 [JSON 电路描述格式](json_circuit_format_zh.md)，示例见 `examples/single_stage.json`。
 
 最小调用方式：
 
 ```python
-import sys
 import numpy as np
 
-sys.path.insert(0, "core")
-
-from circuit_loader import load_circuit_json
-from ac_solver import ac_solve
-from noise_solver import noise_analysis
-from transient_solver import transient
+from core.circuit_loader import load_circuit_json
+from core.ac_solver import ac_solve
+from core.noise_solver import noise_analysis
+from core.transient_solver import transient
 
 spec = load_circuit_json("examples/single_stage.json")
 freqs = np.logspace(0, 4, 121)

@@ -4,8 +4,12 @@ Solves the full circuit at each frequency, computes gain and BW.
 Includes ALL transistors + load capacitors.
 """
 import numpy as np
-from pmos_tft_model import PMOS_TFT
-from topology import AFE_TOPO
+try:
+    from .pmos_tft_model import PMOS_TFT
+    from .topology import AFE_TOPO
+except ImportError:  # pragma: no cover - legacy direct module import
+    from pmos_tft_model import PMOS_TFT
+    from topology import AFE_TOPO
 
 
 def _dev_corner(corner, name):
@@ -339,16 +343,23 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
           for name, *_ in topo.devices}
 
     # ── 3. Build & solve the small-signal MNA (terminals from the topology) ──
-    from ac_mna import _stamp_mos, _stamp_adm
+    try:
+        from .ac_mna import _stamp_mos, _stamp_adm
+    except ImportError:  # pragma: no cover - legacy direct module import
+        from ac_mna import _stamp_mos, _stamp_adm
     NN = topo.n
     drive = topo.input_drives
-    drive_vals = list(drive.values())
-    if not drive_vals:
+    # Normalize the gain by the differential input magnitude. The stimulus is either
+    # a per-gate drive (input_drives) or, for a front-end testbench, AC sources at
+    # NODES (ac_drives) that propagate through the passive network to the gates.
+    ac_drives = topo.ac_drives
+    norm_vals = list(ac_drives.values()) if ac_drives else list(drive.values())
+    if not norm_vals:
         vin_norm = 1.0
-    elif len(drive_vals) > 1 and max(drive_vals) > min(drive_vals):
-        vin_norm = max(drive_vals) - min(drive_vals)
+    elif len(norm_vals) > 1 and max(norm_vals) > min(norm_vals):
+        vin_norm = max(norm_vals) - min(norm_vals)
     else:
-        vin_norm = max(abs(v) for v in drive_vals) or 1.0
+        vin_norm = max(abs(v) for v in norm_vals) or 1.0
     devs = topo.ac_devices(drive=drive)
     out_weights = topo.output_weights()
 
@@ -360,8 +371,11 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         for name, d, g, s in devs:
             p = ss[name]
             _stamp_mos(Y, RHS, d, g, s, p["gm"], p["gds"], p["Cgs"], p["Cgd"], jw)
-        for a, b, cap in topo.load_caps:
-            _stamp_adm(Y, RHS, topo.ac_term(a), topo.ac_term(b), jw * cap)
+        for a, b, cap in topo.cap_list():
+            _stamp_adm(Y, RHS, topo.ac_term(a, ac_drives), topo.ac_term(b, ac_drives), jw * cap)
+        for name, a, b, R in topo.resistors:
+            _stamp_adm(Y, RHS, topo.ac_term(a, ac_drives), topo.ac_term(b, ac_drives), 1.0 / R)
+        # ideal current sources are open-circuit in the small-signal AC system.
         V = np.linalg.solve(Y, RHS)
         out = sum(weight * V[topo.idx[node]] for node, weight in out_weights.items())
         gains.append(abs(out) / vin_norm)
@@ -380,7 +394,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     dc_op = topo.dc_op_with_aliases(nv)
     return {
         "Av_dc_dB": Av_dc_dB,
-        "peak_dB": 20 * np.log10(peak),
+        "peak_dB": 20 * np.log10(max(peak, 1e-9)),
         "bw_Hz": bw_Hz,
         "gains": gains,
         "freqs": freqs,
