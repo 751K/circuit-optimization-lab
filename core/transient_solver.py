@@ -40,94 +40,165 @@ from pmos_tft_model import PMOS_TFT
 from topology import AFE_TOPO
 from ac_solver import ac_solve, _dev_nf
 
-CL = 5e-12
 
-
-def transient(sizes, bias, tgrid, vip, vin, nf=None, V0=None):
+def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
+              topo=AFE_TOPO, inputs=None):
     """Backward-Euler transient.
       tgrid : (N,) time points [s]
-      vip,vin : (N,) M7/M8 gate (input) voltages [V]
-      V0    : optional initial 6-vector of node voltages (else DC op @ vip=vin=VCM)
-    Returns dict: t, vop, von, vout(=vop-von), and per-node arrays.
+      vip,vin : legacy AFE M7/M8 gate waveforms [V]
+      inputs : generic mapping {input_key: waveform}; device gates are mapped by
+               topo.transient_inputs, e.g. {"M1": "in"}.
+      V0    : optional initial solved-node vector.
+    Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
+    fields are included when those nodes exist.
     """
-    topo = AFE_TOPO
     idx, n = topo.idx, topo.n
-    VDD, VB, VC, VCM = bias["VDD"], bias["VB"], bias["VC"], bias["VCM"]
-    rails = {"VDD": VDD, "GND": 0.0, "VB": VB, "VC": VC, "VCM": VCM}
+    rails = topo.rail_values(bias)
     devs = topo.devices
     tft = {name: PMOS_TFT(W=sizes[name][0], L=sizes[name][1], NF=_dev_nf(nf, name))
            for name, *_ in devs}
     tgrid = np.asarray(tgrid, float)
-    vip = np.asarray(vip, float); vin = np.asarray(vin, float)
     N = len(tgrid)
+    if inputs is None:
+        inputs = {}
+        if vip is not None:
+            inputs["vip"] = vip
+        if vin is not None:
+            inputs["vin"] = vin
+    inputs = {key: np.asarray(val, float) for key, val in inputs.items()}
+    for key, val in inputs.items():
+        if len(val) != N:
+            raise ValueError(f"Input waveform {key!r} length {len(val)} != len(tgrid) {N}")
 
     def gtok(name, g):
-        """gate node TOKEN: input pair gates are the driven inputs VIP/VIN."""
-        if name == "M7": return "VIP"
-        if name == "M8": return "VIN"
+        """Gate token: solved node / rail / driven transient input."""
+        if name in topo.transient_inputs:
+            key = topo.transient_inputs[name]
+            if key not in inputs:
+                raise ValueError(f"Missing transient input waveform {key!r} for device {name}")
+            return ("input", key)
         return g
 
-    def termv(term, V, vp, vn):
+    def termv(term, V, input_vals):
         """voltage of a terminal token: solved node / driven input / rail."""
+        if isinstance(term, tuple) and term[0] == "input":
+            return input_vals[term[1]]
         if term in idx:
             return V[idx[term]]
-        if term == "VIP": return vp
-        if term == "VIN": return vn
         return rails[term]
 
-    def caps_at(V, vp, vn):
-        """List of (a_term, b_term, C) frozen at operating point (V, vp, vn)."""
+    dev_meta = []
+    for name, d, g, s in devs:
+        gt = gtok(name, g)
+        dev_meta.append((name, d, gt, s, idx.get(d), idx.get(gt), idx.get(s)))
+    load_meta = [(a, b, idx.get(a), idx.get(b), cap) for a, b, cap in topo.load_caps]
+
+    def device_states(V, input_vals):
+        """Per-Newton operating data shared by residual and Jacobian."""
         out = []
-        for name, d, g, s in devs:
-            gt = gtok(name, g)
-            Vs = termv(s, V, vp, vn); Vd = termv(d, V, vp, vn); Vg = termv(gt, V, vp, vn)
+        for name, d, gt, s, di, gi, si in dev_meta:
+            Vs = termv(s, V, input_vals)
+            Vd = termv(d, V, input_vals)
+            Vg = termv(gt, V, input_vals)
             try:
-                Cgs, Cgd = tft[name].get_capacitances(Vs, Vd, Vg)
+                dev = tft[name]
+                Vs1, Vd1 = dev.get_op(Vs, Vd, Vg)
+                _, _, I_d1_d, _, _ = dev._eval_currents(Vs, Vd, Vg, Vs1, Vd1)
+                Idc = -I_d1_d
+                Cgs, Cgd = dev._capacitances_from_op(Vs, Vd, Vg, Vs1, Vd1)
+                I = abs(Idc)                             # abs() to match ac_solve's
             except Exception:
-                Cgs = Cgd = 0.0
-            out.append((gt, s, Cgs))      # gate-source (gate token honours VIP/VIN)
-            out.append((gt, d, Cgd))      # gate-drain
-        out.append(("VOP", "GND", CL))
-        out.append(("VON", "GND", CL))
+                I = Cgs = Cgd = 0.0
+                Vs1 = Vd1 = 0.0
+            out.append((name, d, gt, s, di, gi, si, Vs, Vd, Vg, Vs1, Vd1, I, Cgs, Cgd))
         return out
 
-    # ── initial condition: DC op at vip=vin=VCM ──
+    # ── initial condition: DC op at static bias ──
     if V0 is None:
-        ac = ac_solve(sizes, bias, np.array([1.0]), nf=nf)
+        ac = ac_solve(sizes, bias, np.array([1.0]), nf=nf, topo=topo)
         dc = ac["dc_op"]
-        V0 = np.array([dc["VOP"], dc["VON"], dc["vfbp"], dc["vfbn"], dc["NET20"], dc["NET2"]])
+        V0 = np.array([dc[name] for name in topo.solved])
     Vhist = np.zeros((N, n)); Vhist[0] = V0
     gmin = 1e-12
 
-    def step_residual(V, Vp, vp, vn, vpp, vnp, Cmap, h):
+    def step_residual(V, Vp, input_now, input_prev, states, h):
         R = np.zeros(n)
         # device DC currents (into-node convention: +Id at drain, -Id at source)
-        for name, d, g, s in devs:
-            Vs = termv(s, V, vp, vn); Vd = termv(d, V, vp, vn)
-            Vg = termv(gtok(name, g), V, vp, vn)
-            try:
-                I = abs(tft[name].get_Idc(Vs, Vd, Vg))   # abs() to match ac_solve's
-            except Exception:                            # KCL sign (drain current INTO
-                I = 0.0                                  # node); raw get_Idc is negative
-            if d in idx: R[idx[d]] += I                  # for these PMOS, and the wrong
-            if s in idx: R[idx[s]] -= I                  # sign makes the DAE unstable
+        for _, _, _, _, di, _, si, _, _, _, _, _, I, _, _ in states:
+            if di is not None:
+                R[di] += I                               # KCL sign (drain current INTO
+            if si is not None:
+                R[si] -= I                               # node); raw get_Idc is negative
         for k in range(n):
             R[k] -= V[k] * gmin
         # capacitor companion: C(V_now)·[(Va-Vb)_now - (Va-Vb)_prev]/h  (C implicit; Cmap
         # is evaluated at the current iterate by the caller, ΔV_prev uses the prev step)
-        for (a, b, C) in Cmap:
+        def add_cap_res(a, b, ai, bi, C):
             if C == 0.0:
-                continue
-            dv_now = termv(a, V, vp, vn) - termv(b, V, vp, vn)
-            dv_pre = termv(a, Vp, vpp, vnp) - termv(b, Vp, vpp, vnp)
+                return
+            dv_now = termv(a, V, input_now) - termv(b, V, input_now)
+            dv_pre = termv(a, Vp, input_prev) - termv(b, Vp, input_prev)
             i_ab = (C / h) * (dv_now - dv_pre)          # A -> B
-            if a in idx: R[idx[a]] -= i_ab
-            if b in idx: R[idx[b]] += i_ab
+            if ai is not None:
+                R[ai] -= i_ab
+            if bi is not None:
+                R[bi] += i_ab
+        for _, d, gt, s, di, gi, si, _, _, _, _, _, _, Cgs, Cgd in states:
+            add_cap_res(gt, s, gi, si, Cgs)              # gate-source
+            add_cap_res(gt, d, gi, di, Cgd)              # gate-drain
+        for a, b, ai, bi, cap in load_meta:
+            add_cap_res(a, b, ai, bi, cap)
         return R
 
     HH = 1e-3   # finite-diff step for gm/gds (matches get_ss_params, Cadence-calibrated)
 
-    def build_jac(V, vp, vn, Cmap, h):
+    def terminal_derivatives(name, Vs, Vd, Vg, Vs1, Vd1, need_gm, need_gds):
+        """Terminal gm/gds via implicit differentiation of the solved internal nodes.
+
+        This is algebraically the same derivative that finite-differencing get_Idc
+        measures, but avoids solving the 2-node internal OP four extra times per
+        device per Newton iteration.
+        """
+        if not need_gm and not need_gds:
+            return 0.0, 0.0
+        dev = tft[name]
+        hx = 1e-6
+        def eval_at(vs, vd, vg, xs1, xd1):
+            I_s_s1, I_s1_d1, I_d1_d, _, _ = dev._eval_currents(vs, vd, vg, xs1, xd1)
+            return I_s_s1 - I_s1_d1, I_s1_d1 - I_d1_d, -I_d1_d
+
+        F0a, F0b, Idc0 = eval_at(Vs, Vd, Vg, Vs1, Vd1)
+        if abs(Idc0) < 1e-30:
+            raise FloatingPointError("abs(Idc) kink")
+        Fpa, Fpb, Ip = eval_at(Vs, Vd, Vg, Vs1 + hx, Vd1)
+        j00 = (Fpa - F0a) / hx
+        j10 = (Fpb - F0b) / hx
+        ix0 = (Ip - Idc0) / hx
+        Fpa, Fpb, Ip = eval_at(Vs, Vd, Vg, Vs1, Vd1 + hx)
+        j01 = (Fpa - F0a) / hx
+        j11 = (Fpb - F0b) / hx
+        ix1 = (Ip - Idc0) / hx
+        det = j00 * j11 - j01 * j10
+        if det == 0.0 or not np.isfinite(det):
+            raise np.linalg.LinAlgError("singular internal Jacobian")
+
+        sign = 1.0 if Idc0 > 0.0 else -1.0
+
+        def deriv(vs_p, vd_p, vg_p, vs_m, vd_m, vg_m):
+            Fpa, Fpb, Ip = eval_at(vs_p, vd_p, vg_p, Vs1, Vd1)
+            Fma, Fmb, Im = eval_at(vs_m, vd_m, vg_m, Vs1, Vd1)
+            fu0 = (Fpa - Fma) / (2 * HH)
+            fu1 = (Fpb - Fmb) / (2 * HH)
+            Iu = (Ip - Im) / (2 * HH)
+            y0 = (j11 * fu0 - j01 * fu1) / det
+            y1 = (-j10 * fu0 + j00 * fu1) / det
+            return sign * (Iu - ix0 * y0 - ix1 * y1)
+
+        gm = deriv(Vs, Vd, Vg + HH, Vs, Vd, Vg - HH) if need_gm else 0.0
+        gds = deriv(Vs, Vd + HH, Vg, Vs, Vd - HH, Vg) if need_gds else 0.0
+        return gm, gds
+
+    def build_jac(V, states, h):
         """Analytic conductance Jacobian dR/dV (n×n).
 
         Device part = small-signal conductance stamp: gm=dI/dVg, gds=dI/dVd
@@ -137,40 +208,48 @@ def transient(sizes, bias, tgrid, vip, vin, nf=None, V0=None):
         Jacobian is exactly what bare fsolve lacked — it lets Newton track the
         correct (physical) branch of the positive-feedback circuit."""
         J = np.zeros((n, n))
-        for name, d, g, s in devs:
-            gt = gtok(name, g)
-            Vs = termv(s, V, vp, vn); Vd = termv(d, V, vp, vn); Vg = termv(gt, V, vp, vn)
-            t = tft[name]
+        for name, _, _, _, di, gi, si, Vs, Vd, Vg, Vs1, Vd1, _, _, _ in states:
+            get_idc = tft[name].get_Idc
+            need_gm = gi is not None or si is not None
+            need_gds = di is not None or si is not None
             try:                                         # abs() to match the residual's
-                aId = lambda vs, vd, vg: abs(t.get_Idc(vs, vd, vg))   # I_into convention
-                gm  = (aId(Vs, Vd, Vg + HH) - aId(Vs, Vd, Vg - HH)) / (2 * HH)
-                gds = (aId(Vs, Vd + HH, Vg) - aId(Vs, Vd - HH, Vg)) / (2 * HH)
+                gm, gds = terminal_derivatives(name, Vs, Vd, Vg, Vs1, Vd1, need_gm, need_gds)
             except Exception:
-                gm, gds = 0.0, 1e-12
+                try:
+                    gm = ((abs(get_idc(Vs, Vd, Vg + HH)) - abs(get_idc(Vs, Vd, Vg - HH))) / (2 * HH)
+                          if need_gm else 0.0)
+                    gds = ((abs(get_idc(Vs, Vd + HH, Vg)) - abs(get_idc(Vs, Vd - HH, Vg))) / (2 * HH)
+                           if need_gds else 0.0)
+                except Exception:
+                    gm, gds = 0.0, 1e-12 if need_gds else 0.0
             cols = []                                   # (column, dI/dVcol) for solved terms
-            if d in idx:  cols.append((idx[d], gds))
-            if gt in idx: cols.append((idx[gt], gm))
-            if s in idx:  cols.append((idx[s], -(gm + gds)))
-            if d in idx:                                # row d: R[d] += I
-                for c, val in cols: J[idx[d], c] += val
-            if s in idx:                                # row s: R[s] -= I
-                for c, val in cols: J[idx[s], c] -= val
+            if di is not None: cols.append((di, gds))
+            if gi is not None: cols.append((gi, gm))
+            if si is not None: cols.append((si, -(gm + gds)))
+            if di is not None:                          # row d: R[d] += I
+                for c, val in cols: J[di, c] += val
+            if si is not None:                          # row s: R[s] -= I
+                for c, val in cols: J[si, c] -= val
         for k in range(n):
             J[k, k] -= gmin
-        for (a, b, C) in Cmap:                          # cap companion: i_ab=(C/h)(Va-Vb)
+        def add_cap_jac(ai, bi, C):
             if C == 0.0:
-                continue
+                return
             gC = C / h
-            ia, ib = idx.get(a), idx.get(b)
-            if ia is not None:
-                J[ia, ia] -= gC
-                if ib is not None: J[ia, ib] += gC
-            if ib is not None:
-                J[ib, ib] -= gC
-                if ia is not None: J[ib, ia] += gC
+            if ai is not None:
+                J[ai, ai] -= gC
+                if bi is not None: J[ai, bi] += gC
+            if bi is not None:
+                J[bi, bi] -= gC
+                if ai is not None: J[bi, ai] += gC
+        for _, _, _, _, di, gi, si, _, _, _, _, _, _, Cgs, Cgd in states:
+            add_cap_jac(gi, si, Cgs)                    # gate-source
+            add_cap_jac(gi, di, Cgd)                    # gate-drain
+        for _, _, ai, bi, cap in load_meta:
+            add_cap_jac(ai, bi, cap)
         return J
 
-    def newton(seed, Vp, vp, vn, vpp, vnp, h, maxit=30, vtol=1e-8):
+    def newton(seed, Vp, input_now, input_prev, h, maxit=30, vtol=1e-8):
         """Full-step Newton with the analytic Jacobian, converged on STEP SIZE |ΔV|.
 
         No residual-decrease line search: on this stiff cap-dominated system (gC=C/h
@@ -188,9 +267,9 @@ def transient(sizes, bias, tgrid, vip, vin, nf=None, V0=None):
         V = np.array(seed, float)
         prev = np.inf
         for it in range(maxit):
-            Cmap = caps_at(V, vp, vn)                    # implicit: caps at current iterate
-            R = step_residual(V, Vp, vp, vn, vpp, vnp, Cmap, h)
-            J = build_jac(V, vp, vn, Cmap, h)
+            states = device_states(V, input_now)         # implicit caps at current iterate
+            R = step_residual(V, Vp, input_now, input_prev, states, h)
+            J = build_jac(V, states, h)
             try:
                 dV = np.linalg.solve(J, -R)
             except np.linalg.LinAlgError:
@@ -210,17 +289,26 @@ def transient(sizes, bias, tgrid, vip, vin, nf=None, V0=None):
     for k in range(1, N):
         h = tgrid[k] - tgrid[k - 1]
         Vp = Vhist[k - 1]
+        input_now = {key: val[k] for key, val in inputs.items()}
+        input_prev = {key: val[k - 1] for key, val in inputs.items()}
         try:
-            V, nrm, ok = newton(Vp, Vp, vip[k], vin[k], vip[k - 1], vin[k - 1], h)
+            V, nrm, ok = newton(Vp, Vp, input_now, input_prev, h)
             Vhist[k] = V
             if not ok:
                 nfail += 1
         except Exception:
             Vhist[k] = Vp; nfail += 1
 
-    vop = Vhist[:, idx["VOP"]]; von = Vhist[:, idx["VON"]]
-    return {"t": tgrid, "vop": vop, "von": von, "vout": vop - von, "nfail": nfail,
-            "nodes": {nm: Vhist[:, idx[nm]] for nm in topo.solved}}
+    nodes = {nm: Vhist[:, idx[nm]] for nm in topo.solved}
+    out = np.zeros(N)
+    for node, weight in topo.output_weights().items():
+        out += weight * nodes[node]
+    result = {"t": tgrid, "output": out, "vout": out, "nfail": nfail, "nodes": nodes}
+    if "VOP" in idx:
+        result["vop"] = nodes["VOP"]
+    if "VON" in idx:
+        result["von"] = nodes["VON"]
+    return result
 
 
 # ── self-consistency check vs the validated DC / AC solvers ──

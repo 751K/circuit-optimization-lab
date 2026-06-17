@@ -28,13 +28,6 @@ from ac_mna import _stamp_mos, _stamp_adm
 from ac_solver import ac_solve, _dev_corner, _dev_nf
 from topology import AFE_TOPO
 
-GND = ("v", 0.0)
-CL = 5e-12
-
-
-def _n(i):
-    return ("n", i)
-
 
 def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1):
     """Drain-current noise PSD A^2/Hz over freqs: S_th + S_fl_1Hz/f."""
@@ -62,7 +55,7 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
     bpts = topo.bias_points(node_vals, bias)
     devs = topo.ac_devices(drive={})
     inj = {name: (d, s) for name, d, g, s in devs}   # drain/source for noise injection
-    VOP, VON, NN = topo.idx["VOP"], topo.idx["VON"], topo.n
+    NN = topo.n
 
     # per-device noise PSD
     psd = {}
@@ -78,6 +71,9 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
     # ── 2/3. per-frequency: build Y, get transimpedance per device ──
     out_psd = np.zeros(len(freqs))                       # total output V^2/Hz
     dev_psd = {name: np.zeros(len(freqs)) for name in bpts}  # per-device output V^2/Hz
+    sense = np.zeros(NN, dtype=complex)
+    for node, weight in topo.output_weights().items():
+        sense[topo.idx[node]] = weight
 
     for fi, f in enumerate(freqs):
         jw = 2j * np.pi * f
@@ -86,13 +82,12 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
         for name, d, g, s in devs:
             p = ss[name]
             _stamp_mos(Y, RHS, d, g, s, p["gm"], p["gds"], p["Cgs"], p["Cgd"], jw)
-        _stamp_adm(Y, RHS, _n(VOP), GND, jw * CL)
-        _stamp_adm(Y, RHS, _n(VON), GND, jw * CL)
+        for a, b, cap in topo.load_caps:
+            _stamp_adm(Y, RHS, topo.ac_term(a), topo.ac_term(b), jw * cap)
 
-        Yinv = np.linalg.inv(Y)
         # transfer from injecting unit current at node j to (vop - von):
-        #   t[j] = Yinv[VOP, j] - Yinv[VON, j]
-        tvec = Yinv[VOP, :] - Yinv[VON, :]
+        #   t[j] = (e_vop - e_von)^T Y^-1[:,j]
+        tvec = np.linalg.solve(Y.T, sense)
 
         for name in bpts:
             d, s = inj[name]
@@ -118,7 +113,9 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
 
 
 def bpts_order(sizes):
-    return [m for m in ["M6","M7","M8","M9","M10","M11","M12","M13","M14","M15"] if m in sizes]
+    afe_order = ["M6","M7","M8","M9","M10","M11","M12","M13","M14","M15"]
+    ordered = [m for m in afe_order if m in sizes]
+    return ordered + [m for m in sizes if m not in ordered]
 
 
 def band_rms(freqs, psd, f_lo, f_hi):

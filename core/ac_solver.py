@@ -37,6 +37,28 @@ def _dev_nf(nf, name):
     return int(nf)
 
 
+_AFE_SYMMETRIC_PAIRS = (("M7", "M8"), ("M9", "M10"), ("M12", "M13"), ("M14", "M15"))
+
+
+def _is_pairwise_symmetric_afe(sizes, nf, topo):
+    """True only when the default AFE can be reduced to the 4-node symmetric DC solve."""
+    if topo is not AFE_TOPO:
+        return False
+    for left, right in _AFE_SYMMETRIC_PAIRS:
+        if sizes.get(left) != sizes.get(right):
+            return False
+        if _dev_nf(nf, left) != _dev_nf(nf, right):
+            return False
+    return True
+
+
+def _dc_residual_ok(residuals, x, tol=1e-9):
+    try:
+        return np.linalg.norm(residuals(x), ord=np.inf) < tol
+    except Exception:
+        return False
+
+
 def _symmetric_seed(sizes, bias, Id, gmin, seeds=None):
     """AFE-specific symmetric DC solve (matched halves: VON=VOP, VFBN=VFBP). 4 unknowns
     [net2, vop, vfb, net20]. Used as a POST-PROCESS guard: when the full 6-node solve
@@ -55,13 +77,17 @@ def _symmetric_seed(sizes, bias, Id, gmin, seeds=None):
             Id("M13", net20, vfb, vop) - Id("M15", vfb, 0.0, 0.0) - vfb * gmin,
             Id("M11", VDD, net20, VC) - 2 * Id("M12", net20, vfb, vop) - net20 * gmin,
         ]
-    trials = list(seeds or []) + [[VCM + 7, VCM - 4, VCM - 8, VCM + 15],
+    trials = list(seeds or []) + [[VCM + 6, VCM - 1, 6.0, bias["VDD"] - 2],
+                                  [VCM + 7, VCM - 4, max(VCM - 25, 4.0), VCM + 8],
+                                  [VCM + 7, VCM - 4, VCM - 8, VCM + 15],
                                   [VCM + 9, VCM - 2, VCM - 10, VCM + 12],
                                   [VCM + 5, VCM - 6, VCM - 6, VCM + 18]]
     for u0 in trials:
         try:
             sol, _, ier, _ = fsolve(f, u0, full_output=True, xtol=1e-12, maxfev=4000)
-            if ier == 1:
+            residual_norm = np.linalg.norm(f(sol), ord=np.inf)
+            in_box = all(-0.5 <= v <= VDD + 0.5 for v in sol)
+            if ier == 1 or (residual_norm < 1e-12 and in_box):
                 n2, vop, vfb, n20 = sol
                 return {"VOP": vop, "VON": vop, "VFBP": vfb, "VFBN": vfb,
                         "NET20": n20, "NET2": n2}
@@ -89,21 +115,35 @@ def _symmetric_continuation(sizes, bias, Id, gmin):
             Id("M13", net20, vfb, vop) - Id("M15", vfb, 0.0, 0.0) - vfb * gmin,
             Id("M11", Vdd, net20, Vc) - 2 * Id("M12", net20, vfb, vop) - net20 * gmin,
         ]
-    u = np.array([VCM, VCM, VCM, VCM]) * 0.1          # near powered-down
-    for sc in np.linspace(0.1, 1.0, 19):
-        ok = False
-        for seed in (u, np.array([VCM+7, VCM-4, VCM-8, VCM+15]) * sc):
-            try:
-                s, _, ier, _ = fsolve(lambda z: f(z, sc), seed,
-                                      full_output=True, xtol=1e-12, maxfev=4000)
-                if ier == 1:
-                    u = s; ok = True; break
-            except Exception:
-                pass
-        if not ok:
-            return None
-    n2, vop, vfb, n20 = u
-    return {"VOP": vop, "VON": vop, "VFBP": vfb, "VFBN": vfb, "NET20": n20, "NET2": n2}
+    def track(seed_sets):
+        u = np.array([VCM, VCM, VCM, VCM]) * 0.1      # near powered-down
+        for sc in np.linspace(0.1, 1.0, 19):
+            ok = False
+            for seed in seed_sets(u, sc):
+                try:
+                    s, _, ier, _ = fsolve(lambda z: f(z, sc), seed,
+                                          full_output=True, xtol=1e-12, maxfev=4000)
+                    if ier == 1:
+                        u = s; ok = True; break
+                except Exception:
+                    pass
+            if not ok:
+                return None
+        n2, vop, vfb, n20 = u
+        return {"VOP": vop, "VON": vop, "VFBP": vfb, "VFBN": vfb,
+                "NET20": n20, "NET2": n2}
+
+    original = track(lambda u, sc: (u, np.array([VCM+7, VCM-4, VCM-8, VCM+15]) * sc))
+    if original is not None:
+        return original
+
+    def low_vfb_seeds(u, sc):
+        return (
+            u,
+            np.array([VCM + 6, VCM - 1, 6.0, VDD - 2]) * sc,
+            np.array([VCM + 7, VCM - 4, max(VCM - 25, 4.0), VCM + 8]) * sc,
+        )
+    return track(low_vfb_seeds)
 
 
 def get_ss_params(W, L, Vs, Vd, Vg, corner=None, nf=1, dev_inst=None):
@@ -146,8 +186,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     `topo` (see topology.py) — no hand-written per-device wiring here.
     """
     from scipy.optimize import fsolve
-    VCM = bias["VCM"]
-    VDD = bias["VDD"]
+    VCM = topo.default_guess_value(bias)
     gmin = 1e-12
 
     # ── pre-build device instances so the warm-start Newton cache survives
@@ -166,7 +205,12 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
 
     # ── 1. DC solve (residuals built from the topology) ──
     residuals = lambda x: topo.dc_residuals(x, bias, Id, gmin)
+    per_dev = bool(corner) and any(isinstance(v, dict) for v in corner.values())
+    symmetric_fast = (x0_guess is None and not per_dev
+                      and _is_pairwise_symmetric_afe(sizes, nf, topo))
     guesses = []
+    nv = None
+    have_symmetric_seed = False
     if x0_guess is not None:
         # A seed was supplied (e.g. an MC/corner sweep seeded from the nominal op that
         # was itself found by continuation): trust it — it already encodes the right
@@ -174,86 +218,92 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         guesses.append(topo.guess_vector(x0_guess, default=VCM)
                        if isinstance(x0_guess, dict) else list(x0_guess))
     else:
-        # Cold solve: run source-ramp continuation on the symmetric system to land on
-        # the physical power-up branch Spectre picks (handles symmetry-broken AND
-        # degenerate multistable points). Tried first.
-        cont = _symmetric_continuation(sizes, bias, Id, gmin)
-        if cont is not None:
-            guesses.append(topo.guess_vector(cont))
-    base = {"VOP": VCM-4, "VON": VCM-4, "VFBP": VCM-8, "VFBN": VCM-8, "NET20": VCM+15, "NET2": VCM+7}
-    for t in range(5):
-        g = dict(base); g["NET2"] = VCM + 7 + t
-        guesses.append(topo.guess_vector(g))
-    guesses.append(topo.guess_vector({"VOP": VCM-2, "VON": VCM-2, "VFBP": VCM-10,
-                                       "VFBN": VCM-10, "NET20": VCM+12, "NET2": VCM+9}))
-    guesses.append(topo.guess_vector({"VOP": VCM-6, "VON": VCM-6, "VFBP": VCM-6,
-                                       "VFBN": VCM-6, "NET20": VCM+18, "NET2": VCM+5}))
-    for x0 in guesses:
-        try:
-            sol, _, ier, _ = fsolve(residuals, x0, full_output=True, xtol=1e-12, maxfev=3000)
-            if ier == 1:
-                break
-        except Exception:
-            pass
-    else:
-        # ── FALLBACK (runs ONLY when every standard guess failed; never alters
-        # already-converged points). Goal: pick the SAME physical branch Spectre
-        # picks, even for multistable points. ──
-        VDD = bias["VDD"]
-        base_g = topo.guess_vector({"VOP": VCM-4, "VON": VCM-4, "VFBP": VCM-8,
-                                    "VFBN": VCM-8, "NET20": VCM+15, "NET2": VCM+7})
+        if symmetric_fast:
+            symv = _symmetric_seed(sizes, bias, Id, gmin)
+            svec = topo.guess_vector(symv) if symv is not None else None
+            if svec is not None and _dc_residual_ok(residuals, svec):
+                guesses.append(svec)
+                have_symmetric_seed = True
+        if symmetric_fast and nv is None and not have_symmetric_seed:
+            # Cold solve: run source-ramp continuation on the symmetric system to land on
+            # the physical power-up branch Spectre picks (handles symmetry-broken AND
+            # degenerate multistable points). Tried before the full 6-node fallback.
+            cont = _symmetric_continuation(sizes, bias, Id, gmin)
+            if cont is not None:
+                cvec = topo.guess_vector(cont)
+                guesses.append(cvec)
+        guesses.extend(topo.dc_guess_vectors(bias))
 
-        def _solve(bias_d, gm, x0):
+    if nv is None:
+        if not guesses:
+            guesses.extend(topo.dc_guess_vectors(bias))
+        for x0 in guesses:
             try:
-                s, _, ier, _ = fsolve(lambda z: topo.dc_residuals(z, bias_d, Id, gm),
-                                      x0, full_output=True, xtol=1e-12, maxfev=4000)
-                return s if ier == 1 else None
+                sol, _, ier, _ = fsolve(residuals, x0, full_output=True, xtol=1e-12, maxfev=3000)
+                if ier == 1 or _dc_residual_ok(residuals, sol, tol=1e-12):
+                    break
             except Exception:
-                return None
+                pass
+        else:
+            # ── FALLBACK (runs ONLY when every standard guess failed; never alters
+            # already-converged points). Goal: pick the SAME physical branch Spectre
+            # picks, even for multistable points. ──
+            base_g = guesses[0] if guesses else [VCM] * topo.n
 
-        sol = None
-        # (a) SOURCE-RAMP continuation: scale all rails 0->1, tracking the power-up
-        #     trajectory. This follows the physical (Spectre) branch through
-        #     multistable regions instead of jumping to an alternate equilibrium.
-        x = np.array(base_g) * 0.2
-        ramp_ok = True
-        for lam in np.linspace(0.2, 1.0, 17):
-            bl = {k: v * lam for k, v in bias.items()}
-            s = _solve(bl, gmin, x)
-            if s is None:
-                s = _solve(bl, gmin, np.array(base_g) * lam)   # re-seed at this step
-            if s is None:
-                ramp_ok = False; break
-            x = s
-        if ramp_ok:
-            sol = x
-        # (b) gmin-stepping backup if the ramp couldn't track all the way
-        if sol is None:
-            flat = topo.guess_vector({n: VCM for n in topo.solved})
-            for x0 in guesses + [flat]:
-                xc = list(np.clip(x0, 0.1, VDD - 0.1))
-                good = True
-                for gm in (1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12):
-                    s = _solve(bias, gm, xc)
+            def _solve(bias_d, gm, x0):
+                try:
+                    s, _, ier, _ = fsolve(lambda z: topo.dc_residuals(z, bias_d, Id, gm),
+                                          x0, full_output=True, xtol=1e-12, maxfev=4000)
+                    return s if ier == 1 or _dc_residual_ok(
+                        lambda z: topo.dc_residuals(z, bias_d, Id, gm), s, tol=1e-12) else None
+                except Exception:
+                    return None
+
+            sol = None
+            # (a) SOURCE-RAMP continuation: scale all rails 0->1, tracking the power-up
+            #     trajectory. This follows the physical (Spectre) branch through
+            #     multistable regions instead of jumping to an alternate equilibrium.
+            x = np.array(base_g) * 0.2
+            ramp_ok = True
+            for lam in np.linspace(0.2, 1.0, 17):
+                bl = {k: (v * lam if isinstance(v, (int, float)) else v)
+                      for k, v in bias.items()}
+                s = _solve(bl, gmin, x)
+                if s is None:
+                    s = _solve(bl, gmin, np.array(base_g) * lam)   # re-seed at this step
                     if s is None:
-                        good = False; break
-                    xc = list(s)
-                if good:
-                    sol = xc; break
-        if sol is None:
-            return None  # DC didn't converge even with continuation
+                        ramp_ok = False; break
+                x = s
+            if ramp_ok:
+                sol = x
+            # (b) gmin-stepping backup if the ramp couldn't track all the way
+            if sol is None:
+                flat = topo.guess_vector({n: VCM for n in topo.solved})
+                rails = [v for v in topo.rail_values(bias).values() if isinstance(v, (int, float))]
+                lo = min(rails) + 0.1 if rails else -np.inf
+                hi = max(rails) - 0.1 if rails else np.inf
+                for x0 in guesses + [flat]:
+                    xc = list(np.clip(x0, lo, hi))
+                    good = True
+                    for gm in (1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12):
+                        s = _solve(bias, gm, xc)
+                        if s is None:
+                            good = False; break
+                        xc = list(s)
+                    if good:
+                        sol = xc; break
+            if sol is None:
+                return None  # DC didn't converge even with continuation
 
-    nv = topo.node_vals(sol)                      # {node_name: voltage}, full asymmetric op
-    per_dev = bool(corner) and any(isinstance(v, dict) for v in corner.values())
+        nv = topo.node_vals(sol)                  # {node_name: voltage}, full asymmetric op
 
     # ── PHYSICALITY GUARD ── No internal node can sit above the supply or below ground
     # here. A solution with e.g. net20 > VDD means the tail M11 is reversed — a
     # non-physical alternate branch Spectre never picks. Re-solve seeded strictly inside
     # the rails and prefer an in-box solution. (Validated designs are already in-box, so
     # this never fires for them.)
-    def _inbox(d):
-        return all(-0.5 <= v <= VDD + 0.5 for v in d.values())
-    if not _inbox(nv):
+    if (topo is AFE_TOPO) and not topo.in_voltage_box(nv, bias):
+        VDD = bias["VDD"]
         for g in ({"VOP": VDD*0.6, "VON": VDD*0.6, "VFBP": VDD*0.4, "VFBN": VDD*0.4,
                    "NET20": VDD-4, "NET2": min(VCM+7, VDD-2)},
                   {"VOP": VDD*0.5, "VON": VDD*0.5, "VFBP": VDD*0.3, "VFBN": VDD*0.3,
@@ -263,7 +313,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
                                        full_output=True, xtol=1e-12, maxfev=4000)
             except Exception:
                 continue
-            if ier == 1 and _inbox(topo.node_vals(s2)):
+            if ier == 1 and topo.in_voltage_box(topo.node_vals(s2), bias):
                 nv = topo.node_vals(s2); break
 
     # ── SYMMETRY GUARD ── No per-device mismatch ⇒ physical op is symmetric (VOP=VON,
@@ -271,8 +321,9 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     # system seeded from the symmetrized average (right next to the physical root).
     # Only fires on no-mismatch + clearly-asymmetric, so symmetric (validated) points
     # are untouched.
-    if (not per_dev) and (abs(nv["VOP"] - nv["VON"]) > 1e-2 or
-                          abs(nv["VFBP"] - nv["VFBN"]) > 1e-2):
+    if ((topo is AFE_TOPO) and (not per_dev) and
+            (abs(nv["VOP"] - nv["VON"]) > 1e-2 or
+             abs(nv["VFBP"] - nv["VFBN"]) > 1e-2)):
         avg = [nv["NET2"], 0.5 * (nv["VOP"] + nv["VON"]),
                0.5 * (nv["VFBP"] + nv["VFBN"]), nv["NET20"]]
         symv = _symmetric_seed(sizes, bias, Id, gmin, seeds=[avg])
@@ -289,13 +340,17 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
 
     # ── 3. Build & solve the small-signal MNA (terminals from the topology) ──
     from ac_mna import _stamp_mos, _stamp_adm
-    iVOP, iVON = topo.idx["VOP"], topo.idx["VON"]
     NN = topo.n
-    GND = ("v", 0.0)
-    CL = 5e-12
-    vin_diff = 1.0
-    half = vin_diff / 2.0
-    devs = topo.ac_devices(drive={"M7": +half, "M8": -half})   # differential input on the pair
+    drive = topo.input_drives
+    drive_vals = list(drive.values())
+    if not drive_vals:
+        vin_norm = 1.0
+    elif len(drive_vals) > 1 and max(drive_vals) > min(drive_vals):
+        vin_norm = max(drive_vals) - min(drive_vals)
+    else:
+        vin_norm = max(abs(v) for v in drive_vals) or 1.0
+    devs = topo.ac_devices(drive=drive)
+    out_weights = topo.output_weights()
 
     gains = []
     for f in freqs:
@@ -305,10 +360,11 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         for name, d, g, s in devs:
             p = ss[name]
             _stamp_mos(Y, RHS, d, g, s, p["gm"], p["gds"], p["Cgs"], p["Cgd"], jw)
-        _stamp_adm(Y, RHS, ("n", iVOP), GND, jw * CL)
-        _stamp_adm(Y, RHS, ("n", iVON), GND, jw * CL)
+        for a, b, cap in topo.load_caps:
+            _stamp_adm(Y, RHS, topo.ac_term(a), topo.ac_term(b), jw * cap)
         V = np.linalg.solve(Y, RHS)
-        gains.append(abs(V[iVOP] - V[iVON]) / vin_diff)
+        out = sum(weight * V[topo.idx[node]] for node, weight in out_weights.items())
+        gains.append(abs(out) / vin_norm)
 
     gains = np.array(gains)
     Av_dc = gains[0]
@@ -321,9 +377,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         if gains[i] < a3:
             bw_Hz = freqs[i]; break
 
-    # dc_op: topology names + legacy aliases (net2/n20/vfb) for existing consumers
-    dc_op = {**nv, "net2": nv["NET2"], "n20": nv["NET20"],
-             "vfb": nv["VFBP"], "vfbp": nv["VFBP"], "vfbn": nv["VFBN"]}
+    dc_op = topo.dc_op_with_aliases(nv)
     return {
         "Av_dc_dB": Av_dc_dB,
         "peak_dB": 20 * np.log10(peak),

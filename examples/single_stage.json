@@ -1,0 +1,32 @@
+{
+  "name": "single_stage_pmos_load",
+  "solved": ["OUT"],
+  "rails": {
+    "VDD": "VDD",
+    "GND": 0.0,
+    "IN": "VIN"
+  },
+  "devices": [
+    {"name": "MPU", "drain": "OUT", "gate": "IN", "source": "VDD", "W": 2000, "L": 80},
+    {"name": "MLD", "drain": "GND", "gate": "GND", "source": "OUT", "W": 1500, "L": 80}
+  ],
+  "bias": {
+    "VDD": 40.0,
+    "VIN": 25.0
+  },
+  "outputs": ["OUT"],
+  "input_drives": {
+    "MPU": 1.0
+  },
+  "load_caps": [
+    ["OUT", "GND", 2e-12]
+  ],
+  "dc_guesses": [
+    {"OUT": 20.0},
+    {"OUT": 5.0},
+    {"OUT": 35.0}
+  ],
+  "transient_inputs": {
+    "MPU": "vin"
+  }
+}

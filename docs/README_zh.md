@@ -26,6 +26,52 @@
 
 当前核心代码结构见 [Core Solver Overview](core_overview.md)。
 
+## 环境安装
+
+建议使用 Python 3.10 或更新版本：
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+可选的 Numba 加速后端用于高频标量模型内核。短任务默认不启用，避免首次 JIT 编译开销；大量 sweep 或长瞬态仿真时可安装并显式打开：
+
+```bash
+python3 -m pip install -r requirements-numba.txt
+CIRCUIT_USE_NUMBA=1 python3 core/transient_solver.py
+```
+
+## JSON 电路描述
+
+求解器现在支持从 JSON 加载通用电路描述，避免在 `core/*.py` 里硬编码节点名和器件名。示例见 `examples/single_stage.json`。
+
+最小调用方式：
+
+```python
+import sys
+import numpy as np
+
+sys.path.insert(0, "core")
+
+from circuit_loader import load_circuit_json
+from ac_solver import ac_solve
+from noise_solver import noise_analysis
+from transient_solver import transient
+
+spec = load_circuit_json("examples/single_stage.json")
+freqs = np.logspace(0, 4, 121)
+
+ac = ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
+noise = noise_analysis(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
+
+t = np.linspace(0, 1e-3, 100)
+vin = np.full_like(t, spec.bias["VIN"])
+tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
+                 nf=spec.nf, inputs={"vin": vin})
+```
+
+JSON 主要字段包括 `solved`、`rails`、`devices`、`bias`、`outputs`、`input_drives`、`load_caps`、`dc_guesses` 和 `transient_inputs`。其中 `devices` 可直接包含 `W/L/NF`，也可以用单独的 `sizes`/`nf` 字段统一指定。
+
 ## 项目动机
 
 模拟电路设计通常需要反复运行仿真器来调整晶体管尺寸、偏置电流和补偿元件。直接扫描的结果可靠，但速度较慢，尤其是在候选设计数量很多，或者需要检查工艺角和 mismatch 时。

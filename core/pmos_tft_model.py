@@ -1,6 +1,10 @@
 import math
 import numpy as np
 from scipy.optimize import fsolve
+try:
+    from numba_kernels import eval_currents_numba
+except Exception:  # pragma: no cover - optional acceleration only
+    eval_currents_numba = None
 
 class PMOS_TFT:
     """
@@ -68,6 +72,7 @@ class PMOS_TFT:
         # Geometry in meters/cm
         self.w = self.W * 1e-6
         self.l = self.L * 1e-6
+        self._two_over_pi = 2.0 / np.pi
         
         self.Cpvt = (1 + self.pvt0 + self.mvt0 / np.sqrt(self.W * self.L * 1e-12))
         self.Vfb = self.VT * (3.25 / self.Ci) * self.Cpvt
@@ -81,11 +86,14 @@ class PMOS_TFT:
         
         # Channel parameters
         self.Rleak = (2 * 1e12 / self.W) * self.L * self.Roff
+        self._inv_Rleak = 1.0 / self.Rleak
         # beta equation
         term1 = (self.Es * self.G0 / self.Ceff)
         term2 = (self.Kbe * self.T) * (self.T / (2 * self.Tt - self.T))
         term3 = ((self.Ceff**2 * np.sin(np.pi * self.T / self.Tt)) / (np.pi * self.Nt * 2 * self.q * self.Kbe * self.T * self.Es)) ** (self.Tt / self.T)
         self.beta = self.beta0 * 0.8 * term1 * term2 * term3
+        self._channel_exponent = 2 * self.Tt / self.T
+        self._current_scale = (self.W / self.L) * self.beta
         
         self.Vss = 2 * self.Kbe * self.Tt * (1 + self.q * self.Nss / self.Ceff) * 2 * self.Tt / (2 * self.Tt - self.T)
         self.Esat = self.VE
@@ -95,6 +103,8 @@ class PMOS_TFT:
         self.Lc = 5
         self.k0 = 1.1e-8
         self.Rcleak = (1e16 / self.W) * self.Lc
+        self._contact_scale = (self.W / self.Lc) * self.k0
+        self._min_rout_denom = 1.0 / np.finfo(float).max
         
         # Capacitance / AC parameters
         self.fw = self.W / self.NF
@@ -104,6 +114,12 @@ class PMOS_TFT:
         self.EDGE_OY = 2*self.C3 + 2*self.C1 * np.ceil(np.ceil((self.fw + 2*self.OSC_O1 + (self.kh-1)*self.C2)/self.C1)/2)
         self.g_area = (self.EDGE_OX + 2*self.C1) * (self.EDGE_OY + 2*self.C1)
         self.AOSC = self.EDGE_OX * self.EDGE_OY
+        self._cap_cgs1 = (np.floor(self.NF / 2) + 1) * (self.fw + 210) * self.cl * self.CI
+        self._cap_cgd1 = np.ceil(self.NF / 2) * (self.fw + 210) * self.cl * self.CI
+        self._cap_half_wl_ci = 0.5 * self.W * self.L * self.CI
+        self._cap_wl_ci = self.W * self.L * self.CI
+        self._cap_cgs3_base = 0.5 * self.AOSC * self.CI - 1.43 * self._cap_wl_ci
+        self._cap_cgd3_base = 0.5 * self.AOSC * self.CI - 0.33 * self._cap_wl_ci
         
         if self.Reg == 1: self.k1 = 1
         elif self.Reg == 2: self.k1 = 0
@@ -159,11 +175,17 @@ class PMOS_TFT:
         arg_d = (v_d - Vg + self.Vfb) / self.Vss
         Vods = self.Vss * self._softplus(arg_d1)
         Vodd = self.Vss * self._softplus(arg_d)
-        exponent = 2 * self.Tt / self.T
+        exponent = self._channel_exponent
         chmod = 1 + self.lambda_ * (v_d1 - v_d)
-        current_scale = (self.W / self.L) * self.beta
+        current_scale = self._current_scale
         Ich = current_scale * (Vods**exponent - Vodd**exponent) * chmod
-        rout = (self.lambda_ * Ich) ** -1
+        lambda_ich = self.lambda_ * Ich
+        if lambda_ich == 0.0:
+            rout = np.inf
+        elif abs(lambda_ich) < self._min_rout_denom:
+            rout = np.copysign(np.inf, lambda_ich)
+        else:
+            rout = 1.0 / lambda_ich
         gm = current_scale * exponent * (
             Vods**(exponent - 1) * self._sigmoid(arg_d1)
             - Vodd**(exponent - 1) * self._sigmoid(arg_d)
@@ -177,8 +199,25 @@ class PMOS_TFT:
             "gm": gm,
         }
 
+    def _eval_channel_ich_sorted(self, v_d, v_d1, Vg):
+        """Fast Ich-only channel path for residual evaluations."""
+        arg_d1 = (v_d1 - Vg + self.Vfb) / self.Vss
+        arg_d = (v_d - Vg + self.Vfb) / self.Vss
+        Vods = self.Vss * self._softplus(arg_d1)
+        Vodd = self.Vss * self._softplus(arg_d)
+        exponent = self._channel_exponent
+        chmod = 1 + self.lambda_ * (v_d1 - v_d)
+        return self._current_scale * (Vods**exponent - Vodd**exponent) * chmod
+
     def _eval_currents(self, Vs, Vd, Vg, Vs1, Vd1):
         """ Evaluates the DC branch currents given external and internal nodes """
+        if eval_currents_numba is not None:
+            return eval_currents_numba(
+                Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self.Vss, self.Lc, self.lambda_,
+                self._contact_scale, self._channel_exponent, self._current_scale,
+                self._inv_Rleak,
+            )
+
         # Voltages sorting based on Verilog-A ternary operators.
         v_s, v_s1, v_d, v_d1 = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
         
@@ -188,19 +227,19 @@ class PMOS_TFT:
         Vods1 = self.Vss * self._softplus((v_s - Vg + Vt) / self.Vss)
         Vodd1 = self.Vss * self._softplus((v_s1 - Vg + Vt) / self.Vss)
         
-        Ecsat = 0.85 * 20 / (np.abs(v_s - Vg) + 0.1)
+        Ecsat = 0.85 * 20 / (abs(v_s - Vg) + 0.1)
         lambdac = 1 / (self.Lc * Ecsat)
         cmod = 1 + lambdac * (v_s - v_s1)
         
-        Icont = (self.W / self.Lc) * self.k0 * (Vods1**(2*self.Tt/self.T) - Vodd1**(2*self.Tt/self.T)) * cmod
+        exponent = self._channel_exponent
+        Icont = self._contact_scale * (Vods1**exponent - Vodd1**exponent) * cmod
         I_s_s1 = Icont if Vs > Vs1 else -Icont
         
         # --- Channel Model (between d1 and d) ---
-        channel = self._eval_channel(Vs, Vd, Vg, Vs1, Vd1)
-        Ich = channel["Ich"]
+        Ich = self._eval_channel_ich_sorted(v_d, v_d1, Vg)
         
         I_d1_d_ch = Ich if Vs1 > Vd else -Ich
-        I_d1_d_leak = (Vd1 - Vd) / self.Rleak + 0.1 / self.Rleak
+        I_d1_d_leak = (Vd1 - Vd + 0.1) * self._inv_Rleak
         I_d1_d = I_d1_d_ch + I_d1_d_leak
         
         # --- Internal resistor (between s1 and d1) ---
@@ -325,32 +364,43 @@ class PMOS_TFT:
         I_s_s1, I_s1_d1, I_d1_d, _, _ = self._eval_currents(Vs, Vd, Vg, Vs1, Vd1)
         return -I_d1_d
 
+    def _capacitances_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
+        """Capacitance equations evaluated from an already-solved internal OP."""
+        v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+
+        Cgs1 = self._cap_cgs1
+        Cgd1 = self._cap_cgd1
+
+        arg_gs = v_s - Vg + self.Vfb
+        Cgs2 = 1.43 * self._cap_half_wl_ci * (self._two_over_pi * np.arctan(arg_gs * 0.6) + 1)
+        Cgd2 = 0.33 * self._cap_half_wl_ci * (self._two_over_pi * np.arctan(arg_gs * 2.01) + 1)
+
+        arg_gd = -Vg + self.Vfb + v_d
+        Cgs3 = 0.34 * self._cap_cgs3_base * (self._two_over_pi * np.arctan(arg_gd * 0.21) + 1)
+        Cgd3 = 0.52 * self._cap_cgd3_base * (self._two_over_pi * np.arctan(arg_gd * 0.42) + 1)
+
+        Cgss = self.k1 * (Cgs1 + Cgs2 + Cgs3) * 1e4 * 1e-12
+        Cgdd = self.k1 * (Cgd1 + Cgd2 + Cgd3) * 1e4 * 1e-12
+        return Cgss, Cgdd
+
+    def get_Idc_and_capacitances(self, Vs, Vd, Vg):
+        """Return drain current and capacitances from one shared internal OP solve."""
+        Vs1, Vd1 = self.get_op(Vs, Vd, Vg)
+        _, _, I_d1_d, _, _ = self._eval_currents(Vs, Vd, Vg, Vs1, Vd1)
+        Cgss, Cgdd = self._capacitances_from_op(Vs, Vd, Vg, Vs1, Vd1)
+        return -I_d1_d, Cgss, Cgdd
+
     def get_capacitances(self, Vs, Vd, Vg):
         """
-        Calculates small-signal parasitic capacitances Cgss and Cgdd 
+        Calculates small-signal parasitic capacitances Cgss and Cgdd
         at the specified DC operating point.
         """
         Vs1, Vd1 = self.get_op(Vs, Vd, Vg)
-        v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
 
-        Cgs1 = (np.floor(self.NF / 2) + 1) * (self.fw + 210) * self.cl * self.CI
-        Cgd1 = (np.ceil(self.NF / 2)) * (self.fw + 210) * self.cl * self.CI
-        
-        arg_gs = v_s - Vg + self.Vfb
-        Cgs2 = 1.43 * (0.5 * self.W * self.L * self.CI) * (2 / np.pi * np.arctan(arg_gs * 0.6) + 1)
-        Cgd2 = 0.33 * (0.5 * self.W * self.L * self.CI) * (2 / np.pi * np.arctan(arg_gs * 2.01) + 1)
-        
-        arg_gd = -Vg + self.Vfb + v_d
-        Cgs3 = 0.34 * (0.5 * self.AOSC * self.CI - 1.43 * (self.W * self.L * self.CI)) * (2 / np.pi * np.arctan(arg_gd * 0.21) + 1)
-        Cgd3 = 0.52 * (0.5 * self.AOSC * self.CI - 0.33 * (self.W * self.L * self.CI)) * (2 / np.pi * np.arctan(arg_gd * 0.42) + 1)
-        
-        Cgss = self.k1 * (Cgs1 + Cgs2 + Cgs3) * 1e4 * 1e-12
-        Cgdd = self.k1 * (Cgd1 + Cgd2 + Cgd3) * 1e4 * 1e-12
-        
         # From the Verilog-A, gate1 is connected to s and d via these capacitors
         # I(s,gate1) = Cgss * ddt(V(s,gate1)) + ...
         # I(d,gate1) = Cgdd * ddt(V(d,gate1)) + ...
-        return Cgss, Cgdd
+        return self._capacitances_from_op(Vs, Vd, Vg, Vs1, Vd1)
 
     def get_os(self, Vs, Vd, Vg):
         """
