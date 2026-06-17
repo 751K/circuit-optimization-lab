@@ -1,6 +1,6 @@
 # Core Solver Overview
 
-[Project overview](README.md) | [中文说明](README_zh.md)
+[Project overview](README.md) | [中文说明](README_zh.md) | [中文版](core_overview_zh.md)
 
 This document introduces the current `core/` solver stack. The code is a compact local implementation of an AT4000TG OTFT ECG AFE solver, calibrated against Cadence/Spectre behavior. It is intended as the first concrete backend of the broader local circuit optimization flow.
 
@@ -15,7 +15,7 @@ The current solver stack covers:
 - Process-corner and per-device mismatch perturbations.
 - Cadence/Spectre-oriented validation for operating point, AC, noise, and transient behavior.
 
-The implementation is intentionally small and self-contained. It currently consists of nine Python source files under `core/`.
+The implementation is intentionally small and self-contained. It currently consists of ten Python source files under `core/`.
 
 ## File Structure
 
@@ -30,6 +30,7 @@ core/
   noise_solver.py      Noise propagation and input-referred noise analysis.
   transient_solver.py  Time-domain transient solver.
   explore.py           Design-space exploration / optimization driver.
+  corners.py           Process corners, mismatch MC, and latch detection.
 ```
 
 ## Import Relationship
@@ -44,6 +45,7 @@ ac_solver.py         <- topology, ac_mna, pmos_tft_model
 noise_solver.py      <- ac_solver, topology, ac_mna, pmos_tft_model
 transient_solver.py  <- ac_solver, topology, pmos_tft_model
 explore.py           <- ac_solver, noise_solver, pmos_tft_model, topology, circuit_loader
+corners.py           <- ac_solver, noise_solver, topology
 ```
 
 ## Main Components
@@ -142,7 +144,11 @@ solvers — the "optimization" the project is named for. Given a circuit plus an
 and one or more objectives), it samples candidates, evaluates each through the
 solvers, filters by constraints, and Pareto-selects the trade-off front.
 
-- `explore(topo, base_sizes, base_bias, nf, cfg, n=, seed=, method=)` — run a sweep.
+- `explore(topo, base_sizes, base_bias, nf, cfg, n=, seed=, method=, corner=)` — run a sweep.
+  `corner` applies a process shift (e.g. `CORNERS["slow"]`) to every evaluation, enabling
+  corner-aware search without modifying the config.
+- `evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None)` — single-candidate
+  solver evaluation, now with optional corner/mismatch argument.
 - `load_explore_json(path)` — read an `explore` block from a full circuit JSON, or
   from a file naming a `builtin_topology` (e.g. `AFE_TOPO`) plus baseline sizes/bias.
 - Sampling is `lhs` (Latin hypercube) or `random`, with a seeded RNG for repeatability.
@@ -155,6 +161,32 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
 
 Example configs: `examples/afe_explore.json` (built-in AFE topology) and the
 `explore` block in `examples/single_stage.json` (generic JSON path).
+
+### `corners.py`
+
+Single source of truth for process-corner and robustness work — the pieces that
+otherwise get re-derived in every sweep:
+
+- `CORNERS` — global process shifts (`typical` / `slow` / `fast` as `pvt0`/`pbeta0`,
+  from the PDK monte.scs sections; e.g. slow = `{"pvt0": -0.2259, "pbeta0": -0.54}`).
+- `mismatch_corner(rng, devices, base)` — per-device random `mvt0`/`mbeta0` on top of
+  a process corner.
+- `metrics(...)` — one design at one corner → `gain_peak_dB`, `bw_Hz`, `irn_uV`, and
+  `latch_dV` (`|out+ - out-|` at the DC op; large ⇒ the cross-coupled positive feedback
+  has latched).
+- `corner_table(...)` — metrics across typ/slow/fast.
+- `latch_screen(...)` — deterministic worst-case latch screen: pushes each symmetric
+  pair ±kσ apart over ALL sign patterns and returns the largest output imbalance. A
+  single fixed kick has false negatives (the latching sign pattern is design-dependent),
+  so the screen scans patterns; cheap enough to use inside a search instead of a full MC.
+- `mismatch_mc(...)` — per-device mismatch MC at one corner, seeded from the nominal op;
+  returns per-metric arrays, a latched mask, and a summary (latch rate + non-latched
+  mean/std/P5/P95).
+
+`ac_solve` / `noise_analysis` accept the same `corner` argument (a flat process dict or a
+per-device mismatch map). The driver `examples/mc_mismatch.py` wraps this into a corner
+table + 3-corner MC figure. (Distinct from `core/mc_corners.py`, which post-processes
+Cadence PSF output — that is the simulator-side flow, this is the local-solver side.)
 
 ## Quick Example
 

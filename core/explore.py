@@ -261,17 +261,20 @@ def _area(topo, sizes, nf):
     return float(total)
 
 
-def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None):
+def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None):
     """Run the solvers for one candidate -> metrics dict, or None if DC fails.
 
     x0_guess seeds the DC solve — required for topologies whose generic DC solve
     is not robust on its own (e.g. the AC-coupled AFE testbench, seeded from the
-    bare-AFE operating point)."""
-    ac = ac_solve(sizes, bias, freqs, topo=topo, nf=nf, x0_guess=x0_guess)
+    bare-AFE operating point).
+    corner applies a process shift (flat dict, e.g. the slow corner) or per-device
+    mismatch map; passed straight through to the solvers."""
+    ac = ac_solve(sizes, bias, freqs, topo=topo, nf=nf, x0_guess=x0_guess, corner=corner)
     if ac is None:
         return None
     try:
-        noise = noise_analysis(sizes, bias, freqs, x0_guess=ac["dc_op"], topo=topo, nf=nf)
+        noise = noise_analysis(sizes, bias, freqs, x0_guess=ac["dc_op"], topo=topo, nf=nf,
+                               corner=corner)
         irn_uV = band_rms(freqs, noise["irn_psd"], band[0], band[1]) * 1e6 if noise else float("nan")
     except Exception:
         irn_uV = float("nan")
@@ -327,18 +330,20 @@ def pareto_front(rows, objectives):
 
 # ── driver ──────────────────────────────────────────────────────────────────
 def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
-            progress=None, seed_fn=None):
+            progress=None, seed_fn=None, corner=None):
     """Sample, evaluate, constrain, and Pareto-select. Returns a results dict.
 
     seed_fn(sizes, bias) -> x0_guess optionally provides a per-candidate DC seed
-    (e.g. the bare-AFE operating point for the testbench)."""
+    (e.g. the bare-AFE operating point for the testbench).
+    corner applies a process shift (e.g. the slow corner) to every evaluation."""
     samples = sample(cfg.variables, n, seed=seed, method=method)
     candidates = []
     for i, var_values in enumerate(samples):
         sizes, bias, cand_nf = apply_variables(cfg.variables, var_values,
                                                base_sizes, base_bias, base_nf=nf)
         x0 = seed_fn(sizes, bias) if seed_fn is not None else None
-        metrics = evaluate(topo, sizes, bias, cand_nf, cfg.freqs, cfg.band, x0_guess=x0)
+        metrics = evaluate(topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
+                           x0_guess=x0, corner=corner)
         candidates.append({
             "idx": i,
             "vars": var_values,

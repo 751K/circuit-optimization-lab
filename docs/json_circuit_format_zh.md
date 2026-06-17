@@ -1,6 +1,6 @@
 # JSON 电路描述格式
 
-[中文说明](README_zh.md) | [核心求解器概览](core_overview.md) | [后续计划](futureplan.md)
+[中文说明](README_zh.md) | [核心求解器概览](core_overview_zh.md) | [后续计划](futureplan.md)
 
 ## 目的
 

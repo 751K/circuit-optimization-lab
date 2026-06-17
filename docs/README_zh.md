@@ -24,7 +24,7 @@
 - 工艺角和 mismatch Monte Carlo 类型的鲁棒性检查。
 - 为报告和科研汇报生成设计图表。
 
-当前核心代码结构见 [Core Solver Overview](core_overview.md)。
+当前核心代码结构见 [核心求解器概览](core_overview_zh.md)。
 
 ## 环境安装
 
