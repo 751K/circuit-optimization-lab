@@ -40,6 +40,10 @@ import csv
 import json
 import os
 
+# Exploration evaluates many candidates, so default to optional Numba acceleration
+# unless the caller explicitly disables it with CIRCUIT_USE_NUMBA=0.
+os.environ.setdefault("CIRCUIT_USE_NUMBA", "1")
+
 import numpy as np
 
 try:

@@ -7,8 +7,10 @@ behind a simple REST API so the HTML frontend can query gain, BW, and IRN
 for any combination of device sizes and bias voltages.
 """
 
-import sys
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import os
+from threading import Lock
+from threading import BoundedSemaphore
 import warnings
 
 # Suppress known-harmless numpy warnings from validated solvers
@@ -16,12 +18,6 @@ import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*divide by zero.*")
 warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*overflow.*")
 warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*invalid value.*")
-
-# Ensure the repo root is on the import path so `core` resolves whether or not
-# the package is pip-installed (`pip install -e .`).
-_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
 
 import numpy as np
 from flask import Flask, jsonify, request, send_from_directory
@@ -47,6 +43,14 @@ from core.ac_solver import ac_solve
 from core.noise_solver import noise_analysis, band_rms
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+
+_dc_seed_lock = Lock()
+_last_dc_seed = None
+SOLVE_TIMEOUT_S = float(os.environ.get("DEMO_SOLVE_TIMEOUT_S", "8.0"))
+MAX_SOLVE_WORKERS = int(os.environ.get("DEMO_MAX_SOLVE_WORKERS", "2"))
+MAX_NFREQ = int(os.environ.get("DEMO_MAX_NFREQ", "401"))
+_solve_executor = ThreadPoolExecutor(max_workers=MAX_SOLVE_WORKERS)
+_solve_slots = BoundedSemaphore(MAX_SOLVE_WORKERS)
 
 # ── Frequency grid (shared across all requests) ──────────────────────
 FREQ_GRID = np.logspace(-2, 3, 101)  # 0.01 Hz .. 1 kHz, ~Cadence grid
@@ -122,47 +126,50 @@ def validate_bias(bias_dict):
     }
 
 
-# ── Routes ────────────────────────────────────────────────────────────
+def solve_ac_with_retries(sizes, bias, freqs):
+    """Use the canonical cold solve first; use the last DC point only as rescue."""
+    global _last_dc_seed
+    with _dc_seed_lock:
+        seed = dict(_last_dc_seed) if _last_dc_seed is not None else None
 
-@app.route("/")
-def index():
-    return send_from_directory("static", "index.html")
+    attempts = [("cold", None)]
+    if seed is not None:
+        attempts.append(("warm_rescue", seed))
+
+    for mode, x0 in attempts:
+        ac = ac_solve(sizes, bias, freqs, x0_guess=x0)
+        if ac is not None:
+            with _dc_seed_lock:
+                _last_dc_seed = dict(ac["dc_op"])
+            return ac, mode
+    return None, "failed"
 
 
-@app.route("/api/presets")
-def get_presets():
-    """Return available preset designs (names + labels only, no sizes)."""
-    return jsonify({k: {"label": v["label"]} for k, v in PRESETS.items()})
-
-
-@app.route("/api/solve", methods=["POST"])
-def solve():
-    """
-    Expects JSON: { "sizes": {...}, "bias": {...} }
-    Returns: gain_dB, bw_Hz, irn_uV, dc_op, freq_response, noise_breakdown, ...
-    """
-    data = request.get_json(force=True)
+def solve_payload(data):
     sizes = validate_sizes(data.get("sizes", {}))
     bias = validate_bias(data.get("bias", {}))
 
-    # Optional: allow caller to specify a custom freq grid
+    # Optional: allow caller to specify a custom freq grid, bounded so one request
+    # cannot accidentally turn the demo into a long batch job.
     nf = int(data.get("nfreq", 121))
+    nf = max(2, min(MAX_NFREQ, nf))
     if nf != len(FREQ_GRID):
         freqs = np.logspace(-2, 3, nf)
     else:
         freqs = FREQ_GRID
 
     # ── AC ────────────────────────────────────────────────
-    ac = ac_solve(sizes, bias, freqs)
+    ac, dc_seed_mode = solve_ac_with_retries(sizes, bias, freqs)
 
     if ac is None:
-        return jsonify({"error": "DC Solution did not converge - please adjust sizes or bias", "converged": False})
+        return {"error": "DC Solution did not converge - please adjust sizes or bias",
+                "converged": False}
 
     # ── Noise ─────────────────────────────────────────────
     nr = noise_analysis(sizes, bias, freqs, x0_guess=ac["dc_op"])
 
     if nr is None:
-        return jsonify({"error": "Noise analysis failed", "converged": False})
+        return {"error": "Noise analysis failed", "converged": False}
 
     irn_total = band_rms(freqs, nr["irn_psd"], F_LO, F_HI)  # Vrms
     irn_uV = irn_total * 1e6
@@ -202,7 +209,7 @@ def solve():
     keep = np.linspace(0, len(freqs) - 1, min(200, len(freqs))).astype(int)
     keep = sorted(set(keep))
 
-    return jsonify(py_type({
+    return py_type({
         "converged": True,
         "gain_dB": round(float(ac["Av_dc_dB"]), 2),
         "peak_dB": round(float(ac["peak_dB"]), 2),
@@ -222,8 +229,54 @@ def solve():
             "bw_ok": bool(ac["bw_Hz"] >= 100),
             "irn_ok": bool(irn_uV <= 44.5),
             "all_ok": bool(ac["Av_dc_dB"] >= 20 and ac["bw_Hz"] >= 100 and irn_uV <= 44.5),
+            "dc_seed": dc_seed_mode,
+            "nfreq": int(len(freqs)),
         },
-    }))
+    })
+
+
+# ── Routes ────────────────────────────────────────────────────────────
+
+@app.route("/")
+def index():
+    return send_from_directory("static", "index.html")
+
+
+@app.route("/api/presets")
+def get_presets():
+    """Return available preset designs (names + labels only, no sizes)."""
+    return jsonify({k: {"label": v["label"]} for k, v in PRESETS.items()})
+
+
+@app.route("/api/solve", methods=["POST"])
+def solve():
+    """
+    Expects JSON: { "sizes": {...}, "bias": {...} }
+    Returns: gain_dB, bw_Hz, irn_uV, dc_op, freq_response, noise_breakdown, ...
+    """
+    data = request.get_json(force=True)
+    if not _solve_slots.acquire(blocking=False):
+        return jsonify({
+            "error": "Solver is busy; please wait for the current request to finish.",
+            "converged": False,
+            "busy": True,
+        }), 429
+
+    future = _solve_executor.submit(solve_payload, data)
+    future.add_done_callback(lambda _: _solve_slots.release())
+    try:
+        return jsonify(future.result(timeout=SOLVE_TIMEOUT_S))
+    except TimeoutError:
+        return jsonify({
+            "error": f"Solve timed out after {SOLVE_TIMEOUT_S:g}s",
+            "converged": False,
+            "timed_out": True,
+        }), 504
+    except Exception as exc:
+        return jsonify({
+            "error": f"Solver error: {exc}",
+            "converged": False,
+        }), 500
 
 
 @app.route("/api/preset/<name>")

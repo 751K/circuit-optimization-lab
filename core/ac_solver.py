@@ -42,6 +42,7 @@ def _dev_nf(nf, name):
 
 
 _AFE_SYMMETRIC_PAIRS = (("M7", "M8"), ("M9", "M10"), ("M12", "M13"), ("M14", "M15"))
+_DC_FALLBACK_TOL = 1e-10
 
 
 def _is_pairwise_symmetric_afe(sizes, nf, topo):
@@ -61,6 +62,38 @@ def _dc_residual_ok(residuals, x, tol=1e-9):
         return np.linalg.norm(residuals(x), ord=np.inf) < tol
     except Exception:
         return False
+
+
+def _bounded_least_squares_dc(residuals, guesses, topo, bias, tol=_DC_FALLBACK_TOL):
+    """Last-resort bounded DC solve.
+
+    fsolve is fast near a good root but can run to absurd voltages on bad AFE
+    slider combinations. This fallback keeps nodes inside the rail box and only
+    accepts a solution when KCL is still tight.
+    """
+    from scipy.optimize import least_squares
+    rails = [v for v in topo.rail_values(bias).values() if isinstance(v, (int, float))]
+    if not rails:
+        return None
+    lo = min(rails) - 0.5
+    hi = max(rails) + 0.5
+    best_x = None
+    best_norm = np.inf
+    for x0 in guesses[:6]:
+        try:
+            x0 = np.clip(np.asarray(x0, float), lo, hi)
+            sol = least_squares(residuals, x0, bounds=(lo, hi), x_scale="jac",
+                                xtol=1e-13, ftol=1e-13, gtol=1e-13,
+                                max_nfev=1200)
+            norm = np.linalg.norm(residuals(sol.x), ord=np.inf)
+            if norm < best_norm:
+                best_norm = norm
+                best_x = sol.x
+        except Exception:
+            pass
+    if best_x is not None and best_norm < tol:
+        return best_x
+    return None
 
 
 def _symmetric_seed(sizes, bias, Id, gmin, seeds=None):
@@ -91,7 +124,7 @@ def _symmetric_seed(sizes, bias, Id, gmin, seeds=None):
             sol, _, ier, _ = fsolve(f, u0, full_output=True, xtol=1e-12, maxfev=4000)
             residual_norm = np.linalg.norm(f(sol), ord=np.inf)
             in_box = all(-0.5 <= v <= VDD + 0.5 for v in sol)
-            if ier == 1 or (residual_norm < 1e-12 and in_box):
+            if in_box and residual_norm < _DC_FALLBACK_TOL:
                 n2, vop, vfb, n20 = sol
                 return {"VOP": vop, "VON": vop, "VFBP": vfb, "VFBN": vfb,
                         "NET20": n20, "NET2": n2}
@@ -127,7 +160,7 @@ def _symmetric_continuation(sizes, bias, Id, gmin):
                 try:
                     s, _, ier, _ = fsolve(lambda z: f(z, sc), seed,
                                           full_output=True, xtol=1e-12, maxfev=4000)
-                    if ier == 1:
+                    if _dc_residual_ok(lambda z: f(z, sc), s, tol=_DC_FALLBACK_TOL):
                         u = s; ok = True; break
                 except Exception:
                     pass
@@ -244,7 +277,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         for x0 in guesses:
             try:
                 sol, _, ier, _ = fsolve(residuals, x0, full_output=True, xtol=1e-12, maxfev=3000)
-                if ier == 1 or _dc_residual_ok(residuals, sol, tol=1e-12):
+                if _dc_residual_ok(residuals, sol, tol=_DC_FALLBACK_TOL) or (per_dev and ier == 1):
                     break
             except Exception:
                 pass
@@ -258,8 +291,9 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
                 try:
                     s, _, ier, _ = fsolve(lambda z: topo.dc_residuals(z, bias_d, Id, gm),
                                           x0, full_output=True, xtol=1e-12, maxfev=4000)
-                    return s if ier == 1 or _dc_residual_ok(
-                        lambda z: topo.dc_residuals(z, bias_d, Id, gm), s, tol=1e-12) else None
+                    rfun = lambda z: topo.dc_residuals(z, bias_d, Id, gm)
+                    return s if (_dc_residual_ok(rfun, s, tol=_DC_FALLBACK_TOL) or
+                                 (per_dev and ier == 1)) else None
                 except Exception:
                     return None
 
@@ -296,6 +330,8 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
                         xc = list(s)
                     if good:
                         sol = xc; break
+                if sol is None and not per_dev:
+                    sol = _bounded_least_squares_dc(residuals, guesses + [flat], topo, bias)
             if sol is None:
                 return None  # DC didn't converge even with continuation
 
@@ -306,19 +342,27 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     # non-physical alternate branch Spectre never picks. Re-solve seeded strictly inside
     # the rails and prefer an in-box solution. (Validated designs are already in-box, so
     # this never fires for them.)
-    if (topo is AFE_TOPO) and not topo.in_voltage_box(nv, bias):
+    if (topo is AFE_TOPO) and not per_dev and not topo.in_voltage_box(nv, bias):
         VDD = bias["VDD"]
-        for g in ({"VOP": VDD*0.6, "VON": VDD*0.6, "VFBP": VDD*0.4, "VFBN": VDD*0.4,
-                   "NET20": VDD-4, "NET2": min(VCM+7, VDD-2)},
-                  {"VOP": VDD*0.5, "VON": VDD*0.5, "VFBP": VDD*0.3, "VFBN": VDD*0.3,
-                   "NET20": VDD-3, "NET2": VDD-5}):
+        box_guesses = ({"VOP": VDD*0.6, "VON": VDD*0.6, "VFBP": VDD*0.4, "VFBN": VDD*0.4,
+                        "NET20": VDD-4, "NET2": min(VCM+7, VDD-2)},
+                       {"VOP": VDD*0.5, "VON": VDD*0.5, "VFBP": VDD*0.3, "VFBN": VDD*0.3,
+                        "NET20": VDD-3, "NET2": VDD-5})
+        for g in box_guesses:
             try:
                 s2, _, ier, _ = fsolve(residuals, topo.guess_vector(g),
                                        full_output=True, xtol=1e-12, maxfev=4000)
             except Exception:
                 continue
-            if ier == 1 and topo.in_voltage_box(topo.node_vals(s2), bias):
+            if (_dc_residual_ok(residuals, s2, tol=_DC_FALLBACK_TOL) and
+                    topo.in_voltage_box(topo.node_vals(s2), bias)):
                 nv = topo.node_vals(s2); break
+        if not topo.in_voltage_box(nv, bias):
+            box_vecs = [topo.guess_vector(g) for g in box_guesses]
+            s3 = _bounded_least_squares_dc(residuals, box_vecs + guesses, topo, bias)
+            if s3 is None:
+                return None
+            nv = topo.node_vals(s3)
 
     # ── SYMMETRY GUARD ── No per-device mismatch ⇒ physical op is symmetric (VOP=VON,
     # VFBP=VFBN). If fsolve latched to a symmetry-broken root, re-solve the symmetric

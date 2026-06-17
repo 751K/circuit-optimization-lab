@@ -60,7 +60,7 @@ corners.py           <- ac_solver, noise_solver, topology
 - 通过 `g_area` 计算几何面积。
 - 工艺和 mismatch 参数，如 `pvt0`、`mvt0`、`pbeta0` 和 `mbeta0`。
 - 带热启动的内部节点工作点求解。
-- 当设置 `CIRCUIT_USE_NUMBA=1` 时，对热点 `_eval_currents()` 标量内核提供可选 Numba 加速。
+- 当设置 `CIRCUIT_USE_NUMBA=1` 时，对热点标量内核提供可选 Numba 加速。
 
 AC 和噪声分析时，求解器通过有限差分 `get_Idc` 提取端 `gm` 和 `gds`，与电路求解器使用的端行为保持一致。
 
@@ -85,13 +85,15 @@ AC 和噪声分析时，求解器通过有限差分 `get_Idc` 提取端 `gm` 和
 
 ### `numba_kernels.py`
 
-为纯标量热点路径提供可选 Numba 内核。该模块可在未安装 Numba 时安全导入。加速通过以下方式显式启用：
+为纯标量热点路径提供可选 Numba 内核。该模块可在未安装 Numba 时安全导入。普通短任务通过以下方式显式启用：
 
 ```bash
 CIRCUIT_USE_NUMBA=1
 ```
 
-目前，主要的加速路径是 PMOS 电流计算内核，DC 和瞬态求解会大量使用。
+`core.explore` 和 `core.corners` 会默认把该变量设为 `1`，因为设计空间探索、corner sweep 和 mismatch MC 都是长任务。若需要强制走纯 Python 路径，在 import 前或运行 `python -m core.explore ...` 前设置 `CIRCUIT_USE_NUMBA=0`。
+
+目前加速路径包括 PMOS 电流计算、内部节点 Newton 迭代、偏置相关电容计算，以及瞬态 Jacobian 的端导数内核。
 
 ### `ac_mna.py`
 

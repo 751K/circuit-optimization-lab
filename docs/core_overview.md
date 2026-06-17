@@ -60,8 +60,8 @@ Implements the AT4000TG PMOS-OTFT compact model in Python. It provides:
 - Geometry area calculation through `g_area`.
 - Process and mismatch parameters such as `pvt0`, `mvt0`, `pbeta0`, and `mbeta0`.
 - A warm-started internal-node operating point solve.
-- Optional Numba acceleration for the hot `_eval_currents()` scalar kernel when
-  `CIRCUIT_USE_NUMBA=1` is set.
+- Optional Numba acceleration for hot scalar kernels when `CIRCUIT_USE_NUMBA=1`
+  is set.
 
 For AC and noise analysis, the solver extracts terminal `gm` and `gds` by finite-differencing `get_Idc`, matching the terminal behavior used by the circuit solver.
 
@@ -86,13 +86,15 @@ This lets new circuits be added through JSON files such as `examples/single_stag
 
 ### `numba_kernels.py`
 
-Provides optional Numba kernels for pure scalar hot paths. The module is safe to import without Numba installed. Acceleration is opt-in through:
+Provides optional Numba kernels for pure scalar hot paths. The module is safe to import without Numba installed. Normal short runs are opt-in through:
 
 ```bash
 CIRCUIT_USE_NUMBA=1
 ```
 
-At present, the main accelerated path is the PMOS current evaluation kernel used heavily by DC and transient solves.
+`core.explore` and `core.corners` default this variable to `1` because exploration, corner sweeps, and mismatch MC are long-running workloads. Set `CIRCUIT_USE_NUMBA=0` before import or before `python -m core.explore ...` to force the pure-Python path.
+
+At present, the accelerated paths are PMOS current evaluation, internal-node Newton iterations, bias-dependent capacitance evaluation, and the transient Jacobian's terminal derivative kernel.
 
 ### `ac_mna.py`
 

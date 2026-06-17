@@ -17,6 +17,11 @@ Note: core/mc_corners.py is a separate, Cadence-PSF post-processor; this module
 drives the local Python solvers.
 """
 import itertools
+import os
+
+# Corner sweeps and mismatch MC are long-running local-solver workloads, so default
+# to optional Numba acceleration unless explicitly disabled.
+os.environ.setdefault("CIRCUIT_USE_NUMBA", "1")
 
 import numpy as np
 

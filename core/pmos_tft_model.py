@@ -2,12 +2,14 @@ import math
 import numpy as np
 from scipy.optimize import fsolve
 try:
-    from .numba_kernels import eval_currents_numba
+    from .numba_kernels import eval_currents_numba, newton_internal_numba, capacitances_numba
 except Exception:  # pragma: no cover - optional acceleration only
     try:
-        from numba_kernels import eval_currents_numba
+        from numba_kernels import eval_currents_numba, newton_internal_numba, capacitances_numba
     except Exception:
         eval_currents_numba = None
+        newton_internal_numba = None
+        capacitances_numba = None
 
 class PMOS_TFT:
     """
@@ -272,6 +274,18 @@ class PMOS_TFT:
         within ~HH of the root converges in 1-2 iterations with no scipy overhead.
         Returns (Vs1, Vd1) on success, or None to let the robust path take over."""
         x0 = np.asarray(x0, float)
+        if newton_internal_numba is not None:
+            try:
+                ok, Vs1, Vd1 = newton_internal_numba(
+                    Vs, Vd, Vg, x0[0], x0[1], tol, maxit,
+                    self.Vfb, self.Vss, self.Lc, self.lambda_,
+                    self._contact_scale, self._channel_exponent,
+                    self._current_scale, self._inv_Rleak)
+                if ok:
+                    return np.array([Vs1, Vd1])
+                return None
+            except Exception:
+                pass
         Vs1, Vd1 = x0[0], x0[1]
         hj = 1e-6                                    # finite-diff step for the 2x2 jac
         for _ in range(maxit):
@@ -369,6 +383,14 @@ class PMOS_TFT:
 
     def _capacitances_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
         """Capacitance equations evaluated from an already-solved internal OP."""
+        if capacitances_numba is not None:
+            try:
+                return capacitances_numba(
+                    Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
+                    self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
+                    self._cap_cgs3_base, self._cap_cgd3_base, self.k1)
+            except Exception:
+                pass
         v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
 
         Cgs1 = self._cap_cgs1

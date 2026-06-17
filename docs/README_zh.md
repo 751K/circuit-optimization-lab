@@ -36,7 +36,7 @@ python3 -m pip install -r requirements.txt
 
 `requirements.txt` 会以 editable 模式安装本项目，因此外部脚本和 notebook 可以直接 `from core...` 导入，不需要手动修改导入路径。
 
-可选的 Numba 加速后端用于高频标量模型内核。短任务默认不启用，避免首次 JIT 编译开销；大量 sweep 或长瞬态仿真时可安装并显式打开：
+可选的 Numba 加速后端用于高频标量模型内核。普通短任务默认不启用，避免首次 JIT 编译开销；`core.explore` 和 `core.corners` 这类 sweep/MC 入口会默认启用 Numba。需要关闭时可显式设置 `CIRCUIT_USE_NUMBA=0`。
 
 ```bash
 python3 -m pip install -r requirements-numba.txt
