@@ -408,6 +408,60 @@ class PMOS_TFT:
         Cgdd = self.k1 * (Cgd1 + Cgd2 + Cgd3) * 1e4 * 1e-12
         return Cgss, Cgdd
 
+    def _capacitance_components_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
+        """Return Verilog-A Cgs*/Cgd* components in farads.
+
+        This is intentionally kept off the hot AC/transient path. It is used by
+        the chopper charge-injection helper to derive a first-order channel-charge
+        estimate from the same PDK capacitance equations instead of introducing an
+        unrelated empirical capacitance.
+        """
+        v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+        scale = self.k1 * 1e4 * 1e-12
+
+        Cgs1 = self._cap_cgs1
+        Cgd1 = self._cap_cgd1
+        arg_gs = v_s - Vg + self.Vfb
+        Cgs2 = 1.43 * self._cap_half_wl_ci * (self._two_over_pi * np.arctan(arg_gs * 0.6) + 1)
+        Cgd2 = 0.33 * self._cap_half_wl_ci * (self._two_over_pi * np.arctan(arg_gs * 2.01) + 1)
+        arg_gd = -Vg + self.Vfb + v_d
+        Cgs3 = 0.34 * self._cap_cgs3_base * (self._two_over_pi * np.arctan(arg_gd * 0.21) + 1)
+        Cgd3 = 0.52 * self._cap_cgd3_base * (self._two_over_pi * np.arctan(arg_gd * 0.42) + 1)
+
+        out = {
+            "Cgs1": Cgs1 * scale,
+            "Cgd1": Cgd1 * scale,
+            "Cgs2": Cgs2 * scale,
+            "Cgd2": Cgd2 * scale,
+            "Cgs3": Cgs3 * scale,
+            "Cgd3": Cgd3 * scale,
+        }
+        out["Cgss"] = out["Cgs1"] + out["Cgs2"] + out["Cgs3"]
+        out["Cgdd"] = out["Cgd1"] + out["Cgd2"] + out["Cgd3"]
+        return out
+
+    def get_capacitance_components(self, Vs, Vd, Vg):
+        Vs1, Vd1 = self.get_op(Vs, Vd, Vg)
+        return self._capacitance_components_from_op(Vs, Vd, Vg, Vs1, Vd1)
+
+    def estimate_channel_charge(self, Vs, Vd, Vg, mobile_only=True):
+        """Estimate turn-off channel charge for switch charge-injection modeling.
+
+        The PDK Verilog-A model is capacitance based and does not provide a
+        charge-conserving channel-charge state. This estimate uses the same
+        capacitance equations and a local overdrive proxy, so it scales with W/L,
+        NF, bias, and process parameters instead of using a fixed ad-hoc charge.
+        """
+        Vs1, Vd1 = self.get_op(Vs, Vd, Vg)
+        comps = self._capacitance_components_from_op(Vs, Vd, Vg, Vs1, Vd1)
+        v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+        vov = max(0.0, 0.5 * ((v_s - Vg + self.Vfb) + (v_d - Vg + self.Vfb)))
+        if mobile_only:
+            cap = comps["Cgs2"] + comps["Cgd2"]
+        else:
+            cap = comps["Cgss"] + comps["Cgdd"]
+        return cap * vov
+
     def get_Idc_and_capacitances(self, Vs, Vd, Vg):
         """Return drain current and capacitances from one shared internal OP solve."""
         Vs1, Vd1 = self.get_op(Vs, Vd, Vg)

@@ -7,6 +7,7 @@ removes it.
 import numpy as np
 import pytest
 
+import core.corners as corners_mod
 from core.corners import (
     CORNERS,
     corner_table,
@@ -57,8 +58,12 @@ def test_corner_table_spans_corners():
     assert t["slow"]["gain_peak_dB"] > 24.0          # robust design meets ~25 dB at slow
 
 
-def test_latch_screen_separates_latch_prone_from_robust():
+def test_latch_screen_separates_latch_prone_from_robust(monkeypatch):
     # worst-case differential kick: huge imbalance for the drawn design, tiny for robust
+    monkeypatch.setattr(
+        corners_mod, "noise_analysis",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("latch_screen should not evaluate noise")))
     drawn_dv = latch_screen(DRAWN["sizes"], DRAWN["bias"], nf=DRAWN["nf"], freqs=FREQS)
     robust_dv = latch_screen(ROBUST["sizes"], ROBUST["bias"], nf=ROBUST["nf"], freqs=FREQS)
     assert drawn_dv > 100.0
@@ -73,3 +78,6 @@ def test_mismatch_mc_latch_rates():
     assert drawn["summary"]["latch_rate"] > 0.0      # drawn latches under mismatch
     assert robust["summary"]["latch_rate"] == 0.0    # robust does not
     assert robust["summary"]["gain_peak_dB"]["p5"] > 24.0
+    assert drawn["summary"]["noise_evaluated"] <= (
+        drawn["summary"]["n"] - drawn["summary"]["latched"])
+    assert robust["summary"]["noise_evaluated"] == robust["summary"]["n"]

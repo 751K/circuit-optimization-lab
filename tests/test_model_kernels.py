@@ -59,6 +59,19 @@ def test_capacitance_kernel_matches_model_formula():
     np.testing.assert_allclose(got, ref, rtol=1e-14, atol=1e-24)
 
 
+def test_capacitance_components_and_channel_charge_are_pdk_scaled():
+    t = PMOS_TFT(W=20000, L=80)
+    Vs, Vd, Vg = 30.65, 29.0, 0.0
+    comps = t.get_capacitance_components(Vs, Vd, Vg)
+    Cgss, Cgdd = t.get_capacitances(Vs, Vd, Vg)
+
+    np.testing.assert_allclose(comps["Cgss"], Cgss, rtol=1e-14, atol=1e-24)
+    np.testing.assert_allclose(comps["Cgdd"], Cgdd, rtol=1e-14, atol=1e-24)
+    assert comps["Cgs2"] > 0.0
+    assert comps["Cgd2"] > 0.0
+    assert t.estimate_channel_charge(Vs, Vd, Vg) > 0.0
+
+
 def test_additional_numba_kernels_match_python_impl_when_enabled():
     if newton_internal_numba is None:
         return

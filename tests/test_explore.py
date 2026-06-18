@@ -1,6 +1,7 @@
 import numpy as np
 
 from core.corners import CORNERS
+import core.explore as explore_mod
 from core.explore import (
     Variable,
     apply_variables,
@@ -73,8 +74,9 @@ def test_single_stage_explore_end_to_end(tmp_path):
 
     for c in cands:
         if c["converged"]:
-            for m in ("gain_dB", "bw_Hz", "irn_uV", "power_uW", "area"):
+            for m in ("gain_dB", "bw_Hz", "power_uW", "area"):
                 assert np.isfinite(c["metrics"][m])
+            assert np.isnan(c["metrics"]["irn_uV"])
 
     feasible = [c for c in cands if c["feasible"]]
     pareto = [c for c in cands if c["pareto"]]
@@ -115,6 +117,54 @@ def test_explore_with_corner_and_nf_variable():
         if c["converged"]:
             assert np.isfinite(c["metrics"]["gain_peak_dB"])
             assert np.isfinite(c["metrics"]["bw_Hz"])
+            assert not c["noise_evaluated"]
+
+
+def test_explore_skips_noise_for_ac_failed_candidates(monkeypatch):
+    topo, sizes, bias, nf, base_cfg = load_explore_json("examples/single_stage.json")
+    cfg = parse_explore({
+        "variables": {
+            "MPU.W": {"min": 1500, "max": 4000, "int": True},
+        },
+        "constraints": {
+            "gain_dB": {"min": 1e6},   # impossible, so IRN is irrelevant
+            "irn_uV": {"max": 44.5},
+        },
+        "objectives": {"area": "min"},
+        "band": list(base_cfg.band),
+        "freqs": {"start": -2, "stop": 3, "num": 21},
+    })
+    calls = {"noise": 0}
+
+    def fake_noise(*args, **kwargs):
+        calls["noise"] += 1
+        raise AssertionError("noise should be skipped after AC constraint failure")
+
+    monkeypatch.setattr(explore_mod, "noise_analysis", fake_noise)
+    res = explore(topo, sizes, bias, nf, cfg, n=4, seed=0, method="lhs")
+
+    assert res["summary"]["converged"] >= 1
+    assert res["summary"]["feasible"] == 0
+    assert res["summary"]["noise_evaluated"] == 0
+    assert calls["noise"] == 0
+
+
+def test_explore_runs_noise_when_irn_objective_needed(monkeypatch):
+    topo, sizes, bias, nf, cfg = load_explore_json("examples/single_stage.json")
+    cfg.constraints = {}
+    cfg.objectives = {"irn_uV": "min"}
+    calls = {"noise": 0}
+    real_noise = explore_mod.noise_analysis
+
+    def counted_noise(*args, **kwargs):
+        calls["noise"] += 1
+        return real_noise(*args, **kwargs)
+
+    monkeypatch.setattr(explore_mod, "noise_analysis", counted_noise)
+    res = explore(topo, sizes, bias, nf, cfg, n=3, seed=1, method="lhs")
+
+    assert res["summary"]["noise_evaluated"] == calls["noise"]
+    assert calls["noise"] >= 1
 
 
 def test_afe_explore_finds_feasible():

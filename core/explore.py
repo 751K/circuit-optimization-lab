@@ -63,6 +63,7 @@ except ImportError:  # pragma: no cover - legacy direct module import
 _BUILTIN_TOPOLOGIES = {"AFE_TOPO": AFE_TOPO}
 
 METRICS = ("gain_dB", "gain_peak_dB", "bw_Hz", "irn_uV", "power_uW", "area")
+NOISE_METRICS = frozenset({"irn_uV"})
 
 
 # ── configuration ────────────────────────────────────────────────────────
@@ -265,31 +266,65 @@ def _area(topo, sizes, nf):
     return float(total)
 
 
-def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None):
+def _needs_noise(constraints=None, objectives=None, require_noise=None):
+    if require_noise is not None:
+        return bool(require_noise)
+    if constraints is None and objectives is None:
+        return True
+    needed = set((constraints or {}).keys()) | set((objectives or {}).keys())
+    return bool(needed & NOISE_METRICS)
+
+
+def _non_noise_constraints(constraints):
+    return {k: v for k, v in (constraints or {}).items() if k not in NOISE_METRICS}
+
+
+def _has_finite_metrics(metrics, names):
+    return all(np.isfinite(metrics.get(name, float("nan"))) for name in names)
+
+
+def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
+             constraints=None, objectives=None, require_noise=None):
     """Run the solvers for one candidate -> metrics dict, or None if DC fails.
 
     x0_guess seeds the DC solve — required for topologies whose generic DC solve
     is not robust on its own (e.g. the AC-coupled AFE testbench, seeded from the
     bare-AFE operating point).
     corner applies a process shift (flat dict, e.g. the slow corner) or per-device
-    mismatch map; passed straight through to the solvers."""
+    mismatch map; passed straight through to the solvers.
+
+    When constraints/objectives are supplied, noise is evaluated lazily: AC-derived
+    metrics are checked first, and `irn_uV` is computed only if it is required and
+    the candidate has not already failed non-noise constraints. Direct callers that
+    omit constraints/objectives keep the old behavior and compute noise by default."""
     ac = ac_solve(sizes, bias, freqs, topo=topo, nf=nf, x0_guess=x0_guess, corner=corner)
     if ac is None:
         return None
+    irn_uV = float("nan")
     try:
-        noise = noise_analysis(sizes, bias, freqs, x0_guess=ac["dc_op"], topo=topo, nf=nf,
-                               corner=corner)
-        irn_uV = band_rms(freqs, noise["irn_psd"], band[0], band[1]) * 1e6 if noise else float("nan")
+        power_uW = float(_supply_power_uW(topo, bias, ac["ss"]))
     except Exception:
-        irn_uV = float("nan")
+        power_uW = float("nan")
     metrics = {
         "gain_dB": float(ac["Av_dc_dB"]),          # gain at the lowest analysis freq
         "gain_peak_dB": float(ac["peak_dB"]),      # passband peak (the spec gain for a bandpass)
         "bw_Hz": float(ac["bw_Hz"]),
         "irn_uV": float(irn_uV),
-        "power_uW": float(_supply_power_uW(topo, bias, ac["ss"])),
+        "power_uW": power_uW,
         "area": _area(topo, sizes, nf),
+        "_noise_evaluated": False,
     }
+    if (_needs_noise(constraints, objectives, require_noise) and
+            is_feasible(metrics, _non_noise_constraints(constraints))):
+        try:
+            noise = noise_analysis(sizes, bias, freqs, x0_guess=ac["dc_op"], topo=topo,
+                                   nf=nf, corner=corner)
+            if noise is not None:
+                metrics["irn_uV"] = float(band_rms(freqs, noise["irn_psd"],
+                                                   band[0], band[1]) * 1e6)
+            metrics["_noise_evaluated"] = True
+        except Exception:
+            metrics["irn_uV"] = float("nan")
     return metrics
 
 
@@ -347,14 +382,18 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
                                                base_sizes, base_bias, base_nf=nf)
         x0 = seed_fn(sizes, bias) if seed_fn is not None else None
         metrics = evaluate(topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
-                           x0_guess=x0, corner=corner)
+                           x0_guess=x0, corner=corner, constraints=cfg.constraints,
+                           objectives=cfg.objectives)
+        complete = bool(metrics is not None and _has_finite_metrics(metrics, cfg.objectives))
         candidates.append({
             "idx": i,
             "vars": var_values,
             "metrics": metrics,
             "converged": metrics is not None,
-            "feasible": bool(metrics is not None and is_feasible(metrics, cfg.constraints)),
+            "feasible": bool(metrics is not None and complete and
+                             is_feasible(metrics, cfg.constraints)),
             "pareto": False,
+            "noise_evaluated": bool(metrics and metrics.get("_noise_evaluated", False)),
         })
         if progress is not None:
             progress(i + 1, n)
@@ -369,6 +408,7 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
         "converged": sum(c["converged"] for c in candidates),
         "feasible": len(feasible),
         "pareto": len(front_local),
+        "noise_evaluated": sum(c["noise_evaluated"] for c in candidates),
         "best": {},
     }
     for metric, sense in cfg.objectives.items():
@@ -419,7 +459,8 @@ def write_jsonl(results, path):
 def _format_summary(results):
     s = results["summary"]
     lines = [f"candidates: {s['n']}   converged: {s['converged']}   "
-             f"feasible: {s['feasible']}   pareto: {s['pareto']}"]
+             f"feasible: {s['feasible']}   pareto: {s['pareto']}   "
+             f"noise: {s['noise_evaluated']}"]
     if s["best"]:
         lines.append("best feasible per objective:")
         for metric, info in s["best"].items():

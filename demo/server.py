@@ -46,6 +46,8 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 
 _dc_seed_lock = Lock()
 _last_dc_seed = None
+_last_dc_bias = None
+_preset_seed_cache = {}
 SOLVE_TIMEOUT_S = float(os.environ.get("DEMO_SOLVE_TIMEOUT_S", "8.0"))
 MAX_SOLVE_WORKERS = int(os.environ.get("DEMO_MAX_SOLVE_WORKERS", "2"))
 MAX_NFREQ = int(os.environ.get("DEMO_MAX_NFREQ", "401"))
@@ -126,21 +128,79 @@ def validate_bias(bias_dict):
     }
 
 
-def solve_ac_with_retries(sizes, bias, freqs):
-    """Use the canonical cold solve first; use the last DC point only as rescue."""
-    global _last_dc_seed
-    with _dc_seed_lock:
-        seed = dict(_last_dc_seed) if _last_dc_seed is not None else None
+_DC_SEED_NODES = ("VOP", "VON", "VFBP", "VFBN", "NET20", "NET2")
+_PRESET_SEED_ORDER = ("first_feasible", "final", "min_area", "base")
 
+
+def _compact_dc_seed(dc):
+    return {node: float(dc[node]) for node in _DC_SEED_NODES if node in dc}
+
+
+def _remap_dc_seed(seed, from_bias, to_bias):
+    """Reuse a known AFE branch after bias changes by preserving VCM-relative offsets."""
+    if not seed or not from_bias:
+        return None
+    from_vcm = float(from_bias.get("VCM", 0.0))
+    to_vcm = float(to_bias.get("VCM", from_vcm))
+    from_vdd = max(float(from_bias.get("VDD", 40.0)), 1e-30)
+    to_vdd = float(to_bias.get("VDD", from_vdd))
+    scale = to_vdd / from_vdd
+    lo, hi = -0.25, to_vdd + 0.25
+    out = {}
+    for node in _DC_SEED_NODES:
+        if node in seed:
+            out[node] = float(np.clip(to_vcm + (float(seed[node]) - from_vcm) * scale,
+                                      lo, hi))
+    return out or None
+
+
+def _preset_dc_seed(name):
+    if name in _preset_seed_cache:
+        return _preset_seed_cache[name]
+    preset = PRESETS[name]
+    ac = ac_solve(preset["sizes"], preset["bias"], np.array([1.0]))
+    if ac is None:
+        _preset_seed_cache[name] = None
+    else:
+        _preset_seed_cache[name] = (_compact_dc_seed(ac["dc_op"]), dict(preset["bias"]))
+    return _preset_seed_cache[name]
+
+
+def _demo_dc_attempts(bias):
+    """Ordered seed attempts for the interactive demo.
+
+    Cold solve stays first. Fallback seeds are known good physical AFE branches,
+    remapped to the current bias, so changing a full size set is less likely to
+    land on the wrong branch or show a false DC failure.
+    """
     attempts = [("cold", None)]
-    if seed is not None:
-        attempts.append(("warm_rescue", seed))
+    with _dc_seed_lock:
+        last_seed = dict(_last_dc_seed) if _last_dc_seed is not None else None
+        last_bias = dict(_last_dc_bias) if _last_dc_bias is not None else None
+    remapped_last = _remap_dc_seed(last_seed, last_bias, bias)
+    if remapped_last is not None:
+        attempts.append(("warm_rescue", remapped_last))
+    for name in _PRESET_SEED_ORDER:
+        item = _preset_dc_seed(name)
+        if item is None:
+            continue
+        seed, seed_bias = item
+        remapped = _remap_dc_seed(seed, seed_bias, bias)
+        if remapped is not None:
+            attempts.append((f"preset_{name}", remapped))
+    return attempts
 
-    for mode, x0 in attempts:
+
+def solve_ac_with_retries(sizes, bias, freqs):
+    """Use the canonical cold solve first, then demo-safe physical branch seeds."""
+    global _last_dc_seed, _last_dc_bias
+
+    for mode, x0 in _demo_dc_attempts(bias):
         ac = ac_solve(sizes, bias, freqs, x0_guess=x0)
         if ac is not None:
             with _dc_seed_lock:
-                _last_dc_seed = dict(ac["dc_op"])
+                _last_dc_seed = _compact_dc_seed(ac["dc_op"])
+                _last_dc_bias = dict(bias)
             return ac, mode
     return None, "failed"
 

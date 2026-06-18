@@ -74,6 +74,21 @@ def test_rc_current_source_transient_relaxes():
     assert np.all(np.diff(tr["output"]) > 0)
 
 
+def test_dynamic_current_input_transient_relaxes():
+    # Same RC as above, but the current source is supplied as a waveform. This is
+    # the generic stamp used by chopper charge-injection pulses.
+    R, C, I = 1e6, 1e-9, 2e-6
+    topo = Topology(solved=["OUT"], devices=[], rails={"VDD": "VDD", "GND": 0.0},
+                    outputs=("OUT",), resistors=[("R1", "OUT", "GND", R)],
+                    capacitors=[("C1", "OUT", "GND", C)])
+    tg = np.linspace(0, 1e-2, 400)
+    tr = transient({}, {"VDD": 10.0}, tg, topo=topo, V0=np.array([0.0]),
+                   inputs={"iin": np.full_like(tg, I)},
+                   current_inputs=[("VDD", "OUT", "iin")])
+    assert tr["nfail"] == 0
+    assert tr["output"][-1] == pytest.approx(I * R, rel=2e-3)
+
+
 def test_resistor_load_example_runs_all_analyses():
     spec = load_circuit_json("examples/resistor_load_stage.json")
     freqs = np.logspace(0, 5, 41)

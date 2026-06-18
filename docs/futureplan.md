@@ -103,9 +103,30 @@
 - 电阻。✅
 - 理想电流源。✅
 - 理想电压源或受控源。（待做）
-- 开关或时变电容，用于 chopper 和采样电路。（待做）
+- 理想同步 chopper 频域分析。✅（`core/chopper.py`，按八开关差分换向器的理想
+  +/-1 方波乘法模型，用边带折叠计算 gain/BW/noise）
+- PMOS 八开关 chopper 拓扑。✅（`build_afe_pmos_chopper()` /
+  `pmos_chopper_analysis()`，用真实 `PMOS_TFT` pass switch 估算 Ron、寄生电容
+  与 switch 噪声对静态相位 gain/BW/noise 的影响）
+- 有限边沿 / dead time chopper 谐波权重。✅（`finite_edge_chopper_harmonics()`）
+- clock feedthrough transient。✅（有限边沿 clock 驱动 PMOS gate，已有 PDK
+  `Cgss/Cgdd * ddt()` 电容伴随 stamp）
+- charge injection 一阶模型。✅（`PMOS_TFT.estimate_channel_charge()` +
+  `transient(current_inputs=...)`，由 PDK 电容公式估算 turn-off 注入脉冲）
+- PMOS quasi-LPTV sideband folding。✅（`pmos_chopper_lptv_analysis()`，用 PMOS
+  静态相位 response/noise 和有限边沿谐波权重做边带折叠）
+- hard-switched PMOS chopper transient 收敛优化。✅（`refine_chopper_tgrid()` +
+  `transient(fallback_least_squares=True)`，clock edge 附近自动细分，并用电源轨
+  有界 fallback solve 处理硬开关 DAE 步）
+- 完整 PSS/PNoise 对齐，用于 correlated periodic noise、clock feedthrough /
+  charge injection 的 Cadence 级验证、有限边沿时间、时变工作点边带折叠等
+  非理想效应的精确标定。（待做）
 
-resistor/capacitor/current source 已完成（它们对 DC、AC、noise、transient 的 stamp 都比较清晰）；下一步是理想电压源 / 受控源与开关 / 时变元件。
+resistor/capacitor/current source 已完成（它们对 DC、AC、noise、transient 的 stamp 都比较清晰）；
+chopper 的理想 LPTV 频域分析、PMOS 静态相位拓扑、有限边沿谐波、charge injection
+一阶 transient stamp、PMOS quasi-LPTV folding 与 hard-switched transient 基础收敛
+优化已完成；下一步是理想电压源 / 受控源，以及与 Spectre PSS/PNoise 对齐的周期
+时变验证路径。
 
 ### 6. 优化 transient 内核
 

@@ -85,17 +85,23 @@ def latch_screen(sizes, bias, nf=None, base="slow", topo=AFE_TOPO, k=3.0,
     for combo in itertools.product((1, -1), repeat=len(pairs) - 1):
         m = metrics(sizes, bias, nf=nf,
                     corner=latch_kick_corner(base, pairs, k, (1,) + combo),
-                    topo=topo, x0_guess=x0_guess, freqs=freqs)
+                    topo=topo, x0_guess=x0_guess, freqs=freqs,
+                    include_noise=False)
         if m is not None:
             worst = max(worst, m["latch_dV"])
     return worst
 
 
 def metrics(sizes, bias, nf=None, corner=None, topo=AFE_TOPO, x0_guess=None,
-            freqs=None, band=(0.05, 100.0)):
+            freqs=None, band=(0.05, 100.0), include_noise=True,
+            noise_gate=None):
     """Evaluate one design at one corner. Returns a dict with:
         gain_peak_dB, bw_Hz, irn_uV, latch_dV (|out+ - out-| at the DC op;
-        large => regenerative latch), and dc_op. None if the DC solve fails."""
+        large => regenerative latch), and dc_op. None if the DC solve fails.
+
+    Noise is optional because latch/gain/BW screens only need the AC/DC result.
+    `noise_gate(out)` can defer IRN until after AC/latch checks, e.g. mismatch MC
+    skips IRN for latched samples that are excluded from final stats."""
     if freqs is None:
         freqs = _DEFAULT_FREQS
     ac = ac_solve(sizes, bias, freqs, corner=corner, nf=nf, topo=topo, x0_guess=x0_guess)
@@ -106,24 +112,30 @@ def metrics(sizes, bias, nf=None, corner=None, topo=AFE_TOPO, x0_guess=None,
     outs = topo.outputs
     out["latch_dV"] = (abs(ac["dc_op"][outs[0]] - ac["dc_op"][outs[1]])
                        if len(outs) == 2 else 0.0)
-    try:
-        nz = noise_analysis(sizes, bias, freqs, corner=corner, nf=nf, topo=topo,
-                            x0_guess=ac["dc_op"])
-        out["irn_uV"] = band_rms(freqs, nz["irn_psd"], *band) * 1e6 if nz else float("nan")
-    except Exception:
-        out["irn_uV"] = float("nan")
+    out["irn_uV"] = float("nan")
+    out["_noise_evaluated"] = False
+    if include_noise and (noise_gate is None or noise_gate(out)):
+        try:
+            nz = noise_analysis(sizes, bias, freqs, corner=corner, nf=nf, topo=topo,
+                                x0_guess=ac["dc_op"])
+            out["irn_uV"] = band_rms(freqs, nz["irn_psd"], *band) * 1e6 if nz else float("nan")
+            out["_noise_evaluated"] = True
+        except Exception:
+            out["irn_uV"] = float("nan")
     return out
 
 
 def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
-                 corners=("typical", "slow", "fast"), freqs=None, band=(0.05, 100.0)):
+                 corners=("typical", "slow", "fast"), freqs=None, band=(0.05, 100.0),
+                 include_noise=True):
     """Evaluate a design across process corners -> {corner: metrics-or-None}."""
     return {c: metrics(sizes, bias, nf=nf, corner=CORNERS[c], topo=topo,
-                       freqs=freqs, band=band) for c in corners}
+                       freqs=freqs, band=band, include_noise=include_noise)
+            for c in corners}
 
 
 def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
-                latch_dV=5.0, freqs=None, band=(0.05, 100.0)):
+                latch_dV=5.0, freqs=None, band=(0.05, 100.0), include_noise=True):
     """Per-device mismatch MC at one process corner, seeded from the nominal op.
 
     Returns {"arrays": {metric: ndarray}, "latched": bool ndarray, "summary": ...}.
@@ -139,19 +151,23 @@ def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
     x0 = nom["dc_op"]
     keys = ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV")
     rows = {k: [] for k in keys}
+    noise_evaluated = 0
     for _ in range(n):
         cm = mismatch_corner(rng, devices, base=base)
         m = metrics(sizes, bias, nf=nf, corner=cm, topo=topo, x0_guess=x0,
-                    freqs=freqs, band=band)
+                    freqs=freqs, band=band, include_noise=include_noise,
+                    noise_gate=lambda out: out["latch_dV"] <= latch_dV)
         if m is None:
             continue
+        noise_evaluated += int(m.get("_noise_evaluated", False))
         for k in keys:
             rows[k].append(m[k])
     arr = {k: np.asarray(v, float) for k, v in rows.items()}
     latched = arr["latch_dV"] > latch_dV
     good = ~latched
     summary = {"n": int(arr["gain_peak_dB"].size), "latched": int(latched.sum()),
-               "latch_rate": float(latched.mean()) if latched.size else 0.0}
+               "latch_rate": float(latched.mean()) if latched.size else 0.0,
+               "noise_evaluated": int(noise_evaluated)}
     for k in ("gain_peak_dB", "bw_Hz", "irn_uV"):
         col = arr[k][good]
         if col.size:

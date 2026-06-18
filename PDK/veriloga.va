@@ -1,0 +1,262 @@
+//////VerilogA model TFT CEA, AT4000TG_ver1.0, 09th August 2017///////
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module pmos_TFT(s, d, gate);
+
+inout gate, s, d;
+electrical s, d, d1, gate, gate1, s1;
+branch (gate,s) gate_s, (gate,d) gate_d;
+branch (gate,s1) gate_s1;
+branch (s,s1) s_s1;
+branch (d,d1) d_d1;
+branch (gate,gate1) gate_gate1;
+
+/////////////////////////////////////////////////////////////////////
+////////////////////////Parameter declarations///////////////////////
+/////////////////////////////////////////////////////////////////////
+
+
+//////////////////////parameters of the interface/////////////////////
+parameter real W = 1000 from [5:inf);
+parameter real L = 20 from [5:inf);
+parameter real VT = -3.03 from [-10:10];
+parameter real Roff = 1 from [0:inf);
+parameter real NF = 1 from [1:inf);
+parameter real Reg = 1;
+parameter real C1=37.5 from[0:inf);
+parameter real C2=50 from[0:inf);
+parameter real C3=35 from[0:inf);
+parameter real C4=35 from[0:inf);
+parameter real Ci=2.4 from[0:inf);
+parameter real kv=1 from(0:inf);
+parameter real kh=1 from(0:inf);
+
+////////////////// general model parameters /////////////////////////
+//////// Vg 	= gate voltage (vector) [V]
+//////// Vfb 	= flat-band voltage [V]
+//////// Vd 	= drain voltage (vector) [V]
+//////// Vs 	= source voltage (vector) [V]
+//////// W 	= channel width [um]
+//////// L 	= channel lenght [um]
+//////// Ks 	= organic material relative dielectric constant [.]
+//////// Ceff 	= gate insulator capacitance per unit of area [F/cm^2]
+//////// alfa   = inverse of localization radius [cm^{-1}]
+//////// T 	= lattice temperature [K]
+//////// s0 	= conductivity prefactor [S/cm]
+//////// Nt 	= total number of tail trapped states [cm^{-3}]
+//////// Tt 	= tail trap states characteristic temperature [K]
+//////// Nss 	= total number of interface states [cm^{-2}]
+
+real w, l, T, Ks, VE, Nt, Tt, Nss, s0, alfa, Ceff, Vss, G0, E0, Es, Bc, pi, wt, q, hooge, Kbe, Kb, gm, gm0; 
+
+//////////////////////Channel parameters/////////////////////////////
+real chmod, Rleak, lambda, Esat, beta, rout, I_tft, k2;
+
+//////////////////////Contact parameters/////////////////////////////
+real cmod, Rcleak, lambdac, Ecsat, Lc, k0, Vt, rc;
+
+///////////////////parasitic capacitors parameters///////////////////
+real R_cap, R_cap2, Cgs1, Cgs2, Cgs3, Cgd1, Cgd2, Cgd3, Cgss, Cgdd, CI, cl, fw, k1, AOSC, g_area, EDGE_OX, EDGE_OY, OSC_O1;
+
+/////////////////////// Internal voltages ///////////////////////////
+real Vg, Vg1, Vs, Vd, Vd1, Vs1, Vodd, Vods, Vods1, Vodd1, Vsg, Vsd;
+
+///////////////////////// Output currents ///////////////////////////
+real Ioff, Ich, Icoff, Icont;
+
+////////////////////////// Annotation ///////////////////////////////
+real MONTE_VTH, MONTE_BETA, Vsd_sat;
+
+//////////////////////////////////////////////////////////////////////
+//////////////Parameters for montecarlo analysis/////////////////////
+//////////////////////////////////////////////////////////////////////
+
+//Vt variation
+(* cds_inherited_parameter *) parameter real pvt0=0;
+(* cds_inherited_parameter *) parameter real mvt0=0;
+//Beta variation
+(* cds_inherited_parameter *) parameter real pbeta0=0;
+(* cds_inherited_parameter *) parameter real mbeta0=0;
+
+localparam real Vfb=VT*(3.25/Ci)*(1+pvt0+mvt0/sqrt(W*L*1e-12));
+localparam real Cpvt=(1+pvt0+mvt0/sqrt(W*L*1e-12));
+localparam real beta0=(1+mbeta0+pbeta0); 
+
+analog begin
+
+//////////////////////////////////////////////////////////////////////
+////////////////////////Internal voltages/////////////////////////////
+//////////////////////////////////////////////////////////////////////
+
+Vg = V(gate);
+Vg1 = V(gate1);
+Vsg=V(s)-V(gate);
+Vsd=V(s)-V(d);
+
+Vs = ( V(s)>V(s1) ) ? V(s) : V(s1);
+Vs1 =( V(s)>V(s1) ) ? V(s1) : V(s);
+Vd = ( V(d1)>V(d) ) ? V(d) : V(d1);
+Vd1 = ( V(d1)>V(d) ) ? V(d1) : V(d);
+
+Vsd_sat=Vsd-Vsg-Vfb;
+
+//////////////////////////////////////////////////////////////////////
+//////////////////////Parameter definitions///////////////////////////
+//////////////////////////////////////////////////////////////////////
+
+///////////////////////General parameters///////////////////////////
+MONTE_VTH=Vfb;
+MONTE_BETA=beta0;
+Ceff=(Ci/3.25*5.000)*1e-9; 
+CI = Ci/Cpvt*1e-9;
+w = W*1e-6;
+l = L*1e-6;
+//T=295;          
+T=295-(($temperature)-295)/4;
+Ks=3;
+alfa=4.5455*1E7;  
+VE=3.6;             
+Nt=1.0000e21;      
+Nss=2.0006e11;    
+s0=5.9658e6;
+Kbe = 8.617343e-5; 
+Kb=1.38064*1e-23;
+pi=3.14159265359;
+E0 = 8.85418781e-14;
+Bc = 2.8;
+Es = E0*Ks;
+q=1.6*1e-19;
+Tt=304.9889;
+wt=Tt/T;
+G0 = s0 *pow(((pi*pow((Tt/T),3)*Nt ))/(Bc*pow((2*alfa),3)),(Tt/T));
+hooge=0.05;
+k2=10;
+///////////////////////channel parameters///////////////////////////
+
+Rleak=(2*1e6*1e6/W*L)*Roff;
+beta=beta0*0.8*((Es*G0/Ceff)*(Kbe*T)*(T/(2*Tt-T))*pow((pow(Ceff,2)*sin(pi*T/Tt))/(pi*Nt*2*q*Kbe*T*Es),(Tt/T)));
+Vss=2*Kbe*Tt*(1+q*Nss/Ceff)*2*Tt/(2*Tt-T);
+Esat=VE;
+lambda=1/(L*Esat*(Ci/3.25));
+
+////////////////////////Contact parameters////////////////////////////
+
+Lc=5;
+k0=1.1*1e-8;
+//Ecsat=0.85*20/(Vs-Vg);
+Ecsat=0.85*20/(abs(Vs-Vg)+0.1);
+lambdac=1/(Lc*Ecsat);
+Rcleak=1E10*1e6/W*Lc;
+
+/////////////////parasitic capacitors parameters//////////////////////
+
+fw=W/NF;
+cl=10.0;
+OSC_O1=C2-C3+C4;
+EDGE_OX=2*C3+2*C1*ceil((ceil((cl+L)*NF+cl+2*OSC_O1+kv*C2)/C1)/2);
+EDGE_OY=2*C3+2*C1*ceil(ceil((fw+2*OSC_O1+(kh-1)*C2)/C1)/2);
+g_area=(EDGE_OX+2*C1)*(EDGE_OY+2*C1);
+AOSC=EDGE_OX*EDGE_OY;
+
+if (Reg==1) begin 
+	k1=1;
+end
+else begin
+	if (Reg==2) begin  
+		k1=0;
+	end
+		else begin
+			if (Reg==3) begin  
+			k1=0.1;
+			end
+				else begin
+					if (Reg==4) begin  
+					k1=0.001;
+					end
+				end
+		end
+end
+
+//Cgs_ov=0.5*((NF+1)*fw*cl+210*(NF+1)*cl)*CI*1e4*1e-12;
+//Cgd_ov=0.5*((NF+1)*fw*cl+210*(NF+1)*cl)*CI*1e4*1e-12;
+//Cgs=(0.5*pi+atan((Vs-Vg+Vfb)/0.1))/pi*k3*k1*CI*g_area*1e4*1e-12;
+//Cgd=(0.5*pi+atan((Vs-Vg+Vfb)/0.1))/pi*k3*k2*CI*g_area*1e4*1e-12;
+Cgs1=(floor(NF/2)+1)*(fw+210)*cl*CI;
+Cgd1=(ceil(NF/2))*(fw+210)*cl*CI;
+Cgs2=1.43*(0.5*W*L*CI)*(2/pi*atan((Vs-Vg+Vfb)*0.6)+1);
+Cgd2=0.33*(0.5*W*L*CI)*(2/pi*atan((Vs-Vg+Vfb)*2.01)+1);
+Cgs3=0.34*(0.5*AOSC*CI-1.43*(W*L*CI))*(2/pi*atan((-Vg+Vfb+Vd)*0.21)+1);
+Cgd3=0.52*(0.5*AOSC*CI-0.33*(W*L*CI))*(2/pi*atan((-Vg+Vfb+Vd)*0.42)+1);
+
+Cgss=k1*(Cgs1+Cgs2+Cgs3)*1e4*1e-12;
+Cgdd=k1*(Cgd1+Cgd2+Cgd3)*1e4*1e-12;
+
+R_cap=100.0;
+R_cap2=1e12*Cpvt;
+
+//////////////////////////////////////////////////////////////////////
+///////////////////////////channel model//////////////////////////////
+//////////////////////////////////////////////////////////////////////
+
+Vodd=Vss*ln(1+exp((Vd-Vg+Vfb)/Vss));
+Vods=Vss*ln(1+exp((Vd1-Vg+Vfb)/Vss));
+
+//////////////////////////Current modulation//////////////////////////
+chmod=1+lambda*(Vd1-Vd);
+
+/////////////////////////Leakage effect//////////////////////////////
+Ioff=(V(d1)-V(d))/Rleak+0.1/Rleak;
+
+//////////////////////////Channel current////////////////////////////
+Ich=W/L*beta*(pow(Vods,2*Tt/T)-pow(Vodd,2*Tt/T))*chmod;
+I_tft=Ioff+Ich;
+rout=pow(lambda*Ich,-1);
+//////////////////////////////////////////////////////////////////////
+////////////////////////contact model/////////////////////////////////
+//////////////////////////////////////////////////////////////////////
+
+Vt=-(0.0045*pow(Vs-Vg,2)+0.7125*(Vs-Vg)+0.9625);
+Vods1=Vss*ln(1+exp((Vs-Vg+Vt)/Vss));
+Vodd1=Vss*ln(1+exp((Vs1-Vg+Vt)/Vss));
+
+//////////////////////////Current modulation//////////////////////////
+cmod=1+lambdac*(Vs-Vs1);
+
+/////////////////////////Leakage effect//////////////////////////////
+Icoff=(V(s)-V(s1))/Rcleak+0.1/Rcleak;
+
+//////////////////////////Contact current////////////////////////////
+Icont=W/Lc*k0*(pow(Vods1,2*Tt/T)-pow(Vodd1,2*Tt/T))*cmod;
+
+////////////////////////////branch  currents//////////////////////////
+I(s,s1) <+ ( V(s)>V(s1) ) ? (Icont): -(Icont);
+I(d1,d) <+ ( V(s1)>V(d) ) ? (Ich): -(Ich);
+
+I(s1,d1) <+ (V(s1)-V(d1))/0.1;
+I(d1,d) <+ (V(d1)-V(d))/Rleak+0.1/Rleak;
+I(gate1,gate)	<+ (V(gate1)-V(gate))/R_cap;
+
+
+/////////////////////////displacement  currents///////////////////////
+
+I(s,gate1) <+ (Cgss)*ddt(V(s,gate1))+V(s,gate1)/R_cap2;
+I(d,gate1) <+ (Cgdd)*ddt(V(d,gate1))+V(d,gate1)/R_cap2;
+
+
+//////////////////////////////////////////////////////////////////////
+/////////////////////////Noise contributions//////////////////////////
+//////////////////////////////////////////////////////////////////////
+
+//gm0=abs(2*Ich/(Vs1-Vg+Vfb));
+//rc=1/(k0*W/Lc*(Vs-Vg+Vt));
+//gm=gm0/(1+gm0*rc);
+gm= -ddx(Ich,V(gate));
+
+I(s,d) <+ white_noise(2*q*(Ich+Ioff),"thermal");
+I(s,d) <+ white_noise(4*Kb*($temperature)*gm*2.0/3.0,"thermal");
+I(s,d) <+ flicker_noise(hooge*q*(pow(Ich,2))/(w*l*CI*1e4*(Vd1-Vg+Vfb)),1.0,"flicker");
+
+end
+endmodule

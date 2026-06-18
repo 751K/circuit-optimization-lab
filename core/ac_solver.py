@@ -7,9 +7,11 @@ import numpy as np
 try:
     from .pmos_tft_model import PMOS_TFT
     from .topology import AFE_TOPO
+    from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
     from pmos_tft_model import PMOS_TFT
     from topology import AFE_TOPO
+    from compiled_topology import CompiledTopology
 
 
 def _dev_corner(corner, name):
@@ -225,6 +227,8 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     from scipy.optimize import fsolve
     VCM = topo.default_guess_value(bias)
     gmin = 1e-12
+    dc_tol = getattr(topo, "dc_tol", None) or _DC_FALLBACK_TOL
+    plan = CompiledTopology(topo, bias)
 
     # ── pre-build device instances so the warm-start Newton cache survives
     #     across fsolve iterations instead of being reset on every Id() call.
@@ -241,7 +245,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
             return 1e-18
 
     # ── 1. DC solve (residuals built from the topology) ──
-    residuals = lambda x: topo.dc_residuals(x, bias, Id, gmin)
+    residuals = lambda x: plan.dc_residuals(x, Id, gmin)
     per_dev = bool(corner) and any(isinstance(v, dict) for v in corner.values())
     symmetric_fast = (x0_guess is None and not per_dev
                       and _is_pairwise_symmetric_afe(sizes, nf, topo))
@@ -277,7 +281,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         for x0 in guesses:
             try:
                 sol, _, ier, _ = fsolve(residuals, x0, full_output=True, xtol=1e-12, maxfev=3000)
-                if _dc_residual_ok(residuals, sol, tol=_DC_FALLBACK_TOL) or (per_dev and ier == 1):
+                if _dc_residual_ok(residuals, sol, tol=dc_tol) or (per_dev and ier == 1):
                     break
             except Exception:
                 pass
@@ -289,10 +293,11 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
 
             def _solve(bias_d, gm, x0):
                 try:
-                    s, _, ier, _ = fsolve(lambda z: topo.dc_residuals(z, bias_d, Id, gm),
-                                          x0, full_output=True, xtol=1e-12, maxfev=4000)
-                    rfun = lambda z: topo.dc_residuals(z, bias_d, Id, gm)
-                    return s if (_dc_residual_ok(rfun, s, tol=_DC_FALLBACK_TOL) or
+                    step_plan = plan if bias_d is bias else CompiledTopology(topo, bias_d)
+                    rfun = lambda z: step_plan.dc_residuals(z, Id, gm)
+                    s, _, ier, _ = fsolve(rfun, x0, full_output=True, xtol=1e-12,
+                                          maxfev=4000)
+                    return s if (_dc_residual_ok(rfun, s, tol=dc_tol) or
                                  (per_dev and ier == 1)) else None
                 except Exception:
                     return None
@@ -331,11 +336,20 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
                     if good:
                         sol = xc; break
                 if sol is None and not per_dev:
-                    sol = _bounded_least_squares_dc(residuals, guesses + [flat], topo, bias)
+                    sol = _bounded_least_squares_dc(residuals, guesses + [flat], topo, bias,
+                                                    tol=dc_tol)
             if sol is None:
                 return None  # DC didn't converge even with continuation
 
         nv = topo.node_vals(sol)                  # {node_name: voltage}, full asymmetric op
+
+    if getattr(topo, "require_dc_in_box", False) and not topo.in_voltage_box(nv, bias):
+        sbox = _bounded_least_squares_dc(residuals, guesses, topo, bias, tol=dc_tol)
+        if sbox is None:
+            return None
+        nv = topo.node_vals(sbox)
+        if not topo.in_voltage_box(nv, bias):
+            return None
 
     # ── PHYSICALITY GUARD ── No internal node can sit above the supply or below ground
     # here. A solution with e.g. net20 > VDD means the tail M11 is reversed — a
@@ -378,7 +392,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         if symv is not None:
             nv = symv                             # physical symmetric branch (Spectre-matching)
 
-    bpts = topo.bias_points(nv, bias)             # per-device (Vs, Vd, Vg)
+    bpts = plan.bias_points(nv)                   # per-device (Vs, Vd, Vg)
 
     # ── 2. Small-signal params at the true per-device DC op ──
     ss = {name: get_ss_params(sizes[name][0], sizes[name][1], *bpts[name],
@@ -391,7 +405,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         from .ac_mna import _stamp_mos, _stamp_adm
     except ImportError:  # pragma: no cover - legacy direct module import
         from ac_mna import _stamp_mos, _stamp_adm
-    NN = topo.n
+    NN = plan.n
     drive = topo.input_drives
     # Normalize the gain by the differential input magnitude. The stimulus is either
     # a per-gate drive (input_drives) or, for a front-end testbench, AC sources at
@@ -404,10 +418,13 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         vin_norm = max(norm_vals) - min(norm_vals)
     else:
         vin_norm = max(abs(v) for v in norm_vals) or 1.0
-    devs = topo.ac_devices(drive=drive)
-    out_weights = topo.output_weights()
+    devs = plan.ac_devices(drive=drive, node_drives=ac_drives)
+    ac_caps = plan.ac_capacitors(ac_drives)
+    ac_res = plan.ac_resistors(ac_drives)
+    out_weights = plan.output_weights
 
     gains = []
+    response = []
     for f in freqs:
         jw = 2j * np.pi * f
         Y = np.zeros((NN, NN), dtype=complex)
@@ -415,16 +432,19 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         for name, d, g, s in devs:
             p = ss[name]
             _stamp_mos(Y, RHS, d, g, s, p["gm"], p["gds"], p["Cgs"], p["Cgd"], jw)
-        for a, b, cap in topo.cap_list():
-            _stamp_adm(Y, RHS, topo.ac_term(a, ac_drives), topo.ac_term(b, ac_drives), jw * cap)
-        for name, a, b, R in topo.resistors:
-            _stamp_adm(Y, RHS, topo.ac_term(a, ac_drives), topo.ac_term(b, ac_drives), 1.0 / R)
+        for a, b, cap in ac_caps:
+            _stamp_adm(Y, RHS, a, b, jw * cap)
+        for _, a, b, _, gval in ac_res:
+            _stamp_adm(Y, RHS, a, b, gval)
         # ideal current sources are open-circuit in the small-signal AC system.
         V = np.linalg.solve(Y, RHS)
-        out = sum(weight * V[topo.idx[node]] for node, weight in out_weights.items())
-        gains.append(abs(out) / vin_norm)
+        out = sum(weight * V[plan.idx[node]] for node, weight in out_weights.items())
+        h = out / vin_norm
+        response.append(h)
+        gains.append(abs(h))
 
     gains = np.array(gains)
+    response = np.array(response, dtype=complex)
     Av_dc = gains[0]
     Av_dc_dB = 20 * np.log10(max(Av_dc, 1e-9))
     peak = gains.max()
@@ -441,6 +461,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         "peak_dB": 20 * np.log10(max(peak, 1e-9)),
         "bw_Hz": bw_Hz,
         "gains": gains,
+        "response": response,
         "freqs": freqs,
         "dc_op": dc_op,
         "ss": ss,

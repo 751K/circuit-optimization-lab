@@ -28,11 +28,13 @@ try:
     from .ac_mna import _stamp_mos, _stamp_adm
     from .ac_solver import ac_solve, _dev_corner, _dev_nf
     from .topology import AFE_TOPO
+    from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
     from pmos_tft_model import PMOS_TFT
     from ac_mna import _stamp_mos, _stamp_adm
     from ac_solver import ac_solve, _dev_corner, _dev_nf
     from topology import AFE_TOPO
+    from compiled_topology import CompiledTopology
 
 
 _KB = 1.380649e-23          # Boltzmann constant [J/K]
@@ -57,15 +59,18 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
     dc = ac["dc_op"]
     ss = ac["ss"]
     Hmag = ac["gains"]                      # |vop-von|/vin_diff at each freq
+    plan = CompiledTopology(topo, bias)
 
     # per-device bias (Vs,Vd,Vg) + AC terminals — DERIVED from the topology.
     # Noise: inputs carry no signal -> M7/M8 gates are AC ground (drive={}),
     # so the Y matrix equals the AC Y. Only the RHS (injected noise) differs.
-    node_vals = {nm: dc[nm] for nm in topo.solved}
-    bpts = topo.bias_points(node_vals, bias)
-    devs = topo.ac_devices(drive={})
+    node_vals = {nm: dc[nm] for nm in plan.solved}
+    bpts = plan.bias_points(node_vals)
+    devs = plan.ac_devices(drive={})
+    ac_caps = plan.ac_capacitors()
+    ac_res = plan.ac_resistors()
     inj = {name: (d, s) for name, d, g, s in devs}   # drain/source for noise injection
-    NN = topo.n
+    NN = plan.n
 
     # per-device noise PSD
     psd = {}
@@ -83,11 +88,9 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
     dev_psd = {name: np.zeros(len(freqs)) for name in bpts}  # per-device output V^2/Hz
     for rname, *_ in topo.resistors:                     # resistors are noise sources too
         dev_psd[rname] = np.zeros(len(freqs))
-    res_inj = [(rname, topo.ac_term(a), topo.ac_term(b), 4.0 * _KB * _TEMP / R)
-               for rname, a, b, R in topo.resistors]     # (name, term_a, term_b, S_th)
-    sense = np.zeros(NN, dtype=complex)
-    for node, weight in topo.output_weights().items():
-        sense[topo.idx[node]] = weight
+    res_inj = [(rname, a, b, 4.0 * _KB * _TEMP / R)
+               for rname, a, b, R, _ in ac_res]  # (name, term_a, term_b, S_th)
+    sense = plan.output_sense(dtype=complex)
 
     for fi, f in enumerate(freqs):
         jw = 2j * np.pi * f
@@ -96,10 +99,10 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
         for name, d, g, s in devs:
             p = ss[name]
             _stamp_mos(Y, RHS, d, g, s, p["gm"], p["gds"], p["Cgs"], p["Cgd"], jw)
-        for a, b, cap in topo.cap_list():
-            _stamp_adm(Y, RHS, topo.ac_term(a), topo.ac_term(b), jw * cap)
-        for name, a, b, R in topo.resistors:
-            _stamp_adm(Y, RHS, topo.ac_term(a), topo.ac_term(b), 1.0 / R)
+        for a, b, cap in ac_caps:
+            _stamp_adm(Y, RHS, a, b, jw * cap)
+        for _, a, b, _, gval in ac_res:
+            _stamp_adm(Y, RHS, a, b, gval)
 
         # transfer from injecting unit current at node j to (vop - von):
         #   t[j] = (e_vop - e_von)^T Y^-1[:,j]
@@ -129,6 +132,7 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
         "out_psd": out_psd,          # differential output noise PSD V^2/Hz
         "dev_psd": dev_psd,          # per-device output PSD
         "Hmag": Hmag,                # |amplifier gain|
+        "response": ac.get("response"),
         "irn_psd": out_psd / Hmag ** 2,
         "psd_split": psd_split,
         "dc": dc,

@@ -19,7 +19,8 @@ The default AFE topology is `AFE_TOPO`.
 class Topology:
     def __init__(self, solved, devices, rails, outputs=None, input_drives=None,
                  load_caps=None, dc_guesses=None, aliases=None, transient_inputs=None,
-                 resistors=None, capacitors=None, isources=None, ac_drives=None):
+                 resistors=None, capacitors=None, isources=None, ac_drives=None,
+                 dc_tol=None, require_dc_in_box=False):
         self.solved = list(solved)                 # MNA node order (index = position)
         self.idx = {n: i for i, n in enumerate(self.solved)}
         self.n = len(self.solved)
@@ -43,6 +44,8 @@ class Topology:
         self.dc_guesses = list(dc_guesses or [])            # dict guesses or callables
         self.aliases = dict(aliases or {})                  # dc_op alias -> solved node
         self.transient_inputs = dict(transient_inputs or {})# device -> input key
+        self.dc_tol = dc_tol
+        self.require_dc_in_box = bool(require_dc_in_box)
 
     # ── node-voltage lookup ──────────────────────────────────────────
     def node_v(self, name, node_vals, bias):
@@ -150,17 +153,21 @@ class Topology:
                 for name, d, g, s in self.devices}
 
     # ── AC/noise small-signal terminal list ──────────────────────────
-    def ac_devices(self, drive=None):
+    def ac_devices(self, drive=None, node_drives=None):
         """(name, d_term, g_term, s_term) with terminals encoded as
               ("n", idx)  -> solved node
-              ("v", val)  -> known AC voltage (rails -> 0; gate input -> drive[name])
+              ("v", val)  -> known AC voltage (rails -> 0; gate input -> drive[name],
+                             node AC source -> node_drives[node])
         `drive` maps device name -> gate AC drive (e.g. +/-0.5 for the input pair
         in the gain analysis; empty dict for noise where gates are AC ground)."""
         drive = drive or {}
+        node_drives = node_drives or {}
 
         def term(node, role, dev):
             if node in self.idx:
                 return ("n", self.idx[node])
+            if node in node_drives:
+                return ("v", float(node_drives[node]))
             if role == "g":
                 return ("v", float(drive.get(dev, 0.0)))
             return ("v", 0.0)                      # rail -> AC ground

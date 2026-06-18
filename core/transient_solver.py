@@ -33,7 +33,10 @@ common mode then runs away. (Backward Euler with a large h artificially damps th
 runaway, so coarse-step DC/gain checks pass and hide the bug; only physically fine
 timesteps expose it. Eigen-check at the op: slowest pole −4.0e3 rad/s ≈ −3 dB BW.)
 
-This is the engine; chopper switches + charge injection are added on top (TODO).
+This is the engine; chopper switch topologies can be driven through node_inputs.
+Clock feedthrough from the Verilog-A Cgss/Cgdd terms is included when the switch
+gate clocks are finite-edge waveforms. Additional explicit charge-injection
+pulses can be supplied through current_inputs.
 """
 import numpy as np
 try:
@@ -41,10 +44,12 @@ try:
     from .topology import AFE_TOPO
     from .ac_solver import ac_solve, _dev_nf
     from .numba_kernels import terminal_derivatives_numba
+    from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
     from pmos_tft_model import PMOS_TFT
     from topology import AFE_TOPO
     from ac_solver import ac_solve, _dev_nf
+    from compiled_topology import CompiledTopology
     try:
         from numba_kernels import terminal_derivatives_numba
     except Exception:
@@ -52,7 +57,10 @@ except ImportError:  # pragma: no cover - legacy direct module import
 
 
 def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
-              topo=AFE_TOPO, inputs=None, node_inputs=None):
+              topo=AFE_TOPO, inputs=None, node_inputs=None, current_inputs=None,
+              max_step=None, max_retry_subdivisions=0, newton_maxit=30,
+              newton_step_limit=5.0, newton_vtol=1e-8,
+              fallback_least_squares=False, fallback_tol=1e-9):
     """Backward-Euler transient.
       tgrid : (N,) time points [s]
       vip,vin : legacy AFE M7/M8 gate waveforms [V]
@@ -62,12 +70,19 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                waveform — used for a testbench where the stimulus enters at source
                nodes and propagates through a front-end network, e.g.
                {"VINP": "vip", "VINN": "vin"}.
+      current_inputs : time-varying ideal current sources. Each entry can be
+               {"p": nplus, "q": nminus, "input": key} or (p, q, key).
+               The waveform current flows p -> q, matching topology.isources.
+      max_step : optional maximum internal step. Intervals larger than this are
+               split linearly between adjacent input samples.
+      max_retry_subdivisions : if Newton fails on a step, recursively bisect that
+               step up to this depth before recording a failure.
+      fallback_least_squares : if true, a failed Newton step is retried with a
+               rail-bounded least-squares solve before substepping/failing.
       V0    : optional initial solved-node vector.
     Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
     fields are included when those nodes exist.
     """
-    idx, n = topo.idx, topo.n
-    rails = topo.rail_values(bias)
     devs = topo.devices
     tft = {name: PMOS_TFT(W=sizes[name][0], L=sizes[name][1], NF=_dev_nf(nf, name))
            for name, *_ in devs}
@@ -84,7 +99,6 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         if len(val) != N:
             raise ValueError(f"Input waveform {key!r} length {len(val)} != len(tgrid) {N}")
     input_keys = tuple(inputs)
-    input_index = {key: k for k, key in enumerate(input_keys)}
     input_values = (np.vstack([inputs[key] for key in input_keys])
                     if input_keys else np.empty((0, N), float))
     node_inputs = dict(node_inputs or {})
@@ -92,60 +106,34 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         if key not in inputs:
             raise ValueError(f"node_inputs[{node!r}] references missing waveform {key!r}")
 
-    def gtok(name, g):
-        """Gate token: solved node / rail / driven transient input."""
-        if name in topo.transient_inputs:
-            key = topo.transient_inputs[name]
-            if key not in inputs:
-                raise ValueError(f"Missing transient input waveform {key!r} for device {name}")
-            return ("input", key)
-        return g
-
-    TERM_SOLVED = 0
-    TERM_INPUT = 1
-    TERM_RAIL = 2
-
-    def compile_term(term):
-        """Compile a topology terminal into a cheap runtime lookup token."""
-        if isinstance(term, tuple) and term[0] == "input":
-            return TERM_INPUT, input_index[term[1]]
-        if term in idx:
-            return TERM_SOLVED, idx[term]
-        if term in node_inputs:
-            return TERM_INPUT, input_index[node_inputs[term]]
-        return TERM_RAIL, float(rails[term])
-
-    def termv(term, V, input_vals):
-        """Voltage of a compiled terminal token."""
-        kind, ref = term
-        if kind == TERM_SOLVED:
-            return V[ref]
-        if kind == TERM_INPUT:
-            return input_vals[ref]
-        return ref
-
-    def solved_index(term):
-        return term[1] if term[0] == TERM_SOLVED else None
-
-    dev_meta = []
-    for name, d, g, s in devs:
-        gt = gtok(name, g)
-        dterm = compile_term(d)
-        gterm = compile_term(gt)
-        sterm = compile_term(s)
-        dev_meta.append((tft[name], dterm, gterm, sterm,
-                         solved_index(dterm), solved_index(gterm), solved_index(sterm)))
-    load_meta = []
-    for a, b, cap in topo.cap_list():
-        aterm = compile_term(a)
-        bterm = compile_term(b)
-        load_meta.append((aterm, bterm, solved_index(aterm), solved_index(bterm), cap))
-    res_meta = []
-    for _, a, b, R in topo.resistors:
-        aterm = compile_term(a)
-        bterm = compile_term(b)
-        res_meta.append((aterm, bterm, solved_index(aterm), solved_index(bterm), 1.0 / R))
-    isrc_meta = [(idx.get(p), idx.get(q), I) for _, p, q, I in topo.isources]
+    plan = CompiledTopology(topo, bias, input_keys=input_keys,
+                            node_inputs=node_inputs, transient_inputs=True)
+    idx, n = plan.idx, plan.n
+    termv = plan.term_value
+    dev_meta = [(tft[item.name], item.d, item.g, item.s, item.di, item.gi, item.si)
+                for item in plan.devices]
+    load_meta = [(item.a, item.b, item.ai, item.bi, item.value)
+                 for item in plan.capacitors]
+    res_meta = [(item.a, item.b, item.ai, item.bi, item.g)
+                for item in plan.resistors]
+    isrc_meta = [(item.pi, item.qi, item.value) for item in plan.isources]
+    dyn_isrc_meta = []
+    for pos, item in enumerate(current_inputs or ()):
+        if isinstance(item, dict):
+            p_node = item["p"]
+            q_node = item["q"]
+            key = item["input"]
+        else:
+            p_node, q_node, key = item
+        if key not in plan.input_index:
+            raise ValueError(f"current_inputs[{pos}] references missing waveform {key!r}")
+        pterm = plan.compile_term(p_node)
+        qterm = plan.compile_term(q_node)
+        dyn_isrc_meta.append((
+            plan.solved_index(pterm),
+            plan.solved_index(qterm),
+            plan.input_index[key],
+        ))
 
     def device_states(V, input_vals):
         """Per-Newton operating data shared by residual and Jacobian."""
@@ -200,6 +188,12 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             if bi is not None:
                 R[bi] += i_ab
         for pi, qi, Ival in isrc_meta:                   # ideal DC current source p -> q
+            if pi is not None:
+                R[pi] -= Ival
+            if qi is not None:
+                R[qi] += Ival
+        for pi, qi, key_idx in dyn_isrc_meta:            # time-varying source p -> q
+            Ival = input_now[key_idx]
             if pi is not None:
                 R[pi] -= Ival
             if qi is not None:
@@ -375,7 +369,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         # ideal DC current sources are constant -> no Jacobian contribution.
         return J
 
-    def newton(seed, Vp, input_now, input_prev, h, maxit=30, vtol=1e-8):
+    def newton(seed, Vp, input_now, input_prev, h, maxit=None, vtol=1e-8):
         """Full-step Newton with the analytic Jacobian, converged on STEP SIZE |ΔV|.
 
         No residual-decrease line search: on this stiff cap-dominated system (gC=C/h
@@ -394,6 +388,8 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         prev = np.inf
         prev_dev_terms = device_terminal_values(Vp, input_prev)
         load_prev_dv = load_cap_dv_values(Vp, input_prev)
+        maxit = int(newton_maxit if maxit is None else maxit)
+        step_limit = float(newton_step_limit)
         for it in range(maxit):
             states = device_states(V, input_now)         # implicit caps at current iterate
             R = step_residual(V, input_now, states, prev_dev_terms, load_prev_dv, h)
@@ -403,8 +399,8 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             except np.linalg.LinAlgError:
                 dV = np.linalg.lstsq(J, -R, rcond=None)[0]
             mx = np.max(np.abs(dV))
-            if mx > 5.0:
-                dV *= 5.0 / mx; mx = 5.0                 # branch-safety step cap
+            if mx > step_limit:
+                dV *= step_limit / mx; mx = step_limit    # branch-safety step cap
             V = V + dV
             if mx < vtol:
                 return V, it + 1, True
@@ -414,24 +410,96 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         return V, maxit, False
 
     nfail = 0
+    nretry = 0
+    nsubsteps = 0
+    max_retry_subdivisions = int(max_retry_subdivisions or 0)
+    max_step = None if max_step is None else float(max_step)
+
+    def input_at_between(input_a, input_b, frac):
+        return input_a + (input_b - input_a) * frac
+
+    def try_step(Vp, input_prev, input_now, h):
+        V = Vp
+        ok = False
+        raised = False
+        try:
+            V, _, ok = newton(Vp, Vp, input_now, input_prev, h,
+                              vtol=float(newton_vtol))
+        except Exception:
+            raised = True
+        if ok or not fallback_least_squares:
+            return V, bool(ok), raised
+        try:
+            from scipy.optimize import least_squares
+            rails = [v for v in plan.rails.values() if isinstance(v, (int, float))]
+            if not rails:
+                return V, False, raised
+            lo = min(rails) - 0.5
+            hi = max(rails) + 0.5
+            prev_dev_terms = device_terminal_values(Vp, input_prev)
+            load_prev_dv = load_cap_dv_values(Vp, input_prev)
+
+            def residual(z):
+                states = device_states(z, input_now)
+                return step_residual(z, input_now, states, prev_dev_terms,
+                                     load_prev_dv, h)
+
+            seed = np.clip(V, lo, hi)
+            sol = least_squares(residual, seed, bounds=(lo, hi), x_scale="jac",
+                                xtol=1e-11, ftol=1e-11, gtol=1e-11,
+                                max_nfev=80)
+            norm = np.linalg.norm(residual(sol.x), ord=np.inf)
+            if norm < fallback_tol:
+                return sol.x, True, raised
+            return sol.x, False, raised
+        except Exception:
+            return V if not raised else Vp, False, True
+
+    def solve_chunk(Vp, input_prev, input_now, h, depth=0):
+        V, ok, raised = try_step(Vp, input_prev, input_now, h)
+        if ok:
+            return V, True, 1, 0
+        if depth < max_retry_subdivisions and h > 0.0:
+            mid_input = input_at_between(input_prev, input_now, 0.5)
+            left_v, left_ok, left_steps, left_retry = solve_chunk(
+                Vp, input_prev, mid_input, 0.5 * h, depth + 1)
+            right_v, right_ok, right_steps, right_retry = solve_chunk(
+                left_v, mid_input, input_now, 0.5 * h, depth + 1)
+            if left_ok and right_ok:
+                return right_v, True, left_steps + right_steps, left_retry + right_retry + 1
+        return V if not raised else Vp, False, 1, 1 if depth == 0 else 0
+
     for k in range(1, N):
         h = tgrid[k] - tgrid[k - 1]
+        if h <= 0.0:
+            raise ValueError("tgrid must be strictly increasing")
         Vp = Vhist[k - 1]
-        input_now = input_values[:, k]
-        input_prev = input_values[:, k - 1]
-        try:
-            V, nrm, ok = newton(Vp, Vp, input_now, input_prev, h)
-            Vhist[k] = V
+        input_start = input_values[:, k - 1]
+        input_end = input_values[:, k]
+        pieces = 1 if max_step is None else max(1, int(np.ceil(h / max_step)))
+        interval_ok = True
+        interval_retries = 0
+        for j in range(pieces):
+            f0 = j / pieces
+            f1 = (j + 1) / pieces
+            in0 = input_at_between(input_start, input_end, f0)
+            in1 = input_at_between(input_start, input_end, f1)
+            Vp, ok, steps, retries = solve_chunk(Vp, in0, in1, h / pieces)
+            nsubsteps += steps
+            interval_retries += retries
             if not ok:
-                nfail += 1
-        except Exception:
-            Vhist[k] = Vp; nfail += 1
+                interval_ok = False
+        Vhist[k] = Vp
+        nretry += interval_retries
+        if not interval_ok:
+            nfail += 1
 
-    nodes = {nm: Vhist[:, idx[nm]] for nm in topo.solved}
+    nodes = {nm: Vhist[:, idx[nm]] for nm in plan.solved}
     out = np.zeros(N)
-    for node, weight in topo.output_weights().items():
+    for node, weight in plan.output_weights.items():
         out += weight * nodes[node]
-    result = {"t": tgrid, "output": out, "vout": out, "nfail": nfail, "nodes": nodes}
+    result = {"t": tgrid, "output": out, "vout": out, "nfail": nfail,
+              "nretry": nretry, "nsubsteps": nsubsteps, "nodes": nodes}
     if "VOP" in idx:
         result["vop"] = nodes["VOP"]
     if "VON" in idx:

@@ -15,37 +15,43 @@ The current solver stack covers:
 - Process-corner and per-device mismatch perturbations.
 - Cadence/Spectre-oriented validation for operating point, AC, noise, and transient behavior.
 
-The implementation is intentionally small and self-contained. It currently consists of ten Python source files under `core/`.
+The implementation is intentionally small and self-contained. It currently consists of thirteen Python source files under `core/` (excluding `__init__.py`).
 
 ## File Structure
 
 ```text
 core/
   topology.py          Circuit topology source of truth.
+  compiled_topology.py Runtime-compiled topology/index/stamp metadata.
   circuit_loader.py    JSON circuit description loader.
   pmos_tft_model.py    AT4000TG PMOS-OTFT compact-model implementation.
   numba_kernels.py     Optional Numba-accelerated scalar kernels.
   ac_mna.py            MNA stamping primitives.
   ac_solver.py         DC operating point and AC small-signal solver.
   noise_solver.py      Noise propagation and input-referred noise analysis.
+  chopper.py           Ideal and PMOS-switch differential chopper analyses.
   transient_solver.py  Time-domain transient solver.
   explore.py           Design-space exploration / optimization driver.
   corners.py           Process corners, mismatch MC, and latch detection.
+  mc_corners.py        Cadence PSF Monte-Carlo post-processing helper.
 ```
 
 ## Import Relationship
 
 ```text
 topology.py          <- no internal dependency
+compiled_topology.py <- no internal dependency; consumes Topology-like objects at runtime
 circuit_loader.py    <- topology
 numba_kernels.py     <- no internal dependency; optional numba at runtime
 pmos_tft_model.py    <- optional numba_kernels
 ac_mna.py            <- no internal dependency
-ac_solver.py         <- topology, ac_mna, pmos_tft_model
-noise_solver.py      <- ac_solver, topology, ac_mna, pmos_tft_model
-transient_solver.py  <- ac_solver, topology, pmos_tft_model
+ac_solver.py         <- topology, compiled_topology, ac_mna, pmos_tft_model
+noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, pmos_tft_model
+chopper.py           <- noise_solver, topology
+transient_solver.py  <- ac_solver, compiled_topology, topology, pmos_tft_model
 explore.py           <- ac_solver, noise_solver, pmos_tft_model, topology, circuit_loader
 corners.py           <- ac_solver, noise_solver, topology
+mc_corners.py        <- simulator-side PSF parsing helpers
 ```
 
 ## Main Components
@@ -67,11 +73,23 @@ For AC and noise analysis, the solver extracts terminal `gm` and `gds` by finite
 
 ### `topology.py`
 
-Defines the circuit topology as the single source of truth. The topology contains the transistor list, solved node list, rail/bias nodes, outputs, AC input drives, load capacitors, transient input mapping, DC guesses, and DC aliases. DC KCL equations, bias mapping, and AC/noise terminal tables are derived from this topology instead of being hand-written separately in each solver.
+Defines the circuit topology as the single source of truth. The topology contains the transistor list, solved node list, rail/bias nodes, outputs, AC input drives, load capacitors, transient input mapping, DC guesses, and DC aliases. Solver runtime metadata is derived from this topology instead of being hand-written separately in each solver.
 
 Alongside the PMOS_TFT transistors it also carries two-terminal passive/source elements — `resistors` (a-b, R in ohms), `capacitors` (a-b, C in farads), and `isources` (ideal DC current sources, I from nplus to nminus). These flow through all four analyses: resistor branch currents and current-source injections enter the DC KCL; resistors stamp as `1/R` and capacitors as `jωC` in AC/noise; resistors add `4kT/R` thermal noise; transient adds resistor conductances, capacitor companions, and constant source currents. Current sources are open-circuit (and noiseless) in the small-signal AC system. None of these touch the PMOS_TFT machinery.
 
 The default topology is `AFE_TOPO`, a 10-transistor fully differential AFE core with tail current device, input pair, output stage, and cross-coupled positive-feedback level shifting devices.
+
+### `compiled_topology.py`
+
+Builds a runtime plan from a declarative `Topology` and a bias/input context. It resolves node names once into compact terminal tokens and exposes shared metadata for DC, AC/noise, and transient:
+
+- solved-node indices and rail values;
+- per-device drain/gate/source terminal tokens;
+- resistor, capacitor, and current-source stamp metadata;
+- AC/noise `("n", idx)` / `("v", value)` terminal tables;
+- transient input and `node_inputs` mappings.
+
+This keeps AC, noise, and transient on the same indexing/stamping convention while preserving the ability to swap in a different JSON-defined circuit.
 
 ### `circuit_loader.py`
 
@@ -122,6 +140,36 @@ Performs noise propagation on the same topology-derived MNA system used by AC an
 
 The noise flow supports the same topology-derived terminal mapping and corner/mismatch parameter passing as the AC solver.
 
+### `chopper.py`
+
+Computes gain, bandwidth, and baseband noise for chopper variants around the AFE:
+
+- `chopper_analysis(...)` is the ideal synchronized differential chopper model.
+  It treats the eight-switch commutator as +/-1 square-wave multipliers at the
+  input and output, then folds sideband gain/noise back to baseband with odd
+  harmonic coefficients. This is the linear periodically time-varying (LPTV)
+  frequency-domain path for ideal chopping and flicker-noise movement.
+- `build_afe_pmos_chopper(...)` inserts the eight switches as real `PMOS_TFT`
+  pass devices around the AFE input/output ports.
+- `pmos_chopper_analysis(...)` runs static phase A/B AC and noise on that PMOS
+  switch topology and averages the phases. It includes switch Ron loading,
+  nonlinear capacitance, and PMOS switch noise.
+- `finite_edge_clock_pair(...)` and `finite_edge_chopper_harmonics(...)` model
+  finite clock edge time and break-before-make dead time in the chopper waveform.
+- `pmos_chopper_lptv_analysis(...)` folds the PMOS-switch sideband response/noise
+  with those finite-edge harmonic weights. This is a quasi-static LPTV
+  approximation for time-varying switch operating points.
+- `pmos_chopper_transient(...)` drives the eight-PMOS topology with finite-edge
+  clocks. Clock feedthrough comes from the PDK `Cgss/Cgdd * ddt()` terms already
+  stamped by the transient solver; optional charge-injection pulses are estimated
+  from the same PDK capacitance equations and stamped as time-varying current
+  sources. The helper automatically refines the internal time grid around clock
+  edges and enables a rail-bounded fallback solve for hard switched DAE steps.
+
+The PMOS-switch sideband path is still a quasi-static approximation, not a full
+correlated periodic-noise solver. It should be treated as a local design/sizing
+model until validated against Spectre PSS/PNoise for a clocked testbench.
+
 ### `transient_solver.py`
 
 Solves the time-domain response of the topology-defined system using backward Euler integration:
@@ -129,6 +177,12 @@ Solves the time-domain response of the topology-defined system using backward Eu
 - `transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None, topo=AFE_TOPO, inputs=None, node_inputs=None)`
 - Supports legacy AFE `vip/vin` inputs and generic `inputs={name: waveform}` driven through `topo.transient_inputs`.
 - `node_inputs={node: input_key}` drives a (rail) NODE with a waveform — used by a front-end testbench where the stimulus enters at source nodes and propagates through a passive network, rather than driving device gates directly.
+- `current_inputs=[{"p": node_a, "q": node_b, "input": key}]` stamps a
+  time-varying ideal current source flowing `p -> q`; the PMOS chopper helper uses
+  this for charge-injection pulses.
+- `max_step`, `max_retry_subdivisions`, and `fallback_least_squares` provide
+  controlled step refinement and bounded fallback solving for switched transient
+  steps.
 - Includes topology-defined load capacitances (and capacitor elements), plus resistor and ideal-current-source branches.
 - Re-evaluates nonlinear capacitances during Newton iterations.
 - Uses the DC operating point from `ac_solve` as the default initial condition.
@@ -150,7 +204,10 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
   `corner` applies a process shift (e.g. `CORNERS["slow"]`) to every evaluation, enabling
   corner-aware search without modifying the config.
 - `evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None)` — single-candidate
-  solver evaluation, now with optional corner/mismatch argument.
+  solver evaluation, now with optional corner/mismatch argument. During `explore`,
+  evaluation is AC-first: gain/BW/power/area are computed before noise, failed
+  candidates are rejected immediately, and `noise_analysis` runs only when
+  `irn_uV` is required by a surviving candidate's constraints or objectives.
 - `load_explore_json(path)` — read an `explore` block from a full circuit JSON, or
   from a file naming a `builtin_topology` (e.g. `AFE_TOPO`) plus baseline sizes/bias.
 - Sampling is `lhs` (Latin hypercube) or `random`, with a seeded RNG for repeatability.
@@ -181,9 +238,11 @@ otherwise get re-derived in every sweep:
   pair ±kσ apart over ALL sign patterns and returns the largest output imbalance. A
   single fixed kick has false negatives (the latching sign pattern is design-dependent),
   so the screen scans patterns; cheap enough to use inside a search instead of a full MC.
+  It skips noise because only the DC/AC operating point and latch imbalance are needed.
 - `mismatch_mc(...)` — per-device mismatch MC at one corner, seeded from the nominal op;
   returns per-metric arrays, a latched mask, and a summary (latch rate + non-latched
-  mean/std/P5/P95).
+  mean/std/P5/P95). Each sample is evaluated AC-first; IRN is computed only for
+  non-latched samples included in the final noise statistics.
 
 `ac_solve` / `noise_analysis` accept the same `corner` argument (a flat process dict or a
 per-device mismatch map). The driver `examples/mc_mismatch.py` wraps this into a corner
