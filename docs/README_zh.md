@@ -78,6 +78,18 @@ tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
 
 JSON 主要字段包括 `solved`、`rails`、`devices`、`bias`、`outputs`、`input_drives`、`load_caps`、`dc_guesses` 和 `transient_inputs`。其中 `devices` 可直接包含 `W/L/NF`，也可以用单独的 `sizes`/`nf` 字段统一指定。
 
+## 交互式 AFE Tuner
+
+`demo/` 目录下提供了一个基于 Web 的交互式调参工具：
+
+```bash
+python3 -m pip install -r requirements-demo.txt
+python3 demo/server.py
+# 浏览器打开 http://localhost:5100
+```
+
+该 tuner 通过 REST API 暴露经验证的核心求解器（DC + AC + noise），搭配 HTML 前端，可在浏览器中实时调整器件尺寸和偏置电压，查看增益、带宽和等价输入噪声变化。内置预设设计（Base、Final Locked、Min Area、First Feasible），包含 DC seed 热启动与分支救援逻辑，并通过有界线程池进行并发控制。
+
 ## 项目动机
 
 模拟电路设计通常需要反复运行仿真器来调整晶体管尺寸、偏置电流和补偿元件。直接扫描的结果可靠，但速度较慢，尤其是在候选设计数量很多，或者需要检查工艺角和 mismatch 时。
