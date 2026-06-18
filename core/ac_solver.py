@@ -402,9 +402,9 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
 
     # ── 3. Build & solve the small-signal MNA (terminals from the topology) ──
     try:
-        from .ac_mna import _stamp_mos, _stamp_adm
+        from .ac_mna import _stamp_adm, _stamp_mos_lti
     except ImportError:  # pragma: no cover - legacy direct module import
-        from ac_mna import _stamp_mos, _stamp_adm
+        from ac_mna import _stamp_adm, _stamp_mos_lti
     NN = plan.n
     drive = topo.input_drives
     # Normalize the gain by the differential input magnitude. The stimulus is either
@@ -423,28 +423,28 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     ac_res = plan.ac_resistors(ac_drives)
     out_weights = plan.output_weights
 
-    gains = []
-    response = []
-    for f in freqs:
-        jw = 2j * np.pi * f
-        Y = np.zeros((NN, NN), dtype=complex)
-        RHS = np.zeros(NN, dtype=complex)
-        for name, d, g, s in devs:
-            p = ss[name]
-            _stamp_mos(Y, RHS, d, g, s, p["gm"], p["gds"], p["Cgs"], p["Cgd"], jw)
-        for a, b, cap in ac_caps:
-            _stamp_adm(Y, RHS, a, b, jw * cap)
-        for _, a, b, _, gval in ac_res:
-            _stamp_adm(Y, RHS, a, b, gval)
-        # ideal current sources are open-circuit in the small-signal AC system.
-        V = np.linalg.solve(Y, RHS)
-        out = sum(weight * V[plan.idx[node]] for node, weight in out_weights.items())
-        h = out / vin_norm
-        response.append(h)
-        gains.append(abs(h))
-
-    gains = np.array(gains)
-    response = np.array(response, dtype=complex)
+    G = np.zeros((NN, NN), dtype=complex)
+    C = np.zeros((NN, NN), dtype=complex)
+    RHS_G = np.zeros(NN, dtype=complex)
+    RHS_C = np.zeros(NN, dtype=complex)
+    for name, d, g, s in devs:
+        p = ss[name]
+        _stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
+                       p["gm"], p["gds"], p["Cgs"], p["Cgd"])
+    for a, b, cap in ac_caps:
+        _stamp_adm(C, RHS_C, a, b, cap)
+    for _, a, b, _, gval in ac_res:
+        _stamp_adm(G, RHS_G, a, b, gval)
+    # ideal current sources are open-circuit in the small-signal AC system.
+    jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
+    Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]
+    RHS = RHS_G[None, :] + jw[:, None] * RHS_C[None, :]
+    V = np.linalg.solve(Y, RHS[..., None])[..., 0]
+    out = np.zeros(len(freqs), dtype=complex)
+    for node, weight in out_weights.items():
+        out += weight * V[:, plan.idx[node]]
+    response = out / vin_norm
+    gains = np.abs(response)
     Av_dc = gains[0]
     Av_dc_dB = 20 * np.log10(max(Av_dc, 1e-9))
     peak = gains.max()

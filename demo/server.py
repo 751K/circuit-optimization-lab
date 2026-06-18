@@ -9,6 +9,8 @@ for any combination of device sizes and bias voltages.
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import os
+from pathlib import Path
+import sys
 from threading import Lock
 from threading import BoundedSemaphore
 import warnings
@@ -21,6 +23,11 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*invalid va
 
 import numpy as np
 from flask import Flask, jsonify, request, send_from_directory
+
+DEMO_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = DEMO_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def py_type(v):
@@ -42,7 +49,7 @@ def py_type(v):
 from core.ac_solver import ac_solve
 from core.noise_solver import noise_analysis, band_rms
 
-app = Flask(__name__, static_folder="static", static_url_path="/static")
+app = Flask(__name__, static_folder=str(DEMO_DIR / "static"), static_url_path="/static")
 
 _dc_seed_lock = Lock()
 _last_dc_seed = None
@@ -299,7 +306,7 @@ def solve_payload(data):
 
 @app.route("/")
 def index():
-    return send_from_directory("static", "index.html")
+    return send_from_directory(app.static_folder, "index.html")
 
 
 @app.route("/api/presets")

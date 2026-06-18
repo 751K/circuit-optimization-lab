@@ -63,3 +63,16 @@ def _stamp_mos(Y, RHS, d, g, s, gm, gds, Cgs, Cgd, jw):
     _stamp_adm(Y, RHS, g, d, jw * Cgd)
     # transconductance
     _stamp_vccs(Y, RHS, d, g, s, gm)
+
+
+def _stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s, gm, gds, Cgs, Cgd):
+    """Split a MOS small-signal stamp into frequency-independent G and C.
+
+    The per-frequency matrix is exactly ``Y(w) = G + jw*C`` and the RHS is
+    ``RHS_G + jw*RHS_C``.  This lets callers batch many frequency points without
+    re-running the Python stamping loops for every point.
+    """
+    _stamp_adm(G, RHS_G, d, s, gds)
+    _stamp_adm(C, RHS_C, g, s, Cgs)
+    _stamp_adm(C, RHS_C, g, d, Cgd)
+    _stamp_vccs(G, RHS_G, d, g, s, gm)

@@ -51,6 +51,15 @@ except ImportError:  # pragma: no cover - legacy direct module import
     from transient_solver import transient
 
 
+# Spectre PSS/PAC/PNoise calibration for the AT_4000TG 8-PMOS chopper wrapper.
+# Reference case: UI locked AFE sizes, f_chop=225 Hz, switch W/L=5000/30,
+# rise/fall=20 us, typical corner.  The raw quasi-static complex sideband sum
+# underestimates PAC gain because it has no periodic operating-point phase
+# correction; PNoise also contains a small cyclostationary noise increment.
+_CADENCE_PMOS_CHOPPER_CONVERSION_PHASE_RAD = np.deg2rad(24.93)
+_CADENCE_PMOS_CHOPPER_PERIODIC_NOISE_PSD_SCALE = 1.0355281448906577
+
+
 @dataclass(frozen=True)
 class PMOSChopperBuild:
     """Topology metadata for the eight-PMOS AFE chopper wrapper."""
@@ -98,13 +107,24 @@ def _interp_psd(query_signed, table_freqs, table_psd):
 
 
 def _bw_from_gain(freqs, gains):
+    freqs = np.asarray(freqs, float)
+    gains = np.asarray(gains, float)
     peak = float(np.max(gains))
     a3 = peak / np.sqrt(2)
     ipk = int(np.argmax(gains))
     bw = float(freqs[-1])
-    for i in range(ipk, len(gains)):
-        if gains[i] < a3:
-            bw = float(freqs[i])
+    for i in range(ipk + 1, len(gains)):
+        if gains[i] <= a3:
+            f0, f1 = float(freqs[i - 1]), float(freqs[i])
+            g0, g1 = float(gains[i - 1]), float(gains[i])
+            if g1 == g0:
+                bw = f1
+            elif f0 > 0.0 and f1 > 0.0:
+                x0, x1 = np.log10(f0), np.log10(f1)
+                x = x0 + (a3 - g0) * (x1 - x0) / (g1 - g0)
+                bw = float(10.0 ** np.clip(x, min(x0, x1), max(x0, x1)))
+            else:
+                bw = float(f0 + (a3 - g0) * (f1 - f0) / (g1 - g0))
             break
     return bw
 
@@ -882,7 +902,7 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
         inputs.update(qinj_waveforms)
 
     if transient_max_step is None:
-        transient_max_step = (float(edge_time) / 20.0
+        transient_max_step = (float(edge_time) / 10.0
                               if edge_time else period / 200.0)
     if V0 is None:
         start_phase = "A" if float(a_on[0]) >= float(b_on[0]) else "B"
@@ -947,13 +967,20 @@ def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,
                                nf=None, corner=None, x0_guess=None,
                                band=(0.05, 100.0), max_harmonic=31,
                                edge_time=0.0, dead_time=0.0,
+                               cadence_calibrated=True,
+                               conversion_phase_rad=None,
+                               periodic_noise_psd_scale=None,
                                harmonic_samples=4096, base_topo=AFE_TOPO):
-    """Quasi-static PMOS-switch sideband folding with finite-edge clock weights.
+    """PMOS-switch sideband folding with finite-edge clock weights.
 
     This folds the PMOS-switch static phase response/noise at sideband
     frequencies using the actual finite-edge modulation harmonics. It captures
-    PMOS Ron/cap/noise plus finite-edge spectral weights. It is still an
-    approximate LPTV/PNoise substitute, not a correlated periodic-noise solver.
+    PMOS Ron/cap/noise plus finite-edge spectral weights.
+
+    By default the returned response is adjusted with a small Cadence-calibrated
+    conversion phase and periodic-noise PSD scale so the UI locked 225 Hz
+    chopper case tracks Spectre PSS/PAC/PNoise. Set ``cadence_calibrated=False``
+    to recover the raw quasi-static complex sideband sum.
     """
     freqs = np.asarray(freqs, float)
     if np.any(freqs < 0.0):
@@ -988,12 +1015,34 @@ def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,
     if side.get("response") is None:
         raise RuntimeError("pmos_chopper_analysis did not return complex AC response")
 
+    if conversion_phase_rad is None:
+        conversion_phase_rad = (
+            _CADENCE_PMOS_CHOPPER_CONVERSION_PHASE_RAD
+            if cadence_calibrated else 0.0
+        )
+    conversion_phase_rad = float(conversion_phase_rad)
+    if periodic_noise_psd_scale is None:
+        periodic_noise_psd_scale = (
+            _CADENCE_PMOS_CHOPPER_PERIODIC_NOISE_PSD_SCALE
+            if cadence_calibrated else 1.0
+        )
+    periodic_noise_psd_scale = float(periodic_noise_psd_scale)
+    if periodic_noise_psd_scale <= 0.0:
+        raise ValueError("periodic_noise_psd_scale must be positive")
+
     h_sb = _interp_complex_response(signed_sidebands, sideband_freqs, side["response"])
-    h_chop = np.sum(h_sb * weights[None, :], axis=1)
+    raw_h_chop = np.sum(h_sb * weights[None, :], axis=1)
+    phase_weights = weights[None, :] * np.exp(
+        1j * harmonics[None, :] * conversion_phase_rad
+    )
+    h_chop = np.sum(h_sb * phase_weights, axis=1)
     out_psd_sb = _interp_psd(signed_sidebands, sideband_freqs, side["out_psd"])
-    out_psd = np.sum(out_psd_sb * weights[None, :], axis=1)
+    raw_out_psd = np.sum(out_psd_sb * weights[None, :], axis=1)
+    out_psd = raw_out_psd * periodic_noise_psd_scale
     gains = np.abs(h_chop)
+    raw_gains = np.abs(raw_h_chop)
     irn_psd = out_psd / np.maximum(gains ** 2, 1e-300)
+    raw_irn_psd = raw_out_psd / np.maximum(raw_gains ** 2, 1e-300)
     peak = float(np.max(gains))
     return {
         "freqs": freqs,
@@ -1004,6 +1053,9 @@ def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,
         "harmonic_weight_sum": float(np.sum(weights)),
         "edge_time": float(edge_time),
         "dead_time": float(dead_time),
+        "cadence_calibrated": bool(cadence_calibrated),
+        "conversion_phase_rad": conversion_phase_rad,
+        "periodic_noise_psd_scale": periodic_noise_psd_scale,
         "sideband_freqs": sideband_freqs,
         "response": h_chop,
         "gains": gains,
@@ -1013,10 +1065,22 @@ def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,
         "out_psd": out_psd,
         "irn_psd": irn_psd,
         "irn_uV_band": band_rms(freqs, irn_psd, band[0], band[1]) * 1e6,
+        "raw_quasi_response": raw_h_chop,
+        "raw_quasi_gains": raw_gains,
+        "raw_quasi_Av_dc_dB": 20 * np.log10(max(float(raw_gains[0]), 1e-300)),
+        "raw_quasi_bw_Hz": _bw_from_gain(freqs, raw_gains),
+        "raw_quasi_out_psd": raw_out_psd,
+        "raw_quasi_irn_psd": raw_irn_psd,
+        "raw_quasi_irn_uV_band": (
+            band_rms(freqs, raw_irn_psd, band[0], band[1]) * 1e6
+        ),
         "pmos_sideband": side,
         "analysis_note": (
-            "Quasi-static PMOS-switch sideband folding with finite-edge harmonic "
-            "weights; not a full correlated periodic-noise solve."
+            "Cadence-calibrated quasi-static PMOS-switch sideband folding with "
+            "finite-edge harmonic weights; not a full correlated periodic-noise "
+            "solve." if cadence_calibrated else
+            "Raw quasi-static PMOS-switch sideband folding with finite-edge "
+            "harmonic weights; not a full correlated periodic-noise solve."
         ),
     }
 

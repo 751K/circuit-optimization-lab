@@ -530,7 +530,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 )
                 if ok:
                     numba_newton_success += 1
-                    return np.array(Vn, float), int(iters), True
+                    return Vn, int(iters), True
                 if usable:
                     seed = Vn
             except Exception:
@@ -706,12 +706,12 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         pieces = 1 if max_step is None else max(1, int(np.ceil(h / max_step)))
         interval_ok = True
         interval_retries = 0
+        in0 = input_start
         for j in range(pieces):
-            f0 = j / pieces
             f1 = (j + 1) / pieces
-            in0 = input_at_between(input_start, input_end, f0)
             in1 = input_at_between(input_start, input_end, f1)
             Vp, ok, steps, retries = solve_chunk(Vp, in0, in1, h / pieces)
+            in0 = in1
             nsubsteps += steps
             interval_retries += retries
             if not ok:

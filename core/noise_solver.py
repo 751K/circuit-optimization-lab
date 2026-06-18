@@ -25,13 +25,13 @@ Ground-truth check (Cadence Spectre, afe_gt/tb_noise.raw/noiseAnal.noise):
 import numpy as np
 try:
     from .pmos_tft_model import PMOS_TFT
-    from .ac_mna import _stamp_mos, _stamp_adm
+    from .ac_mna import _stamp_adm, _stamp_mos_lti
     from .ac_solver import ac_solve, _dev_corner, _dev_nf
     from .topology import AFE_TOPO
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
     from pmos_tft_model import PMOS_TFT
-    from ac_mna import _stamp_mos, _stamp_adm
+    from ac_mna import _stamp_adm, _stamp_mos_lti
     from ac_solver import ac_solve, _dev_corner, _dev_nf
     from topology import AFE_TOPO
     from compiled_topology import CompiledTopology
@@ -92,39 +92,45 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
                for rname, a, b, R, _ in ac_res]  # (name, term_a, term_b, S_th)
     sense = plan.output_sense(dtype=complex)
 
-    for fi, f in enumerate(freqs):
-        jw = 2j * np.pi * f
-        Y = np.zeros((NN, NN), dtype=complex)
-        RHS = np.zeros(NN, dtype=complex)  # unused for Y build
-        for name, d, g, s in devs:
-            p = ss[name]
-            _stamp_mos(Y, RHS, d, g, s, p["gm"], p["gds"], p["Cgs"], p["Cgd"], jw)
-        for a, b, cap in ac_caps:
-            _stamp_adm(Y, RHS, a, b, jw * cap)
-        for _, a, b, _, gval in ac_res:
-            _stamp_adm(Y, RHS, a, b, gval)
+    G = np.zeros((NN, NN), dtype=complex)
+    C = np.zeros((NN, NN), dtype=complex)
+    RHS_G = np.zeros(NN, dtype=complex)
+    RHS_C = np.zeros(NN, dtype=complex)
+    for name, d, g, s in devs:
+        p = ss[name]
+        _stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
+                       p["gm"], p["gds"], p["Cgs"], p["Cgd"])
+    for a, b, cap in ac_caps:
+        _stamp_adm(C, RHS_C, a, b, cap)
+    for _, a, b, _, gval in ac_res:
+        _stamp_adm(G, RHS_G, a, b, gval)
 
-        # transfer from injecting unit current at node j to (vop - von):
-        #   t[j] = (e_vop - e_von)^T Y^-1[:,j]
-        tvec = np.linalg.solve(Y.T, sense)
+    jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
+    Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]
+    # transfer from injecting unit current at node j to (vop - von):
+    #   t[j] = (e_vop - e_von)^T Y^-1[:,j]
+    tvec = np.linalg.solve(
+        np.swapaxes(Y, 1, 2),
+        np.broadcast_to(sense, (len(freqs), NN))[..., None],
+    )[..., 0]
 
-        def transimpedance(term_d, term_s):
-            Z = 0.0 + 0.0j
-            if term_d[0] == "n":
-                Z += tvec[term_d[1]]
-            if term_s[0] == "n":
-                Z -= tvec[term_s[1]]
-            return Z
+    def transimpedance(term_d, term_s):
+        Z = np.zeros(len(freqs), dtype=complex)
+        if term_d[0] == "n":
+            Z += tvec[:, term_d[1]]
+        if term_s[0] == "n":
+            Z -= tvec[:, term_s[1]]
+        return Z
 
-        for name in bpts:
-            d, s = inj[name]
-            contrib = (abs(transimpedance(d, s)) ** 2) * psd[name][fi]
-            dev_psd[name][fi] = contrib
-            out_psd[fi] += contrib
-        for rname, ta, tb, S_th in res_inj:              # resistor thermal noise 4kT/R
-            contrib = (abs(transimpedance(ta, tb)) ** 2) * S_th
-            dev_psd[rname][fi] = contrib
-            out_psd[fi] += contrib
+    for name in bpts:
+        d, s = inj[name]
+        contrib = (np.abs(transimpedance(d, s)) ** 2) * psd[name]
+        dev_psd[name] = contrib
+        out_psd += contrib
+    for rname, ta, tb, S_th in res_inj:                  # resistor thermal noise 4kT/R
+        contrib = (np.abs(transimpedance(ta, tb)) ** 2) * S_th
+        dev_psd[rname] = contrib
+        out_psd += contrib
 
     # ── 4/5. integrate + input-refer ──
     return {

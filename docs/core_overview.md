@@ -119,9 +119,10 @@ automatically when it is available.
 At present, the accelerated paths are PMOS current evaluation, internal-node
 Newton iterations, bias-dependent capacitance evaluation, terminal derivatives,
 and the transient Newton inner loop: topology token lookup, PMOS state solve,
-residual/Jacobian stamping, and the small dense Newton solve. If the compiled
-path cannot handle a step, `transient_solver.py` falls back to the original
-Python Newton / full-Jacobian / least-squares path.
+residual/Jacobian stamping, and the small dense Newton solve. The dense Newton
+solve uses an in-place `A*x = -R` path to avoid avoidable per-iteration copies.
+If the compiled path cannot handle a step, `transient_solver.py` falls back to
+the original Python Newton / full-Jacobian / least-squares path.
 
 ### `ac_mna.py`
 
@@ -166,8 +167,10 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
 - `finite_edge_clock_pair(...)` and `finite_edge_chopper_harmonics(...)` model
   finite clock edge time and break-before-make dead time in the chopper waveform.
 - `pmos_chopper_lptv_analysis(...)` folds the PMOS-switch sideband response/noise
-  with those finite-edge harmonic weights. This is a quasi-static LPTV
-  approximation for time-varying switch operating points.
+  with those finite-edge harmonic weights. By default it applies the Spectre
+  PSS/PAC/PNoise calibration for the UI locked 225 Hz / 5000/30 switch case:
+  a small conversion-phase correction and a small periodic-noise PSD scale. Set
+  `cadence_calibrated=False` to inspect the raw quasi-static sideband sum.
 - `pmos_chopper_transient(...)` drives the eight-PMOS topology with finite-edge
   clocks. The default clock follows Spectre `type=pulse` timing (`delay=T/2`,
   `width=T/2`, finite `rise/fall`), while the older centered phase waveform is
@@ -180,10 +183,10 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   bidirectional pass switches, and keeps a tight residual tolerance so slow
   common-mode charge balance is not lost.
 
-The PMOS-switch sideband path is still a quasi-static approximation, not a full
-correlated periodic-noise solver. The finite-edge transient path has been checked
-against Spectre `tran`; periodic-noise claims should still be validated against
-Spectre PSS/PNoise for a clocked testbench.
+The PMOS-switch sideband path is calibrated to the validated Spectre
+PSS/PAC/PNoise reference, but it remains a compact local approximation rather
+than a general replacement for sign-off periodic-noise simulation. The
+finite-edge transient path has been checked against Spectre `tran`.
 
 ### `transient_solver.py`
 
@@ -210,8 +213,9 @@ Solves the time-domain response of the topology-defined system using backward Eu
 - Uses the DC operating point from `ac_solve` as the default initial condition.
 - Uses the Numba transient Newton kernel when available. The compiled path
   evaluates PMOS operating points/capacitances, stamps the residual/Jacobian, and
-  solves the dense Newton step in one inner loop; it falls back to the Python path
-  if a device internal solve or matrix solve cannot be handled.
+  solves the dense Newton step in one inner loop. The linear solve overwrites the
+  temporary Jacobian/residual arrays in place, and the Python substep loop reuses
+  the previous interpolated input as the next substep's start input.
 - Uses implicit differentiation of the PMOS internal nodes for faster transient
   Jacobians, with finite-difference fallback.
 
@@ -342,14 +346,36 @@ tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
 
 ## Benchmarks
 
-Fixed AFE benchmarks live under `benchmarks/`:
+Four benchmarks live under `benchmarks/`:
 
 ```bash
+# Full-AFE benchmark (ac121 / noise121 / tran200)
 python3 -m benchmarks.bench_afe --warm-runs 3
 CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_afe --warm-runs 3
+
+# Single-device PMOS_TFT micro-benchmark (7 hot-path ops × 3 bias regions)
+python3 -m benchmarks.bench_model --warm-runs 3
+CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_model --warm-runs 3
+
+# Chopper analysis benchmark (harmonics / ideal / pmos_static / pmos_lptv / pmos_tran)
+python3 -m benchmarks.bench_chopper --warm-runs 3
+python3 -m benchmarks.bench_chopper --skip-tran --warm-runs 3
+
+# Batch sweep benchmark (N × AC / AC+noise, explore-layer workload)
+python3 -m benchmarks.bench_sweep --n-candidates 200 --warm-runs 3
 ```
 
-The script reports cold and warm timings separately for `ac121`, `noise121`, and `tran200`. The default run uses Numba when available; the `CIRCUIT_USE_NUMBA=0` run is useful for pure-Python comparison.
+`bench_afe.py` reports cold and warm timings for the three canonical full-AFE
+workloads. `bench_model.py` measures individual device operations (DC OP, Idc,
+capacitances, noise PSD, Cadence metrics) across saturation, subthreshold, and
+linear bias regions. `bench_chopper.py` covers the five chopper analysis levels
+at f_chop=225 Hz — from fast finite-edge harmonic math (~1 ms) through ideal
+LPTV folding, PMOS static-phase, quasi-static PMOS sideband folding, and the
+heavy hard-switched PMOS chopper transient. `bench_sweep.py` measures batch
+throughput of AC and AC+noise evaluation across randomly perturbed design
+candidates, simulating the explore layer's per-candidate workload.  The
+default run uses Numba when available; `CIRCUIT_USE_NUMBA=0` is useful for
+pure-Python comparison.
 
 ## Calibration Status
 
@@ -361,9 +387,14 @@ The current core was calibrated against Cadence Spectre 24.1 for the AT4000TG AF
 - Transient step and sinusoidal response closely matching Cadence `tran` behavior.
 - PMOS eight-switch chopper transient, using UI locked sizes, `f_chop=225 Hz`,
   switch `W/L=5000/30`, and `rise/fall=20 us`, now matches the Spectre
-  finite-edge transient scale: last-period output mean about `-11.05 mV`
-  vs Spectre `-10.62 mV`, output `21.28 mVpp` vs `21.46 mVpp`, input common-mode
-  swing `5.18 Vpp` vs `5.43 Vpp`, and `nfail=0`.
+  finite-edge transient scale with the default `edge_time/10` internal step:
+  last-period output mean about `-10.76 mV` vs Spectre `-10.62 mV`, output
+  `21.11 mVpp` vs `21.46 mVpp`, input common-mode swing `5.14 Vpp` vs
+  `5.43 Vpp`, and `nfail=0`.
+- PMOS eight-switch chopper PSS/PAC/PNoise, using the same UI locked case, is
+  matched by `pmos_chopper_lptv_analysis(...)`: gain `21.370 dB` vs Spectre
+  `21.369 dB`, bandwidth `738.6 Hz` vs `721.9 Hz`, and IRN `12.592 uVrms` vs
+  `12.591 uVrms`.
 - Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms input-referred noise.
 
 These numbers describe the current AT4000TG validation case. Future PDKs or topologies should be recalibrated against their own simulator references.

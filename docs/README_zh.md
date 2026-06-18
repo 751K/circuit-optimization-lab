@@ -46,8 +46,22 @@ python3 -m benchmarks.bench_afe --skip-noise --warm-runs 3
 固定性能基准可用：
 
 ```bash
+# 全 AFE 基准（ac121 / noise121 / tran200）
 python3 -m benchmarks.bench_afe --warm-runs 3
 CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_afe --warm-runs 3
+
+# 单管 PMOS_TFT 微基准（7 个热路径操作 × 3 个偏置工作区）
+python3 -m benchmarks.bench_model --warm-runs 3
+CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_model --warm-runs 3
+
+# Chopper 分析基准（harmonics / ideal / pmos_static / pmos_lptv / pmos_tran）
+python3 -m benchmarks.bench_chopper --warm-runs 3
+python3 -m benchmarks.bench_chopper --skip-tran --warm-runs 3   # 跳过慢速 transient
+CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_chopper --warm-runs 3
+
+# 批量 sweep 基准（N × AC / AC+noise，模拟 explore 层负载）
+python3 -m benchmarks.bench_sweep --n-candidates 200 --warm-runs 3
+CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_sweep --warm-runs 3
 ```
 
 ## JSON 电路描述

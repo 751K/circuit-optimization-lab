@@ -240,49 +240,55 @@ def _solve_internal_with_guesses_impl(Vs, Vd, Vg, cache_valid, cache_vs1,
     return False, cache_vs1, cache_vd1
 
 
-def _solve_dense_impl(A, b):
+def _solve_dense_neg_rhs_inplace_impl(A, b):
+    """Solve A*x = -b in place.
+
+    A is overwritten by its LU-like elimination state and b is overwritten by x.
+    The transient Newton path does not need either object after the solve, so
+    this avoids two array copies and one explicit rhs allocation per iteration.
+    """
     n = A.shape[0]
-    M = A.copy()
-    x = b.copy()
+    for i in range(n):
+        b[i] = -b[i]
 
     for k in range(n):
         piv = k
-        piv_abs = abs(M[k, k])
+        piv_abs = abs(A[k, k])
         for r in range(k + 1, n):
-            val = abs(M[r, k])
+            val = abs(A[r, k])
             if val > piv_abs:
                 piv = r
                 piv_abs = val
         if piv_abs == 0.0 or not math.isfinite(piv_abs):
-            return False, x
+            return False, b
         if piv != k:
             for c in range(k, n):
-                tmp = M[k, c]
-                M[k, c] = M[piv, c]
-                M[piv, c] = tmp
-            tmp = x[k]
-            x[k] = x[piv]
-            x[piv] = tmp
-        diag = M[k, k]
+                tmp = A[k, c]
+                A[k, c] = A[piv, c]
+                A[piv, c] = tmp
+            tmp = b[k]
+            b[k] = b[piv]
+            b[piv] = tmp
+        diag = A[k, k]
         for r in range(k + 1, n):
-            factor = M[r, k] / diag
+            factor = A[r, k] / diag
             if factor != 0.0:
-                M[r, k] = 0.0
+                A[r, k] = 0.0
                 for c in range(k + 1, n):
-                    M[r, c] -= factor * M[k, c]
-                x[r] -= factor * x[k]
+                    A[r, c] -= factor * A[k, c]
+                b[r] -= factor * b[k]
 
     for i in range(n - 1, -1, -1):
-        acc = x[i]
+        acc = b[i]
         for c in range(i + 1, n):
-            acc -= M[i, c] * x[c]
-        diag = M[i, i]
+            acc -= A[i, c] * b[c]
+        diag = A[i, i]
         if diag == 0.0 or not math.isfinite(diag):
-            return False, x
-        x[i] = acc / diag
-        if not math.isfinite(x[i]):
-            return False, x
-    return True, x
+            return False, b
+        b[i] = acc / diag
+        if not math.isfinite(b[i]):
+            return False, b
+    return True, b
 
 
 def _stamp_transient_system_impl(
@@ -559,8 +565,7 @@ def _transient_newton_impl(
             if rmax < fallback_tol:
                 return V, it + 1, True, True
 
-        rhs = -R
-        solved, dV = _solve_dense_impl(J, rhs)
+        solved, dV = _solve_dense_neg_rhs_inplace_impl(J, R)
         if not solved:
             return V, it + 1, False, True
         mx = 0.0
@@ -598,7 +603,7 @@ if NUMBA_AVAILABLE:
     _terminal_derivatives_impl = njit(cache=False)(_terminal_derivatives_impl)
     _term_value_impl = njit(cache=False)(_term_value_impl)
     _solve_internal_with_guesses_impl = njit(cache=False)(_solve_internal_with_guesses_impl)
-    _solve_dense_impl = njit(cache=False)(_solve_dense_impl)
+    _solve_dense_neg_rhs_inplace_impl = njit(cache=False)(_solve_dense_neg_rhs_inplace_impl)
     _stamp_transient_system_impl = njit(cache=False)(_stamp_transient_system_impl)
     eval_currents_numba = _eval_currents_impl
     newton_internal_numba = _newton_internal_impl

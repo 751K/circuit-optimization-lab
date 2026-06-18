@@ -46,8 +46,22 @@ python3 -m benchmarks.bench_afe --skip-noise --warm-runs 3
 Fixed performance benchmarks:
 
 ```bash
+# Full-AFE benchmark (ac121 / noise121 / tran200)
 python3 -m benchmarks.bench_afe --warm-runs 3
 CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_afe --warm-runs 3
+
+# Single-device PMOS_TFT micro-benchmark (7 hot-path ops × 3 bias regions)
+python3 -m benchmarks.bench_model --warm-runs 3
+CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_model --warm-runs 3
+
+# Chopper analysis benchmark (harmonics / ideal / pmos_static / pmos_lptv / pmos_tran)
+python3 -m benchmarks.bench_chopper --warm-runs 3
+python3 -m benchmarks.bench_chopper --skip-tran --warm-runs 3   # skip slow transient
+CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_chopper --warm-runs 3
+
+# Batch sweep benchmark (N × AC / AC+noise, explore-layer workload)
+python3 -m benchmarks.bench_sweep --n-candidates 200 --warm-runs 3
+CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_sweep --warm-runs 3
 ```
 
 ## JSON Circuit Description
