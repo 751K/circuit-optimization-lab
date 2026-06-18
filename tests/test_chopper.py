@@ -223,6 +223,7 @@ def test_pmos_chopper_transient_refines_edges_and_converges():
         input_diff=0.0,
         edge_time=1e-3,
         dead_time=2e-4,
+        clock_style="phase",
         charge_injection=True,
         charge_scale=0.05,
         switch_size=(10000.0, 80.0),
@@ -234,3 +235,54 @@ def test_pmos_chopper_transient_refines_edges_and_converges():
     assert len(result["charge_injection_sources"]) > 0
     assert np.isfinite(result["output"]).all()
     assert np.isfinite(result["requested_output"]).all()
+
+
+def test_pmos_chopper_transient_ui_sizes_do_not_run_away():
+    t = np.linspace(0.0, 1.0 / 225.0, 31)
+    result = pmos_chopper_transient(
+        CHOPPER_UI_SIZES,
+        CHOPPER_UI_BIAS,
+        t,
+        f_chop=225.0,
+        input_diff=0.0,
+        charge_injection=False,
+        switch_size=(5000.0, 30.0),
+        edge_points=5,
+    )
+    nodes = result["requested_nodes"]
+    input_dm = nodes["CH_INP"] - nodes["CH_INN"]
+    core_out_dm = nodes["CH_AMP_OP"] - nodes["CH_AMP_ON"]
+
+    assert result["nfail"] == 0
+    assert np.ptp(input_dm) < 1e-3
+    assert np.ptp(core_out_dm) < 1e-3
+    assert np.ptp(result["requested_output"]) < 1e-3
+    assert np.isfinite(result["requested_output"]).all()
+
+
+def test_pmos_chopper_transient_ui_finite_edge_matches_cadence_scale():
+    period = 1.0 / 225.0
+    t = np.linspace(0.0, 2.0 * period, 161)
+    result = pmos_chopper_transient(
+        CHOPPER_UI_SIZES,
+        CHOPPER_UI_BIAS,
+        t,
+        f_chop=225.0,
+        input_diff=1e-3,
+        edge_time=20e-6,
+        charge_injection=False,
+        switch_size=(5000.0, 30.0),
+        edge_points=5,
+    )
+    rt = result["t"]
+    mask = rt >= rt[-1] - period - 1e-15
+    nodes = result["nodes"]
+    input_cm = 0.5 * (nodes["CH_INP"] + nodes["CH_INN"]) - CHOPPER_UI_BIAS["VCM"]
+    core_cm = 0.5 * (nodes["CH_AMP_OP"] + nodes["CH_AMP_ON"]) - CHOPPER_UI_BIAS["VCM"]
+    out = result["output"]
+
+    assert result["nfail"] == 0
+    assert 0.015 < np.ptp(out[mask]) < 0.03
+    assert -0.02 < np.mean(out[mask]) < -0.005
+    assert 4.5 < np.ptp(input_cm[mask]) < 6.0
+    assert -3.5 < np.mean(core_cm[mask]) < -0.5

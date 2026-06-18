@@ -5,8 +5,9 @@ Measures the canonical local-solver workloads:
   - noise121: noise analysis on the same 121 points.
   - tran200: transient step response on 200 time points.
 
-The first run is reported as "cold"; later runs are reported as "warm". When
-CIRCUIT_USE_NUMBA=1 is set, the cold run includes any first-call JIT work.
+The first run is reported as "cold"; later runs are reported as "warm". Numba is
+enabled by default when installed, so the cold run includes any first-call JIT
+work unless CIRCUIT_USE_NUMBA=0/false/off disables it.
 """
 import argparse
 import json
@@ -19,6 +20,7 @@ import numpy as np
 
 from core.ac_solver import ac_solve
 from core.noise_solver import band_rms, noise_analysis
+from core.numba_kernels import NUMBA_AVAILABLE
 from core.transient_solver import transient
 
 
@@ -107,8 +109,8 @@ def run_benchmarks(warm_runs, skip_noise=False, skip_tran=False):
     return {
         "python": sys.version.split()[0],
         "numpy": np.__version__,
-        "numba_enabled": os.environ.get("CIRCUIT_USE_NUMBA", "").lower()
-        in {"1", "true", "yes", "on"},
+        "numba_enabled": bool(NUMBA_AVAILABLE),
+        "numba_env": os.environ.get("CIRCUIT_USE_NUMBA"),
         "warm_runs": warm_runs,
         "results": results,
     }

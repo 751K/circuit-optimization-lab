@@ -66,8 +66,8 @@ Implements the AT4000TG PMOS-OTFT compact model in Python. It provides:
 - Geometry area calculation through `g_area`.
 - Process and mismatch parameters such as `pvt0`, `mvt0`, `pbeta0`, and `mbeta0`.
 - A warm-started internal-node operating point solve.
-- Optional Numba acceleration for hot scalar kernels when `CIRCUIT_USE_NUMBA=1`
-  is set.
+- Automatic Numba acceleration for hot scalar kernels when Numba is installed
+  (`CIRCUIT_USE_NUMBA=0` disables it).
 
 For AC and noise analysis, the solver extracts terminal `gm` and `gds` by finite-differencing `get_Idc`, matching the terminal behavior used by the circuit solver.
 
@@ -104,15 +104,24 @@ This lets new circuits be added through JSON files such as `examples/single_stag
 
 ### `numba_kernels.py`
 
-Provides optional Numba kernels for pure scalar hot paths. The module is safe to import without Numba installed. Normal short runs are opt-in through:
+Provides optional Numba kernels for pure scalar hot paths. The module is safe to
+import without Numba installed. When Numba is installed, kernels are enabled by
+default; force the pure-Python path with:
 
 ```bash
-CIRCUIT_USE_NUMBA=1
+CIRCUIT_USE_NUMBA=0
 ```
 
-`core.explore` and `core.corners` default this variable to `1` because exploration, corner sweeps, and mismatch MC are long-running workloads. Set `CIRCUIT_USE_NUMBA=0` before import or before `python -m core.explore ...` to force the pure-Python path.
+`core.explore` and `core.corners` still set `CIRCUIT_USE_NUMBA=1` by default for
+long-running workloads, but the general solver path now also uses Numba
+automatically when it is available.
 
-At present, the accelerated paths are PMOS current evaluation, internal-node Newton iterations, bias-dependent capacitance evaluation, and the transient Jacobian's terminal derivative kernel.
+At present, the accelerated paths are PMOS current evaluation, internal-node
+Newton iterations, bias-dependent capacitance evaluation, terminal derivatives,
+and the transient Newton inner loop: topology token lookup, PMOS state solve,
+residual/Jacobian stamping, and the small dense Newton solve. If the compiled
+path cannot handle a step, `transient_solver.py` falls back to the original
+Python Newton / full-Jacobian / least-squares path.
 
 ### `ac_mna.py`
 
@@ -160,15 +169,21 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   with those finite-edge harmonic weights. This is a quasi-static LPTV
   approximation for time-varying switch operating points.
 - `pmos_chopper_transient(...)` drives the eight-PMOS topology with finite-edge
-  clocks. Clock feedthrough comes from the PDK `Cgss/Cgdd * ddt()` terms already
-  stamped by the transient solver; optional charge-injection pulses are estimated
-  from the same PDK capacitance equations and stamped as time-varying current
-  sources. The helper automatically refines the internal time grid around clock
-  edges and enables a rail-bounded fallback solve for hard switched DAE steps.
+  clocks. The default clock follows Spectre `type=pulse` timing (`delay=T/2`,
+  `width=T/2`, finite `rise/fall`), while the older centered phase waveform is
+  still available with `clock_style="phase"` for dead-time experiments. Clock
+  feedthrough comes from the PDK `Cgss/Cgdd * ddt()` terms and the long-timescale
+  `R_cap2` gate-leak terms stamped by the transient solver; optional
+  charge-injection pulses are estimated from the same PDK capacitance equations
+  and stamped as time-varying current sources. The helper refines the internal
+  time grid around clock edges, uses signed terminal currents for the eight
+  bidirectional pass switches, and keeps a tight residual tolerance so slow
+  common-mode charge balance is not lost.
 
 The PMOS-switch sideband path is still a quasi-static approximation, not a full
-correlated periodic-noise solver. It should be treated as a local design/sizing
-model until validated against Spectre PSS/PNoise for a clocked testbench.
+correlated periodic-noise solver. The finite-edge transient path has been checked
+against Spectre `tran`; periodic-noise claims should still be validated against
+Spectre PSS/PNoise for a clocked testbench.
 
 ### `transient_solver.py`
 
@@ -180,13 +195,25 @@ Solves the time-domain response of the topology-defined system using backward Eu
 - `current_inputs=[{"p": node_a, "q": node_b, "input": key}]` stamps a
   time-varying ideal current source flowing `p -> q`; the PMOS chopper helper uses
   this for charge-injection pulses.
-- `max_step`, `max_retry_subdivisions`, and `fallback_least_squares` provide
+- `max_step`, `max_retry_subdivisions`, `fallback_full_jacobian`, and
+  `fallback_least_squares` provide
   controlled step refinement and bounded fallback solving for switched transient
   steps.
 - Includes topology-defined load capacitances (and capacitor elements), plus resistor and ideal-current-source branches.
-- Re-evaluates nonlinear capacitances during Newton iterations.
+- Re-evaluates nonlinear capacitances during Newton iterations, and includes the
+  PMOS `R_cap2` source/drain-to-gate leakage branch used by the PDK Verilog-A
+  model.
+- Supports `signed_devices` for bidirectional pass switches. The default AFE
+  path keeps the historical `abs(Idc)` convention that matches the calibrated
+  DC/AC/noise solvers, while switch devices can keep physical drain-current sign
+  when source/drain voltages reverse.
 - Uses the DC operating point from `ac_solve` as the default initial condition.
-- Uses implicit differentiation of the PMOS internal nodes for faster transient Jacobians, with finite-difference fallback.
+- Uses the Numba transient Newton kernel when available. The compiled path
+  evaluates PMOS operating points/capacitances, stamps the residual/Jacobian, and
+  solves the dense Newton step in one inner loop; it falls back to the Python path
+  if a device internal solve or matrix solve cannot be handled.
+- Uses implicit differentiation of the PMOS internal nodes for faster transient
+  Jacobians, with finite-difference fallback.
 
 ### Front-end stimulus (`ac_drives`)
 
@@ -319,10 +346,10 @@ Fixed AFE benchmarks live under `benchmarks/`:
 
 ```bash
 python3 -m benchmarks.bench_afe --warm-runs 3
-CIRCUIT_USE_NUMBA=1 python3 -m benchmarks.bench_afe --warm-runs 3
+CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_afe --warm-runs 3
 ```
 
-The script reports cold and warm timings separately for `ac121`, `noise121`, and `tran200`. The Numba cold run includes first-call JIT compilation cost.
+The script reports cold and warm timings separately for `ac121`, `noise121`, and `tran200`. The default run uses Numba when available; the `CIRCUIT_USE_NUMBA=0` run is useful for pure-Python comparison.
 
 ## Calibration Status
 
@@ -332,6 +359,11 @@ The current core was calibrated against Cadence Spectre 24.1 for the AT4000TG AF
 - Input-referred noise within a few percent across validated cases.
 - Per-device mismatch Monte Carlo mean and standard deviation matching Cadence trends.
 - Transient step and sinusoidal response closely matching Cadence `tran` behavior.
+- PMOS eight-switch chopper transient, using UI locked sizes, `f_chop=225 Hz`,
+  switch `W/L=5000/30`, and `rise/fall=20 us`, now matches the Spectre
+  finite-edge transient scale: last-period output mean about `-11.05 mV`
+  vs Spectre `-10.62 mV`, output `21.28 mVpp` vs `21.46 mVpp`, input common-mode
+  swing `5.18 Vpp` vs `5.43 Vpp`, and `nfail=0`.
 - Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms input-referred noise.
 
 These numbers describe the current AT4000TG validation case. Future PDKs or topologies should be recalibrated against their own simulator references.

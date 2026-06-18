@@ -176,6 +176,60 @@ def finite_edge_clock_pair(tgrid, f_chop, *, v_low=0.0, v_high=40.0,
     return clk_a, clk_b, a_on, b_on
 
 
+def spectre_pulse_clock_pair(tgrid, f_chop, *, v_low=0.0, v_high=40.0,
+                             edge_time=0.0):
+    """Complementary PMOS gate clocks matching Spectre ``type=pulse`` timing.
+
+    The Cadence verification netlist uses:
+
+    ``delay=T/2 width=T/2 period=T rise=edge_time fall=edge_time``.
+
+    Spectre applies the finite rise before starting the high-width interval, so
+    the falling edge starts at ``T + edge_time`` for the first cycle.  This
+    helper intentionally follows that source semantics rather than the ideal
+    centered-edge periodic chopper waveform used by the frequency-domain helper.
+    """
+    tgrid = np.asarray(tgrid, float)
+    f_chop = float(f_chop)
+    if f_chop <= 0.0:
+        raise ValueError("f_chop must be positive")
+    period = 1.0 / f_chop
+    half = 0.5 * period
+    edge = max(0.0, float(edge_time))
+    low = float(v_low)
+    high = float(v_high)
+
+    def pulse(val0, val1):
+        out = np.full_like(tgrid, float(val0), dtype=float)
+        active = tgrid >= half
+        if not np.any(active):
+            return out
+        tau = np.mod(tgrid[active] - half, period)
+        vals = np.full_like(tau, float(val0), dtype=float)
+        if edge <= 0.0:
+            vals[tau < half] = float(val1)
+        else:
+            rise = tau < edge
+            high_region = (tau >= edge) & (tau < edge + half)
+            fall = (tau >= edge + half) & (tau < 2.0 * edge + half)
+            vals[rise] = val0 + (val1 - val0) * (tau[rise] / edge)
+            vals[high_region] = val1
+            vals[fall] = val1 + (val0 - val1) * ((tau[fall] - edge - half) / edge)
+        out[active] = vals
+        return out
+
+    clk_a = pulse(low, high)
+    clk_b = pulse(high, low)
+    vspan = high - low
+    if vspan == 0.0:
+        a_on = np.zeros_like(clk_a)
+        b_on = np.zeros_like(clk_b)
+    else:
+        a_on = np.clip((high - clk_a) / vspan, 0.0, 1.0)
+        b_on = np.clip((high - clk_b) / vspan, 0.0, 1.0)
+    return clk_a, clk_b, a_on, b_on
+
+
 def finite_edge_chopper_harmonics(max_harmonic=31, *, edge_fraction=0.0,
                                   dead_fraction=0.0, samples=4096):
     """Fourier coefficients of a finite-edge differential chopper waveform.
@@ -629,6 +683,53 @@ def refine_chopper_tgrid(tgrid, f_chop, *, edge_time=0.0, dead_time=0.0,
     return refined[(refined >= t0) & (refined <= t1)]
 
 
+def refine_pulse_clock_tgrid(tgrid, f_chop, *, edge_time=0.0,
+                             edge_points=17, hard_edge_window=None):
+    """Refine around Spectre pulse-source clock edges."""
+    tgrid = np.asarray(tgrid, float)
+    if len(tgrid) < 2:
+        return tgrid.copy()
+    f_chop = float(f_chop)
+    if f_chop <= 0.0:
+        raise ValueError("f_chop must be positive")
+    period = 1.0 / f_chop
+    half = 0.5 * period
+    edge_time = max(0.0, float(edge_time))
+    if edge_time > 0.0:
+        edge_window = edge_time
+    elif hard_edge_window is not None:
+        edge_window = float(hard_edge_window)
+    else:
+        edge_window = 0.0
+    if edge_window <= 0.0:
+        return np.unique(tgrid)
+
+    t0 = float(tgrid[0])
+    t1 = float(tgrid[-1])
+    edge_points = max(3, int(edge_points))
+    starts = []
+    k_min = int(np.floor((t0 - half - 2.0 * edge_window) / period)) - 1
+    k_max = int(np.ceil((t1 - half + 2.0 * edge_window) / period)) + 1
+    for k in range(k_min, k_max + 1):
+        starts.append(half + k * period)
+        starts.append(half + edge_time + half + k * period)
+
+    points = [tgrid]
+    for start in starts:
+        if edge_time > 0.0:
+            lo = start
+            hi = start + edge_time
+        else:
+            lo = start - 0.5 * edge_window
+            hi = start + 0.5 * edge_window
+        lo = max(t0, lo)
+        hi = min(t1, hi)
+        if hi >= lo:
+            points.append(np.linspace(lo, hi, edge_points))
+    refined = np.unique(np.concatenate(points))
+    return refined[(refined >= t0) & (refined <= t1)]
+
+
 def _charge_injection_sources(build, all_sizes, all_nf, bias, tgrid, clk_a, clk_b,
                               *, charge_scale=1.0, source_split=0.5):
     """Build charge-injection current-source waveforms for PMOS turn-off edges."""
@@ -690,15 +791,18 @@ def _charge_injection_sources(build, all_sizes, all_nf, bias, tgrid, clk_a, clk_
 def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
                            input_common_mode=None, vip=None, vin=None,
                            edge_time=0.0, dead_time=0.0,
+                           clock_style="pulse",
                            clock_phase_offset=0.25,
                            switch_size=(20000.0, 80.0), switch_nf=1, nf=None,
                            V0=None, charge_injection=True,
                            charge_scale=1.0, charge_source_split=0.5,
                            refine_edges=True, edge_points=9,
-                           transient_max_step=None, max_retry_subdivisions=0,
+                           signed_switches=True,
+                           transient_max_step=None, max_retry_subdivisions=1,
                            newton_maxit=35, newton_step_limit=0.5,
-                           newton_vtol=1e-6,
-                           fallback_least_squares=True, fallback_tol=1e-5,
+                           newton_vtol=1e-8,
+                           fallback_full_jacobian=False,
+                           fallback_least_squares=True, fallback_tol=1e-10,
                            base_topo=AFE_TOPO):
     """Transient of the eight-PMOS chopper with finite-edge clocks.
 
@@ -712,6 +816,12 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
     tgrid = requested_tgrid
     f_chop = float(f_chop)
     period = 1.0 / f_chop
+    clock_style = str(clock_style).lower()
+    pulse_clock = clock_style in {"pulse", "spectre", "spectre_pulse"}
+    if clock_style not in {"phase", "finite_edge", "legacy", "pulse", "spectre", "spectre_pulse"}:
+        raise ValueError("clock_style must be 'pulse' or 'phase'")
+    if pulse_clock and dead_time:
+        raise ValueError("dead_time is only supported with clock_style='phase'")
     build = build_afe_pmos_chopper(switch_size=switch_size, switch_nf=switch_nf,
                                    base_topo=base_topo)
     all_sizes, all_nf = _with_switch_maps(sizes, nf, build)
@@ -731,19 +841,29 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
         raise ValueError("vip/vin waveform length must match tgrid")
 
     if refine_edges:
-        tgrid = refine_chopper_tgrid(
-            requested_tgrid, f_chop, edge_time=edge_time, dead_time=dead_time,
-            phase_offset=clock_phase_offset, edge_points=edge_points,
-            hard_edge_window=period / 200.0)
+        if pulse_clock:
+            tgrid = refine_pulse_clock_tgrid(
+                requested_tgrid, f_chop, edge_time=edge_time,
+                edge_points=edge_points, hard_edge_window=period / 200.0)
+        else:
+            tgrid = refine_chopper_tgrid(
+                requested_tgrid, f_chop, edge_time=edge_time, dead_time=dead_time,
+                phase_offset=clock_phase_offset, edge_points=edge_points,
+                hard_edge_window=period / 200.0)
         vip = np.interp(tgrid, requested_tgrid, vip)
         vin = np.interp(tgrid, requested_tgrid, vin)
 
-    clk_a, clk_b, a_on, b_on = finite_edge_clock_pair(
-        tgrid, f_chop, v_low=0.0, v_high=bias["VDD"],
-        edge_time=edge_time, dead_time=dead_time,
-        phase_offset=clock_phase_offset)
+    if pulse_clock:
+        clk_a, clk_b, a_on, b_on = spectre_pulse_clock_pair(
+            tgrid, f_chop, v_low=0.0, v_high=bias["VDD"],
+            edge_time=edge_time)
+    else:
+        clk_a, clk_b, a_on, b_on = finite_edge_clock_pair(
+            tgrid, f_chop, v_low=0.0, v_high=bias["VDD"],
+            edge_time=edge_time, dead_time=dead_time,
+            phase_offset=clock_phase_offset)
     tbias = dict(bias)
-    tbias.update({"VIP": float(vcm), "VIN": float(vcm),
+    tbias.update({"VIP": float(vip[0]), "VIN": float(vin[0]),
                   "CLK_A": float(clk_a[0]), "CLK_B": float(clk_b[0])})
     inputs = {"vip": vip, "vin": vin, "clk_a": clk_a, "clk_b": clk_b}
     node_inputs = {
@@ -762,7 +882,7 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
         inputs.update(qinj_waveforms)
 
     if transient_max_step is None:
-        transient_max_step = (float(edge_time) / max(int(edge_points) - 1, 1)
+        transient_max_step = (float(edge_time) / 20.0
                               if edge_time else period / 200.0)
     if V0 is None:
         start_phase = "A" if float(a_on[0]) >= float(b_on[0]) else "B"
@@ -774,6 +894,13 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
             dc0 = ac0["dc_op"] if ac0 is not None else seed
             V0 = np.array(build.topology.guess_vector(
                 dc0, default=build.topology.default_guess_value(tbias)), dtype=float)
+    if signed_switches is True:
+        signed_devices = build.switch_names
+    elif signed_switches is False or signed_switches is None:
+        signed_devices = ()
+    else:
+        signed_devices = tuple(signed_switches)
+
     result = transient(all_sizes, tbias, tgrid, topo=build.topology, inputs=inputs,
                        node_inputs=node_inputs, current_inputs=current_inputs,
                        nf=all_nf, V0=V0, max_step=transient_max_step,
@@ -781,8 +908,10 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
                        newton_maxit=newton_maxit,
                        newton_step_limit=newton_step_limit,
                        newton_vtol=newton_vtol,
+                       fallback_full_jacobian=fallback_full_jacobian,
                        fallback_least_squares=fallback_least_squares,
-                       fallback_tol=fallback_tol)
+                       fallback_tol=fallback_tol,
+                       signed_devices=signed_devices)
     requested_output = np.interp(requested_tgrid, result["t"], result["output"])
     requested_nodes = {
         name: np.interp(requested_tgrid, result["t"], vals)
@@ -807,6 +936,8 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
         "charge_injection_sources": current_inputs,
         "node_inputs": node_inputs,
         "inputs": inputs,
+        "clock_style": "pulse" if pulse_clock else "phase",
+        "signed_devices": signed_devices,
     })
     return result
 

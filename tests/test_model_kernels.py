@@ -99,7 +99,7 @@ def test_additional_numba_kernels_match_python_impl_when_enabled():
         rtol=1e-14, atol=1e-24)
 
     td_args = (
-        Vs, Vd, Vg, Vs1, Vd1, True, True, 1e-3, 1e-6, t.Vfb, t.Vss,
+        Vs, Vd, Vg, Vs1, Vd1, True, True, True, 1e-3, 1e-6, t.Vfb, t.Vss,
         t.Lc, t.lambda_, t._contact_scale, t._channel_exponent,
         t._current_scale, t._inv_Rleak,
     )
