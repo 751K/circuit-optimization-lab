@@ -5,8 +5,9 @@ import numpy as np
 import pytest
 
 from core.ac_solver import ac_solve
+from core.analysis_dispatch import run_analysis_suite
 from core.circuit_loader import circuit_from_dict, load_circuit_json
-from core.noise_solver import band_rms, noise_analysis
+from core.noise_solver import _KB, _TEMP, band_rms, noise_analysis
 from core.topology import AFE_TOPO
 from core.transient_solver import transient
 
@@ -18,7 +19,8 @@ def test_example_json_matches_schema_when_jsonschema_available():
     jsonschema = pytest.importorskip("jsonschema")
     schema = json.loads((ROOT / "schemas" / "circuit.schema.json").read_text())
     jsonschema.Draft202012Validator.check_schema(schema)
-    for name in ("single_stage.json", "resistor_load_stage.json", "afe_explore.json"):
+    for name in ("single_stage.json", "resistor_load_stage.json", "afe_explore.json",
+                 "periodic_rc.json"):
         data = json.loads((ROOT / "examples" / name).read_text())
         jsonschema.validate(data, schema)
 
@@ -58,6 +60,29 @@ def test_afe_json_matches_builtin_topology_ac():
     assert builtin_ac is not None
     np.testing.assert_allclose(json_ac["gains"], builtin_ac["gains"], rtol=1e-10, atol=1e-12)
     assert json_ac["bw_Hz"] == pytest.approx(builtin_ac["bw_Hz"], rel=1e-10)
+
+
+def test_periodic_json_dispatch_runs_generic_pss_pac_pnoise():
+    spec = load_circuit_json("examples/periodic_rc.json")
+    results = run_analysis_suite(spec)
+
+    assert set(results) == {"ac", "noise", "pss", "pac", "pnoise"}
+    assert results["pss"]["converged"]
+    assert results["pss"]["nfail"] == 0
+
+    freqs = np.array([100.0, 1000.0])
+    R = 1e5
+    C = 1e-9
+    expected_h = 1.0 / (1.0 + 2j * np.pi * freqs * R * C)
+    np.testing.assert_allclose(results["ac"]["gains"], np.abs(expected_h), rtol=1e-6)
+    np.testing.assert_allclose(results["pac"]["gains"], np.abs(expected_h), rtol=2e-2)
+
+    z = 1.0 / (1.0 / R + 2j * np.pi * freqs * C)
+    expected_noise = np.abs(z) ** 2 * (4.0 * _KB * _TEMP / R)
+    np.testing.assert_allclose(results["pnoise"]["out_psd"], expected_noise, rtol=1e-5)
+    assert results["pnoise"]["method"] == "lti_noise_fast_path"
+    assert results["pnoise"]["pnoise_hb_solve_count"] == 0
+    assert results["pnoise"]["irn_uV_band"] > 0.0
 
 
 def test_loader_rejects_unknown_device_node():

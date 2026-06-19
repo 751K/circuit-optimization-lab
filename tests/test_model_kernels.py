@@ -1,15 +1,20 @@
 import numpy as np
 
+import core.ac_solver as ac_solver
 from core.numba_kernels import (
     _capacitances_impl,
     _eval_currents_impl,
     _newton_internal_impl,
+    _pnoise_fold_psd_impl,
+    _pnoise_hb_blocks_impl,
     _residual_pair_jac_internal_impl,
     _terminal_derivatives_from_jac_impl,
     _terminal_derivatives_impl,
     capacitances_numba,
     eval_currents_numba,
     newton_internal_numba,
+    pnoise_fold_psd_numba,
+    pnoise_hb_blocks_numba,
     terminal_derivatives_numba,
 )
 from core.pmos_tft_model import PMOS_TFT
@@ -109,6 +114,54 @@ def test_additional_numba_kernels_match_python_impl_when_enabled():
     ref_td = _terminal_derivatives_impl(*td_args)
     assert got_td[0] == ref_td[0]
     np.testing.assert_allclose(got_td[1:], ref_td[1:], rtol=1e-14, atol=1e-18)
+
+
+def test_pnoise_numba_kernels_match_reference_when_enabled():
+    if pnoise_hb_blocks_numba is None:
+        return
+
+    rng = np.random.default_rng(4)
+    N = 8
+    n = 2
+    K = 2
+    Gf = rng.normal(size=(N, n, n)) + 1j * rng.normal(size=(N, n, n))
+    Cf = rng.normal(size=(N, n, n)) + 1j * rng.normal(size=(N, n, n))
+
+    got_y, got_c = pnoise_hb_blocks_numba(Gf, Cf, K, 225.0)
+    ref_y, ref_c = _pnoise_hb_blocks_impl.py_func(Gf, Cf, K, 225.0)
+    np.testing.assert_allclose(got_y, ref_y, rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(got_c, ref_c, rtol=1e-14, atol=1e-14)
+
+    nfreq = 3
+    nb = 2 * K + 1
+    adjs = rng.normal(size=(nfreq, nb * n)) + 1j * rng.normal(size=(nfreq, nb * n))
+    freqs = np.array([0.1, 10.0, 100.0])
+    p_indices = np.array([[0, 2, 4, 6, 8], [-1, -1, -1, -1, -1]], dtype=np.int64)
+    q_indices = np.array([[1, 3, 5, 7, 9], [0, 2, 4, 6, 8]], dtype=np.int64)
+    sth = rng.normal(size=(2, nb, nb)) + 1j * rng.normal(size=(2, nb, nb))
+    sfl = rng.normal(size=(2, nb, nb)) + 1j * rng.normal(size=(2, nb, nb))
+
+    got_out, got_dev = pnoise_fold_psd_numba(
+        adjs, freqs, K, 225.0, p_indices, q_indices, sth, sfl)
+    ref_out, ref_dev = _pnoise_fold_psd_impl.py_func(
+        adjs, freqs, K, 225.0, p_indices, q_indices, sth, sfl)
+    np.testing.assert_allclose(got_out, ref_out, rtol=1e-14, atol=1e-12)
+    np.testing.assert_allclose(got_dev, ref_dev, rtol=1e-14, atol=1e-12)
+
+
+def test_get_ss_params_numba_fast_path_matches_finite_difference(monkeypatch):
+    point = (40.0, 31.38, 0.0)
+    fast_dev = PMOS_TFT(W=5000, L=30)
+    fast = ac_solver.get_ss_params(5000, 30, *point, dev_inst=fast_dev)
+
+    monkeypatch.setattr(ac_solver, "terminal_derivatives_numba", None)
+    fd_dev = PMOS_TFT(W=5000, L=30)
+    ref = ac_solver.get_ss_params(5000, 30, *point, dev_inst=fd_dev)
+
+    np.testing.assert_allclose(fast["gm"], ref["gm"], rtol=1e-5, atol=1e-12)
+    np.testing.assert_allclose(fast["gds"], ref["gds"], rtol=1e-5, atol=1e-12)
+    np.testing.assert_allclose(fast["Cgs"], ref["Cgs"], rtol=1e-14, atol=1e-24)
+    np.testing.assert_allclose(fast["Cgd"], ref["Cgd"], rtol=1e-14, atol=1e-24)
 
 
 def test_transient_analytic_terminal_derivatives_match_finite_difference():

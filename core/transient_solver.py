@@ -664,9 +664,15 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     max_step = None if max_step is None else float(max_step)
     flat_max_step = None if flat_max_step is None else float(flat_max_step)
     used_grid_numba = False
+    partial_grid_numba = False
+    python_start_idx = 1
     profile = bool(profile)
     profile_wall_s = 0.0
     profile_stats = None
+    numba_grid_error = None
+    numba_grid_failed_index = None
+    numba_grid_failed_substeps = 0
+    numba_grid_failed_profile = None
     if edge_mask is None:
         edge_mask_arr = np.empty(0, dtype=np.bool_)
     else:
@@ -679,10 +685,11 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             max_step_arg = -1.0 if max_step is None else float(max_step)
             flat_max_step_arg = -1.0 if flat_max_step is None else float(flat_max_step)
             t_profile0 = time.perf_counter()
-            ok_grid, Vfast, fast_substeps, _, raw_profile = transient_solve_grid_numba(
+            ok_grid, Vfast, fast_substeps, fail_index, raw_profile = transient_solve_grid_numba(
                 np.asarray(V0, float), np.asarray(tgrid, float),
                 np.asarray(input_values, float), edge_mask_arr, profile,
                 max_step_arg, flat_max_step_arg,
+                int(max_retry_subdivisions),
                 int(n), int(newton_maxit), float(newton_step_limit),
                 float(newton_vtol), float(gmin),
                 bool(fallback_full_jacobian or fallback_least_squares),
@@ -708,11 +715,26 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             if ok_grid:
                 Vhist = Vfast
                 nsubsteps = int(fast_substeps)
+                raw_profile_arr = np.asarray(raw_profile, float)
+                nfail = int(raw_profile_arr[13])
+                nretry = nfail
                 numba_newton_attempts += nsubsteps
                 numba_newton_success += nsubsteps
                 used_grid_numba = True
-                profile_stats = np.asarray(raw_profile, float)
-        except Exception:
+                profile_stats = raw_profile_arr
+            else:
+                numba_grid_failed_index = int(fail_index)
+                numba_grid_failed_substeps = int(fast_substeps)
+                numba_grid_failed_profile = np.asarray(raw_profile, float)
+                if numba_grid_failed_index is not None and numba_grid_failed_index > 1:
+                    Vhist = Vfast
+                    nsubsteps = int(fast_substeps)
+                    numba_newton_attempts += nsubsteps
+                    numba_newton_success += nsubsteps
+                    partial_grid_numba = True
+                    python_start_idx = int(numba_grid_failed_index)
+        except Exception as exc:
+            numba_grid_error = f"{type(exc).__name__}: {exc}"
             used_grid_numba = False
 
     def input_at_between(input_a, input_b, frac):
@@ -789,7 +811,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         return Vp, False, 1, 1 if depth == 0 else 0
 
     if not used_grid_numba:
-        for k in range(1, N):
+        for k in range(python_start_idx, N):
             h = tgrid[k] - tgrid[k - 1]
             if h <= 0.0:
                 raise ValueError("tgrid must be strictly increasing")
@@ -848,6 +870,19 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         result["transient_profile"] = {
             "enabled": True,
             "numba_grid_solver": bool(used_grid_numba),
+            "numba_grid_partial": bool(partial_grid_numba),
+            "numba_grid_error": numba_grid_error,
+            "numba_grid_failed_index": numba_grid_failed_index,
+            "numba_grid_failed_substeps": int(numba_grid_failed_substeps),
+            "numba_grid_failed_newton_iters": (
+                int(numba_grid_failed_profile[0])
+                if numba_grid_failed_profile is not None else 0),
+            "numba_grid_failed_substep_failures": (
+                int(numba_grid_failed_profile[10])
+                if numba_grid_failed_profile is not None else 0),
+            "numba_grid_failed_interval_failures": (
+                int(numba_grid_failed_profile[13])
+                if numba_grid_failed_profile is not None else 0),
             "wall_time_s": float(profile_wall_s),
             "nsubsteps": int(nsubsteps),
             "intervals": int(profile_stats[11]),
@@ -865,6 +900,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             "edge_newton_iters": int(profile_stats[8]),
             "flat_newton_iters": int(profile_stats[9]),
             "failed_substeps": int(profile_stats[10]),
+            "failed_intervals": int(profile_stats[13]),
             "edge_time_s_est": float(edge_time_est),
             "flat_time_s_est": float(flat_time_est),
             "time_estimate_basis": "newton_iteration_weighted",

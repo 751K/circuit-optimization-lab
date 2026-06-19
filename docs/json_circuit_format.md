@@ -20,6 +20,7 @@ Example files:
 examples/single_stage.json
 examples/resistor_load_stage.json
 examples/afe_explore.json
+examples/periodic_rc.json
 ```
 
 ## Minimal Structure
@@ -325,6 +326,84 @@ rather than directly at a transistor gate.
 }
 ```
 
+### `periodic`
+
+Optional. Default large-signal periodic excitation for PSS/PAC/PNoise and
+periodic transient dispatch.
+
+```json
+"periodic": {
+  "frequency": 1000.0,
+  "n_points": 101,
+  "inputs": {
+    "vin": {"type": "constant", "value": "VIN"},
+    "clk": {"type": "pulse", "low": 0.0, "high": "VDD", "duty": 0.5,
+            "rise": 20e-6, "fall": 20e-6}
+  },
+  "node_inputs": {"VIN": "vin", "CLK": "clk"},
+  "current_inputs": [{"p": "VDD", "q": "OUT", "input": "iqinj"}],
+  "signed_devices": ["SW1", "SW2"]
+}
+```
+
+Supported waveform forms:
+
+- Number or bias key: constant waveform, e.g. `"VIN"`.
+- `constant` / `dc`: constant waveform.
+- `sine` / `sin` / `cosine` / `cos`: fields include `dc`, `amplitude`,
+  `phase`, `frequency`, or `harmonic`.
+- `square`: ideal square wave with `low`, `high`, `duty`, and `delay`.
+- `pulse`: finite-edge periodic pulse with optional `rise` and `fall`.
+- `pwl`: periodic piecewise-linear waveform with `times` and `values`.
+
+### `analyses`
+
+Optional. Unified analysis-dispatch configuration. Calling
+`core.analysis_dispatch.run_analysis_suite(spec)` runs configured analyses in
+the fixed order `ac -> noise -> transient -> pss -> pac -> pnoise`; PAC/PNoise
+automatically reuse or create the required PSS result.
+
+```json
+"analyses": {
+  "pss": {
+    "residual_tol": 1e-12,
+    "max_shooting_iters": 2,
+    "jacobian_reuse": true
+  },
+  "pac": {
+    "freqs": [100.0, 1000.0],
+    "input_drive": {"vin": 1.0},
+    "lti_fast_path": true,
+    "cache_linearization": true,
+    "cache_forcing": true
+  },
+  "pnoise": {
+    "freqs": [100.0, 1000.0],
+    "input_drive": {"vin": 1.0},
+    "max_sideband": 0,
+    "n_period_samples": 32,
+    "lti_fast_path": true,
+    "cache_linearization": true,
+    "band": [100.0, 1000.0]
+  }
+}
+```
+
+`freqs` can be an explicit list or an object such as
+`{"start": 1.0, "stop": 1e4, "num": 41, "scale": "log"}`. `input_drive` is the
+PAC/PNoise small-signal complex amplitude map; JSON complex values can be a
+number, `[real, imag]`, or `{"real": ..., "imag": ...}`.
+PSS reuses the shooting Jacobian with a Broyden update by default; for difficult
+convergence or very tight reference comparisons, set `"jacobian_reuse": false`
+or periodically rebuild with `"jacobian_rebuild_interval": 2`.
+PAC and PNoise enable the static-orbit LTI fast path and PSS-attached caches by default.
+Set `"lti_fast_path": false`, `"cache_linearization": false`, or
+`"cache_forcing": false` to force fresh finite-difference or harmonic-balance
+work. PNoise reuses sampled `G(t)/C(t)`, HB blocks, and identical-frequency
+adjoint solves from `pss_result`. Set
+`"compute_condition": false` to skip PAC boundary-matrix condition diagnostics
+and save a small amount of linear-algebra overhead.
+
 ### `explore`
 
 Optional. Design-space exploration configuration — variables to sweep with ranges,
@@ -352,6 +431,7 @@ feasibility constraints (gain, BW, IRN, power, area), and optimization objective
 examples/single_stage.json        # Pure PMOS_TFT
 examples/resistor_load_stage.json # PMOS + resistive load + output cap + current source
 examples/afe_explore.json         # 10-transistor AFE with explore config
+examples/periodic_rc.json         # Passive RC with PSS/PAC/PNoise dispatch
 ```
 
 Load and run:
@@ -376,6 +456,18 @@ tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
                  nf=spec.nf, inputs={"vin": vin})
 ```
 
+Or run the analyses configured inside the JSON:
+
+```python
+from core.analysis_dispatch import run_analysis_suite
+from core.circuit_loader import load_circuit_json
+
+spec = load_circuit_json("examples/periodic_rc.json")
+results = run_analysis_suite(spec)
+pac_gain = results["pac"]["gains"]
+pnoise_irn = results["pnoise"]["irn_uV_band"]
+```
+
 ## Current Limitations
 
 The JSON format is a local-solver circuit description, not a full SPICE netlist.
@@ -389,6 +481,7 @@ Supported:
 - Fixed load capacitance.
 - AC gate drive and node drive.
 - Transient gate waveforms and node waveforms.
+- Periodic PSS/PAC/PNoise dispatch from JSON.
 - DC initial guesses.
 
 Not yet supported:

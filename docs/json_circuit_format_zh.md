@@ -16,6 +16,9 @@ schemas/circuit.schema.json
 
 ```text
 examples/single_stage.json
+examples/resistor_load_stage.json
+examples/afe_explore.json
+examples/periodic_rc.json
 ```
 
 ## 最小结构
@@ -307,6 +310,89 @@ tran = transient(sizes, bias, t, topo=topology,
                  inputs={"vip": vip_waveform, "vin": vin_waveform})
 ```
 
+### `ac_drives`
+
+可选。类似 `input_drives`，但驱动的是节点而不是器件 gate。适合输入先经过电阻、
+电容或 testbench 前端网络，再到达有源器件的情况。
+
+```json
+"ac_drives": {
+  "VINP": 0.5,
+  "VINN": -0.5
+}
+```
+
+### `periodic`
+
+可选。给 PSS/PAC/PNoise 和周期 transient 使用的默认大信号周期激励。
+
+```json
+"periodic": {
+  "frequency": 1000.0,
+  "n_points": 101,
+  "inputs": {
+    "vin": {"type": "constant", "value": "VIN"},
+    "clk": {"type": "pulse", "low": 0.0, "high": "VDD", "duty": 0.5,
+            "rise": 20e-6, "fall": 20e-6}
+  },
+  "node_inputs": {"VIN": "vin", "CLK": "clk"},
+  "current_inputs": [{"p": "VDD", "q": "OUT", "input": "iqinj"}],
+  "signed_devices": ["SW1", "SW2"]
+}
+```
+
+支持的波形：
+
+- 数字或 bias key：常量波形，例如 `"VIN"`。
+- `constant` / `dc`：常量。
+- `sine` / `sin` / `cosine` / `cos`：正弦/余弦，字段包括 `dc`、`amplitude`、`phase`、`frequency` 或 `harmonic`。
+- `square`：理想方波，字段包括 `low`、`high`、`duty`、`delay`。
+- `pulse`：有限边沿周期 pulse，额外支持 `rise`、`fall`。
+- `pwl`：周期 PWL，字段为 `times` 和 `values`。
+
+### `analyses`
+
+可选。统一分析 dispatch 配置。调用 `core.analysis_dispatch.run_analysis_suite(spec)`
+会按 `ac -> noise -> transient -> pss -> pac -> pnoise` 顺序运行已配置的分析；
+PAC/PNoise 需要 PSS 时会自动复用或先运行 PSS。
+
+```json
+"analyses": {
+  "pss": {
+    "residual_tol": 1e-12,
+    "max_shooting_iters": 2,
+    "jacobian_reuse": true
+  },
+  "pac": {
+    "freqs": [100.0, 1000.0],
+    "input_drive": {"vin": 1.0},
+    "lti_fast_path": true,
+    "cache_linearization": true,
+    "cache_forcing": true
+  },
+  "pnoise": {
+    "freqs": [100.0, 1000.0],
+    "input_drive": {"vin": 1.0},
+    "max_sideband": 0,
+    "n_period_samples": 32,
+    "lti_fast_path": true,
+    "cache_linearization": true,
+    "band": [100.0, 1000.0]
+  }
+}
+```
+
+`freqs` 可以是频点数组，也可以是 `{"start": 1.0, "stop": 1e4, "num": 41, "scale": "log"}`。
+`input_drive` 是 PAC/PNoise 小信号输入复幅值映射；JSON 中复数可写成数字、
+`[real, imag]` 或 `{"real": ..., "imag": ...}`。
+PSS 默认复用 Broyden shooting Jacobian；疑难收敛或极高精度对比时可设置
+`"jacobian_reuse": false`，或用 `"jacobian_rebuild_interval": 2` 之类的值周期性重建。
+PAC/PNoise 默认启用静态轨道 LTI fast path 和 PSS 结果缓存；如需逐次强制重算有限差分或 HB，
+可设置 `"lti_fast_path": false`、`"cache_linearization": false`、
+`"cache_forcing": false`。PNoise 会复用 `pss_result` 上的采样 `G(t)/C(t)`、
+HB block 和相同频点的 adjoint 解。`"compute_condition": false` 可关闭 PAC
+边界矩阵 condition 诊断，减少少量线性代数开销。
+
 ## 完整示例
 
 见：
@@ -314,6 +400,7 @@ tran = transient(sizes, bias, t, topo=topology,
 ```text
 examples/single_stage.json        # 纯 PMOS_TFT
 examples/resistor_load_stage.json # PMOS + 电阻负载 + 输出电容 + 电流源
+examples/periodic_rc.json         # 纯 RC 周期 PSS/PAC/PNoise dispatch
 ```
 
 可以这样加载并运行：
@@ -338,6 +425,18 @@ tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
                  nf=spec.nf, inputs={"vin": vin})
 ```
 
+或直接运行 JSON 内配置的分析：
+
+```python
+from core.analysis_dispatch import run_analysis_suite
+from core.circuit_loader import load_circuit_json
+
+spec = load_circuit_json("examples/periodic_rc.json")
+results = run_analysis_suite(spec)
+pac_gain = results["pac"]["gains"]
+pnoise_irn = results["pnoise"]["irn_uV_band"]
+```
+
 ## 当前限制
 
 当前 JSON 格式仍是本地求解器的电路描述，不是完整 SPICE netlist。
@@ -349,8 +448,9 @@ tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
 - DC/AC/noise/transient 共享拓扑（电阻含热噪声）。
 - 单端或差分输出。
 - 固定 load capacitance。
-- AC gate drive。
-- transient gate waveform。
+- AC gate drive 和 node drive。
+- transient gate waveform 和 node waveform。
+- 从 JSON dispatch 周期 PSS/PAC/PNoise。
 - DC 初值。
 
 尚未支持：

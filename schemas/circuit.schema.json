@@ -31,7 +31,6 @@
     "devices": {
       "type": "array",
       "description": "PMOS_TFT devices. Object form may carry W/L/NF; array form is [name, drain, gate, source].",
-      "minItems": 1,
       "items": {
         "oneOf": [
           {"$ref": "#/$defs/deviceObject"},
@@ -69,6 +68,11 @@
     "input_drives": {
       "type": "object",
       "description": "AC gate drive per device. Differential gain usually uses +0.5/-0.5.",
+      "additionalProperties": {"type": "number"}
+    },
+    "ac_drives": {
+      "type": "object",
+      "description": "AC drive per named node, for source/passive-network inputs.",
       "additionalProperties": {"type": "number"}
     },
     "load_caps": {
@@ -129,12 +133,224 @@
       "description": "Map device name to transient input waveform key.",
       "additionalProperties": {"$ref": "#/$defs/name"}
     },
+    "periodic": {
+      "$ref": "#/$defs/periodic",
+      "description": "Default periodic large-signal excitation for PSS/PAC/PNoise."
+    },
+    "analyses": {
+      "$ref": "#/$defs/analyses",
+      "description": "Optional analysis dispatch configuration."
+    },
     "explore": {
       "$ref": "#/$defs/explore",
       "description": "Optional design-space exploration spec (see core/explore.py)."
     }
   },
   "$defs": {
+    "analyses": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ac": {"$ref": "#/$defs/analysisCommon"},
+        "noise": {"$ref": "#/$defs/analysisCommon"},
+        "transient": {"$ref": "#/$defs/transientAnalysis"},
+        "pss": {"$ref": "#/$defs/pssAnalysis"},
+        "pac": {"$ref": "#/$defs/pacAnalysis"},
+        "pnoise": {"$ref": "#/$defs/pnoiseAnalysis"}
+      }
+    },
+    "analysisCommon": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "freqs": {"$ref": "#/$defs/frequencyGrid"},
+        "band": {"$ref": "#/$defs/band"}
+      }
+    },
+    "pssAnalysis": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "periodic": {"$ref": "#/$defs/periodic"},
+        "n_points": {"type": "integer", "minimum": 2},
+        "tgrid": {"$ref": "#/$defs/timeGrid"},
+        "tstab_periods": {"type": "integer", "minimum": 0},
+        "max_shooting_iters": {"type": "integer", "minimum": 0},
+        "residual_tol": {"$ref": "#/$defs/positiveNumber"},
+        "jacobian_reuse": {"type": "boolean"},
+        "jacobian_rebuild_interval": {"type": "integer", "minimum": 0}
+      }
+    },
+    "pacAnalysis": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "freqs": {"$ref": "#/$defs/frequencyGrid"},
+        "input_drive": {"$ref": "#/$defs/complexMap"},
+        "pss": {"$ref": "#/$defs/pssAnalysis"},
+        "cache_linearization": {"type": "boolean"},
+        "cache_forcing": {"type": "boolean"},
+        "compute_condition": {"type": "boolean"},
+        "lti_fast_path": {"type": "boolean"}
+      }
+    },
+    "pnoiseAnalysis": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "freqs": {"$ref": "#/$defs/frequencyGrid"},
+        "band": {"$ref": "#/$defs/band"},
+        "input_drive": {"$ref": "#/$defs/complexMap"},
+        "max_sideband": {"type": "integer", "minimum": 0},
+        "n_period_samples": {"type": "integer", "minimum": 2},
+        "cache_linearization": {"type": "boolean"},
+        "lti_fast_path": {"type": "boolean"},
+        "pss": {"$ref": "#/$defs/pssAnalysis"}
+      }
+    },
+    "transientAnalysis": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "tgrid": {"$ref": "#/$defs/timeGrid"},
+        "periodic": {"$ref": "#/$defs/periodic"},
+        "duration": {"$ref": "#/$defs/positiveNumber"},
+        "tstop": {"$ref": "#/$defs/positiveNumber"},
+        "n_points": {"type": "integer", "minimum": 2}
+      }
+    },
+    "periodic": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frequency": {"$ref": "#/$defs/positiveNumber"},
+        "fundamental": {"$ref": "#/$defs/positiveNumber"},
+        "period": {"$ref": "#/$defs/positiveNumber"},
+        "n_points": {"type": "integer", "minimum": 2},
+        "tgrid": {"$ref": "#/$defs/timeGrid"},
+        "inputs": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/waveform"}
+        },
+        "node_inputs": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/name"}
+        },
+        "current_inputs": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {"$ref": "#/$defs/currentInputObject"},
+              {"$ref": "#/$defs/currentInputTuple"}
+            ]
+          }
+        },
+        "signed_devices": {"type": "array", "items": {"$ref": "#/$defs/name"}}
+      }
+    },
+    "waveform": {
+      "oneOf": [
+        {"type": "number"},
+        {"$ref": "#/$defs/name"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {"enum": ["constant", "dc", "sine", "sin", "cosine", "cos", "square", "pulse", "pwl"]},
+            "value": {"oneOf": [{"type": "number"}, {"$ref": "#/$defs/name"}]},
+            "dc": {"oneOf": [{"type": "number"}, {"$ref": "#/$defs/name"}]},
+            "offset": {"oneOf": [{"type": "number"}, {"$ref": "#/$defs/name"}]},
+            "amplitude": {"type": "number"},
+            "phase": {"type": "number"},
+            "frequency": {"$ref": "#/$defs/positiveNumber"},
+            "harmonic": {"type": "number"},
+            "low": {"oneOf": [{"type": "number"}, {"$ref": "#/$defs/name"}]},
+            "high": {"oneOf": [{"type": "number"}, {"$ref": "#/$defs/name"}]},
+            "duty": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+            "delay": {"type": "number"},
+            "rise": {"type": "number", "minimum": 0},
+            "fall": {"type": "number", "minimum": 0},
+            "times": {"type": "array", "items": {"type": "number"}, "minItems": 2},
+            "values": {"type": "array", "items": {"type": "number"}, "minItems": 2}
+          }
+        }
+      ]
+    },
+    "frequencyGrid": {
+      "oneOf": [
+        {"type": "array", "items": {"$ref": "#/$defs/positiveNumber"}, "minItems": 1},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "stop", "num"],
+          "properties": {
+            "start": {"$ref": "#/$defs/positiveNumber"},
+            "stop": {"$ref": "#/$defs/positiveNumber"},
+            "num": {"type": "integer", "minimum": 1},
+            "scale": {"enum": ["log", "linear"]}
+          }
+        }
+      ]
+    },
+    "timeGrid": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "start": {"type": "number"},
+        "stop": {"type": "number"},
+        "duration": {"$ref": "#/$defs/positiveNumber"},
+        "n_points": {"type": "integer", "minimum": 2},
+        "points": {"type": "array", "items": {"type": "number"}, "minItems": 2}
+      }
+    },
+    "complexMap": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/complexValue"}
+    },
+    "complexValue": {
+      "oneOf": [
+        {"type": "number"},
+        {
+          "type": "array",
+          "prefixItems": [{"type": "number"}, {"type": "number"}],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "real": {"type": "number"},
+            "imag": {"type": "number"}
+          }
+        }
+      ]
+    },
+    "currentInputObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p", "q", "input"],
+      "properties": {
+        "p": {"$ref": "#/$defs/name"},
+        "q": {"$ref": "#/$defs/name"},
+        "input": {"$ref": "#/$defs/name"}
+      }
+    },
+    "currentInputTuple": {
+      "type": "array",
+      "prefixItems": [{"$ref": "#/$defs/name"}, {"$ref": "#/$defs/name"}, {"$ref": "#/$defs/name"}],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "band": {
+      "type": "array",
+      "prefixItems": [{"type": "number"}, {"type": "number"}],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
     "explore": {
       "type": "object",
       "additionalProperties": false,

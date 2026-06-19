@@ -40,14 +40,18 @@ import numpy as np
 try:
     from .ac_solver import ac_solve, _dev_nf, _is_afe_topology
     from .noise_solver import band_rms, noise_analysis
+    from .pac_solver import pac_solve
     from .pmos_tft_model import PMOS_TFT
+    from .pnoise_solver import pnoise_solve
     from .pss_solver import pss_solve
     from .topology import AFE_TOPO, Topology
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_solver import ac_solve, _dev_nf, _is_afe_topology
     from noise_solver import band_rms, noise_analysis
+    from pac_solver import pac_solve
     from pmos_tft_model import PMOS_TFT
+    from pnoise_solver import pnoise_solve
     from pss_solver import pss_solve
     from topology import AFE_TOPO, Topology
     from transient_solver import transient
@@ -1206,30 +1210,17 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
     return result
 
 
-def _periodic_average(t, values):
-    t = np.asarray(t, float)
-    values = np.asarray(values)
-    period = float(t[-1] - t[0])
-    if period <= 0.0:
-        return np.mean(values, axis=0)
-    return np.trapezoid(values, t, axis=0) / period
-
-
 def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
                      nf=None,
                      pacmag=1.0, fd_state_step=1e-4, fd_input_step=1e-4,
-                     pss_kwargs=None, transient_kwargs=None):
+                     pss_kwargs=None, transient_kwargs=None,
+                     cache_linearization=True, cache_forcing=True,
+                     compute_condition=True, lti_fast_path=True):
     """PSS-assisted small-signal PAC for the PMOS chopper.
 
-    The implementation uses the nonlinear transient engine as the source of
-    truth: around one PSS period it finite-differences the state transition
-    matrix and the complex input forcing, then solves the quasi-periodic PAC
-    boundary equation.  It is intentionally generic and accuracy-oriented; the
-    cost is roughly ``n_state + 2`` one-period transient runs per frequency.
+    This wrapper builds the chopper PSS orbit when needed, then delegates the
+    finite-difference shooting solve to :func:`core.pac_solver.pac_solve`.
     """
-    freqs = np.asarray(freqs, float)
-    if np.any(freqs < 0.0):
-        raise ValueError("PAC frequencies must be non-negative")
     pss_kwargs = dict(pss_kwargs or {})
     transient_kwargs = dict(transient_kwargs or {})
     if pss_result is None:
@@ -1239,173 +1230,33 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
             pss_defaults["nf"] = nf
         pss_defaults.update(pss_kwargs)
         pss_result = pmos_chopper_pss(sizes, bias, f_chop, **pss_defaults)
-
-    topo = pss_result["topology"]
-    tgrid = np.asarray(pss_result["t"], float)
-    period = float(tgrid[-1] - tgrid[0])
-    if period <= 0.0:
-        raise ValueError("PSS result must span one positive period")
-    tbias = dict(pss_result.get("bias", bias))
-    base_inputs = {key: np.asarray(val, float).copy()
-                   for key, val in pss_result["inputs"].items()}
-    node_inputs = pss_result.get("node_inputs")
-    current_inputs = pss_result.get("charge_injection_sources", ())
-    signed_devices = pss_result.get("signed_devices", ())
-    all_sizes = dict(sizes)
-    all_sizes.update(pss_result.get("switch_sizes", {}))
-    if "all_nf" in pss_result and nf is None:
-        all_nf = dict(pss_result["all_nf"])
-    else:
-        all_nf = dict(nf) if isinstance(nf, dict) else ({} if nf is None else {"__global__": nf})
-        if "__global__" in all_nf:
-            global_nf = all_nf.pop("__global__")
-            all_nf = {name: global_nf for name in all_sizes}
-        all_nf.update(pss_result.get("switch_nf", {}))
-    if not all_nf:
-        all_nf = None
-
-    solved = list(topo.solved)
-    Xbase = np.column_stack([pss_result["nodes"][node] for node in solved])
-    ybase = np.asarray(pss_result["output"], float)
-    x0 = np.asarray(pss_result["x0"], float)
-    xend_base = np.asarray(pss_result["x_end"], float)
-    fd_state_step = float(fd_state_step)
-    fd_input_step = float(fd_input_step)
-
-    common_tr = dict(
-        topo=topo,
-        inputs=base_inputs,
-        node_inputs=node_inputs,
-        current_inputs=current_inputs,
-        nf=all_nf,
-        V0=x0,
-        max_step=pss_result.get("transient_max_step"),
-        flat_max_step=pss_result.get("transient_flat_max_step"),
-        max_retry_subdivisions=0,
-        newton_maxit=60,
-        newton_step_limit=2.0,
-        fallback_least_squares=False,
-        signed_devices=signed_devices,
+    return pac_solve(
+        sizes, bias, freqs, pss_result=pss_result,
+        input_drive={"vip": 0.5, "vin": -0.5}, nf=nf,
+        fd_state_step=fd_state_step, fd_input_step=fd_input_step,
+        transient_kwargs=transient_kwargs, pacmag=pacmag,
         rail_margin=pss_kwargs.get("rail_margin", 2.0),
+        cache_linearization=cache_linearization,
+        cache_forcing=cache_forcing,
+        compute_condition=compute_condition,
+        lti_fast_path=lti_fast_path,
     )
-    common_tr.update(transient_kwargs)
-
-    def run_with(v0, diff_wave):
-        inputs = {key: val.copy() for key, val in base_inputs.items()}
-        vcm = float(bias["VCM"])
-        inputs["vip"] = vcm + 0.5 * diff_wave
-        inputs["vin"] = vcm - 0.5 * diff_wave
-        tr_kwargs = dict(common_tr)
-        tr_kwargs["inputs"] = inputs
-        tr_kwargs["V0"] = np.asarray(v0, float)
-        return transient(all_sizes, tbias, tgrid, profile=False, **tr_kwargs)
-
-    n = topo.n
-    phi = np.empty((n, n), dtype=float)
-    y_cols = np.empty((len(tgrid), n), dtype=float)
-    zero_diff = np.zeros_like(tgrid)
-    for col in range(n):
-        step = fd_state_step * max(1.0, abs(float(x0[col])))
-        xp = x0.copy()
-        xp[col] += step
-        trp = run_with(xp, zero_diff)
-        Xp = np.column_stack([trp["nodes"][node] for node in solved])
-        phi[:, col] = (np.asarray([trp["nodes"][node][-1] for node in solved]) -
-                       xend_base) / step
-        y_cols[:, col] = (np.asarray(trp["output"], float) - ybase) / step
-
-    out_response = np.empty(len(freqs), dtype=complex)
-    residuals = np.empty(len(freqs), dtype=float)
-    conditions = np.empty(len(freqs), dtype=float)
-    nfail = np.empty(len(freqs), dtype=int)
-    for pos, freq in enumerate(freqs):
-        omega = 2.0 * np.pi * float(freq)
-        cos_wave = fd_input_step * np.cos(omega * tgrid)
-        sin_wave = fd_input_step * np.sin(omega * tgrid)
-        trc = run_with(x0, cos_wave)
-        trs = run_with(x0, sin_wave)
-        Xc = np.column_stack([trc["nodes"][node] for node in solved])
-        Xs = np.column_stack([trs["nodes"][node] for node in solved])
-        b_end = ((np.asarray([trc["nodes"][node][-1] for node in solved]) - xend_base) +
-                 1j * (np.asarray([trs["nodes"][node][-1] for node in solved]) - xend_base)
-                 ) / fd_input_step
-        b_y = ((np.asarray(trc["output"], float) - ybase) +
-               1j * (np.asarray(trs["output"], float) - ybase)) / fd_input_step
-        gamma = np.exp(1j * omega * period)
-        mat = phi.astype(complex) - gamma * np.eye(n, dtype=complex)
-        try:
-            cond = float(np.linalg.cond(mat))
-        except Exception:
-            cond = np.inf
-        conditions[pos] = cond
-        try:
-            if (not np.isfinite(cond)) or cond > 1e12:
-                raise np.linalg.LinAlgError("ill-conditioned PAC boundary matrix")
-            dx0 = np.linalg.solve(mat, -b_end)
-        except np.linalg.LinAlgError:
-            dx0 = np.linalg.lstsq(mat, -b_end, rcond=None)[0]
-        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            y_env = b_y + y_cols @ dx0
-        if not np.all(np.isfinite(y_env)):
-            y_env = np.nan_to_num(y_env, nan=0.0, posinf=0.0, neginf=0.0)
-        # The transient finite difference gives the full small-signal waveform
-        # y(t) for an exp(j*w*t) input.  PAC sideband 0 is the DC coefficient of
-        # the periodic envelope Y(t), where y(t)=Y(t)*exp(j*w*t).
-        out_response[pos] = _periodic_average(tgrid, y_env * np.exp(-1j * omega * tgrid))
-        residuals[pos] = float(np.linalg.norm(mat @ dx0 + b_end, ord=np.inf))
-        nfail[pos] = int(trc.get("nfail", 0)) + int(trs.get("nfail", 0))
-
-    gains = np.abs(out_response)
-    return {
-        "freqs": freqs,
-        "response": out_response,
-        "gains": gains,
-        "Hmag": gains,
-        "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300)) if len(gains) else np.nan,
-        "bw_Hz": _bw_from_gain(freqs, gains) if len(gains) else np.nan,
-        "pss": pss_result,
-        "pacmag": float(pacmag),
-        "pac_residual": residuals,
-        "pac_condition": conditions,
-        "nfail": nfail,
-        "method": "pss_finite_difference_shooting",
-    }
 
 
 def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
                         max_sideband=10, n_period_samples=384,
                         band=(0.05, 100.0), gains=None, pac_result=None,
                         noise_devices=None, switch_noise_conductance_gated=True,
+                        cache_linearization=True, lti_fast_path=True,
                         pss_kwargs=None, base_topo=AFE_TOPO):
     """PSS-based LPTV periodic noise for the eight-PMOS chopper.
 
-    Linearizes the circuit around the PSS orbit (time-varying small signal) and
-    assembles the harmonic-balance conversion matrix with blocks
-
-        Y[kr, kc] = G_{kr-kc} + j * 2*pi*(f + kr*f_chop) * C_{kr-kc}
-
-    where G_k / C_k are the Fourier coefficients of the periodic small-signal
-    conductance / capacitance stamps. One adjoint solve per baseband frequency
-    gives the transimpedance Z_{j,k}(f) from every device drain-current noise
-    source j at every sideband k to the baseband differential output, and the
-    cyclostationary device noise (thermal + flicker, evaluated on the PSS orbit)
-    is folded:
-
-        S_out(f) = sum_j sum_k |Z_{j,k}(f)|^2 * S_j(|f + k*f_chop|)
-
-    Unlike :func:`pmos_chopper_lptv_analysis` this needs no Cadence calibration
-    factor; it is the first-principles periodic-noise solve that PSS/PAC enable.
+    This wrapper builds the chopper PSS orbit when needed, then delegates the
+    harmonic-balance noise conversion matrix to :func:`core.pnoise_solver.pnoise_solve`.
     """
-    from .ac_solver import get_ss_params
-    from .ac_mna import _stamp_adm, _stamp_mos_lti
-
-    freqs = np.asarray(freqs, float)
-    if np.any(freqs < 0.0):
-        raise ValueError("PNoise frequencies must be non-negative")
     f_chop = float(f_chop)
     if f_chop <= 0.0:
         raise ValueError("f_chop must be positive")
-    period = 1.0 / f_chop
 
     pss_kwargs = dict(pss_kwargs or {})
     if pss_result is None:
@@ -1416,157 +1267,17 @@ def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
         pss_defaults.update(pss_kwargs)
         pss_result = pmos_chopper_pss(sizes, bias, f_chop, base_topo=base_topo,
                                       **pss_defaults)
-
-    topo = pss_result["topology"]
-    n = topo.n
-    idx = topo.idx
-    tbias = dict(pss_result.get("bias", bias))
-    rails = topo.rail_values(tbias)
-    node_inputs = pss_result.get("node_inputs", {})
-    torbit = np.asarray(pss_result["t"], float)
-
-    N = int(n_period_samples)
-    tu = np.linspace(0.0, period, N, endpoint=False)
-
-    def _interp_per(y):
-        return np.interp(tu, torbit, np.asarray(y, float), period=period)
-
-    node_wave = {nm: _interp_per(pss_result["nodes"][nm]) for nm in topo.solved}
-    in_wave = {k: _interp_per(v) for k, v in pss_result.get("inputs", {}).items()}
-
-    all_sizes = dict(sizes)
-    all_sizes.update(pss_result.get("switch_sizes", {}))
-    all_nf = pss_result.get("all_nf", nf)
-
-    def _nfval(name):
-        if isinstance(all_nf, dict):
-            return int(all_nf.get(name, 1))
-        return int(all_nf) if all_nf else 1
-
-    devices = list(topo.devices)
-    dev_inst = {name: PMOS_TFT(W=all_sizes[name][0], L=all_sizes[name][1], NF=_nfval(name))
-                for name, *_ in devices}
-    switch_names = set(pss_result.get("switch_names", ()))
-    _KB, _TEMP = 1.380649e-23, 300.15
-
-    def termvolt(node, m):
-        if node in idx:
-            return node_wave[node][m]
-        if node in node_inputs:
-            return in_wave[node_inputs[node]][m]
-        return rails[node]
-
-    def term(node):
-        return ("n", idx[node]) if node in idx else ("v", 0.0)
-
-    # constant (LTI) load caps + resistors -> added to every sample (k=0 coeff)
-    Gc = np.zeros((n, n)); Cc = np.zeros((n, n)); rg = np.zeros(n); rc = np.zeros(n)
-    for a, b, cap in topo.cap_list():
-        _stamp_adm(Cc, rc, term(a), term(b), cap)
-    for _, a, b, R in topo.resistors:
-        _stamp_adm(Gc, rg, term(a), term(b), 1.0 / R)
-    for k in range(n):
-        Gc[k, k] += 1e-12                                  # gmin
-
-    Gt = np.zeros((N, n, n)); Ct = np.zeros((N, n, n))
-    Sth = np.zeros((len(devices), N)); Sfl = np.zeros((len(devices), N))
-    for m in range(N):
-        Gm = Gt[m]; Cm = Ct[m]
-        Gm += Gc; Cm += Cc
-        for j, (name, d, g, s) in enumerate(devices):
-            Vs = termvolt(s, m); Vd = termvolt(d, m); Vg = termvolt(g, m)
-            p = get_ss_params(all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
-                              nf=_nfval(name), dev_inst=dev_inst[name])
-            _stamp_mos_lti(Gm, Cm, rg, rc, term(d), term(g), term(s),
-                           p["gm"], p["gds"], p["Cgs"], p["Cgd"])
-            if switch_noise_conductance_gated and name in switch_names:
-                # Triode pass switch: thermal current PSD is 4kT*gds, which tracks the
-                # on/off conduction (gds -> 0 when off). This avoids the leakage-resistor
-                # noise of an off device blowing up against the high-Z baseband output.
-                S_th = 4.0 * _KB * _TEMP * abs(p["gds"]); S_fl1 = 0.0
-            else:
-                try:
-                    S_th, S_fl1 = dev_inst[name].get_noise_psd(Vs, Vd, Vg, frequency=1.0)
-                except Exception:
-                    S_th, S_fl1 = 0.0, 0.0
-            Sth[j, m] = max(float(S_th), 0.0); Sfl[j, m] = max(float(S_fl1), 0.0)
-
-    Gf = np.fft.fft(Gt, axis=0) / N
-    Cf = np.fft.fft(Ct, axis=0) / N
-    # Cyclostationary source spectra: Fourier coefficients of each device's periodic
-    # instantaneous drain-current noise PSD (thermal level and 1-Hz flicker level).
-    # The m=0 coefficient is the time average; m!=0 coefficients carry the on/off
-    # modulation that makes a switch's noise vanish in its off phase.
-    Sthf = np.fft.fft(Sth, axis=1) / N
-    Sflf = np.fft.fft(Sfl, axis=1) / N
-
-    K = int(max_sideband)
-    nb = 2 * K + 1
-    out_w = topo.output_weights()
-    keep = set(noise_devices) if noise_devices is not None else None
-    src = [(j, idx.get(d), idx.get(s)) for j, (name, d, g, s) in enumerate(devices)
-           if keep is None or name in keep]
-    ks = np.arange(-K, K + 1)
-    # m = k - l index grid for the cyclostationary double sum
-    m_grid = ks[:, None] - ks[None, :]
-
-    def coeff(F, k):
-        return F[k % N]
-
-    out_psd = np.zeros(len(freqs))
-    for fi, f in enumerate(freqs):
-        Y = np.zeros((nb * n, nb * n), dtype=complex)
-        for kr in range(-K, K + 1):
-            om = 2j * np.pi * (f + kr * f_chop)
-            br = (kr + K) * n
-            for kc in range(-K, K + 1):
-                bc = (kc + K) * n
-                Y[br:br + n, bc:bc + n] = coeff(Gf, kr - kc) + om * coeff(Cf, kr - kc)
-        e = np.zeros(nb * n, dtype=complex)
-        base0 = K * n
-        for node, w in out_w.items():
-            e[base0 + idx[node]] = w
-        try:
-            x = np.linalg.solve(Y.T, e)                    # out_sb0 = (Y^{-T} e) . I
-        except np.linalg.LinAlgError:
-            x = np.linalg.lstsq(Y.T, e, rcond=None)[0]
-        # per-sideband flicker frequency (symmetric assignment for cross terms)
-        nu = np.abs(f + ks * f_chop)
-        nu[nu < 1e-9] = 1e-9
-        inv_sqrt_nu = 1.0 / np.sqrt(nu)
-        flick_freq = np.outer(inv_sqrt_nu, inv_sqrt_nu)    # 1/sqrt(nu_k nu_l)
-        s_out = 0.0
-        for j, di, si in src:
-            Z = np.array([(x[(k + K) * n + di] if di is not None else 0.0) -
-                          (x[(k + K) * n + si] if si is not None else 0.0)
-                          for k in range(-K, K + 1)])
-            # S_out += Re sum_{k,l} Z_k Z_l^* (Sth_{k-l} + Sfl_{k-l}/sqrt(nu_k nu_l))
-            Smat = coeff(Sthf[j], m_grid) + coeff(Sflf[j], m_grid) * flick_freq
-            ZZ = np.outer(Z, np.conj(Z))
-            s_out += float(np.real(np.sum(ZZ * Smat)))
-        out_psd[fi] = max(s_out, 0.0)
-
-    if gains is None:
-        if pac_result is None:
-            pac_result = pmos_chopper_pac(sizes, bias, freqs, f_chop,
-                                          pss_result=pss_result, nf=nf)
-        gains = pac_result["gains"]
-    gains = np.asarray(gains, float)
-    irn_psd = out_psd / np.maximum(gains ** 2, 1e-300)
-    return {
-        "freqs": freqs,
-        "f_chop": f_chop,
-        "out_psd": out_psd,
-        "out_asd": np.sqrt(out_psd),
-        "gains": gains,
-        "irn_psd": irn_psd,
-        "irn_uV_band": band_rms(freqs, irn_psd, band[0], band[1]) * 1e6,
-        "out_uV_band": band_rms(freqs, out_psd, band[0], band[1]) * 1e6,
-        "max_sideband": K,
-        "n_period_samples": N,
-        "pss": pss_result,
-        "method": "pss_harmonic_balance_conversion_matrix",
-    }
+    gds_noise_devices = pss_result.get("switch_names", ())
+    return pnoise_solve(
+        sizes, bias, freqs, pss_result=pss_result, fundamental=f_chop,
+        nf=nf, max_sideband=max_sideband, n_period_samples=n_period_samples,
+        band=band, gains=gains, pac_result=pac_result,
+        input_drive={"vip": 0.5, "vin": -0.5},
+        noise_devices=noise_devices, gds_noise_devices=gds_noise_devices,
+        switch_noise_conductance_gated=switch_noise_conductance_gated,
+        cache_linearization=cache_linearization,
+        lti_fast_path=lti_fast_path,
+    )
 
 
 def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,

@@ -5,10 +5,12 @@ Includes ALL transistors + load capacitors.
 """
 import numpy as np
 try:
+    from .numba_kernels import terminal_derivatives_numba
     from .pmos_tft_model import PMOS_TFT
     from .topology import AFE_TOPO
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
+    from numba_kernels import terminal_derivatives_numba
     from pmos_tft_model import PMOS_TFT
     from topology import AFE_TOPO
     from compiled_topology import CompiledTopology
@@ -213,9 +215,31 @@ def get_ss_params(W, L, Vs, Vd, Vg, corner=None, nf=1, dev_inst=None):
     """
     t = dev_inst if dev_inst is not None else PMOS_TFT(W=W, L=L, NF=nf, **(corner or {}))
     h = 1e-3
+    if terminal_derivatives_numba is not None:
+        try:
+            s1, d1 = t.get_op(Vs, Vd, Vg)
+            _, _, I_d1_d, _, _ = t._eval_currents(Vs, Vd, Vg, s1, d1)
+            Idc0 = -I_d1_d
+            if abs(Idc0) < 1e-10:
+                raise FloatingPointError("small-current finite-difference fallback")
+            ok, gm_neg, gds_neg = terminal_derivatives_numba(
+                Vs, Vd, Vg, s1, d1, True, True, False, h, 1e-6,
+                t.Vfb, t.Vss, t.Lc, t.lambda_, t._contact_scale,
+                t._channel_exponent, t._current_scale, t._inv_Rleak)
+            if ok and np.isfinite(gm_neg) and np.isfinite(gds_neg):
+                gm = -gm_neg
+                gds = -gds_neg
+            else:
+                raise FloatingPointError("terminal derivative fallback")
+            Cgss, Cgdd = t._capacitances_from_op(Vs, Vd, Vg, s1, d1)
+            Ich = t._eval_channel(Vs, Vd, Vg, s1, d1)["Ich"]
+            return {"gm": gm, "gds": gds, "Cgs": Cgss, "Cgd": Cgdd, "Ich": Ich}
+        except Exception:
+            pass
+
     try:
         Id = lambda vs, vd, vg: t.get_Idc(vs, vd, vg)
-        gm  = (Id(Vs, Vd, Vg + h) - Id(Vs, Vd, Vg - h)) / (2 * h)
+        gm = (Id(Vs, Vd, Vg + h) - Id(Vs, Vd, Vg - h)) / (2 * h)
         gds = (Id(Vs, Vd + h, Vg) - Id(Vs, Vd - h, Vg)) / (2 * h)
         Cgss, Cgdd = t.get_capacitances(Vs, Vd, Vg)
         s1, d1 = t.get_op(Vs, Vd, Vg)

@@ -69,3 +69,48 @@ def test_pss_constant_passive_network_uses_dc_seed():
     assert result["nfail"] == 0
     assert result["x0"][0] == pytest.approx(2.5, rel=1e-9)
     assert result["residual_norm"] < 1e-10
+
+
+def test_pss_reuses_broyden_jacobian_after_first_fd_build(monkeypatch):
+    period = 1e-3
+    t = np.linspace(0.0, period, 5)
+    topo = Topology(
+        solved=["A", "B"],
+        devices=[],
+        rails={"GND": 0.0},
+        outputs=("A",),
+    )
+    root = np.array([0.3, -0.2])
+    amat = np.array([[0.35, 0.08], [-0.04, 0.28]])
+
+    def fake_transient(_sizes, _bias, tgrid, V0=None, **_kwargs):
+        x0 = np.asarray(V0, float)
+        dx = x0 - root
+        residual = amat @ dx + 0.08 * dx * dx
+        x1 = x0 + residual
+        nodes = {
+            "A": np.linspace(x0[0], x1[0], len(tgrid)),
+            "B": np.linspace(x0[1], x1[1], len(tgrid)),
+        }
+        return {"t": tgrid, "nodes": nodes, "output": nodes["A"], "vout": nodes["A"],
+                "nfail": 0}
+
+    monkeypatch.setattr("core.pss_solver.transient", fake_transient)
+
+    common = dict(
+        topo=topo,
+        tgrid=t,
+        V0=np.array([0.0, 0.0]),
+        residual_tol=1e-30,
+        max_shooting_iters=2,
+        fd_step=1e-5,
+        rail_margin=None,
+    )
+    reused = pss_solve({}, {}, period, jacobian_reuse=True, **common)
+    rebuilt = pss_solve({}, {}, period, jacobian_reuse=False, **common)
+
+    assert reused["shooting_jacobian_evals"] == 1
+    assert reused["shooting_jacobian_reuses"] == 1
+    assert rebuilt["shooting_jacobian_evals"] == 2
+    assert reused["shooting_period_runs"] < rebuilt["shooting_period_runs"]
+    assert reused["residual_norm"] < 1e-3

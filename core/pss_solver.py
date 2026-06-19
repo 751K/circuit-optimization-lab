@@ -117,6 +117,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               fallback_full_jacobian=False, fallback_least_squares=False,
               fallback_tol=1e-9, signed_devices=None, residual_tol=1e-7,
               max_shooting_iters=8, fd_step=1e-5, min_damping=1.0 / 64.0,
+              jacobian_reuse=True, jacobian_rebuild_interval=0,
               rail_margin=0.5, check_periodic_inputs=True,
               input_periodic_tol=1e-9, profile=False, edge_mask=None):
     """Solve periodic steady state with transient shooting.
@@ -164,7 +165,11 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     x = _initial_vector(sizes, bias, topo, nf, V0)
     x = _rail_clip(x, topo, bias, rail_margin)
 
+    period_runs = 0
+    shooting_jacobian_evals = 0
+    shooting_jacobian_reuses = 0
     for _ in range(max(0, int(tstab_periods))):
+        period_runs += 1
         tr_stab = transient(sizes, bias, tgrid, V0=x, profile=False,
                             **transient_kwargs)
         x = _rail_clip(_end_vector(tr_stab, topo), topo, bias, rail_margin)
@@ -172,6 +177,8 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     history = []
 
     def run_period(x0):
+        nonlocal period_runs
+        period_runs += 1
         tr = transient(sizes, bias, tgrid, V0=x0, profile=False,
                        **transient_kwargs)
         x_end = _end_vector(tr, topo)
@@ -199,58 +206,110 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
 
     converged = (nfail == 0 and norm <= float(residual_tol))
     iterations = 0
+    jac = None
+    jac_age = 0
+    jacobian_reuse = bool(jacobian_reuse)
+    jacobian_rebuild_interval = max(0, int(jacobian_rebuild_interval))
+
+    def build_shooting_jacobian(x_base, residual_base):
+        nonlocal shooting_jacobian_evals, jac_age
+        shooting_jacobian_evals += 1
+        jac_age = 0
+        out = np.empty((topo.n, topo.n), dtype=float)
+        for col in range(topo.n):
+            h = float(fd_step) * max(1.0, abs(float(x_base[col])))
+            if h == 0.0:
+                h = float(fd_step)
+            xp = x_base.copy()
+            xp[col] += h
+            xp = _rail_clip(xp, topo, bias, rail_margin)
+            delta = float(xp[col] - x_base[col])
+            if abs(delta) < 1e-30:
+                xp = x_base.copy()
+                xp[col] -= h
+                xp = _rail_clip(xp, topo, bias, rail_margin)
+                delta = float(xp[col] - x_base[col])
+            if abs(delta) < 1e-30:
+                out[:, col] = 0.0
+                continue
+            _, _, rp, _, _ = run_period(xp)
+            out[:, col] = (rp - residual_base) / delta
+        return out
+
+    def update_broyden(jacobian, step, residual_delta):
+        nonlocal jac_age
+        denom = float(np.dot(step, step))
+        if denom <= 1e-30 or not np.isfinite(denom):
+            jac_age = 0
+            return None
+        correction = residual_delta - jacobian @ step
+        if not np.all(np.isfinite(correction)):
+            jac_age = 0
+            return None
+        jac_age += 1
+        return jacobian + np.outer(correction, step) / denom
+
     for iteration in range(1, int(max_shooting_iters) + 1):
         if converged:
             break
         iterations = iteration
 
-        jac = np.empty((topo.n, topo.n), dtype=float)
-        for col in range(topo.n):
-            h = float(fd_step) * max(1.0, abs(float(x[col])))
-            if h == 0.0:
-                h = float(fd_step)
-            xp = x.copy()
-            xp[col] += h
-            xp = _rail_clip(xp, topo, bias, rail_margin)
-            delta = float(xp[col] - x[col])
-            if abs(delta) < 1e-30:
-                xp = x.copy()
-                xp[col] -= h
-                xp = _rail_clip(xp, topo, bias, rail_margin)
-                delta = float(xp[col] - x[col])
-            if abs(delta) < 1e-30:
-                jac[:, col] = 0.0
-                continue
-            _, _, rp, _, _ = run_period(xp)
-            jac[:, col] = (rp - residual) / delta
-
-        try:
-            dx = np.linalg.solve(jac, -residual)
-        except np.linalg.LinAlgError:
-            dx = np.linalg.lstsq(jac, -residual, rcond=None)[0]
-
         accepted = None
-        alpha = 1.0
-        current_score = _residual_score(norm, nfail)
-        while alpha >= float(min_damping):
-            xt = _rail_clip(x + alpha * dx, topo, bias, rail_margin)
-            tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt)
-            score_t = _residual_score(norm_t, nfail_t)
-            if score_t < current_score or norm_t <= float(residual_tol):
-                accepted = (alpha, xt, tr_t, x_end_t, residual_t, norm_t, nfail_t,
-                            score_t)
+        jacobian_kind = None
+        rebuilt_after_reuse_failure = False
+        old_x = x.copy()
+        old_residual = residual.copy()
+        for jac_attempt in range(2):
+            rebuild = (
+                jac is None or
+                not jacobian_reuse or
+                (jacobian_rebuild_interval > 0 and
+                 jac_age >= jacobian_rebuild_interval)
+            )
+            used_reused_jac = False
+            if rebuild:
+                jac = build_shooting_jacobian(x, residual)
+                jacobian_kind = "finite_difference"
+            else:
+                shooting_jacobian_reuses += 1
+                used_reused_jac = True
+                jacobian_kind = "broyden"
+
+            try:
+                dx = np.linalg.solve(jac, -residual)
+            except np.linalg.LinAlgError:
+                dx = np.linalg.lstsq(jac, -residual, rcond=None)[0]
+
+            alpha = 1.0
+            current_score = _residual_score(norm, nfail)
+            while alpha >= float(min_damping):
+                xt = _rail_clip(x + alpha * dx, topo, bias, rail_margin)
+                tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt)
+                score_t = _residual_score(norm_t, nfail_t)
+                if score_t < current_score or norm_t <= float(residual_tol):
+                    accepted = (alpha, xt, tr_t, x_end_t, residual_t, norm_t,
+                                nfail_t, score_t)
+                    break
+                if score_t < best["score"]:
+                    best = {
+                        "x0": xt.copy(),
+                        "x_end": x_end_t.copy(),
+                        "residual": residual_t.copy(),
+                        "residual_norm": norm_t,
+                        "nfail": nfail_t,
+                        "transient": tr_t,
+                        "score": score_t,
+                    }
+                alpha *= 0.5
+
+            if accepted is not None:
                 break
-            if score_t < best["score"]:
-                best = {
-                    "x0": xt.copy(),
-                    "x_end": x_end_t.copy(),
-                    "residual": residual_t.copy(),
-                    "residual_norm": norm_t,
-                    "nfail": nfail_t,
-                    "transient": tr_t,
-                    "score": score_t,
-                }
-            alpha *= 0.5
+            if used_reused_jac and jac_attempt == 0:
+                jac = None
+                jac_age = 0
+                rebuilt_after_reuse_failure = True
+                continue
+            break
 
         if accepted is None:
             history.append({
@@ -258,6 +317,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                 "residual_norm": norm,
                 "nfail": nfail,
                 "accepted_alpha": 0.0,
+                "jacobian": jacobian_kind,
                 "stalled": True,
             })
             break
@@ -273,11 +333,18 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                 "transient": tr,
                 "score": score,
             }
+        if jacobian_reuse:
+            jac = update_broyden(jac, x - old_x, residual - old_residual)
+        else:
+            jac = None
+            jac_age = 0
         history.append({
             "iter": iteration,
             "residual_norm": norm,
             "nfail": nfail,
             "accepted_alpha": float(alpha),
+            "jacobian": jacobian_kind,
+            "rebuilt_after_reuse_failure": bool(rebuilt_after_reuse_failure),
         })
         converged = (nfail == 0 and norm <= float(residual_tol))
 
@@ -291,6 +358,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         converged = (nfail == 0 and norm <= float(residual_tol))
 
     if profile:
+        period_runs += 1
         tr = transient(sizes, bias, tgrid, V0=x, profile=True, **transient_kwargs)
         x_end = _end_vector(tr, topo)
         residual = x_end - x
@@ -309,7 +377,19 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         "residual_tol": float(residual_tol),
         "shooting_iters": int(iterations),
         "shooting_history": history,
+        "shooting_period_runs": int(period_runs),
+        "shooting_jacobian_evals": int(shooting_jacobian_evals),
+        "shooting_jacobian_reuses": int(shooting_jacobian_reuses),
+        "shooting_jacobian_reuse_enabled": bool(jacobian_reuse),
+        "shooting_jacobian_rebuild_interval": int(jacobian_rebuild_interval),
         "nfail": int(nfail),
         "topology": topo,
+        "inputs": {key: val.copy() for key, val in inputs.items()},
+        "node_inputs": dict(node_inputs or {}),
+        "current_inputs": tuple(current_inputs or ()),
+        "signed_devices": tuple(signed_devices or ()),
+        "transient_max_step": max_step,
+        "transient_flat_max_step": flat_max_step,
+        "rail_margin": rail_margin,
     })
     return result

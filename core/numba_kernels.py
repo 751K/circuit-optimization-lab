@@ -1108,7 +1108,8 @@ def _transient_newton_reuse_impl(
 
 def _transient_solve_grid_impl(
         V0, tgrid, input_values, edge_mask, profile_enabled,
-        max_step, flat_max_step, n, maxit, step_limit, vtol,
+        max_step, flat_max_step, max_retry_subdivisions,
+        n, maxit, step_limit, vtol,
         gmin, fallback_accept, fallback_tol, HH,
         dev_d_kind, dev_d_ref, dev_d_val,
         dev_g_kind, dev_g_ref, dev_g_val,
@@ -1136,6 +1137,8 @@ def _transient_solve_grid_impl(
     input_end = np.empty(ninputs)
     in0 = np.empty(ninputs)
     in1 = np.empty(ninputs)
+    piece_in0 = np.empty(ninputs)
+    piece_in1 = np.empty(ninputs)
     Vp = V0.copy()
     Vwork = np.empty(n)
     R = np.empty(n)
@@ -1148,6 +1151,7 @@ def _transient_solve_grid_impl(
     nsubsteps = 0
 
     for k in range(1, N):
+        nsubsteps_before_interval = nsubsteps
         h = tgrid[k] - tgrid[k - 1]
         if h <= 0.0:
             return False, Vhist, nsubsteps, k, profile_stats
@@ -1171,10 +1175,13 @@ def _transient_solve_grid_impl(
         interval_edge = False
         if edge_mask.shape[0] == N:
             interval_edge = bool(edge_mask[k] or edge_mask[k - 1])
+        interval_failed = False
         for j in range(pieces):
             frac = (j + 1.0) / pieces
             for ii in range(ninputs):
                 in1[ii] = input_start[ii] + (input_end[ii] - input_start[ii]) * frac
+                piece_in0[ii] = in0[ii]
+                piece_in1[ii] = in1[ii]
             iters, ok, usable = _transient_newton_reuse_impl(
                 Vp, Vp, in1, in0, hpiece, n, maxit, step_limit, vtol,
                 gmin, fallback_accept, fallback_tol, HH,
@@ -1196,29 +1203,173 @@ def _transient_solve_grid_impl(
                 clip_lo, clip_hi,
                 Vwork, R, J, prev_vs, prev_vd, prev_vg, cap_prev_dv,
                 profile_enabled, profile_stats)
-            nsubsteps += 1
-            if profile_enabled:
-                profile_stats[0] += iters
-                if interval_edge:
-                    profile_stats[6] += 1.0
-                    profile_stats[8] += iters
-                else:
-                    profile_stats[7] += 1.0
-                    profile_stats[9] += iters
             if not ok:
-                if profile_enabled:
+                retry_count = 1
+                for _retry_pow in range(max_retry_subdivisions):
+                    retry_count *= 2
+                if retry_count <= 1:
                     profile_stats[10] += 1.0
-                return False, Vhist, nsubsteps, k, profile_stats
-            for i in range(n):
-                Vp[i] = Vwork[i]
-            for ii in range(ninputs):
-                in0[ii] = in1[ii]
+                    if fallback_accept:
+                        if profile_enabled:
+                            profile_stats[0] += iters
+                        return False, Vhist, nsubsteps_before_interval, k, profile_stats
+                    if profile_enabled:
+                        profile_stats[0] += iters
+                    interval_failed = True
+                    break
+                if profile_enabled:
+                    profile_stats[0] += iters
+                retry_ok = True
+                for rr in range(retry_count):
+                    retry_frac = (rr + 1.0) / retry_count
+                    for ii in range(ninputs):
+                        in1[ii] = (
+                            piece_in0[ii] +
+                            (piece_in1[ii] - piece_in0[ii]) * retry_frac
+                        )
+                    iters_r, ok_r, usable_r = _transient_newton_reuse_impl(
+                        Vp, Vp, in1, in0, hpiece / retry_count,
+                        n, maxit, step_limit, vtol, gmin, fallback_accept,
+                        fallback_tol, HH,
+                        dev_d_kind, dev_d_ref, dev_d_val,
+                        dev_g_kind, dev_g_ref, dev_g_val,
+                        dev_s_kind, dev_s_ref, dev_s_val,
+                        dev_di, dev_gi, dev_si, dev_use_abs,
+                        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale,
+                        p_exponent, p_current_scale, p_inv_Rleak,
+                        p_two_over_pi, p_cap_cgs1, p_cap_cgd1,
+                        p_cap_half_wl_ci, p_cap_cgs3_base, p_cap_cgd3_base,
+                        p_k1, p_gate_leak_g,
+                        op_cache_valid, op_cache_vs1, op_cache_vd1,
+                        res_a_kind, res_a_ref, res_a_val,
+                        res_b_kind, res_b_ref, res_b_val, res_ai, res_bi,
+                        res_g,
+                        cap_a_kind, cap_a_ref, cap_a_val,
+                        cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi,
+                        cap_value,
+                        isrc_pi, isrc_qi, isrc_value,
+                        dyn_pi, dyn_qi, dyn_input_idx,
+                        clip_lo, clip_hi,
+                        Vwork, R, J, prev_vs, prev_vd, prev_vg,
+                        cap_prev_dv, profile_enabled, profile_stats)
+                    if profile_enabled:
+                        profile_stats[0] += iters_r
+                    if not ok_r:
+                        retry_ok = False
+                        profile_stats[10] += 1.0
+                        break
+                    nsubsteps += 1
+                    if profile_enabled:
+                        if interval_edge:
+                            profile_stats[6] += 1.0
+                            profile_stats[8] += iters_r
+                        else:
+                            profile_stats[7] += 1.0
+                            profile_stats[9] += iters_r
+                    for i in range(n):
+                        Vp[i] = Vwork[i]
+                    for ii in range(ninputs):
+                        in0[ii] = in1[ii]
+                if not retry_ok:
+                    if fallback_accept:
+                        return False, Vhist, nsubsteps_before_interval, k, profile_stats
+                    interval_failed = True
+                    break
+            else:
+                nsubsteps += 1
+                if profile_enabled:
+                    profile_stats[0] += iters
+                    if interval_edge:
+                        profile_stats[6] += 1.0
+                        profile_stats[8] += iters
+                    else:
+                        profile_stats[7] += 1.0
+                        profile_stats[9] += iters
+                for i in range(n):
+                    Vp[i] = Vwork[i]
+                for ii in range(ninputs):
+                    in0[ii] = in1[ii]
+        if interval_failed:
+            # Match the Python fallback's non-throwing transient behavior for
+            # non-robust mode: keep the last accepted state, count the failed
+            # interval, and continue the trajectory.
+            profile_stats[13] += 1.0
         for i in range(n):
             Vhist[k, i] = Vp[i]
     if profile_enabled:
         profile_stats[11] = N - 1
         profile_stats[12] = nsubsteps
     return True, Vhist, nsubsteps, -1, profile_stats
+
+
+def _pnoise_hb_blocks_impl(Gf, Cf, K, fundamental):
+    N = Gf.shape[0]
+    n = Gf.shape[1]
+    nb = 2 * K + 1
+    size = nb * n
+    Y_base = np.zeros((size, size), dtype=np.complex128)
+    C_block = np.zeros((size, size), dtype=np.complex128)
+    for kr_i in range(nb):
+        kr = kr_i - K
+        row_omega = 2.0j * math.pi * kr * fundamental
+        br = kr_i * n
+        for kc_i in range(nb):
+            kc = kc_i - K
+            bc = kc_i * n
+            coeff_idx = (kr - kc) % N
+            for r in range(n):
+                rr = br + r
+                for c in range(n):
+                    cc = bc + c
+                    c_coeff = Cf[coeff_idx, r, c]
+                    Y_base[rr, cc] = Gf[coeff_idx, r, c] + row_omega * c_coeff
+                    C_block[rr, cc] = c_coeff
+    return Y_base, C_block
+
+
+def _pnoise_fold_psd_impl(adjs, freqs, K, fundamental,
+                          p_indices, q_indices, sth_grids, sfl_grids):
+    nfreq = freqs.shape[0]
+    nsrc = p_indices.shape[0]
+    nb = 2 * K + 1
+    out_psd = np.zeros(nfreq, dtype=np.float64)
+    dev_psd = np.zeros((nsrc, nfreq), dtype=np.float64)
+    inv_sqrt_nu = np.empty(nb, dtype=np.float64)
+    for fi in range(nfreq):
+        freq = freqs[fi]
+        for r in range(nb):
+            nu = abs(freq + (r - K) * fundamental)
+            if nu < 1e-9:
+                nu = 1e-9
+            inv_sqrt_nu[r] = 1.0 / math.sqrt(nu)
+
+        adj = adjs[fi]
+        for si in range(nsrc):
+            contrib = 0.0
+            for r in range(nb):
+                pr = p_indices[si, r]
+                qr = q_indices[si, r]
+                zr = 0.0j
+                if pr >= 0:
+                    zr += adj[pr]
+                if qr >= 0:
+                    zr -= adj[qr]
+                for c in range(nb):
+                    pc = p_indices[si, c]
+                    qc = q_indices[si, c]
+                    zc = 0.0j
+                    if pc >= 0:
+                        zc += adj[pc]
+                    if qc >= 0:
+                        zc -= adj[qc]
+                    smat = (sth_grids[si, r, c] +
+                            sfl_grids[si, r, c] * inv_sqrt_nu[r] * inv_sqrt_nu[c])
+                    contrib += (zr * smat * zc.conjugate()).real
+            if contrib < 0.0:
+                contrib = 0.0
+            dev_psd[si, fi] = contrib
+            out_psd[fi] += contrib
+    return out_psd, dev_psd
 
 
 if NUMBA_AVAILABLE:
@@ -1252,12 +1403,16 @@ if NUMBA_AVAILABLE:
     _transient_newton_impl = njit(cache=False)(_transient_newton_impl)
     _transient_newton_reuse_impl = njit(cache=False)(_transient_newton_reuse_impl)
     _transient_solve_grid_impl = njit(cache=False)(_transient_solve_grid_impl)
+    _pnoise_hb_blocks_impl = njit(cache=False)(_pnoise_hb_blocks_impl)
+    _pnoise_fold_psd_impl = njit(cache=False)(_pnoise_fold_psd_impl)
     eval_currents_numba = _eval_currents_impl
     newton_internal_numba = _newton_internal_impl
     capacitances_numba = _capacitances_impl
     terminal_derivatives_numba = _terminal_derivatives_impl
     transient_newton_numba = _transient_newton_impl
     transient_solve_grid_numba = _transient_solve_grid_impl
+    pnoise_hb_blocks_numba = _pnoise_hb_blocks_impl
+    pnoise_fold_psd_numba = _pnoise_fold_psd_impl
 else:
     eval_currents_numba = None
     newton_internal_numba = None
@@ -1265,3 +1420,5 @@ else:
     terminal_derivatives_numba = None
     transient_newton_numba = None
     transient_solve_grid_numba = None
+    pnoise_hb_blocks_numba = None
+    pnoise_fold_psd_numba = None

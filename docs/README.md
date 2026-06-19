@@ -30,12 +30,17 @@ python3 -m pip install -r requirements.txt
 # 2. Optional: Numba acceleration (10-50× faster transient)
 python3 -m pip install -r requirements-numba.txt
 
-# 3. Verify — run the AFE benchmark
+# 3. Run your first circuit — one command
+python3 -m core examples/periodic_rc.json
+
+# 4. Verify — run the AFE benchmark
 python3 -m benchmarks.bench_afe --warm-runs 1 --skip-noise
 ```
 
-Expected output: three timing lines (`ac121`, `noise121`, `tran200`) in the
-millisecond range. If you see numbers, everything works.
+The first command above runs AC, noise, PSS, PAC, and PNoise on a passive RC
+lowpass and prints a summary. No Python scripting needed. If it prints numbers,
+everything works. From there, swap in any circuit JSON or use
+`-a ac,noise` to pick specific analyses.
 
 ### How the code is organized
 
@@ -167,6 +172,22 @@ The PSS→PAC→PNoise pipeline is the local equivalent of Cadence Spectre
 costs `n_state+2` transient runs per frequency). PNoise uses harmonic balance
 on the PSS orbit — it's a first-principles LPTV noise solve with no calibration
 fudge factors.
+`pmos_chopper_pac` / `pmos_chopper_pnoise` are chopper compatibility wrappers;
+generic periodic topologies can call `core.pac_solver.pac_solve` and
+`core.pnoise_solver.pnoise_solve` directly using the orbit returned by
+`pss_solve` plus an `input_drive` mapping.
+
+**JSON dispatch** — when the circuit JSON has `periodic` and `analyses` blocks,
+run everything with one call:
+
+```python
+from core.analysis_dispatch import run_analysis_suite
+from core.circuit_loader import load_circuit_json
+
+spec = load_circuit_json("examples/periodic_rc.json")
+results = run_analysis_suite(spec)
+# results["pss"], results["pac"], results["pnoise"] — all ready
+```
 
 ### 4. Design-Space Exploration / Optimization
 
@@ -259,18 +280,20 @@ Key top-level fields:
 |-------|----------|---------|
 | `solved` | yes | Nodes whose voltages the solver must find |
 | `rails` | yes | Fixed-voltage nodes: `{"VDD": 40.0, "GND": 0.0, ...}` |
-| `devices` | yes | PMOS transistors: `{"name": "M1", "drain": "OUT", "gate": "IN", "source": "VDD", "W": 2000, "L": 80, "NF": 1}` |
+| `devices` | yes | PMOS transistors; passive circuits may use an empty array `[]` |
 | `bias` | yes | DC voltage at every rail node: `{"VDD": 40.0, "VIN": 30.0, ...}` |
 | `outputs` | yes | Which node(s) to measure gain/noise at |
 | `input_drives` | — | Where to inject the AC small-signal stimulus for gain calculation |
 | `load_caps` | — | Load capacitance per output node (F): `{"OUT": 1e-12}` |
 | `resistors` | — | `[name, node_a, node_b, R_ohm]` |
 | `capacitors` | — | `[name, node_a, node_b, C_farad]` |
-| `isources` | — | Ideal DC current sources: `[name, nplus, nminus, I_amp]` |
+| `current_sources` | — | Ideal DC current sources: `[name, nplus, nminus, I_amp]` |
 | `nf` | — | Global NF (fingers) applied to all devices; overridden by per-device `NF` |
 | `dc_guesses` | — | Initial voltage guesses for DC convergence on tricky circuits |
 | `transient_inputs` | — | Maps input waveform names to the nodes they drive |
 | `ac_drives` | — | Like `input_drives` but drives a *node* rather than a device gate (used for testbench front-ends) |
+| `periodic` | — | Large-signal periodic input description for PSS/PAC/PNoise and periodic transient |
+| `analyses` | — | `run_analysis_suite()` dispatch config for `ac/noise/transient/pss/pac/pnoise` |
 | `aliases` | — | Shortcuts so tools/sweeps can find key nodes by name (e.g. `"VOP"`, `"VON"`) |
 | `explore` | — | Design-space exploration config (variables, constraints, objectives) |
 
@@ -323,7 +346,8 @@ modern Mac (Numba enabled):
 |------|-----------|
 | `examples/afe_explore.json` | The locked 10-transistor AFE design with sizes, bias, NF, and explore sweep config |
 | `examples/single_stage.json` | Minimal single-transistor common-source stage — best starting point for a new circuit |
-| `examples/resistor_load_stage.json` | Single transistor with resistive load, demoing `resistors` and `isources` fields |
+| `examples/resistor_load_stage.json` | Single transistor with resistive load, demoing `resistors` and `current_sources` fields |
+| `examples/periodic_rc.json` | Passive RC lowpass with PSS/PAC/PNoise dispatch — simplest end-to-end periodic example |
 | `examples/afe_testbench.py` | Full testbench: dry-electrode front-end (R∥C network) → AFE core → AC + noise + transient |
 | `examples/mc_mismatch.py` | Monte Carlo mismatch driver: corner table + 3-corner MC figure |
 
@@ -350,7 +374,17 @@ check that all input waveforms are periodic with the same period.
 
 **PNoise is slow.**
 Reduce `max_sideband` (odd harmonics dominate the fold; 5–7 is often enough)
-or `n_period_samples` (trade time-domain resolution for speed).
+or `n_period_samples` (trade time-domain resolution for speed). Reuse the same
+`pss_result` when sweeping output bands or repeated frequency grids: PNoise now
+caches LPTV linearization, HB blocks, and identical-frequency adjoint solves.
+With Numba installed, large HB block assembly, noise folding, and gm/gds
+linearization also use compiled kernels.
+
+**PSS / periodic transient is slow.**
+For chopper PSS, use the non-robust transient mode once convergence behavior has
+been validated: `fallback_least_squares=False`. That keeps the full period in
+the Numba grid solver and records failed intervals without rerunning the period
+in Python.
 
 ---
 

@@ -19,7 +19,7 @@ The current solver stack covers:
 - Cadence/Spectre-oriented validation for operating point, AC, noise, transient,
   PSS, PAC, and PNoise behavior.
 
-The implementation is intentionally small and self-contained. It currently consists of thirteen Python source files under `core/` (excluding `__init__.py`).
+The implementation is intentionally small and self-contained. It currently consists of sixteen Python source files under `core/` (excluding `__init__.py`).
 
 ## File Structure
 
@@ -35,6 +35,9 @@ core/
   noise_solver.py      Noise propagation and input-referred noise analysis.
   transient_solver.py  Time-domain transient solver.
   pss_solver.py        Transient-shooting periodic steady-state solver.
+  pac_solver.py        Generic PSS-assisted PAC solver.
+  pnoise_solver.py     Generic harmonic-balance PNoise solver.
+  analysis_dispatch.py JSON analysis-configuration dispatch entry point.
   chopper.py           Ideal and PMOS-switch differential chopper analyses.
   explore.py           Design-space exploration / optimization driver.
   corners.py           Process corners, mismatch MC, and latch detection.
@@ -53,7 +56,10 @@ ac_solver.py         <- topology, compiled_topology, ac_mna, pmos_tft_model
 noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, pmos_tft_model
 transient_solver.py  <- ac_solver, compiled_topology, topology, pmos_tft_model
 pss_solver.py        <- ac_solver, topology, transient_solver
-chopper.py           <- noise_solver, pss_solver, topology
+pac_solver.py        <- transient_solver
+pnoise_solver.py     <- ac_solver, noise_solver, pac_solver, pmos_tft_model, ac_mna
+analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader
+chopper.py           <- noise_solver, pss_solver, pac_solver, pnoise_solver, topology
 explore.py           <- ac_solver, noise_solver, pmos_tft_model, topology, circuit_loader
 corners.py           <- ac_solver, noise_solver, topology
 ```
@@ -121,7 +127,8 @@ long-running workloads, but the general solver path now also uses Numba
 automatically when it is available.
 
 At present, the accelerated paths are PMOS current evaluation, internal-node
-Newton iterations, bias-dependent capacitance evaluation, terminal derivatives,
+Newton iterations, bias-dependent capacitance evaluation, AC/PNoise
+terminal-derivative small-signal parameters, PNoise HB block assembly/noise fold,
 and the transient Newton inner loop: topology token lookup, PMOS state solve,
 residual/Jacobian stamping, and the small dense Newton solve. The dense Newton
 solve uses an in-place `A*x = -R` path to avoid avoidable per-iteration copies.
@@ -189,22 +196,21 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
 - `pmos_chopper_pss(...)` wraps that same hard-switched topology in the generic
   shooting PSS solver and returns one periodic orbit for the selected clock
   period. This is the foundation for native PAC/PNoise.
-- `pmos_chopper_pac(...)` is a PSS-assisted finite-difference PAC solver.
-  It finite-differences the state transition matrix Φ and the complex input
-  forcing directly on the nonlinear transient engine, then solves the
-  quasi-periodic boundary equation `(Φ-γI)dx0=-b`. The output envelope's DC
-  Fourier coefficient gives the sideband-0 PAC gain. Cost is `n_state+2`
-  one-period transient runs per frequency.
-- `pmos_chopper_pnoise(...)` is a first-principles LPTV periodic-noise solver
-  using harmonic balance on the PSS orbit. It samples the periodic small-signal
-  G(t)/C(t) matrices at N points along the orbit, FFTs them to frequency-domain
-  Fourier coefficients, assembles the `nb×nb` conversion matrix
-  `Y[kr,kc] = G_{kr-kc} + jω·C_{kr-kc}`, and solves one adjoint system per
-  baseband frequency to obtain the transimpedance Z_{j,k} from each device
-  noise source at every sideband to the baseband output. Cyclostationary device
-  noise (thermal + flicker, evaluated on the PSS orbit) is folded as
-  `S_out = Σ_j Σ_k |Z_{j,k}|² · S_j(|f + k·f_chop|)`. Unlike
-  `pmos_chopper_lptv_analysis`, this needs no Cadence calibration factor.
+- `pmos_chopper_pac(...)` is a compatibility wrapper over the generic
+  `core.pac_solver.pac_solve(...)`. The generic PAC kernel finite-differences
+  the state transition matrix Φ and the complex input forcing around a PSS
+  orbit, then solves `(Φ-γI)dx0=-b`. The output envelope's DC Fourier coefficient
+  gives sideband-0 PAC gain. For true LPTV cases, cost is one `n_state`-period
+  state linearization plus two input-quadrature period runs per frequency. Static
+  PSS orbits automatically reduce to ordinary `ac_solve`, avoiding PAC transient
+  runs.
+- `pmos_chopper_pnoise(...)` is a compatibility wrapper over the generic
+  `core.pnoise_solver.pnoise_solve(...)`. The generic PNoise kernel uses
+  harmonic balance on a PSS orbit: sample periodic small-signal G(t)/C(t), FFT to
+  Fourier coefficients, assemble `Y[kr,kc] = G_{kr-kc} + jω·C_{kr-kc}`, solve one
+  adjoint system per baseband frequency, and fold cyclostationary device/resistor
+  noise to the baseband output. Unlike `pmos_chopper_lptv_analysis`, this needs
+  no Cadence calibration factor.
 
 The PMOS-switch sideband path was initially validated with
 `pmos_chopper_lptv_analysis` paired with Cadence calibration constants. The
@@ -223,15 +229,50 @@ engine:
 - Integrates one period with `transient(...)` and solves `x(T)-x(0)=0`.
 - Uses the DC operating point as the default seed, with optional stabilization
   periods before shooting.
-- Builds the shooting Jacobian by finite-differencing the one-period map. This
-  keeps the first implementation topology-generic and exactly aligned with the
-  transient discretization/device model.
+- Builds the first shooting Jacobian by finite-differencing the one-period map,
+  then reuses it by default with a Broyden secant update. This removes the
+  repeated `n_state` extra period transients on later shooting iterations while
+  still recomputing the true one-period residual for every accepted step. Use
+  `jacobian_reuse=False` to rebuild the full finite-difference Jacobian every
+  iteration, or set `jacobian_rebuild_interval` for periodic rebuilds.
 - Returns the one-period trajectory, `x0`, `x_end`, residual vector/norm,
-  convergence flag, and iteration history.
+  convergence flag, iteration history, and performance counters such as
+  `shooting_period_runs`, `shooting_jacobian_evals`, and
+  `shooting_jacobian_reuses`.
 
-This is a PSS operating-orbit solver that feeds into the native
-PAC and PNoise analyses in :func:`pmos_chopper_pac` and
-:func:`pmos_chopper_pnoise`.
+This PSS orbit can feed the generic `pac_solve` and `pnoise_solve` kernels
+directly. `pmos_chopper_pac` / `pmos_chopper_pnoise` are wrappers that map the
+chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
+
+### `pac_solver.py`
+
+- `pac_solve(sizes, bias, freqs, pss_result=..., input_drive=...)`
+- Circuit-generic: it only requires the PSS result to carry `topology`, `t`,
+  `nodes`, `x0`, `x_end`, `output`, and periodic input-waveform metadata.
+- `input_drive` maps small-signal complex amplitudes to transient input keys,
+  e.g. `{"vip": 0.5, "vin": -0.5}` for differential input or `{"vin": 1.0}`
+  for single-ended input.
+- Two performance paths are enabled by default: static PSS orbits use an LTI
+  `ac_solve` fast path, while true LPTV finite-difference state linearization and
+  per-frequency input forcing are cached on `pss_result` for repeated PAC/PNoise
+  calls. Results include counters such as `pac_period_runs`,
+  `pac_state_cache_hit`, and `pac_input_cache_hits`.
+
+### `pnoise_solver.py`
+
+- `pnoise_solve(sizes, bias, freqs, pss_result=..., fundamental=...)`
+- Uses generic `Topology` device/resistor/capacitor stamps. PMOS device noise is
+  sampled along the PSS orbit; resistor thermal noise is folded as a stationary
+  source.
+- Static PSS orbits use the same LTI `noise_analysis` path as normal noise
+  analysis. True LPTV runs cache sampled `G(t)/C(t)`, HB blocks, and
+  identical-frequency adjoint solves on `pss_result`.
+- With Numba available, large LPTV PNoise runs use compiled HB block assembly
+  and compiled `freq × source × sideband²` noise folding. `get_ss_params()` also
+  uses the compiled terminal-derivative path for gm/gds and falls back to the
+  original finite difference near small-current/kink regions.
+- If `gains` or `pac_result` are not provided, pass the same `input_drive` and
+  the function will call generic `pac_solve` for input-referred noise.
 
 ### `transient_solver.py`
 
@@ -261,6 +302,13 @@ Solves the time-domain response of the topology-defined system using backward Eu
   solves the dense Newton step in one inner loop. The linear solve overwrites the
   temporary Jacobian/residual arrays in place, and the Python substep loop reuses
   the previous interpolated input as the next substep's start input.
+- For PSS-style non-robust runs (`fallback_least_squares=False` and
+  `fallback_full_jacobian=False`), the compiled grid solver stays in Numba across
+  the full period. Failed substeps are counted as failed intervals and the
+  trajectory continues from the last accepted state, matching the non-throwing
+  Python transient behavior without rerunning the whole period in Python.
+- Robust fallback modes still return to the Python path so least-squares or full
+  finite-difference Jacobian recovery can be applied only when requested.
 - Uses implicit differentiation of the PMOS internal nodes for faster transient
   Jacobians, with finite-difference fallback.
 

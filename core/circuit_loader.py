@@ -20,6 +20,8 @@ class CircuitSpec:
     sizes: dict
     bias: dict
     nf: dict | int | None = None
+    periodic: dict | None = None
+    analyses: dict | None = None
 
 
 def _as_number(value, field):
@@ -32,8 +34,8 @@ def _load_devices(raw_devices):
     devices = []
     sizes = {}
     nf = {}
-    if not isinstance(raw_devices, list) or not raw_devices:
-        raise ValueError("devices must be a non-empty list")
+    if not isinstance(raw_devices, list):
+        raise ValueError("devices must be a list")
 
     for i, item in enumerate(raw_devices):
         where = f"devices[{i}]"
@@ -143,6 +145,9 @@ def _validate_nodes(topo):
     for name in topo.input_drives:
         if name not in names:
             raise ValueError(f"input_drives references unknown device {name!r}")
+    for node in topo.ac_drives:
+        if node not in known:
+            raise ValueError(f"ac_drives references unknown node {node!r}")
     for name in topo.transient_inputs:
         if name not in names:
             raise ValueError(f"transient_inputs references unknown device {name!r}")
@@ -184,6 +189,7 @@ def circuit_from_dict(data):
         rails={str(k): v for k, v in rails.items()},
         outputs=tuple(str(x) for x in data.get("outputs", ())),
         input_drives={str(k): float(v) for k, v in data.get("input_drives", {}).items()},
+        ac_drives={str(k): float(v) for k, v in data.get("ac_drives", {}).items()},
         load_caps=_load_load_caps(data.get("load_caps")),
         dc_guesses=[{str(k): float(v) for k, v in guess.items()}
                     for guess in data.get("dc_guesses", [])],
@@ -198,7 +204,17 @@ def circuit_from_dict(data):
     )
     _validate_nodes(topo)
     bias = {str(k): float(v) for k, v in data.get("bias", {}).items()}
-    return CircuitSpec(name=name, topology=topo, sizes=sizes, bias=bias, nf=nf)
+    periodic = data.get("periodic")
+    if periodic is not None and not isinstance(periodic, dict):
+        raise ValueError("periodic must be an object")
+    analyses = data.get("analyses")
+    if analyses is not None and not isinstance(analyses, dict):
+        raise ValueError("analyses must be an object")
+    return CircuitSpec(
+        name=name, topology=topo, sizes=sizes, bias=bias, nf=nf,
+        periodic=dict(periodic) if periodic is not None else None,
+        analyses=dict(analyses) if analyses is not None else None,
+    )
 
 
 def load_circuit_json(path):
