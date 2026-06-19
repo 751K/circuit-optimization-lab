@@ -70,27 +70,152 @@ def _residual_pair_impl(Vs, Vd, Vg, Vs1, Vd1, Vfb, Vss, Lc, lambda_,
     return I_s_s1 - I_s1_d1, I_s1_d1 - I_d1_d
 
 
+def _sigmoid_impl(x):
+    if x >= 0.0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
+
+
+def _residual_pair_fd_jac_impl(Vs, Vd, Vg, Vs1, Vd1, hj, Vfb, Vss, Lc,
+                               lambda_, contact_scale, exponent,
+                               current_scale, inv_Rleak):
+    r0a, r0b = _residual_pair_impl(
+        Vs, Vd, Vg, Vs1, Vd1, Vfb, Vss, Lc, lambda_, contact_scale,
+        exponent, current_scale, inv_Rleak)
+    r1a, r1b = _residual_pair_impl(
+        Vs, Vd, Vg, Vs1 + hj, Vd1, Vfb, Vss, Lc, lambda_, contact_scale,
+        exponent, current_scale, inv_Rleak)
+    r2a, r2b = _residual_pair_impl(
+        Vs, Vd, Vg, Vs1, Vd1 + hj, Vfb, Vss, Lc, lambda_, contact_scale,
+        exponent, current_scale, inv_Rleak)
+    return (r0a, r0b, (r1a - r0a) / hj, (r2a - r0a) / hj,
+            (r1b - r0b) / hj, (r2b - r0b) / hj)
+
+
+def _residual_pair_jac_internal_impl(Vs, Vd, Vg, Vs1, Vd1, Vfb, Vss, Lc,
+                                     lambda_, contact_scale, exponent,
+                                     current_scale, inv_Rleak):
+    # The compact model has branch min/max sign changes. Around those kinks the
+    # old finite-difference Jacobian is the safer local linearization.
+    if (abs(Vs - Vs1) < 1e-10 or abs(Vd1 - Vd) < 1e-10 or
+            abs(Vs1 - Vd) < 1e-10):
+        return _residual_pair_fd_jac_impl(
+            Vs, Vd, Vg, Vs1, Vd1, 1e-6, Vfb, Vss, Lc, lambda_,
+            contact_scale, exponent, current_scale, inv_Rleak)
+
+    # Contact branch I_s_s1 and derivative with respect to Vs1.
+    if Vs > Vs1:
+        v_s = Vs
+        v_s1 = Vs1
+        dv = v_s - Vg
+        Vt = -(0.0045 * dv ** 2 + 0.7125 * dv + 0.9625)
+        arg_a = (v_s - Vg + Vt) / Vss
+        arg_b = (v_s1 - Vg + Vt) / Vss
+        A = Vss * _softplus_py(arg_a)
+        B = Vss * _softplus_py(arg_b)
+        Ap = A ** exponent
+        Bp = B ** exponent
+        Aem1 = Ap / A if A != 0.0 else 0.0
+        Bem1 = Bp / B if B != 0.0 else 0.0
+        Ecsat = 17.0 / (abs(dv) + 0.1)
+        lambdac = 1.0 / (Lc * Ecsat)
+        cmod = 1.0 + lambdac * (v_s - v_s1)
+        Icont = contact_scale * (Ap - Bp) * cmod
+        dB = _sigmoid_impl(arg_b)
+        dIcont = contact_scale * (
+            -exponent * Bem1 * dB * cmod -
+            (Ap - Bp) * lambdac)
+        I_s_s1 = Icont
+        dIss_dVs1 = dIcont
+    else:
+        v_s = Vs1
+        v_s1 = Vs
+        dv = v_s - Vg
+        Vt = -(0.0045 * dv ** 2 + 0.7125 * dv + 0.9625)
+        dVt = -(0.009 * dv + 0.7125)
+        arg_a = (v_s - Vg + Vt) / Vss
+        arg_b = (v_s1 - Vg + Vt) / Vss
+        A = Vss * _softplus_py(arg_a)
+        B = Vss * _softplus_py(arg_b)
+        Ap = A ** exponent
+        Bp = B ** exponent
+        Aem1 = Ap / A if A != 0.0 else 0.0
+        Bem1 = Bp / B if B != 0.0 else 0.0
+        Ecsat = 17.0 / (abs(dv) + 0.1)
+        lambdac = 1.0 / (Lc * Ecsat)
+        cmod = 1.0 + lambdac * (v_s - v_s1)
+        Icont = contact_scale * (Ap - Bp) * cmod
+        sign_dv = 1.0 if dv > 0.0 else -1.0
+        dlambdac = sign_dv / (17.0 * Lc)
+        dA = _sigmoid_impl(arg_a) * (1.0 + dVt)
+        dB = _sigmoid_impl(arg_b) * dVt
+        dcmod = dlambdac * (v_s - v_s1) + lambdac
+        dIcont = contact_scale * (
+            (exponent * Aem1 * dA - exponent * Bem1 * dB) * cmod +
+            (Ap - Bp) * dcmod)
+        I_s_s1 = -Icont
+        dIss_dVs1 = -dIcont
+
+    # Channel branch I_d1_d and derivative with respect to Vd1.
+    if Vd1 > Vd:
+        v_d = Vd
+        v_d1 = Vd1
+        arg_a = (v_d1 - Vg + Vfb) / Vss
+        arg_b = (v_d - Vg + Vfb) / Vss
+        A = Vss * _softplus_py(arg_a)
+        B = Vss * _softplus_py(arg_b)
+        Ap = A ** exponent
+        Bp = B ** exponent
+        Aem1 = Ap / A if A != 0.0 else 0.0
+        chmod = 1.0 + lambda_ * (v_d1 - v_d)
+        Ich = current_scale * (Ap - Bp) * chmod
+        dA = _sigmoid_impl(arg_a)
+        dIch = current_scale * (
+            exponent * Aem1 * dA * chmod +
+            (Ap - Bp) * lambda_)
+    else:
+        v_d = Vd1
+        v_d1 = Vd
+        arg_a = (v_d1 - Vg + Vfb) / Vss
+        arg_b = (v_d - Vg + Vfb) / Vss
+        A = Vss * _softplus_py(arg_a)
+        B = Vss * _softplus_py(arg_b)
+        Ap = A ** exponent
+        Bp = B ** exponent
+        Bem1 = Bp / B if B != 0.0 else 0.0
+        chmod = 1.0 + lambda_ * (v_d1 - v_d)
+        Ich = current_scale * (Ap - Bp) * chmod
+        dB = _sigmoid_impl(arg_b)
+        dIch = current_scale * (
+            -exponent * Bem1 * dB * chmod -
+            (Ap - Bp) * lambda_)
+    sign_ch = 1.0 if Vs1 > Vd else -1.0
+    I_d1_d = sign_ch * Ich + (Vd1 - Vd + 0.1) * inv_Rleak
+    dId_dVd1 = sign_ch * dIch + inv_Rleak
+
+    I_s1_d1 = (Vs1 - Vd1) / 0.1
+    r0a = I_s_s1 - I_s1_d1
+    r0b = I_s1_d1 - I_d1_d
+    j00 = dIss_dVs1 - 10.0
+    j01 = 10.0
+    j10 = 10.0
+    j11 = -10.0 - dId_dVd1
+    return r0a, r0b, j00, j01, j10, j11
+
+
 def _newton_internal_impl(Vs, Vd, Vg, x0s, x0d, tol, maxit, Vfb, Vss, Lc, lambda_,
                           contact_scale, exponent, current_scale, inv_Rleak):
     Vs1 = x0s
     Vd1 = x0d
     hj = 1e-6
     for _ in range(maxit):
-        r0a, r0b = _residual_pair_impl(
-            Vs, Vd, Vg, Vs1, Vd1, Vfb, Vss, Lc, lambda_, contact_scale,
-            exponent, current_scale, inv_Rleak)
+        r0a, r0b, j00, j01, j10, j11 = _residual_pair_fd_jac_impl(
+            Vs, Vd, Vg, Vs1, Vd1, hj, Vfb, Vss, Lc, lambda_,
+            contact_scale, exponent, current_scale, inv_Rleak)
         if abs(r0a) + abs(r0b) < tol:
             return True, Vs1, Vd1
-        r1a, r1b = _residual_pair_impl(
-            Vs, Vd, Vg, Vs1 + hj, Vd1, Vfb, Vss, Lc, lambda_, contact_scale,
-            exponent, current_scale, inv_Rleak)
-        r2a, r2b = _residual_pair_impl(
-            Vs, Vd, Vg, Vs1, Vd1 + hj, Vfb, Vss, Lc, lambda_, contact_scale,
-            exponent, current_scale, inv_Rleak)
-        j00 = (r1a - r0a) / hj
-        j01 = (r2a - r0a) / hj
-        j10 = (r1b - r0b) / hj
-        j11 = (r2b - r0b) / hj
         det = j00 * j11 - j01 * j10
         if det == 0.0 or not math.isfinite(det):
             return False, Vs1, Vd1
@@ -109,6 +234,41 @@ def _newton_internal_impl(Vs, Vd, Vg, x0s, x0d, tol, maxit, Vfb, Vss, Lc, lambda
                 return True, Vs1, Vd1
             return False, Vs1, Vd1
     return False, Vs1, Vd1
+
+
+def _newton_internal_fast_impl(Vs, Vd, Vg, x0s, x0d, tol, maxit, Vfb, Vss, Lc,
+                               lambda_, contact_scale, exponent, current_scale,
+                               inv_Rleak):
+    Vs1 = x0s
+    Vd1 = x0d
+    fd_fallbacks = 0
+    for it in range(maxit):
+        if (abs(Vs - Vs1) < 1e-10 or abs(Vd1 - Vd) < 1e-10 or
+                abs(Vs1 - Vd) < 1e-10):
+            fd_fallbacks += 1
+        r0a, r0b, j00, j01, j10, j11 = _residual_pair_jac_internal_impl(
+            Vs, Vd, Vg, Vs1, Vd1, Vfb, Vss, Lc, lambda_, contact_scale,
+            exponent, current_scale, inv_Rleak)
+        if abs(r0a) + abs(r0b) < tol:
+            return True, Vs1, Vd1, it + 1, fd_fallbacks
+        det = j00 * j11 - j01 * j10
+        if det == 0.0 or not math.isfinite(det):
+            return False, Vs1, Vd1, it + 1, fd_fallbacks
+        d0 = -(j11 * r0a - j01 * r0b) / det
+        d1 = -(-j10 * r0a + j00 * r0b) / det
+        mx = abs(d0) if abs(d0) > abs(d1) else abs(d1)
+        if mx > 2.0:
+            scale = 2.0 / mx
+            d0 *= scale
+            d1 *= scale
+            mx = 2.0
+        Vs1 += d0
+        Vd1 += d1
+        if mx < 1e-13:
+            if abs(r0a) + abs(r0b) < 1e-9:
+                return True, Vs1, Vd1, it + 1, fd_fallbacks
+            return False, Vs1, Vd1, it + 1, fd_fallbacks
+    return False, Vs1, Vd1, maxit, fd_fallbacks
 
 
 def _capacitances_impl(Vs, Vd, Vg, Vs1, Vd1, Vfb, two_over_pi, cap_cgs1,
@@ -156,15 +316,12 @@ def _terminal_deriv_one_impl(vs_p, vd_p, vg_p, vs_m, vd_m, vg_m, Vs1, Vd1,
     return sign * (Iu - ix0 * y0 - ix1 * y1)
 
 
-def _terminal_derivatives_impl(Vs, Vd, Vg, Vs1, Vd1, need_gm, need_gds, use_abs,
-                               HH, hx,
-                               Vfb, Vss, Lc, lambda_, contact_scale, exponent,
-                               current_scale, inv_Rleak):
+def _terminal_derivatives_from_base_impl(
+        Vs, Vd, Vg, Vs1, Vd1, F0a, F0b, Idc0, need_gm, need_gds, use_abs,
+        HH, hx, Vfb, Vss, Lc, lambda_, contact_scale, exponent,
+        current_scale, inv_Rleak):
     if not need_gm and not need_gds:
         return True, 0.0, 0.0
-    F0a, F0b, Idc0 = _eval_at_impl(
-        Vs, Vd, Vg, Vs1, Vd1, Vfb, Vss, Lc, lambda_, contact_scale, exponent,
-        current_scale, inv_Rleak)
     if abs(Idc0) < 1e-30:
         return False, 0.0, 0.0
     Fpa, Fpb, Ip = _eval_at_impl(
@@ -199,6 +356,201 @@ def _terminal_derivatives_impl(Vs, Vd, Vg, Vs1, Vd1, need_gm, need_gds, use_abs,
     return True, gm, gds
 
 
+def _terminal_derivatives_from_jac_fdterm_impl(
+        Vs, Vd, Vg, Vs1, Vd1, F0a, F0b, Idc0,
+        j00, j01, j10, j11, need_gm, need_gds, use_abs,
+        HH, Vfb, Vss, Lc, lambda_, contact_scale, exponent,
+        current_scale, inv_Rleak):
+    if not need_gm and not need_gds:
+        return True, 0.0, 0.0
+    if abs(Idc0) < 1e-30:
+        return False, 0.0, 0.0
+    det = j00 * j11 - j01 * j10
+    if det == 0.0 or not math.isfinite(det):
+        return False, 0.0, 0.0
+    ix0 = j10 - 10.0
+    ix1 = j11 + 10.0
+    sign = 1.0 if Idc0 > 0.0 else -1.0
+    current_sign = sign if use_abs else -1.0
+    gm = 0.0
+    gds = 0.0
+    if need_gm:
+        gm = _terminal_deriv_one_impl(
+            Vs, Vd, Vg + HH, Vs, Vd, Vg - HH, Vs1, Vd1, Idc0,
+            j00, j01, j10, j11, ix0, ix1, det, current_sign, HH, Vfb, Vss, Lc,
+            lambda_, contact_scale, exponent, current_scale, inv_Rleak)
+    if need_gds:
+        gds = _terminal_deriv_one_impl(
+            Vs, Vd + HH, Vg, Vs, Vd - HH, Vg, Vs1, Vd1, Idc0,
+            j00, j01, j10, j11, ix0, ix1, det, current_sign, HH, Vfb, Vss, Lc,
+            lambda_, contact_scale, exponent, current_scale, inv_Rleak)
+    return True, gm, gds
+
+
+def _contact_diss_dvg_impl(Vs, Vg, Vs1, Vfb, Vss, Lc, contact_scale, exponent):
+    if Vs > Vs1:
+        v_s = Vs
+        v_s1 = Vs1
+        dv = v_s - Vg
+        Vt = -(0.0045 * dv ** 2 + 0.7125 * dv + 0.9625)
+        dVt = 0.009 * dv + 0.7125
+        arg_a = (v_s - Vg + Vt) / Vss
+        arg_b = (v_s1 - Vg + Vt) / Vss
+        A = Vss * _softplus_py(arg_a)
+        B = Vss * _softplus_py(arg_b)
+        Ap = A ** exponent
+        Bp = B ** exponent
+        Aem1 = Ap / A if A != 0.0 else 0.0
+        Bem1 = Bp / B if B != 0.0 else 0.0
+        Ecsat = 17.0 / (abs(dv) + 0.1)
+        lambdac = 1.0 / (Lc * Ecsat)
+        cmod = 1.0 + lambdac * (v_s - v_s1)
+        sign_dv = 1.0 if dv > 0.0 else -1.0
+        dlambdac = -sign_dv / (17.0 * Lc)
+        darg_num = -1.0 + dVt
+        dA = _sigmoid_impl(arg_a) * darg_num
+        dB = _sigmoid_impl(arg_b) * darg_num
+        dcmod = dlambdac * (v_s - v_s1)
+        return contact_scale * (
+            (exponent * Aem1 * dA - exponent * Bem1 * dB) * cmod +
+            (Ap - Bp) * dcmod)
+
+    v_s = Vs1
+    v_s1 = Vs
+    dv = v_s - Vg
+    Vt = -(0.0045 * dv ** 2 + 0.7125 * dv + 0.9625)
+    dVt = 0.009 * dv + 0.7125
+    arg_a = (v_s - Vg + Vt) / Vss
+    arg_b = (v_s1 - Vg + Vt) / Vss
+    A = Vss * _softplus_py(arg_a)
+    B = Vss * _softplus_py(arg_b)
+    Ap = A ** exponent
+    Bp = B ** exponent
+    Aem1 = Ap / A if A != 0.0 else 0.0
+    Bem1 = Bp / B if B != 0.0 else 0.0
+    Ecsat = 17.0 / (abs(dv) + 0.1)
+    lambdac = 1.0 / (Lc * Ecsat)
+    cmod = 1.0 + lambdac * (v_s - v_s1)
+    sign_dv = 1.0 if dv > 0.0 else -1.0
+    dlambdac = -sign_dv / (17.0 * Lc)
+    darg_num = -1.0 + dVt
+    dA = _sigmoid_impl(arg_a) * darg_num
+    dB = _sigmoid_impl(arg_b) * darg_num
+    dcmod = dlambdac * (v_s - v_s1)
+    dIcont = contact_scale * (
+        (exponent * Aem1 * dA - exponent * Bem1 * dB) * cmod +
+        (Ap - Bp) * dcmod)
+    return -dIcont
+
+
+def _channel_partials_impl(Vs1, Vd, Vg, Vd1, Vfb, Vss, lambda_, exponent,
+                           current_scale, inv_Rleak):
+    if Vd1 > Vd:
+        v_d = Vd
+        v_d1 = Vd1
+        arg_a = (v_d1 - Vg + Vfb) / Vss
+        arg_b = (v_d - Vg + Vfb) / Vss
+        A = Vss * _softplus_py(arg_a)
+        B = Vss * _softplus_py(arg_b)
+        Ap = A ** exponent
+        Bp = B ** exponent
+        Aem1 = Ap / A if A != 0.0 else 0.0
+        Bem1 = Bp / B if B != 0.0 else 0.0
+        chmod = 1.0 + lambda_ * (v_d1 - v_d)
+        dIch_dVg = current_scale * exponent * (
+            -Aem1 * _sigmoid_impl(arg_a) +
+            Bem1 * _sigmoid_impl(arg_b)) * chmod
+        dIch_dVd = current_scale * (
+            -exponent * Bem1 * _sigmoid_impl(arg_b) * chmod -
+            (Ap - Bp) * lambda_)
+    else:
+        v_d = Vd1
+        v_d1 = Vd
+        arg_a = (v_d1 - Vg + Vfb) / Vss
+        arg_b = (v_d - Vg + Vfb) / Vss
+        A = Vss * _softplus_py(arg_a)
+        B = Vss * _softplus_py(arg_b)
+        Ap = A ** exponent
+        Bp = B ** exponent
+        Aem1 = Ap / A if A != 0.0 else 0.0
+        Bem1 = Bp / B if B != 0.0 else 0.0
+        chmod = 1.0 + lambda_ * (v_d1 - v_d)
+        dIch_dVg = current_scale * exponent * (
+            -Aem1 * _sigmoid_impl(arg_a) +
+            Bem1 * _sigmoid_impl(arg_b)) * chmod
+        dIch_dVd = current_scale * (
+            exponent * Aem1 * _sigmoid_impl(arg_a) * chmod +
+            (Ap - Bp) * lambda_)
+
+    sign_ch = 1.0 if Vs1 > Vd else -1.0
+    dId_dVg = sign_ch * dIch_dVg
+    dId_dVd = sign_ch * dIch_dVd - inv_Rleak
+    return dId_dVg, dId_dVd
+
+
+def _terminal_deriv_from_partials_impl(fu0, fu1, iu, j00, j01, j10, j11,
+                                       ix0, ix1, det, current_sign):
+    y0 = (j11 * fu0 - j01 * fu1) / det
+    y1 = (-j10 * fu0 + j00 * fu1) / det
+    return current_sign * (iu - ix0 * y0 - ix1 * y1)
+
+
+def _terminal_derivatives_from_jac_impl(
+        Vs, Vd, Vg, Vs1, Vd1, F0a, F0b, Idc0,
+        j00, j01, j10, j11, need_gm, need_gds, use_abs,
+        HH, Vfb, Vss, Lc, lambda_, contact_scale, exponent,
+        current_scale, inv_Rleak):
+    if not need_gm and not need_gds:
+        return True, 0.0, 0.0
+    if (abs(Vs - Vs1) < 1e-10 or abs(Vd1 - Vd) < 1e-10 or
+            abs(Vs1 - Vd) < 1e-10):
+        return _terminal_derivatives_from_jac_fdterm_impl(
+            Vs, Vd, Vg, Vs1, Vd1, F0a, F0b, Idc0, j00, j01, j10, j11,
+            need_gm, need_gds, use_abs, HH, Vfb, Vss, Lc, lambda_,
+            contact_scale, exponent, current_scale, inv_Rleak)
+    if abs(Idc0) < 1e-30:
+        return False, 0.0, 0.0
+    det = j00 * j11 - j01 * j10
+    if det == 0.0 or not math.isfinite(det):
+        return False, 0.0, 0.0
+
+    ix0 = j10 - 10.0
+    ix1 = j11 + 10.0
+    sign = 1.0 if Idc0 > 0.0 else -1.0
+    current_sign = sign if use_abs else -1.0
+    dId_dVg, dId_dVd = _channel_partials_impl(
+        Vs1, Vd, Vg, Vd1, Vfb, Vss, lambda_, exponent, current_scale,
+        inv_Rleak)
+
+    gm = 0.0
+    if need_gm:
+        dIss_dVg = _contact_diss_dvg_impl(
+            Vs, Vg, Vs1, Vfb, Vss, Lc, contact_scale, exponent)
+        gm = _terminal_deriv_from_partials_impl(
+            dIss_dVg, -dId_dVg, -dId_dVg,
+            j00, j01, j10, j11, ix0, ix1, det, current_sign)
+
+    gds = 0.0
+    if need_gds:
+        gds = _terminal_deriv_from_partials_impl(
+            0.0, -dId_dVd, -dId_dVd,
+            j00, j01, j10, j11, ix0, ix1, det, current_sign)
+    return True, gm, gds
+
+
+def _terminal_derivatives_impl(Vs, Vd, Vg, Vs1, Vd1, need_gm, need_gds, use_abs,
+                               HH, hx,
+                               Vfb, Vss, Lc, lambda_, contact_scale, exponent,
+                               current_scale, inv_Rleak):
+    F0a, F0b, Idc0 = _eval_at_impl(
+        Vs, Vd, Vg, Vs1, Vd1, Vfb, Vss, Lc, lambda_, contact_scale, exponent,
+        current_scale, inv_Rleak)
+    return _terminal_derivatives_from_base_impl(
+        Vs, Vd, Vg, Vs1, Vd1, F0a, F0b, Idc0, need_gm, need_gds, use_abs,
+        HH, hx, Vfb, Vss, Lc, lambda_, contact_scale, exponent,
+        current_scale, inv_Rleak)
+
+
 def _term_value_impl(kind, ref, value, V, input_values):
     if kind == 0:      # solved
         return V[ref]
@@ -207,17 +559,46 @@ def _term_value_impl(kind, ref, value, V, input_values):
     return value       # rail / constant
 
 
+def _fill_prev_terms_impl(
+        Vp, input_prev,
+        dev_d_kind, dev_d_ref, dev_d_val,
+        dev_g_kind, dev_g_ref, dev_g_val,
+        dev_s_kind, dev_s_ref, dev_s_val,
+        cap_a_kind, cap_a_ref, cap_a_val,
+        cap_b_kind, cap_b_ref, cap_b_val,
+        prev_vs, prev_vd, prev_vg, cap_prev_dv):
+    for pos in range(prev_vs.shape[0]):
+        prev_vs[pos] = _term_value_impl(dev_s_kind[pos], dev_s_ref[pos],
+                                        dev_s_val[pos], Vp, input_prev)
+        prev_vd[pos] = _term_value_impl(dev_d_kind[pos], dev_d_ref[pos],
+                                        dev_d_val[pos], Vp, input_prev)
+        prev_vg[pos] = _term_value_impl(dev_g_kind[pos], dev_g_ref[pos],
+                                        dev_g_val[pos], Vp, input_prev)
+    for pos in range(cap_prev_dv.shape[0]):
+        pva = _term_value_impl(cap_a_kind[pos], cap_a_ref[pos],
+                               cap_a_val[pos], Vp, input_prev)
+        pvb = _term_value_impl(cap_b_kind[pos], cap_b_ref[pos],
+                               cap_b_val[pos], Vp, input_prev)
+        cap_prev_dv[pos] = pva - pvb
+
+
 def _solve_internal_with_guesses_impl(Vs, Vd, Vg, cache_valid, cache_vs1,
                                       cache_vd1, tol, maxit, Vfb, Vss, Lc,
                                       lambda_, contact_scale, exponent,
                                       current_scale, inv_Rleak):
+    attempts = 0
+    inner_iters = 0
+    fd_fallbacks = 0
     if cache_valid:
-        ok, xs, xd = _newton_internal_impl(
+        attempts += 1
+        ok, xs, xd, iters, nfd = _newton_internal_fast_impl(
             Vs, Vd, Vg, cache_vs1, cache_vd1, tol, maxit,
             Vfb, Vss, Lc, lambda_, contact_scale, exponent,
             current_scale, inv_Rleak)
+        inner_iters += iters
+        fd_fallbacks += nfd
         if ok:
-            return True, xs, xd
+            return True, xs, xd, attempts, inner_iters, fd_fallbacks
 
     # Same deterministic guesses used before the Python fsolve fallback. The
     # Numba path exits if these fail, letting transient_solver fall back to the
@@ -231,13 +612,16 @@ def _solve_internal_with_guesses_impl(Vs, Vd, Vg, cache_valid, cache_vs1,
         (Vd, Vd),
     )
     for xs0, xd0 in guesses:
-        ok, xs, xd = _newton_internal_impl(
+        attempts += 1
+        ok, xs, xd, iters, nfd = _newton_internal_fast_impl(
             Vs, Vd, Vg, xs0, xd0, tol, maxit,
             Vfb, Vss, Lc, lambda_, contact_scale, exponent,
             current_scale, inv_Rleak)
+        inner_iters += iters
+        fd_fallbacks += nfd
         if ok:
-            return True, xs, xd
-    return False, cache_vs1, cache_vd1
+            return True, xs, xd, attempts, inner_iters, fd_fallbacks
+    return False, cache_vs1, cache_vd1, attempts, inner_iters, fd_fallbacks
 
 
 def _solve_dense_neg_rhs_inplace_impl(A, b):
@@ -307,9 +691,13 @@ def _stamp_transient_system_impl(
         cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
         cap_b_val, cap_ai, cap_bi, cap_value,
         isrc_pi, isrc_qi, isrc_value,
-        dyn_pi, dyn_qi, dyn_input_idx):
-    R = np.zeros(n)
-    J = np.zeros((n, n))
+        dyn_pi, dyn_qi, dyn_input_idx,
+        prev_vs, prev_vd, prev_vg, cap_prev_dv,
+        R, J, profile_enabled, profile_stats):
+    for i in range(n):
+        R[i] = 0.0
+        for j in range(n):
+            J[i, j] = 0.0
     inv_h = 1.0 / h
 
     for pos in range(dev_di.shape[0]):
@@ -319,25 +707,27 @@ def _stamp_transient_system_impl(
                               V, input_now)
         Vg = _term_value_impl(dev_g_kind[pos], dev_g_ref[pos], dev_g_val[pos],
                               V, input_now)
-        pVs = _term_value_impl(dev_s_kind[pos], dev_s_ref[pos], dev_s_val[pos],
-                               Vp, input_prev)
-        pVd = _term_value_impl(dev_d_kind[pos], dev_d_ref[pos], dev_d_val[pos],
-                               Vp, input_prev)
-        pVg = _term_value_impl(dev_g_kind[pos], dev_g_ref[pos], dev_g_val[pos],
-                               Vp, input_prev)
+        pVs = prev_vs[pos]
+        pVd = prev_vd[pos]
+        pVg = prev_vg[pos]
 
-        ok, Vs1, Vd1 = _solve_internal_with_guesses_impl(
+        ok, Vs1, Vd1, op_attempts, op_iters, op_fd = _solve_internal_with_guesses_impl(
             Vs, Vd, Vg, op_cache_valid[pos], op_cache_vs1[pos],
             op_cache_vd1[pos], 1e-12, 40, p_Vfb[pos], p_Vss[pos], p_Lc[pos],
             p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
             p_current_scale[pos], p_inv_Rleak[pos])
+        if profile_enabled:
+            profile_stats[1] += 1.0
+            profile_stats[2] += op_attempts
+            profile_stats[3] += op_iters
+            profile_stats[4] += op_fd
         if not ok:
-            return False, R, J
+            return False
         op_cache_valid[pos] = True
         op_cache_vs1[pos] = Vs1
         op_cache_vd1[pos] = Vd1
 
-        _, _, I_d1_d, _, _ = _eval_currents_impl(
+        F0a, F0b, j00, j01, j10, j11 = _residual_pair_jac_internal_impl(
             Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_Vss[pos], p_Lc[pos],
             p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
             p_current_scale[pos], p_inv_Rleak[pos])
@@ -349,7 +739,8 @@ def _stamp_transient_system_impl(
         di = dev_di[pos]
         gi = dev_gi[pos]
         si = dev_si[pos]
-        I = abs(-I_d1_d) if dev_use_abs[pos] else I_d1_d
+        Idc0 = F0b - (Vs1 - Vd1) / 0.1
+        I = abs(Idc0) if dev_use_abs[pos] else -Idc0
         if di >= 0:
             R[di] += I
         if si >= 0:
@@ -383,13 +774,17 @@ def _stamp_transient_system_impl(
 
         need_gm = gi >= 0 or si >= 0
         need_gds = di >= 0 or si >= 0
-        okd, gm, gds = _terminal_derivatives_impl(
-            Vs, Vd, Vg, Vs1, Vd1, need_gm, need_gds, dev_use_abs[pos],
-            HH, 1e-6, p_Vfb[pos], p_Vss[pos], p_Lc[pos], p_lambda[pos],
-            p_contact_scale[pos], p_exponent[pos], p_current_scale[pos],
-            p_inv_Rleak[pos])
+        if (profile_enabled and (need_gm or need_gds) and
+                (abs(Vs - Vs1) < 1e-10 or abs(Vd1 - Vd) < 1e-10 or
+                 abs(Vs1 - Vd) < 1e-10)):
+            profile_stats[5] += 1.0
+        okd, gm, gds = _terminal_derivatives_from_jac_impl(
+            Vs, Vd, Vg, Vs1, Vd1, F0a, F0b, Idc0, j00, j01, j10, j11,
+            need_gm, need_gds, dev_use_abs[pos], HH, p_Vfb[pos],
+            p_Vss[pos], p_Lc[pos], p_lambda[pos], p_contact_scale[pos],
+            p_exponent[pos], p_current_scale[pos], p_inv_Rleak[pos])
         if not okd:
-            return False, R, J
+            return False
         dI_dVs = -(gm + gds)
         if di >= 0:
             J[di, di] += gds
@@ -493,11 +888,7 @@ def _stamp_transient_system_impl(
                                   cap_a_val[pos], V, input_now)
             vb = _term_value_impl(cap_b_kind[pos], cap_b_ref[pos],
                                   cap_b_val[pos], V, input_now)
-            pva = _term_value_impl(cap_a_kind[pos], cap_a_ref[pos],
-                                   cap_a_val[pos], Vp, input_prev)
-            pvb = _term_value_impl(cap_b_kind[pos], cap_b_ref[pos],
-                                   cap_b_val[pos], Vp, input_prev)
-            i_ab = cap * inv_h * ((va - vb) - (pva - pvb))
+            i_ab = cap * inv_h * ((va - vb) - cap_prev_dv[pos])
             gc = cap * inv_h
             ai = cap_ai[pos]
             bi = cap_bi[pos]
@@ -512,7 +903,7 @@ def _stamp_transient_system_impl(
                 if ai >= 0:
                     J[bi, ai] += gc
 
-    return True, R, J
+    return True
 
 
 def _transient_newton_impl(
@@ -532,11 +923,27 @@ def _transient_newton_impl(
         cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
         cap_b_val, cap_ai, cap_bi, cap_value,
         isrc_pi, isrc_qi, isrc_value,
-        dyn_pi, dyn_qi, dyn_input_idx):
+        dyn_pi, dyn_qi, dyn_input_idx,
+        clip_lo, clip_hi):
     V = seed.copy()
+    R = np.empty(n)
+    J = np.empty((n, n))
+    profile_stats = np.zeros(16)
+    prev_vs = np.empty(dev_di.shape[0])
+    prev_vd = np.empty(dev_di.shape[0])
+    prev_vg = np.empty(dev_di.shape[0])
+    cap_prev_dv = np.empty(cap_value.shape[0])
+    _fill_prev_terms_impl(
+        Vp, input_prev,
+        dev_d_kind, dev_d_ref, dev_d_val,
+        dev_g_kind, dev_g_ref, dev_g_val,
+        dev_s_kind, dev_s_ref, dev_s_val,
+        cap_a_kind, cap_a_ref, cap_a_val,
+        cap_b_kind, cap_b_ref, cap_b_val,
+        prev_vs, prev_vd, prev_vg, cap_prev_dv)
     prev = math.inf
     for it in range(maxit):
-        ok, R, J = _stamp_transient_system_impl(
+        ok = _stamp_transient_system_impl(
             V, Vp, input_now, input_prev, h, n, gmin, HH,
             dev_d_kind, dev_d_ref, dev_d_val,
             dev_g_kind, dev_g_ref, dev_g_val,
@@ -552,7 +959,9 @@ def _transient_newton_impl(
             cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
             cap_b_val, cap_ai, cap_bi, cap_value,
             isrc_pi, isrc_qi, isrc_value,
-            dyn_pi, dyn_qi, dyn_input_idx)
+            dyn_pi, dyn_qi, dyn_input_idx,
+            prev_vs, prev_vd, prev_vg, cap_prev_dv,
+            R, J, False, profile_stats)
         if not ok:
             return V, it + 1, False, False
 
@@ -580,12 +989,236 @@ def _transient_newton_impl(
             mx = step_limit
         for i in range(n):
             V[i] += dV[i]
+            if clip_lo <= clip_hi:
+                if V[i] < clip_lo:
+                    V[i] = clip_lo
+                elif V[i] > clip_hi:
+                    V[i] = clip_hi
         if mx < vtol:
+            if fallback_accept:
+                prev = mx
+                continue
             return V, it + 1, True, True
         if it >= 4 and mx >= prev and mx < 1e-5:
+            if fallback_accept:
+                prev = mx
+                continue
             return V, it + 1, True, True
         prev = mx
     return V, maxit, False, True
+
+
+def _transient_newton_reuse_impl(
+        seed, Vp, input_now, input_prev, h, n, maxit, step_limit, vtol,
+        gmin, fallback_accept, fallback_tol, HH,
+        dev_d_kind, dev_d_ref, dev_d_val,
+        dev_g_kind, dev_g_ref, dev_g_val,
+        dev_s_kind, dev_s_ref, dev_s_val,
+        dev_di, dev_gi, dev_si, dev_use_abs,
+        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+        p_current_scale, p_inv_Rleak,
+        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+        p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+        op_cache_valid, op_cache_vs1, op_cache_vd1,
+        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+        res_b_val, res_ai, res_bi, res_g,
+        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+        cap_b_val, cap_ai, cap_bi, cap_value,
+        isrc_pi, isrc_qi, isrc_value,
+        dyn_pi, dyn_qi, dyn_input_idx,
+        clip_lo, clip_hi,
+        V, R, J, prev_vs, prev_vd, prev_vg, cap_prev_dv,
+        profile_enabled, profile_stats):
+    for i in range(n):
+        V[i] = seed[i]
+    _fill_prev_terms_impl(
+        Vp, input_prev,
+        dev_d_kind, dev_d_ref, dev_d_val,
+        dev_g_kind, dev_g_ref, dev_g_val,
+        dev_s_kind, dev_s_ref, dev_s_val,
+        cap_a_kind, cap_a_ref, cap_a_val,
+        cap_b_kind, cap_b_ref, cap_b_val,
+        prev_vs, prev_vd, prev_vg, cap_prev_dv)
+    prev = math.inf
+    for it in range(maxit):
+        ok = _stamp_transient_system_impl(
+            V, Vp, input_now, input_prev, h, n, gmin, HH,
+            dev_d_kind, dev_d_ref, dev_d_val,
+            dev_g_kind, dev_g_ref, dev_g_val,
+            dev_s_kind, dev_s_ref, dev_s_val,
+            dev_di, dev_gi, dev_si, dev_use_abs,
+            p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+            p_current_scale, p_inv_Rleak,
+            p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+            p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+            op_cache_valid, op_cache_vs1, op_cache_vd1,
+            res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+            res_b_val, res_ai, res_bi, res_g,
+            cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+            cap_b_val, cap_ai, cap_bi, cap_value,
+            isrc_pi, isrc_qi, isrc_value,
+            dyn_pi, dyn_qi, dyn_input_idx,
+            prev_vs, prev_vd, prev_vg, cap_prev_dv,
+            R, J, profile_enabled, profile_stats)
+        if not ok:
+            return it + 1, False, False
+
+        if fallback_accept:
+            rmax = 0.0
+            for i in range(n):
+                val = abs(R[i])
+                if val > rmax:
+                    rmax = val
+            if rmax < fallback_tol:
+                return it + 1, True, True
+
+        solved, dV = _solve_dense_neg_rhs_inplace_impl(J, R)
+        if not solved:
+            return it + 1, False, True
+        mx = 0.0
+        for i in range(n):
+            val = abs(dV[i])
+            if val > mx:
+                mx = val
+        if mx > step_limit:
+            scale = step_limit / mx
+            for i in range(n):
+                dV[i] *= scale
+            mx = step_limit
+        for i in range(n):
+            V[i] += dV[i]
+            if clip_lo <= clip_hi:
+                if V[i] < clip_lo:
+                    V[i] = clip_lo
+                elif V[i] > clip_hi:
+                    V[i] = clip_hi
+        if mx < vtol:
+            if fallback_accept:
+                prev = mx
+                continue
+            return it + 1, True, True
+        if it >= 4 and mx >= prev and mx < 1e-5:
+            if fallback_accept:
+                prev = mx
+                continue
+            return it + 1, True, True
+        prev = mx
+    return maxit, False, True
+
+
+def _transient_solve_grid_impl(
+        V0, tgrid, input_values, edge_mask, profile_enabled,
+        max_step, flat_max_step, n, maxit, step_limit, vtol,
+        gmin, fallback_accept, fallback_tol, HH,
+        dev_d_kind, dev_d_ref, dev_d_val,
+        dev_g_kind, dev_g_ref, dev_g_val,
+        dev_s_kind, dev_s_ref, dev_s_val,
+        dev_di, dev_gi, dev_si, dev_use_abs,
+        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+        p_current_scale, p_inv_Rleak,
+        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+        p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+        op_cache_valid, op_cache_vs1, op_cache_vd1,
+        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+        res_b_val, res_ai, res_bi, res_g,
+        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+        cap_b_val, cap_ai, cap_bi, cap_value,
+        isrc_pi, isrc_qi, isrc_value,
+        dyn_pi, dyn_qi, dyn_input_idx,
+        clip_lo, clip_hi):
+    N = tgrid.shape[0]
+    ninputs = input_values.shape[0]
+    Vhist = np.zeros((N, n))
+    for i in range(n):
+        Vhist[0, i] = V0[i]
+
+    input_start = np.empty(ninputs)
+    input_end = np.empty(ninputs)
+    in0 = np.empty(ninputs)
+    in1 = np.empty(ninputs)
+    Vp = V0.copy()
+    Vwork = np.empty(n)
+    R = np.empty(n)
+    J = np.empty((n, n))
+    prev_vs = np.empty(dev_di.shape[0])
+    prev_vd = np.empty(dev_di.shape[0])
+    prev_vg = np.empty(dev_di.shape[0])
+    cap_prev_dv = np.empty(cap_value.shape[0])
+    profile_stats = np.zeros(16)
+    nsubsteps = 0
+
+    for k in range(1, N):
+        h = tgrid[k] - tgrid[k - 1]
+        if h <= 0.0:
+            return False, Vhist, nsubsteps, k, profile_stats
+        for ii in range(ninputs):
+            input_start[ii] = input_values[ii, k - 1]
+            input_end[ii] = input_values[ii, k]
+            in0[ii] = input_start[ii]
+        if max_step > 0.0:
+            interval_edge = False
+            if edge_mask.shape[0] == N:
+                interval_edge = bool(edge_mask[k] or edge_mask[k - 1])
+            local_max_step = max_step
+            if flat_max_step > 0.0 and not interval_edge:
+                local_max_step = flat_max_step
+            pieces = int(math.ceil(h / local_max_step))
+            if pieces < 1:
+                pieces = 1
+        else:
+            pieces = 1
+        hpiece = h / pieces
+        interval_edge = False
+        if edge_mask.shape[0] == N:
+            interval_edge = bool(edge_mask[k] or edge_mask[k - 1])
+        for j in range(pieces):
+            frac = (j + 1.0) / pieces
+            for ii in range(ninputs):
+                in1[ii] = input_start[ii] + (input_end[ii] - input_start[ii]) * frac
+            iters, ok, usable = _transient_newton_reuse_impl(
+                Vp, Vp, in1, in0, hpiece, n, maxit, step_limit, vtol,
+                gmin, fallback_accept, fallback_tol, HH,
+                dev_d_kind, dev_d_ref, dev_d_val,
+                dev_g_kind, dev_g_ref, dev_g_val,
+                dev_s_kind, dev_s_ref, dev_s_val,
+                dev_di, dev_gi, dev_si, dev_use_abs,
+                p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+                p_current_scale, p_inv_Rleak,
+                p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+                p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+                op_cache_valid, op_cache_vs1, op_cache_vd1,
+                res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+                res_b_val, res_ai, res_bi, res_g,
+                cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+                cap_b_val, cap_ai, cap_bi, cap_value,
+                isrc_pi, isrc_qi, isrc_value,
+                dyn_pi, dyn_qi, dyn_input_idx,
+                clip_lo, clip_hi,
+                Vwork, R, J, prev_vs, prev_vd, prev_vg, cap_prev_dv,
+                profile_enabled, profile_stats)
+            nsubsteps += 1
+            if profile_enabled:
+                profile_stats[0] += iters
+                if interval_edge:
+                    profile_stats[6] += 1.0
+                    profile_stats[8] += iters
+                else:
+                    profile_stats[7] += 1.0
+                    profile_stats[9] += iters
+            if not ok:
+                if profile_enabled:
+                    profile_stats[10] += 1.0
+                return False, Vhist, nsubsteps, k, profile_stats
+            for i in range(n):
+                Vp[i] = Vwork[i]
+            for ii in range(ninputs):
+                in0[ii] = in1[ii]
+        for i in range(n):
+            Vhist[k, i] = Vp[i]
+    if profile_enabled:
+        profile_stats[11] = N - 1
+        profile_stats[12] = nsubsteps
+    return True, Vhist, nsubsteps, -1, profile_stats
 
 
 if NUMBA_AVAILABLE:
@@ -596,23 +1229,39 @@ if NUMBA_AVAILABLE:
     _softplus_py = njit(cache=False)(_softplus_py)
     _eval_currents_impl = njit(cache=False)(_eval_currents_impl)
     _residual_pair_impl = njit(cache=False)(_residual_pair_impl)
+    _sigmoid_impl = njit(cache=False)(_sigmoid_impl)
+    _residual_pair_fd_jac_impl = njit(cache=False)(_residual_pair_fd_jac_impl)
+    _residual_pair_jac_internal_impl = njit(cache=False)(_residual_pair_jac_internal_impl)
     _newton_internal_impl = njit(cache=False)(_newton_internal_impl)
+    _newton_internal_fast_impl = njit(cache=False)(_newton_internal_fast_impl)
     _capacitances_impl = njit(cache=False)(_capacitances_impl)
     _eval_at_impl = njit(cache=False)(_eval_at_impl)
     _terminal_deriv_one_impl = njit(cache=False)(_terminal_deriv_one_impl)
+    _terminal_derivatives_from_base_impl = njit(cache=False)(_terminal_derivatives_from_base_impl)
+    _terminal_derivatives_from_jac_fdterm_impl = njit(cache=False)(_terminal_derivatives_from_jac_fdterm_impl)
+    _contact_diss_dvg_impl = njit(cache=False)(_contact_diss_dvg_impl)
+    _channel_partials_impl = njit(cache=False)(_channel_partials_impl)
+    _terminal_deriv_from_partials_impl = njit(cache=False)(_terminal_deriv_from_partials_impl)
+    _terminal_derivatives_from_jac_impl = njit(cache=False)(_terminal_derivatives_from_jac_impl)
     _terminal_derivatives_impl = njit(cache=False)(_terminal_derivatives_impl)
     _term_value_impl = njit(cache=False)(_term_value_impl)
+    _fill_prev_terms_impl = njit(cache=False)(_fill_prev_terms_impl)
     _solve_internal_with_guesses_impl = njit(cache=False)(_solve_internal_with_guesses_impl)
     _solve_dense_neg_rhs_inplace_impl = njit(cache=False)(_solve_dense_neg_rhs_inplace_impl)
     _stamp_transient_system_impl = njit(cache=False)(_stamp_transient_system_impl)
+    _transient_newton_impl = njit(cache=False)(_transient_newton_impl)
+    _transient_newton_reuse_impl = njit(cache=False)(_transient_newton_reuse_impl)
+    _transient_solve_grid_impl = njit(cache=False)(_transient_solve_grid_impl)
     eval_currents_numba = _eval_currents_impl
     newton_internal_numba = _newton_internal_impl
     capacitances_numba = _capacitances_impl
     terminal_derivatives_numba = _terminal_derivatives_impl
-    transient_newton_numba = njit(cache=False)(_transient_newton_impl)
+    transient_newton_numba = _transient_newton_impl
+    transient_solve_grid_numba = _transient_solve_grid_impl
 else:
     eval_currents_numba = None
     newton_internal_numba = None
     capacitances_numba = None
     terminal_derivatives_numba = None
     transient_newton_numba = None
+    transient_solve_grid_numba = None

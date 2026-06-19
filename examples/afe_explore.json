@@ -1,15 +1,45 @@
 {
   "name": "afe_area_power_explore",
-  "builtin_topology": "AFE_TOPO",
-  "sizes": {
-    "M6": [2264, 78],
-    "M7": [61365, 61], "M8": [61365, 61],
-    "M9": [3175, 468], "M10": [3175, 468],
-    "M11": [465, 66],
-    "M12": [894, 85], "M13": [894, 85],
-    "M14": [5224, 46], "M15": [5224, 46]
+  "solved": ["VOP", "VON", "VFBP", "VFBN", "NET20", "NET2"],
+  "rails": {
+    "VDD": "VDD",
+    "GND": 0.0,
+    "VB": "VB",
+    "VC": "VC",
+    "VCM": "VCM"
   },
+  "devices": [
+    {"name": "M6",  "drain": "NET2",  "gate": "VB",   "source": "VDD",   "W": 2264,  "L": 78},
+    {"name": "M7",  "drain": "VOP",   "gate": "VCM",  "source": "NET2",  "W": 61365, "L": 61},
+    {"name": "M8",  "drain": "VON",   "gate": "VCM",  "source": "NET2",  "W": 61365, "L": 61},
+    {"name": "M9",  "drain": "GND",   "gate": "VFBP", "source": "VOP",   "W": 3175,  "L": 468},
+    {"name": "M10", "drain": "GND",   "gate": "VFBN", "source": "VON",   "W": 3175,  "L": 468},
+    {"name": "M11", "drain": "NET20", "gate": "VC",   "source": "VDD",   "W": 465,   "L": 66},
+    {"name": "M12", "drain": "VFBN",  "gate": "VOP",  "source": "NET20", "W": 894,   "L": 85},
+    {"name": "M13", "drain": "VFBP",  "gate": "VON",  "source": "NET20", "W": 894,   "L": 85},
+    {"name": "M14", "drain": "GND",   "gate": "GND",  "source": "VFBN",  "W": 5224,  "L": 46},
+    {"name": "M15", "drain": "GND",   "gate": "GND",  "source": "VFBP",  "W": 5224,  "L": 46}
+  ],
   "bias": {"VDD": 40.0, "VCM": 30.65, "VB": 9.84, "VC": 16.0},
+  "outputs": ["VOP", "VON"],
+  "input_drives": {"M7": 0.5, "M8": -0.5},
+  "load_caps": [
+    ["VOP", "GND", 5e-12],
+    ["VON", "GND", 5e-12]
+  ],
+  "dc_guesses": [
+    {"VOP": 26.65, "VON": 26.65, "VFBP": 22.65, "VFBN": 22.65, "NET20": 45.65, "NET2": 37.65},
+    {"VOP": 28.65, "VON": 28.65, "VFBP": 20.65, "VFBN": 20.65, "NET20": 42.65, "NET2": 39.65},
+    {"VOP": 24.65, "VON": 24.65, "VFBP": 24.65, "VFBN": 24.65, "NET20": 48.65, "NET2": 35.65}
+  ],
+  "aliases": {
+    "net2": "NET2",
+    "n20": "NET20",
+    "vfb": "VFBP",
+    "vfbp": "VFBP",
+    "vfbn": "VFBN"
+  },
+  "transient_inputs": {"M7": "vip", "M8": "vin"},
   "explore": {
     "variables": {
       "in_pair_W": {"min": 40000, "max": 90000, "int": true, "targets": ["M7.W", "M8.W"]},

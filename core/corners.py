@@ -13,8 +13,8 @@ corner / robustness work, so search, verification and MC all agree:
   * corner_table   — metrics across typ/slow/fast.
   * mismatch_mc    — per-device mismatch MC at one corner, seeded from the nominal op.
 
-Note: core/mc_corners.py is a separate, Cadence-PSF post-processor; this module
-drives the local Python solvers.
+This module drives the local Python solvers; Cadence/Spectre comparison should
+live in dedicated verification scripts instead of the core solver package.
 """
 import itertools
 import os

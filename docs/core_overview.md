@@ -12,8 +12,12 @@ The current solver stack covers:
 - AC small-signal gain and bandwidth analysis.
 - Noise analysis, including flicker noise and thermal noise.
 - Transient response simulation.
+- Periodic steady-state (PSS) shooting for periodic transient orbits.
+- PSS-assisted PAC (periodic AC) via finite-difference shooting.
+- Harmonic-balance PNoise (periodic noise) with cyclostationary noise folding.
 - Process-corner and per-device mismatch perturbations.
-- Cadence/Spectre-oriented validation for operating point, AC, noise, and transient behavior.
+- Cadence/Spectre-oriented validation for operating point, AC, noise, transient,
+  PSS, PAC, and PNoise behavior.
 
 The implementation is intentionally small and self-contained. It currently consists of thirteen Python source files under `core/` (excluding `__init__.py`).
 
@@ -29,11 +33,11 @@ core/
   ac_mna.py            MNA stamping primitives.
   ac_solver.py         DC operating point and AC small-signal solver.
   noise_solver.py      Noise propagation and input-referred noise analysis.
-  chopper.py           Ideal and PMOS-switch differential chopper analyses.
   transient_solver.py  Time-domain transient solver.
+  pss_solver.py        Transient-shooting periodic steady-state solver.
+  chopper.py           Ideal and PMOS-switch differential chopper analyses.
   explore.py           Design-space exploration / optimization driver.
   corners.py           Process corners, mismatch MC, and latch detection.
-  mc_corners.py        Cadence PSF Monte-Carlo post-processing helper.
 ```
 
 ## Import Relationship
@@ -47,11 +51,11 @@ pmos_tft_model.py    <- optional numba_kernels
 ac_mna.py            <- no internal dependency
 ac_solver.py         <- topology, compiled_topology, ac_mna, pmos_tft_model
 noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, pmos_tft_model
-chopper.py           <- noise_solver, topology
 transient_solver.py  <- ac_solver, compiled_topology, topology, pmos_tft_model
+pss_solver.py        <- ac_solver, topology, transient_solver
+chopper.py           <- noise_solver, pss_solver, topology
 explore.py           <- ac_solver, noise_solver, pmos_tft_model, topology, circuit_loader
 corners.py           <- ac_solver, noise_solver, topology
-mc_corners.py        <- simulator-side PSF parsing helpers
 ```
 
 ## Main Components
@@ -182,11 +186,52 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   time grid around clock edges, uses signed terminal currents for the eight
   bidirectional pass switches, and keeps a tight residual tolerance so slow
   common-mode charge balance is not lost.
+- `pmos_chopper_pss(...)` wraps that same hard-switched topology in the generic
+  shooting PSS solver and returns one periodic orbit for the selected clock
+  period. This is the foundation for native PAC/PNoise.
+- `pmos_chopper_pac(...)` is a PSS-assisted finite-difference PAC solver.
+  It finite-differences the state transition matrix Φ and the complex input
+  forcing directly on the nonlinear transient engine, then solves the
+  quasi-periodic boundary equation `(Φ-γI)dx0=-b`. The output envelope's DC
+  Fourier coefficient gives the sideband-0 PAC gain. Cost is `n_state+2`
+  one-period transient runs per frequency.
+- `pmos_chopper_pnoise(...)` is a first-principles LPTV periodic-noise solver
+  using harmonic balance on the PSS orbit. It samples the periodic small-signal
+  G(t)/C(t) matrices at N points along the orbit, FFTs them to frequency-domain
+  Fourier coefficients, assembles the `nb×nb` conversion matrix
+  `Y[kr,kc] = G_{kr-kc} + jω·C_{kr-kc}`, and solves one adjoint system per
+  baseband frequency to obtain the transimpedance Z_{j,k} from each device
+  noise source at every sideband to the baseband output. Cyclostationary device
+  noise (thermal + flicker, evaluated on the PSS orbit) is folded as
+  `S_out = Σ_j Σ_k |Z_{j,k}|² · S_j(|f + k·f_chop|)`. Unlike
+  `pmos_chopper_lptv_analysis`, this needs no Cadence calibration factor.
 
-The PMOS-switch sideband path is calibrated to the validated Spectre
-PSS/PAC/PNoise reference, but it remains a compact local approximation rather
-than a general replacement for sign-off periodic-noise simulation. The
-finite-edge transient path has been checked against Spectre `tran`.
+The PMOS-switch sideband path was initially validated with
+`pmos_chopper_lptv_analysis` paired with Cadence calibration constants. The
+native `pmos_chopper_pac` and `pmos_chopper_pnoise` now replace those
+calibration-dependent paths with first-principles periodic small-signal and
+noise solves. The finite-edge transient path has been checked against Spectre
+`tran`, and the native PNoise IRN matches Spectre PNoise to within ~6% at full
+resolution (see `test_pmos_chopper_pnoise_matches_cadence_band`).
+
+### `pss_solver.py`
+
+Solves periodic steady state by shooting on top of the existing transient
+engine:
+
+- `pss_solve(sizes, bias, period, topo=..., tgrid=..., inputs=..., node_inputs=...)`
+- Integrates one period with `transient(...)` and solves `x(T)-x(0)=0`.
+- Uses the DC operating point as the default seed, with optional stabilization
+  periods before shooting.
+- Builds the shooting Jacobian by finite-differencing the one-period map. This
+  keeps the first implementation topology-generic and exactly aligned with the
+  transient discretization/device model.
+- Returns the one-period trajectory, `x0`, `x_end`, residual vector/norm,
+  convergence flag, and iteration history.
+
+This is a PSS operating-orbit solver that feeds into the native
+PAC and PNoise analyses in :func:`pmos_chopper_pac` and
+:func:`pmos_chopper_pnoise`.
 
 ### `transient_solver.py`
 
@@ -239,8 +284,10 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
   evaluation is AC-first: gain/BW/power/area are computed before noise, failed
   candidates are rejected immediately, and `noise_analysis` runs only when
   `irn_uV` is required by a surviving candidate's constraints or objectives.
-- `load_explore_json(path)` — read an `explore` block from a full circuit JSON, or
-  from a file naming a `builtin_topology` (e.g. `AFE_TOPO`) plus baseline sizes/bias.
+- `load_explore_json(path)` — read an `explore` block from a full circuit JSON.
+  The topology, device sizes, bias, and optional NF data are all loaded through
+  the same JSON path; legacy `builtin_topology` configs are no longer accepted
+  in the exploration layer.
 - Sampling is `lhs` (Latin hypercube) or `random`, with a seeded RNG for repeatability.
 - Metrics: `gain_dB`, `bw_Hz`, `irn_uV`, `power_uW` (top-rail supply current x rail
   voltage), and `area` (sum of per-device `g_area`).
@@ -249,8 +296,8 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
   physical branch.
 - Results export to CSV and JSONL; a CLI runs `python -m core.explore <config.json>`.
 
-Example configs: `examples/afe_explore.json` (built-in AFE topology) and the
-`explore` block in `examples/single_stage.json` (generic JSON path).
+Example configs: `examples/afe_explore.json` and `examples/single_stage.json`;
+both are full circuit JSON files with an `explore` block.
 
 ### `corners.py`
 
@@ -277,8 +324,7 @@ otherwise get re-derived in every sweep:
 
 `ac_solve` / `noise_analysis` accept the same `corner` argument (a flat process dict or a
 per-device mismatch map). The driver `examples/mc_mismatch.py` wraps this into a corner
-table + 3-corner MC figure. (Distinct from `core/mc_corners.py`, which post-processes
-Cadence PSF output — that is the simulator-side flow, this is the local-solver side.)
+table + 3-corner MC figure.
 
 ## Quick Example
 
@@ -395,6 +441,11 @@ The current core was calibrated against Cadence Spectre 24.1 for the AT4000TG AF
   matched by `pmos_chopper_lptv_analysis(...)`: gain `21.370 dB` vs Spectre
   `21.369 dB`, bandwidth `738.6 Hz` vs `721.9 Hz`, and IRN `12.592 uVrms` vs
   `12.591 uVrms`.
-- Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms input-referred noise.
+- Native `pmos_chopper_pac` and `pmos_chopper_pnoise` (first-principles,
+  no calibration constants) match Spectre PSS/PAC/PNoise: PNoise IRN
+  within ~6% of Cadence at full resolution for the D3 design case
+  (f_chop=300 Hz, output RC filter, K=6 sidebands).
+- Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms
+  input-referred noise.
 
 These numbers describe the current AT4000TG validation case. Future PDKs or topologies should be recalibrated against their own simulator references.

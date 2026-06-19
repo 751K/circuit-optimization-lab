@@ -47,9 +47,23 @@ _AFE_SYMMETRIC_PAIRS = (("M7", "M8"), ("M9", "M10"), ("M12", "M13"), ("M14", "M1
 _DC_FALLBACK_TOL = 1e-10
 
 
+def _is_afe_topology(topo):
+    """Structural AFE check.
+
+    JSON-loaded AFE topologies are not the same Python object as `AFE_TOPO`, but
+    they should still use the AFE-specific symmetric DC continuation and guards.
+    Keep this strict: those helpers assume the canonical AFE node/device names.
+    """
+    return (
+        tuple(getattr(topo, "solved", ())) == tuple(AFE_TOPO.solved) and
+        tuple(getattr(topo, "devices", ())) == tuple(AFE_TOPO.devices) and
+        dict(getattr(topo, "rails", {})) == dict(AFE_TOPO.rails)
+    )
+
+
 def _is_pairwise_symmetric_afe(sizes, nf, topo):
     """True only when the default AFE can be reduced to the 4-node symmetric DC solve."""
-    if topo is not AFE_TOPO:
+    if not _is_afe_topology(topo):
         return False
     for left, right in _AFE_SYMMETRIC_PAIRS:
         if sizes.get(left) != sizes.get(right):
@@ -356,7 +370,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     # non-physical alternate branch Spectre never picks. Re-solve seeded strictly inside
     # the rails and prefer an in-box solution. (Validated designs are already in-box, so
     # this never fires for them.)
-    if (topo is AFE_TOPO) and not per_dev and not topo.in_voltage_box(nv, bias):
+    if _is_afe_topology(topo) and not per_dev and not topo.in_voltage_box(nv, bias):
         VDD = bias["VDD"]
         box_guesses = ({"VOP": VDD*0.6, "VON": VDD*0.6, "VFBP": VDD*0.4, "VFBN": VDD*0.4,
                         "NET20": VDD-4, "NET2": min(VCM+7, VDD-2)},
@@ -383,7 +397,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     # system seeded from the symmetrized average (right next to the physical root).
     # Only fires on no-mismatch + clearly-asymmetric, so symmetric (validated) points
     # are untouched.
-    if ((topo is AFE_TOPO) and (not per_dev) and
+    if (_is_afe_topology(topo) and (not per_dev) and
             (abs(nv["VOP"] - nv["VON"]) > 1e-2 or
              abs(nv["VFBP"] - nv["VFBN"]) > 1e-2)):
         avg = [nv["NET2"], 0.5 * (nv["VOP"] + nv["VON"]),

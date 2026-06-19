@@ -4,97 +4,272 @@
 
 ## 项目概述
 
-本项目的目标是搭建一个本地电路建模、仿真与优化流程，用于模拟电路设计空间探索。核心动机是减少早期尺寸和偏置迭代阶段对 Cadence/Spectre 大规模参数扫描的依赖，同时仍然以 Cadence/Spectre 结果作为最终验证参考。
+本地 Python 电路求解器，用于模拟电路设计空间探索，已对 Cadence/Spectre 完成标定。首个应用场景是 **AT4000TG PMOS 薄膜晶体管 ECG AFE**（带 chopper 的心电模拟前端放大器）。
 
-第一个应用场景来自 AT4000TG 薄膜晶体管放大器设计。在这个项目中，本地 Python 模型被用于复现和分析关键电路行为，包括 DC 工作点、小信号响应、瞬态响应、噪声以及设计约束。这个仓库后续不希望局限在当前 Python 实现或单一 PDK 上，而是希望逐步扩展成更通用的电路探索和优化框架。
+你能用它做什么：
 
-## 当前范围
+- **DC / AC / Noise / Transient** — 标准电路分析，无需仿真器 license。
+- **PSS / PAC / PNoise** — 周期稳态、周期 AC、周期噪声分析（对标 Spectre RF 分析）。
+- **设计空间探索** — 扫描器件尺寸和偏置电压，按约束过滤（增益、带宽、噪声、功耗、面积），找到 Pareto 最优设计。
+- **工艺角与失配** — 全局工艺角、逐器件 mismatch Monte Carlo、latch 筛查。
 
-当前流程已经覆盖或计划覆盖以下内容：
+求解器内部实现见 [核心求解器概览](core_overview_zh.md)。
 
-- 器件紧凑模型计算。
-- DC 工作点求解。
-- AC 小信号增益和带宽估计。
-- 瞬态响应仿真。
-- 噪声分析，包括热噪声和 flicker noise。
-- 与 Cadence/Spectre 结果对比和校准。
-- 对增益、带宽、输入参考噪声、功耗和面积进行约束检查。
-- 在本地快速探索设计空间，而不是每个候选点都直接跑 Cadence。
-- 使用搜索、greedy shrink 和 Pareto selection 进行尺寸和偏置优化。
-- 工艺角和 mismatch Monte Carlo 类型的鲁棒性检查。
-- 为报告和科研汇报生成设计图表。
+---
 
-当前核心代码结构见 [核心求解器概览](core_overview_zh.md)。
-
-## 环境安装
-
-建议使用 Python 3.10 或更新版本：
+## 快速上手
 
 ```bash
+# 1. 安装
 python3 -m pip install -r requirements.txt
-```
 
-`requirements.txt` 会以 editable 模式安装本项目，因此外部脚本和 notebook 可以直接 `from core...` 导入，不需要手动修改导入路径。
-
-可选的 Numba 加速后端用于 PMOS 模型与 transient Newton 热路径。安装 Numba 时默认自动启用；需要关闭时可显式设置 `CIRCUIT_USE_NUMBA=0`。
-
-```bash
+# 2. 可选：Numba 加速（transient 可提速 10–50 倍）
 python3 -m pip install -r requirements-numba.txt
-python3 -m benchmarks.bench_afe --skip-noise --warm-runs 3
+
+# 3. 验证安装 — 跑 AFE 基准
+python3 -m benchmarks.bench_afe --warm-runs 1 --skip-noise
 ```
 
-固定性能基准可用：
+预期输出：三行耗时（`ac121`、`noise121`、`tran200`），均在毫秒级。看到数字就说明一切正常。
 
-```bash
-# 全 AFE 基准（ac121 / noise121 / tran200）
-python3 -m benchmarks.bench_afe --warm-runs 3
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_afe --warm-runs 3
+### 一分钟搞懂代码结构
 
-# 单管 PMOS_TFT 微基准（7 个热路径操作 × 3 个偏置工作区）
-python3 -m benchmarks.bench_model --warm-runs 3
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_model --warm-runs 3
+在看具体工作流之前，先搞清楚几个核心概念：
 
-# Chopper 分析基准（harmonics / ideal / pmos_static / pmos_lptv / pmos_tran）
-python3 -m benchmarks.bench_chopper --warm-runs 3
-python3 -m benchmarks.bench_chopper --skip-tran --warm-runs 3   # 跳过慢速 transient
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_chopper --warm-runs 3
+| 概念               | 是什么                                  | 在哪定义                                             |
+| ---------------- | ------------------------------------ | ------------------------------------------------ |
+| **Topology（拓扑）** | 电路结构——有哪些节点、器件如何连接、输入输出在哪            | `core/topology.py`，或从 JSON 自动生成                  |
+| **Sizes（尺寸）**    | `{器件名: (W_µm, L_µm)}`——晶体管宽长         | JSON `sizes` 字段                                  |
+| **NF**           | Number of fingers（晶体管并联数，等比例放大电流）    | JSON `nf` 字段，或每个器件单独指定 `devices[].NF`            |
+| **Bias（偏置）**     | `{节点名: 电压}`——各 rail 节点的 DC 工作电压      | JSON `bias` 字段                                   |
+| **Solver（求解器）**  | 接收 拓扑 + 尺寸 + 偏置 → 输出结果（增益、噪声、波形…）的函数 | `core/ac_solver.py`、`core/transient_solver.py` 等 |
 
-# 批量 sweep 基准（N × AC / AC+noise，模拟 explore 层负载）
-python3 -m benchmarks.bench_sweep --n-candidates 200 --warm-runs 3
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_sweep --warm-runs 3
+所有求解器的调用模式都一样：
+
+```python
+result = solver(sizes, bias, ..., topo=topology, nf=nf)
 ```
 
-## JSON 电路描述
+JSON 文件把这些输入打包在一起；`load_circuit_json()` 解包成 `CircuitSpec` 对象，
+包含 `.topology`、`.sizes`、`.bias`、`.nf` 以及可选的 `.explore`。
 
-求解器现在支持从 JSON 加载通用电路描述，避免在 `core/*.py` 里硬编码节点名和器件名。格式说明见 [JSON 电路描述格式](json_circuit_format_zh.md)，示例见 `examples/single_stage.json`。
+---
 
-最小调用方式：
+## 常用工作流
+
+以下所有示例均可直接复制运行。它们使用的都是 `examples/afe_explore.json`
+中已与 Cadence 对标验证的锁定 AFE 设计。
+
+### 1. 加载电路 + DC / AC / Noise 分析
 
 ```python
 import numpy as np
-
 from core.circuit_loader import load_circuit_json
 from core.ac_solver import ac_solve
-from core.noise_solver import noise_analysis
-from core.transient_solver import transient
+from core.noise_solver import noise_analysis, band_rms
 
-spec = load_circuit_json("examples/single_stage.json")
-freqs = np.logspace(0, 4, 121)
+# 从 JSON 加载电路 —— 求解器代码里不硬编码任何节点名
+spec = load_circuit_json("examples/afe_explore.json")
+freqs = np.logspace(-2, 4, 121)   # 0.01 Hz 到 10 kHz
 
+# DC 工作点 + AC 增益 / 带宽
 ac = ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
-noise = noise_analysis(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
+print(f"增益: {ac['Av_dc_dB']:.2f} dB,  带宽: {ac['bw_Hz']:.1f} Hz")
+# → 增益: 22.89 dB,  带宽: 549.3 Hz
 
-t = np.linspace(0, 1e-3, 100)
-vin = np.full_like(t, spec.bias["VIN"])
-tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
-                 nf=spec.nf, inputs={"vin": vin})
+# 噪声分析（热噪声 + 闪烁噪声）
+noise = noise_analysis(spec.sizes, spec.bias, freqs,
+                       topo=spec.topology, nf=spec.nf)
+irn_uv = band_rms(freqs, noise["irn_psd"], 0.05, 100.0) * 1e6
+print(f"IRN (0.05–100 Hz): {irn_uv:.2f} µVrms")
+# → IRN (0.05–100 Hz): 36.97 µVrms
 ```
 
-JSON 主要字段包括 `solved`、`rails`、`devices`、`bias`、`outputs`、`input_drives`、`load_caps`、`dc_guesses` 和 `transient_inputs`。其中 `devices` 可直接包含 `W/L/NF`，也可以用单独的 `sizes`/`nf` 字段统一指定。
+### 2. 瞬态仿真
+
+```python
+from core.transient_solver import transient
+
+# 4 ms 仿真，在 t=0.5 ms 处施加 0.5 mV 差分阶跃
+t = np.linspace(0, 4e-3, 400)
+vip = np.where(t >= 0.5e-3, 30.65 + 0.5e-3, 30.65)
+vin = np.where(t >= 0.5e-3, 30.65 - 0.5e-3, 30.65)
+
+tran = transient(spec.sizes, spec.bias, t, vip, vin,
+                 topo=spec.topology, nf=spec.nf)
+print(f"瞬态步数: {len(t)},  失败步数: {tran['nfail']}")
+# → 瞬态步数: 400,  失败步数: 0
+```
+
+### 3. Chopper 分析（三种精度层级）
+
+#### 层级 1 — 理想 LPTV（最快，方波乘法器模型）
+
+```python
+from core.chopper import chopper_analysis
+
+chop_ideal = chopper_analysis(
+    spec.sizes, spec.bias, freqs, f_chop=225.0,
+    topo=spec.topology, nf=spec.nf, max_harmonic=31,
+    band=(0.05, 100.0))
+print(f"理想 chopper: {chop_ideal['peak_dB']:.2f} dB,  "
+      f"IRN: {chop_ideal['irn_uV_band']:.2f} µVrms")
+```
+
+#### 层级 2 — PMOS 开关（静态两相分析，无需 PSS）
+
+```python
+from core.chopper import pmos_chopper_analysis
+
+pmos = pmos_chopper_analysis(
+    spec.sizes, spec.bias, freqs,
+    switch_size=(20000, 80), band=(0.05, 100.0))
+print(f"PMOS 静态 chopper: {pmos['peak_dB']:.2f} dB,  "
+      f"IRN: {pmos['irn_uV_band']:.2f} µVrms")
+```
+
+#### 层级 3 — 完整 PSS / PAC / PNoise（第一性原理，对标 Spectre）
+
+```python
+from core.chopper import (pmos_chopper_pss, pmos_chopper_pac,
+                           pmos_chopper_pnoise)
+
+# 第一步：PSS — 求解周期稳态轨道
+pss = pmos_chopper_pss(
+    spec.sizes, spec.bias, f_chop=225.0,
+    switch_size=(5000, 30), edge_time=20e-6,
+    tstab_periods=2, n_points=121)
+print(f"PSS 收敛: {pss['converged']},  "
+      f"残差: {pss['residual_norm']:.2e}")
+
+# 第二步：PAC — 在 PSS 轨道上做周期 AC 增益分析
+pac = pmos_chopper_pac(
+    spec.sizes, spec.bias, freqs, f_chop=225.0,
+    pss_result=pss)
+print(f"PAC 增益: {pac['Av_dc_dB']:.2f} dB,  带宽: {pac['bw_Hz']:.1f} Hz")
+
+# 第三步：PNoise — 周期噪声（谐波平衡法，无需标定常数）
+pnoise = pmos_chopper_pnoise(
+    spec.sizes, spec.bias, freqs, f_chop=225.0,
+    pss_result=pss, pac_result=pac, max_sideband=10,
+    band=(0.05, 100.0))
+print(f"PNoise IRN: {pnoise['irn_uV_band']:.2f} µVrms")
+```
+
+PSS→PAC→PNoise 三件套是 Cadence Spectre `pss` + `pac` + `pnoise` 的本地等价实现。
+PAC 使用有限差分 shooting（精度优先，每频点需 `n_state+2` 次瞬态周期）。
+PNoise 在 PSS 轨道上做谐波平衡——这是第一性原理的 LPTV 噪声解，**不需要任何 Cadence
+标定常数**。对标结果：全分辨率 PNoise IRN 与 Spectre PNoise 偏差约 6% 以内。
+
+### 4. 设计空间探索 / 优化
+
+```python
+from core.explore import explore
+from core.circuit_loader import load_circuit_json
+
+spec = load_circuit_json("examples/afe_explore.json")
+
+# JSON 中的 "explore" 块定义了设计变量、约束和目标。
+# explore() 采样候选点，通过求解器逐个评估，按约束过滤，返回 Pareto 前沿。
+result = explore(spec.topology, spec.sizes, spec.bias, spec.nf,
+                 spec.explore, n=500, method="lhs", seed=42)
+
+print(f"候选总数: {result['n_total']},  "
+      f"可行解: {result['n_feasible']},  "
+      f"Pareto 最优: {len(result['pareto'])}")
+# → 候选总数: 500,  可行解: 87,  Pareto 最优: 12
+```
+
+也支持命令行：
+
+```bash
+python -m core.explore examples/afe_explore.json --n 500 --seed 42
+```
+
+结果导出为 CSV 和 JSONL。JSON 中的 explore 配置指定了扫描哪些变量（器件 W/L、偏置电压）、
+什么约束条件（增益 > X、IRN < Y 等），以及优化什么目标。
+
+### 5. 工艺角与失配分析
+
+```python
+from core.corners import CORNERS, corner_table, mismatch_mc, latch_screen
+import numpy as np
+
+# 工艺角扫描 — 一个设计在 typ/slow/fast 下的指标
+table = corner_table(spec.sizes, spec.bias, np.logspace(-2, 4, 121),
+                     topo=spec.topology, nf=spec.nf)
+for row in table:
+    print(f"{row['corner']:>6s}:  增益={row['gain_peak_dB']:.2f} dB,  "
+          f"BW={row['bw_Hz']:.0f} Hz,  IRN={row['irn_uV']:.2f} µVrms")
+# → typical:  增益=22.89 dB,  BW=549 Hz,  IRN=36.97 µVrms
+# →   slow:  增益=20.81 dB,  BW=328 Hz,  IRN=45.72 µVrms
+# →   fast:  增益=24.41 dB,  BW=846 Hz,  IRN=28.40 µVrms
+
+# 快速 latch 筛查（确定性方法，速度足够快，可嵌入搜索内循环）
+rng = np.random.default_rng(0)
+latch = latch_screen(spec.sizes, spec.bias, topo=spec.topology,
+                     nf=spec.nf, rng=rng, k_sigma=3.0)
+print(f"Latch dV: {latch['latch_dV']*1e3:.2f} mV  "
+      f"({'已 latch' if latch['latched'] else '正常'})")
+
+# 完整 mismatch Monte Carlo（较慢，用于最终验证）
+mc = mismatch_mc(spec.sizes, spec.bias, np.logspace(-2, 4, 61),
+                 topo=spec.topology, nf=spec.nf, n=200,
+                 corner=CORNERS["typical"], seed=1)
+print(f"Latch 率: {mc['latch_rate']*100:.1f}%,  "
+      f"IRN: {mc['irn_mean']:.2f} ± {mc['irn_std']:.2f} µVrms")
+```
+
+---
+
+## JSON 电路格式
+
+新电路通过 JSON 定义，无需修改求解器源码。完整字段参考见
+[JSON 电路描述格式](json_circuit_format_zh.md)。
+
+快速示例 (`examples/single_stage.json`)：
+
+```json
+{
+  "solved": ["OUT"],
+  "rails": {"VDD": 40.0, "GND": 0.0},
+  "devices": [
+    {"name": "M1", "drain": "OUT", "gate": "IN", "source": "VDD",
+     "W": 2000, "L": 80, "NF": 1}
+  ],
+  "bias": {"VDD": 40.0, "VIN": 30.0, "VB": 10.0},
+  "outputs": ["OUT"],
+  "input_drives": {"IN": 1.0},
+  "load_caps": {"OUT": 1e-12}
+}
+```
+
+主要字段说明：
+
+| 字段                 | 必填  | 用途                                                                                                    |
+| ------------------ | --- | ----------------------------------------------------------------------------------------------------- |
+| `solved`           | 是   | 求解器需要求解电压的节点列表                                                                                        |
+| `rails`            | 是   | 固定电压节点：`{"VDD": 40.0, "GND": 0.0, ...}`                                                               |
+| `devices`          | 是   | PMOS 晶体管：`{"name": "M1", "drain": "OUT", "gate": "IN", "source": "VDD", "W": 2000, "L": 80, "NF": 1}` |
+| `bias`             | 是   | 每个 rail 节点的 DC 电压：`{"VDD": 40.0, "VIN": 30.0, ...}`                                                   |
+| `outputs`          | 是   | 观测增益/噪声的输出节点                                                                                          |
+| `input_drives`     | —   | AC 小信号激励注入位置（驱动器件栅极）                                                                                  |
+| `load_caps`        | —   | 各输出节点的负载电容 (F)：`{"OUT": 1e-12}`                                                                       |
+| `resistors`        | —   | `[名称, 节点A, 节点B, 阻值]`                                                                                  |
+| `capacitors`       | —   | `[名称, 节点A, 节点B, 容值]`                                                                                  |
+| `isources`         | —   | 理想直流电流源：`[名称, nplus, nminus, 电流]`                                                                     |
+| `nf`               | —   | 全局 NF（fingers），作用于所有器件；可被器件自身的 `NF` 覆盖                                                                |
+| `dc_guesses`       | —   | DC 收敛的初始电压猜测，复杂电路需要此字段帮助收敛                                                                            |
+| `transient_inputs` | —   | 瞬态输入波形名到驱动节点的映射                                                                                       |
+| `ac_drives`        | —   | 类似 `input_drives`，但驱动的是*节点*而非器件栅极（用于 testbench 前端网络）                                                  |
+| `aliases`          | —   | 节点别名，方便工具/扫描按名称找到关键节点（如 `"VOP"`、`"VON"`）                                                              |
+| `explore`          | —   | 设计空间探索配置（变量范围、约束条件、优化目标）                                                                              |
+
+---
 
 ## 交互式 AFE Tuner
 
-`demo/` 目录下提供了一个基于 Web 的交互式调参工具：
+基于 Web 的实时调参工具：
 
 ```bash
 python3 -m pip install -r requirements-demo.txt
@@ -102,45 +277,103 @@ python3 demo/server.py
 # 浏览器打开 http://localhost:5100
 ```
 
-该 tuner 通过 REST API 暴露经验证的核心求解器（DC + AC + noise），搭配 HTML 前端，可在浏览器中实时调整器件尺寸和偏置电压，查看增益、带宽和等价输入噪声变化。内置预设设计（Base、Final Locked、Min Area、First Feasible），包含 DC seed 热启动与分支救援逻辑，并通过有界线程池进行并发控制。
+在浏览器中调整器件 W/L 和偏置电压，实时查看增益、带宽和等价输入噪声变化。
+内置预设设计（Base、Final Locked、Min Area、First Feasible）。
+
+---
+
+## 性能基准
+
+四个固定性能基准，用于性能回归跟踪：
+
+```bash
+python3 -m benchmarks.bench_afe --warm-runs 3         # AC+noise+transient
+python3 -m benchmarks.bench_model --warm-runs 3       # 单管微基准
+python3 -m benchmarks.bench_chopper --warm-runs 3     # Chopper: 5 个分析层级
+python3 -m benchmarks.bench_sweep --n-candidates 200  # 批量 explore 负载
+```
+
+设置 `CIRCUIT_USE_NUMBA=0` 可对比纯 Python 性能。 MacMini M4 上 Numba 预热后的典型耗时：
+
+| 基准                                      | 耗时      |
+| --------------------------------------- | ------- |
+| AC 121 点                                | ~1.5 ms |
+| Noise 121 点                             | ~1.7 ms |
+| Transient 200 步                         | ~5 ms   |
+| 理想 chopper（31 次谐波）                      | ~5 ms   |
+| PMOS chopper LPTV                       | ~22 ms  |
+| Chopper transient（8-PMOS, 225 Hz, 8 周期） | ~0.6 s  |
+| 批量 sweep（200 候选, AC+noise）              | ~0.5 s  |
+
+---
+
+## 示例文件
+
+| 文件                                  | 说明                                                |
+| ----------------------------------- | ------------------------------------------------- |
+| `examples/afe_explore.json`         | 锁定 10 管 AFE 设计，含尺寸、偏置、NF 和 explore 扫描配置           |
+| `examples/single_stage.json`        | 最小单管共源级——新建电路的最佳起点                                |
+| `examples/resistor_load_stage.json` | 带电阻负载的单管电路，演示 `resistors` 和 `isources` 字段         |
+| `examples/afe_testbench.py`         | 完整 testbench：干电极前端（R∥C 网络）→ AFE 核心 → AC + 噪声 + 瞬态 |
+| `examples/mc_mismatch.py`           | Monte Carlo mismatch 驱动：工艺角表 + 3-corner MC 图      |
+
+---
+
+## 常见问题
+
+**DC 求解不收敛。**
+先用 `examples/single_stage.json`（单管，必然收敛）。对复杂电路，在 JSON
+中加上 `dc_guesses`——一个近似节点电压的字典。锁定 AFE 的 JSON 里就包含了这些猜测值。
+
+**Transient 出现 `nfail > 0`。**
+部分 Newton 步失败。尝试：(a) 增加时间点 `np.linspace(0, T, more_steps)`；
+(b) 收紧 `newton_vtol`（默认 `1e-8`）；(c) 启用 `fallback_least_squares=True`。
+对开关电路，确保 `max_step` 小于最快的边沿时间。
+
+**PSS 不收敛（`converged=False`）。**
+增加 `tstab_periods`（shooting 前的额外稳定周期），或降低 `max_shooting_iters`。
+检查 `pss['shooting_history']`，看残差是否在下降。如果停滞，可能是轨道本身非周期——
+检查所有输入波形是否周期相同、周期一致。
+
+**PNoise 太慢。**
+减少 `max_sideband`（奇次谐波主导折叠，5–7 通常够了），或降低 `n_period_samples`
+（用时域分辨率换速度）。
+
+---
+
+## 延伸阅读
+
+| 文档                                       | 作用                     |
+| ---------------------------------------- | ---------------------- |
+| [核心求解器概览](core_overview_zh.md)           | 理解每个求解器的原理、导入依赖关系和标定数据 |
+| [JSON 电路描述格式](json_circuit_format_zh.md) | JSON 的字段级参考            |
+| [后续开发计划](futureplan.md)                  | 了解已完成、待做事项和执行路线图       |
+| `tests/` 目录                              | 每个 API 调用的可运行示例，带预期输出  |
+| `benchmarks/` 目录                         | 性能基线及 Numba 加速对比       |
+
+---
 
 ## 项目动机
 
-模拟电路设计通常需要反复运行仿真器来调整晶体管尺寸、偏置电流和补偿元件。直接扫描的结果可靠，但速度较慢，尤其是在候选设计数量很多，或者需要检查工艺角和 mismatch 时。
+模拟电路设计需要反复跑仿真来调整晶体管尺寸和偏置。Cadence/Spectre 精确但慢，
+尤其是有大量候选设计或需要检查工艺角和 mismatch 时。
 
-这个项目采用互补的方式：
+本项目的工作流：
 
-1. 使用 Cadence/Spectre 作为可信参考。
-2. 建立能够匹配关键仿真行为的本地模型。
-3. 使用本地求解器快速探索和优化。
-4. 只把筛选后的候选设计送回 Cadence 验证。
+1. **Cadence/Spectre** = 可信参考。
+2. **本仓库** = 经标定匹配 Spectre 行为的本地快速模型。
+3. **本地探索** — 扫描尺寸、偏置、工艺角；用约束过滤。
+4. **Cadence 验证** — 只把最优候选送回 Spectre 最终确认。
 
-这样可以更快地理解设计 trade-off，在正式仿真前缩小搜索空间，并获得更合理的候选设计。
+---
 
-## 优化方向
+## 参与贡献
 
-当前优化方法更适合称为 model-based design-space exploration，而不是严格意义上的 machine learning。它使用经过校准的 physics-based surrogate model 来快速评估候选设计。
+欢迎提 Issue 和 PR。
 
-已有和计划中的优化方法包括：
-
-- 对尺寸和偏置变量进行随机全局搜索。
-- 基于约束进行可行解筛选。
-- 使用 greedy per-device shrink 在保持指标通过的同时减小面积。
-- 使用 Pareto selection 分析面积-功耗或噪声-功耗 trade-off。
-- 后续扩展到可微分 surrogate model 或 machine-learning surrogate model。
-
-## 后续计划
-
-后续计划包括：
-
-- 支持更多 PDK 和晶体管紧凑模型。
-- 支持更通用的电路拓扑描述。
-- 拓展更高级的 DC、AC、瞬态和噪声求解器。
-- 改进与仿真器数据的校准流程。
-- 自动生成验证报告。
-- 搭建交互式图形界面，用于查看设计 trade-off。
-- 集成机器学习 surrogate model，用于更快的优化。
+---
 
 ## 使用定位
 
-这个仓库面向科研和早期模拟电路设计探索，不用于替代 sign-off 级别的电路仿真器。它的作用是在本地快速理解趋势、缩小搜索空间，并为 Cadence/Spectre 验证准备更好的候选设计。
+面向科研和早期模拟电路设计探索。**不是** sign-off 级仿真器替代品。
+用于在本地快速理解设计趋势、缩小搜索空间、为 Cadence/Spectre 验证准备更优候选。

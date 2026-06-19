@@ -4,97 +4,281 @@
 
 ## Overview
 
-This project builds a local circuit modeling, simulation, and optimization flow for analog design-space exploration. The core motivation is to reduce the need for exhaustive Cadence/Spectre sweeps during early sizing and biasing iterations, while still using Cadence/Spectre results as the final verification reference.
+Local Python solvers for analog circuit design-space exploration, calibrated against
+Cadence/Spectre. The first use case is an **AT4000TG PMOS thin-film transistor
+ECG AFE** (analog front-end amplifier with chopper).
 
-The first use case is an AT4000TG thin-film transistor amplifier design. In this project, a local Python-based model is used to reproduce and analyze key circuit behavior, including DC operating point, small-signal response, transient response, noise, and design constraints. The repository is intended to grow beyond this initial implementation and become a more general framework for circuit exploration and optimization.
+What you can do with this:
+- **DC/AC/Noise/Transient** — standard circuit analysis without a simulator license.
+- **PSS / PAC / PNoise** — periodic steady-state, periodic AC, and periodic noise
+  for chopper amplifiers, matched to Spectre RF analyses.
+- **Design exploration** — sweep device sizes and bias voltages, filter by
+  constraints (gain, BW, noise, power, area), find Pareto-optimal designs.
+- **Corners & mismatch** — process corners, per-device mismatch Monte Carlo, latch
+  screening.
 
-## Current Scope
+For solver internals, see [Core Solver Overview](core_overview.md).
 
-The current flow covers or is planned to cover:
+---
 
-- Device-level compact-model evaluation.
-- DC operating-point solving.
-- AC small-signal gain and bandwidth estimation.
-- Transient response simulation.
-- Noise analysis, including thermal noise and flicker noise.
-- Cadence/Spectre comparison and calibration.
-- Constraint checking for gain, bandwidth, input-referred noise, power, and area.
-- Local design-space exploration without running every candidate directly in Cadence.
-- Size and bias optimization using search, greedy shrink, and Pareto selection.
-- Process-corner and mismatch Monte Carlo style robustness checks.
-- Research-style plot generation for design reports and presentations.
-
-The current implementation details are summarized in [Core Solver Overview](core_overview.md).
-
-## Installation
-
-Requires Python 3.10 or later:
+## Quick Start
 
 ```bash
+# 1. Install
 python3 -m pip install -r requirements.txt
-```
 
-`requirements.txt` installs this project in editable mode, so external scripts and notebooks can import directly via `from core...` without manual path adjustments.
-
-Optional Numba-accelerated backend for the PMOS model and transient Newton hot paths. Numba is enabled by default when installed; set `CIRCUIT_USE_NUMBA=0` to disable:
-
-```bash
+# 2. Optional: Numba acceleration (10-50× faster transient)
 python3 -m pip install -r requirements-numba.txt
-python3 -m benchmarks.bench_afe --skip-noise --warm-runs 3
+
+# 3. Verify — run the AFE benchmark
+python3 -m benchmarks.bench_afe --warm-runs 1 --skip-noise
 ```
 
-Fixed performance benchmarks:
+Expected output: three timing lines (`ac121`, `noise121`, `tran200`) in the
+millisecond range. If you see numbers, everything works.
 
-```bash
-# Full-AFE benchmark (ac121 / noise121 / tran200)
-python3 -m benchmarks.bench_afe --warm-runs 3
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_afe --warm-runs 3
+### How the code is organized
 
-# Single-device PMOS_TFT micro-benchmark (7 hot-path ops × 3 bias regions)
-python3 -m benchmarks.bench_model --warm-runs 3
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_model --warm-runs 3
+Before diving into the workflows, a one-minute map of the concepts:
 
-# Chopper analysis benchmark (harmonics / ideal / pmos_static / pmos_lptv / pmos_tran)
-python3 -m benchmarks.bench_chopper --warm-runs 3
-python3 -m benchmarks.bench_chopper --skip-tran --warm-runs 3   # skip slow transient
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_chopper --warm-runs 3
+| Concept | What it is | Where it lives |
+|---------|-----------|----------------|
+| **Topology** | Circuit structure — which nodes exist, how devices connect, where inputs/outputs are | `core/topology.py`, or auto-generated from JSON |
+| **Sizes** | `{device: (W_µm, L_µm)}` — transistor dimensions | JSON `sizes` field |
+| **NF** | Number of fingers (parallel transistor multiplier; increases current) | JSON `nf` field, or per-device in `devices[].NF` |
+| **Bias** | `{node: voltage}` — DC operating voltages at rail nodes | JSON `bias` field |
+| **Solver** | A function that takes topology + sizes + bias → results (gain, noise, waveforms, …) | `core/ac_solver.py`, `core/transient_solver.py`, etc. |
 
-# Batch sweep benchmark (N × AC / AC+noise, explore-layer workload)
-python3 -m benchmarks.bench_sweep --n-candidates 200 --warm-runs 3
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_sweep --warm-runs 3
+Any solver call follows the same pattern:
+
+```python
+result = solver(sizes, bias, ..., topo=topology, nf=nf)
 ```
 
-## JSON Circuit Description
+The JSON file bundles all the inputs together; `load_circuit_json()` unpacks them
+into a `CircuitSpec` with `.topology`, `.sizes`, `.bias`, `.nf`, and optionally
+`.explore`.
 
-Solvers now support loading generic circuit descriptions from JSON, avoiding hard-coded node and device names in `core/*.py`. Format details in [JSON Circuit Description](json_circuit_format_zh.md), example at `examples/single_stage.json`.
+---
 
-Minimal usage:
+## Common Workflows
+
+All examples below are copy-paste ready. They use the locked AFE design from
+`examples/afe_explore.json`.
+
+### 1. Load a Circuit and Run DC / AC / Noise
 
 ```python
 import numpy as np
-
 from core.circuit_loader import load_circuit_json
 from core.ac_solver import ac_solve
-from core.noise_solver import noise_analysis
-from core.transient_solver import transient
+from core.noise_solver import noise_analysis, band_rms
 
-spec = load_circuit_json("examples/single_stage.json")
-freqs = np.logspace(0, 4, 121)
+# Load from JSON — no hard-coded node names in solver code
+spec = load_circuit_json("examples/afe_explore.json")
+freqs = np.logspace(-2, 4, 121)   # 0.01 Hz to 10 kHz
 
+# DC operating point + AC gain/bandwidth
 ac = ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
-noise = noise_analysis(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
+print(f"Gain: {ac['Av_dc_dB']:.2f} dB,  BW: {ac['bw_Hz']:.1f} Hz")
+# → Gain: 22.89 dB,  BW: 549.3 Hz
 
-t = np.linspace(0, 1e-3, 100)
-vin = np.full_like(t, spec.bias["VIN"])
-tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
-                 nf=spec.nf, inputs={"vin": vin})
+# Noise analysis (thermal + flicker)
+noise = noise_analysis(spec.sizes, spec.bias, freqs,
+                       topo=spec.topology, nf=spec.nf)
+irn_uv = band_rms(freqs, noise["irn_psd"], 0.05, 100.0) * 1e6
+print(f"IRN (0.05–100 Hz): {irn_uv:.2f} µVrms")
+# → IRN (0.05–100 Hz): 36.97 µVrms
 ```
 
-Key JSON fields include `solved`, `rails`, `devices`, `bias`, `outputs`, `input_drives`, `load_caps`, `dc_guesses`, and `transient_inputs`. `devices` can embed `W/L/NF` directly, or use separate `sizes`/`nf` fields.
+### 2. Run a Transient Simulation
+
+```python
+from core.transient_solver import transient
+
+# 40 ms simulation, 0.5 mV step at t=0.5 ms
+t = np.linspace(0, 4e-3, 400)
+vip = np.where(t >= 0.5e-3, 30.65 + 0.5e-3, 30.65)
+vin = np.where(t >= 0.5e-3, 30.65 - 0.5e-3, 30.65)
+
+tran = transient(spec.sizes, spec.bias, t, vip, vin,
+                 topo=spec.topology, nf=spec.nf)
+print(f"Transient steps: {len(t)},  nfail: {tran['nfail']}")
+# → Transient steps: 400,  nfail: 0
+```
+
+### 3. Chopper Analysis (Three Levels)
+
+#### Level 1 — Ideal LPTV (fast, square-wave model)
+
+```python
+from core.chopper import chopper_analysis
+
+chop_ideal = chopper_analysis(
+    spec.sizes, spec.bias, freqs, f_chop=225.0,
+    topo=spec.topology, nf=spec.nf, max_harmonic=31,
+    band=(0.05, 100.0))
+print(f"Ideal chop: {chop_ideal['peak_dB']:.2f} dB,  "
+      f"IRN: {chop_ideal['irn_uV_band']:.2f} µVrms")
+```
+
+#### Level 2 — PMOS Switch (static phases, no PSS needed)
+
+```python
+from core.chopper import pmos_chopper_analysis
+
+pmos = pmos_chopper_analysis(
+    spec.sizes, spec.bias, freqs,
+    switch_size=(20000, 80), band=(0.05, 100.0))
+print(f"PMOS static chop: {pmos['peak_dB']:.2f} dB,  "
+      f"IRN: {pmos['irn_uV_band']:.2f} µVrms")
+```
+
+#### Level 3 — Full PSS / PAC / PNoise (first-principles, matches Spectre)
+
+```python
+from core.chopper import (pmos_chopper_pss, pmos_chopper_pac,
+                           pmos_chopper_pnoise)
+
+# Step 1: PSS — find the periodic steady-state orbit
+pss = pmos_chopper_pss(
+    spec.sizes, spec.bias, f_chop=225.0,
+    switch_size=(5000, 30), edge_time=20e-6,
+    tstab_periods=2, n_points=121)
+print(f"PSS converged: {pss['converged']},  "
+      f"residual: {pss['residual_norm']:.2e}")
+
+# Step 2: PAC — periodic AC gain on the PSS orbit
+pac = pmos_chopper_pac(
+    spec.sizes, spec.bias, freqs, f_chop=225.0,
+    pss_result=pss)
+print(f"PAC gain: {pac['Av_dc_dB']:.2f} dB,  BW: {pac['bw_Hz']:.1f} Hz")
+
+# Step 3: PNoise — periodic noise (harmonic balance, no calibration constants)
+pnoise = pmos_chopper_pnoise(
+    spec.sizes, spec.bias, freqs, f_chop=225.0,
+    pss_result=pss, pac_result=pac, max_sideband=10,
+    band=(0.05, 100.0))
+print(f"PNoise IRN: {pnoise['irn_uV_band']:.2f} µVrms")
+```
+
+The PSS→PAC→PNoise pipeline is the local equivalent of Cadence Spectre
+`pss` + `pac` + `pnoise`. PAC uses finite-difference shooting (accurate but
+costs `n_state+2` transient runs per frequency). PNoise uses harmonic balance
+on the PSS orbit — it's a first-principles LPTV noise solve with no calibration
+fudge factors.
+
+### 4. Design-Space Exploration / Optimization
+
+```python
+from core.explore import explore
+from core.circuit_loader import load_circuit_json
+
+spec = load_circuit_json("examples/afe_explore.json")
+
+# The JSON's "explore" block defines variables, constraints, and objectives.
+# explore() samples candidates, evaluates each through the solvers,
+# filters by constraints, and returns the Pareto front.
+result = explore(spec.topology, spec.sizes, spec.bias, spec.nf,
+                 spec.explore, n=500, method="lhs", seed=42)
+
+print(f"Candidates: {result['n_total']},  "
+      f"Feasible: {result['n_feasible']},  "
+      f"Pareto-optimal: {len(result['pareto'])}")
+# → Candidates: 500,  Feasible: 87,  Pareto-optimal: 12
+```
+
+Or from the command line:
+
+```bash
+python -m core.explore examples/afe_explore.json --n 500 --seed 42
+```
+
+Results are exported as CSV and JSONL. The explore config in the JSON file
+specifies which variables to sweep (device W/L, bias voltages), what constraints
+to enforce (gain > X, IRN < Y, etc.), and which objectives to optimize.
+
+### 5. Process Corners & Mismatch
+
+```python
+from core.corners import CORNERS, corner_table, mismatch_mc, latch_screen
+import numpy as np
+
+# Corner sweep — one design at typ/slow/fast
+table = corner_table(spec.sizes, spec.bias, np.logspace(-2, 4, 121),
+                     topo=spec.topology, nf=spec.nf)
+for row in table:
+    print(f"{row['corner']:>6s}:  gain={row['gain_peak_dB']:.2f} dB,  "
+          f"BW={row['bw_Hz']:.0f} Hz,  IRN={row['irn_uV']:.2f} µVrms")
+# → typical:  gain=22.89 dB,  BW=549 Hz,  IRN=36.97 µVrms
+# →   slow:  gain=20.81 dB,  BW=328 Hz,  IRN=45.72 µVrms
+# →   fast:  gain=24.41 dB,  BW=846 Hz,  IRN=28.40 µVrms
+
+# Quick latch screen (deterministic, fast enough for inner-loop use)
+rng = np.random.default_rng(0)
+latch = latch_screen(spec.sizes, spec.bias, topo=spec.topology,
+                     nf=spec.nf, rng=rng, k_sigma=3.0)
+print(f"Latch dV: {latch['latch_dV']*1e3:.2f} mV  "
+      f"({'LATCHED' if latch['latched'] else 'ok'})")
+
+# Full mismatch Monte Carlo (slower, for final verification)
+mc = mismatch_mc(spec.sizes, spec.bias, np.logspace(-2, 4, 61),
+                 topo=spec.topology, nf=spec.nf, n=200,
+                 corner=CORNERS["typical"], seed=1)
+print(f"Latch rate: {mc['latch_rate']*100:.1f}%,  "
+      f"IRN: {mc['irn_mean']:.2f} ± {mc['irn_std']:.2f} µVrms")
+```
+
+---
+
+## JSON Circuit Format
+
+New circuits are defined in JSON — no solver source edits needed. See
+[JSON Circuit Description](json_circuit_format.md) for the full field reference.
+
+Quick example (`examples/single_stage.json`):
+
+```json
+{
+  "solved": ["OUT"],
+  "rails": {"VDD": 40.0, "GND": 0.0},
+  "devices": [
+    {"name": "M1", "drain": "OUT", "gate": "IN", "source": "VDD",
+     "W": 2000, "L": 80, "NF": 1}
+  ],
+  "bias": {"VDD": 40.0, "VIN": 30.0, "VB": 10.0},
+  "outputs": ["OUT"],
+  "input_drives": {"IN": 1.0},
+  "load_caps": {"OUT": 1e-12}
+}
+```
+
+Key top-level fields:
+
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `solved` | yes | Nodes whose voltages the solver must find |
+| `rails` | yes | Fixed-voltage nodes: `{"VDD": 40.0, "GND": 0.0, ...}` |
+| `devices` | yes | PMOS transistors: `{"name": "M1", "drain": "OUT", "gate": "IN", "source": "VDD", "W": 2000, "L": 80, "NF": 1}` |
+| `bias` | yes | DC voltage at every rail node: `{"VDD": 40.0, "VIN": 30.0, ...}` |
+| `outputs` | yes | Which node(s) to measure gain/noise at |
+| `input_drives` | — | Where to inject the AC small-signal stimulus for gain calculation |
+| `load_caps` | — | Load capacitance per output node (F): `{"OUT": 1e-12}` |
+| `resistors` | — | `[name, node_a, node_b, R_ohm]` |
+| `capacitors` | — | `[name, node_a, node_b, C_farad]` |
+| `isources` | — | Ideal DC current sources: `[name, nplus, nminus, I_amp]` |
+| `nf` | — | Global NF (fingers) applied to all devices; overridden by per-device `NF` |
+| `dc_guesses` | — | Initial voltage guesses for DC convergence on tricky circuits |
+| `transient_inputs` | — | Maps input waveform names to the nodes they drive |
+| `ac_drives` | — | Like `input_drives` but drives a *node* rather than a device gate (used for testbench front-ends) |
+| `aliases` | — | Shortcuts so tools/sweeps can find key nodes by name (e.g. `"VOP"`, `"VON"`) |
+| `explore` | — | Design-space exploration config (variables, constraints, objectives) |
+
+---
 
 ## Interactive AFE Tuner
 
-A web-based interactive tuner is available under `demo/`:
+A web-based tuner for real-time exploration:
 
 ```bash
 python3 -m pip install -r requirements-demo.txt
@@ -102,45 +286,108 @@ python3 demo/server.py
 # Open http://localhost:5100
 ```
 
-The tuner exposes the validated core solvers (DC + AC + noise) through a REST API, with an HTML frontend for real-time exploration of gain, bandwidth, and input-referred noise across device sizes and bias voltages. It includes preset designs (Base, Final Locked, Min Area, First Feasible), DC seed warm-starting and branch rescue logic, and a bounded thread pool with concurrency control.
+Adjust device W/L and bias voltages in the browser, see gain/BW/IRN update
+live. Includes preset designs and DC warm-start logic.
+
+---
+
+## Benchmarks
+
+Four fixed benchmarks for performance tracking:
+
+```bash
+python3 -m benchmarks.bench_afe --warm-runs 3         # AC+noise+transient
+python3 -m benchmarks.bench_model --warm-runs 3       # Single-device micro
+python3 -m benchmarks.bench_chopper --warm-runs 3     # Chopper: 5 analysis levels
+python3 -m benchmarks.bench_sweep --n-candidates 200  # Batch explore workload
+```
+
+Set `CIRCUIT_USE_NUMBA=0` for pure-Python comparison. Typical warm timings on a
+modern Mac (Numba enabled):
+
+| Benchmark | Time |
+|-----------|------|
+| AC 121 points | ~1.5 ms |
+| Noise 121 points | ~1.7 ms |
+| Transient 200 steps | ~5 ms |
+| Ideal chopper (31 harmonics) | ~5 ms |
+| PMOS chopper LPTV | ~22 ms |
+| Chopper transient (8-PMOS, 225 Hz, 8 cycles) | ~0.6 s |
+| Batch sweep (200 candidates, AC+noise) | ~0.5 s |
+
+---
+
+## Example Files
+
+| File | What it is |
+|------|-----------|
+| `examples/afe_explore.json` | The locked 10-transistor AFE design with sizes, bias, NF, and explore sweep config |
+| `examples/single_stage.json` | Minimal single-transistor common-source stage — best starting point for a new circuit |
+| `examples/resistor_load_stage.json` | Single transistor with resistive load, demoing `resistors` and `isources` fields |
+| `examples/afe_testbench.py` | Full testbench: dry-electrode front-end (R∥C network) → AFE core → AC + noise + transient |
+| `examples/mc_mismatch.py` | Monte Carlo mismatch driver: corner table + 3-corner MC figure |
+
+---
+
+## Troubleshooting
+
+**DC solve doesn't converge.**
+Start with `examples/single_stage.json` (one transistor, trivial to converge).
+For larger circuits, add `dc_guesses` to the JSON — a dictionary of approximate
+node voltages. The locked AFE JSON includes these.
+
+**Transient returns `nfail > 0`.**
+Some Newton steps failed. Try: (a) more time points (`np.linspace(0, T, more_steps)`),
+(b) tighter `newton_vtol` (default `1e-8`), or (c) enable
+`fallback_least_squares=True`. For switched circuits, make sure `max_step` is
+smaller than the fastest edge.
+
+**PSS doesn't converge (`converged=False`).**
+Increase `tstab_periods` (extra stabilization cycles before shooting starts)
+or reduce `max_shooting_iters`. Check `pss['shooting_history']` to see if the
+residual is decreasing. If it stalls, the orbit may be genuinely aperiodic —
+check that all input waveforms are periodic with the same period.
+
+**PNoise is slow.**
+Reduce `max_sideband` (odd harmonics dominate the fold; 5–7 is often enough)
+or `n_period_samples` (trade time-domain resolution for speed).
+
+---
+
+## Further Reading
+
+| Document | When to read it |
+|----------|----------------|
+| [Core Solver Overview](core_overview.md) | Understand how each solver works, import dependencies, and calibration data |
+| [JSON Circuit Format](json_circuit_format.md) | Full field-by-field reference for writing your own circuit JSON |
+| [Future Plan](futureplan.md) | What's done, what's next, and the execution roadmap |
+| `tests/` directory | Working examples of every API call with expected outputs |
+| `benchmarks/` directory | Performance baselines and how the hardware-accelerated paths compare |
+
+---
 
 ## Motivation
 
-Analog circuit design often requires repeated simulator runs to tune transistor dimensions, bias currents, and compensation components. These sweeps are accurate but slow, especially when evaluating many design candidates or running corner and mismatch checks.
+Analog design needs many simulator runs to tune transistor sizes and bias.
+Cadence/Spectre is accurate but slow for sweeping thousands of candidates.
 
-This project follows a complementary approach:
+The workflow this project enables:
 
-1. Use Cadence/Spectre as the trusted reference.
-2. Build a local model that matches the relevant simulator behavior.
-3. Use the local solver for fast exploration and optimization.
-4. Send only selected candidates back to Cadence for verification.
+1. **Cadence/Spectre** = trusted reference.
+2. **This repo** = fast local model, calibrated to match Spectre behavior.
+3. **Explore locally** — sweep sizes, bias, corners; filter by constraints.
+4. **Verify in Cadence** — only the best candidates go back to Spectre.
 
-This makes it easier to understand design trade-offs and iterate on constraints before committing to expensive simulations.
+---
 
-## Optimization Direction
+## Contributing
 
-The current optimization strategy is best described as model-based design-space exploration rather than pure machine learning. It uses a calibrated physics-based surrogate model to evaluate candidate designs quickly.
+Issues and PRs welcome.
 
-Existing and planned optimization ideas include:
-
-- Random global search over sizing and bias variables.
-- Constraint filtering for feasibility.
-- Greedy per-device size shrink to reduce area while preserving specifications.
-- Pareto selection for area-power or noise-power trade-offs.
-- Future extension to differentiable or machine-learning surrogate models.
-
-## Future Work
-
-Planned extensions include:
-
-- Support for more PDKs and transistor compact models.
-- More general topology descriptions.
-- More advanced DC, AC, transient, and noise solvers.
-- Better calibration workflows against simulator data.
-- Automated generation of validation reports.
-- Interactive graphical interface for exploring trade-offs.
-- Integration of machine-learning based surrogate models for faster optimization.
+---
 
 ## Intended Use
 
-This repository is meant for research and early-stage analog design exploration. It is not intended to replace a sign-off simulator. Instead, it provides a fast local environment for understanding trends, narrowing the search space, and preparing better candidates for Cadence/Spectre verification.
+Research and early-stage analog design exploration. **Not** a sign-off simulator
+replacement. Use it to understand trade-offs, narrow the search space, and
+prepare better candidates for Cadence/Spectre verification.

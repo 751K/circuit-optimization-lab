@@ -37,12 +37,18 @@ Clock feedthrough from the Verilog-A Cgss/Cgdd terms is included when the switch
 gate clocks are finite-edge waveforms. Additional explicit charge-injection
 pulses can be supplied through current_inputs.
 """
+import time
+
 import numpy as np
 try:
     from .pmos_tft_model import PMOS_TFT
     from .topology import AFE_TOPO
     from .ac_solver import ac_solve, _dev_nf
-    from .numba_kernels import terminal_derivatives_numba, transient_newton_numba
+    from .numba_kernels import (
+        terminal_derivatives_numba,
+        transient_newton_numba,
+        transient_solve_grid_numba,
+    )
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
     from pmos_tft_model import PMOS_TFT
@@ -50,19 +56,26 @@ except ImportError:  # pragma: no cover - legacy direct module import
     from ac_solver import ac_solve, _dev_nf
     from compiled_topology import CompiledTopology
     try:
-        from numba_kernels import terminal_derivatives_numba, transient_newton_numba
+        from numba_kernels import (
+            terminal_derivatives_numba,
+            transient_newton_numba,
+            transient_solve_grid_numba,
+        )
     except Exception:
         terminal_derivatives_numba = None
         transient_newton_numba = None
+        transient_solve_grid_numba = None
 
 
 def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
               topo=AFE_TOPO, inputs=None, node_inputs=None, current_inputs=None,
-              max_step=None, max_retry_subdivisions=0, newton_maxit=30,
+              max_step=None, flat_max_step=None,
+              max_retry_subdivisions=0, newton_maxit=30,
               newton_step_limit=5.0, newton_vtol=1e-8,
               fallback_full_jacobian=False,
               fallback_least_squares=False, fallback_tol=1e-9,
-              signed_devices=None):
+              signed_devices=None, profile=False, edge_mask=None,
+              rail_margin=None):
     """Backward-Euler transient.
       tgrid : (N,) time points [s]
       vip,vin : legacy AFE M7/M8 gate waveforms [V]
@@ -77,6 +90,8 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                The waveform current flows p -> q, matching topology.isources.
       max_step : optional maximum internal step. Intervals larger than this are
                split linearly between adjacent input samples.
+      flat_max_step : optional maximum internal step for intervals not marked by
+               edge_mask. If omitted, max_step is used everywhere.
       max_retry_subdivisions : if Newton fails on a step, recursively bisect that
                step up to this depth before recording a failure.
       fallback_least_squares : if true, a failed Newton step is retried with a
@@ -88,6 +103,12 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                Verilog-A drain-terminal sign. The default AFE devices use the
                legacy abs(Idc) convention calibrated by AC/noise; bidirectional
                pass switches should be signed.
+      profile : if true, include transient_profile counters in the result.
+      edge_mask : optional boolean mask over tgrid points; intervals touching a
+               true point are counted as edge work in transient_profile.
+      rail_margin : optional voltage margin around numeric rails for topologies
+               that need physical branch selection. If omitted, topologies with
+               require_dc_in_box use a 2 V margin; other topologies are unbounded.
       V0    : optional initial solved-node vector.
     Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
     fields are included when those nodes exist.
@@ -211,6 +232,15 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     dyn_pi = _index_array(item[0] for item in dyn_isrc_meta)
     dyn_qi = _index_array(item[1] for item in dyn_isrc_meta)
     dyn_input_idx = np.array([item[2] for item in dyn_isrc_meta], dtype=np.int64)
+    if rail_margin is None and getattr(topo, "require_dc_in_box", False):
+        rail_margin = 2.0
+    clip_lo = np.inf
+    clip_hi = -np.inf
+    if rail_margin is not None:
+        rails = [v for v in plan.rails.values() if isinstance(v, (int, float))]
+        if rails:
+            clip_lo = min(rails) - float(rail_margin)
+            clip_hi = max(rails) + float(rail_margin)
     use_numba_newton = transient_newton_numba is not None
     numba_newton_attempts = 0
     numba_newton_success = 0
@@ -527,6 +557,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                     cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value,
                     isrc_pi, isrc_qi, isrc_value,
                     dyn_pi, dyn_qi, dyn_input_idx,
+                    float(clip_lo), float(clip_hi),
                 )
                 if ok:
                     numba_newton_success += 1
@@ -556,9 +587,18 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             if mx > step_limit:
                 dV *= step_limit / mx; mx = step_limit    # branch-safety step cap
             V = V + dV
+            if clip_lo <= clip_hi:
+                V = np.clip(V, clip_lo, clip_hi)
             if mx < vtol:
+                if fallback_full_jacobian or fallback_least_squares:
+                    # Stiff chopper edges can produce a tiny Newton update at a
+                    # still-large KCL residual.  Let the next iteration verify
+                    # the residual, otherwise fall through to the robust fallback.
+                    continue
                 return V, it + 1, True
             if it >= 4 and mx >= prev and mx < 1e-5:     # stalled at the numeric floor
+                if fallback_full_jacobian or fallback_least_squares:
+                    continue
                 return V, it + 1, True
             prev = mx
         return V, maxit, False
@@ -622,6 +662,58 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     nsubsteps = 0
     max_retry_subdivisions = int(max_retry_subdivisions or 0)
     max_step = None if max_step is None else float(max_step)
+    flat_max_step = None if flat_max_step is None else float(flat_max_step)
+    used_grid_numba = False
+    profile = bool(profile)
+    profile_wall_s = 0.0
+    profile_stats = None
+    if edge_mask is None:
+        edge_mask_arr = np.empty(0, dtype=np.bool_)
+    else:
+        edge_mask_arr = np.asarray(edge_mask, dtype=np.bool_)
+        if len(edge_mask_arr) != N:
+            raise ValueError("edge_mask length must match tgrid")
+
+    if transient_solve_grid_numba is not None:
+        try:
+            max_step_arg = -1.0 if max_step is None else float(max_step)
+            flat_max_step_arg = -1.0 if flat_max_step is None else float(flat_max_step)
+            t_profile0 = time.perf_counter()
+            ok_grid, Vfast, fast_substeps, _, raw_profile = transient_solve_grid_numba(
+                np.asarray(V0, float), np.asarray(tgrid, float),
+                np.asarray(input_values, float), edge_mask_arr, profile,
+                max_step_arg, flat_max_step_arg,
+                int(n), int(newton_maxit), float(newton_step_limit),
+                float(newton_vtol), float(gmin),
+                bool(fallback_full_jacobian or fallback_least_squares),
+                float(fallback_tol), float(HH),
+                dev_d_kind, dev_d_ref, dev_d_val,
+                dev_g_kind, dev_g_ref, dev_g_val,
+                dev_s_kind, dev_s_ref, dev_s_val,
+                dev_di, dev_gi, dev_si, dev_use_abs,
+                p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+                p_current_scale, p_inv_Rleak,
+                p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+                p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+                op_cache_valid, op_cache_vs1, op_cache_vd1,
+                res_a_kind, res_a_ref, res_a_val,
+                res_b_kind, res_b_ref, res_b_val, res_ai, res_bi, res_g,
+                cap_a_kind, cap_a_ref, cap_a_val,
+                cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value,
+                isrc_pi, isrc_qi, isrc_value,
+                dyn_pi, dyn_qi, dyn_input_idx,
+                float(clip_lo), float(clip_hi),
+            )
+            profile_wall_s = time.perf_counter() - t_profile0
+            if ok_grid:
+                Vhist = Vfast
+                nsubsteps = int(fast_substeps)
+                numba_newton_attempts += nsubsteps
+                numba_newton_success += nsubsteps
+                used_grid_numba = True
+                profile_stats = np.asarray(raw_profile, float)
+        except Exception:
+            used_grid_numba = False
 
     def input_at_between(input_a, input_b, frac):
         return input_a + (input_b - input_a) * frac
@@ -696,30 +788,36 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 return right_v, True, left_steps + right_steps, left_retry + right_retry + 1
         return Vp, False, 1, 1 if depth == 0 else 0
 
-    for k in range(1, N):
-        h = tgrid[k] - tgrid[k - 1]
-        if h <= 0.0:
-            raise ValueError("tgrid must be strictly increasing")
-        Vp = Vhist[k - 1]
-        input_start = input_values[:, k - 1]
-        input_end = input_values[:, k]
-        pieces = 1 if max_step is None else max(1, int(np.ceil(h / max_step)))
-        interval_ok = True
-        interval_retries = 0
-        in0 = input_start
-        for j in range(pieces):
-            f1 = (j + 1) / pieces
-            in1 = input_at_between(input_start, input_end, f1)
-            Vp, ok, steps, retries = solve_chunk(Vp, in0, in1, h / pieces)
-            in0 = in1
-            nsubsteps += steps
-            interval_retries += retries
-            if not ok:
-                interval_ok = False
-        Vhist[k] = Vp
-        nretry += interval_retries
-        if not interval_ok:
-            nfail += 1
+    if not used_grid_numba:
+        for k in range(1, N):
+            h = tgrid[k] - tgrid[k - 1]
+            if h <= 0.0:
+                raise ValueError("tgrid must be strictly increasing")
+            Vp = Vhist[k - 1]
+            input_start = input_values[:, k - 1]
+            input_end = input_values[:, k]
+            interval_edge = (len(edge_mask_arr) == N and
+                             bool(edge_mask_arr[k] or edge_mask_arr[k - 1]))
+            local_max_step = max_step
+            if flat_max_step is not None and flat_max_step > 0.0 and not interval_edge:
+                local_max_step = flat_max_step
+            pieces = 1 if local_max_step is None else max(1, int(np.ceil(h / local_max_step)))
+            interval_ok = True
+            interval_retries = 0
+            in0 = input_start
+            for j in range(pieces):
+                f1 = (j + 1) / pieces
+                in1 = input_at_between(input_start, input_end, f1)
+                Vp, ok, steps, retries = solve_chunk(Vp, in0, in1, h / pieces)
+                in0 = in1
+                nsubsteps += steps
+                interval_retries += retries
+                if not ok:
+                    interval_ok = False
+            Vhist[k] = Vp
+            nretry += interval_retries
+            if not interval_ok:
+                nfail += 1
 
     nodes = {nm: Vhist[:, idx[nm]] for nm in plan.solved}
     out = np.zeros(N)
@@ -731,6 +829,46 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         result["numba_newton_attempts"] = numba_newton_attempts
         result["numba_newton_success"] = numba_newton_success
         result["numba_newton_fallback"] = numba_newton_fallback
+        result["numba_grid_solver"] = used_grid_numba
+    if profile:
+        if profile_stats is None:
+            profile_stats = np.zeros(16, dtype=float)
+            profile_stats[0] = 0.0
+            profile_stats[6] = 0.0
+            profile_stats[7] = float(nsubsteps)
+            profile_stats[10] = float(nfail)
+            profile_stats[11] = float(N - 1)
+            profile_stats[12] = float(nsubsteps)
+        total_iters = float(profile_stats[0])
+        edge_iters = float(profile_stats[8])
+        flat_iters = float(profile_stats[9])
+        iter_work = edge_iters + flat_iters
+        edge_time_est = profile_wall_s * edge_iters / iter_work if iter_work else 0.0
+        flat_time_est = profile_wall_s * flat_iters / iter_work if iter_work else 0.0
+        result["transient_profile"] = {
+            "enabled": True,
+            "numba_grid_solver": bool(used_grid_numba),
+            "wall_time_s": float(profile_wall_s),
+            "nsubsteps": int(nsubsteps),
+            "intervals": int(profile_stats[11]),
+            "newton_iters_total": int(profile_stats[0]),
+            "newton_iters_avg": float(total_iters / nsubsteps) if nsubsteps else 0.0,
+            "pmos_op_solves": int(profile_stats[1]),
+            "pmos_internal_newton_attempts": int(profile_stats[2]),
+            "pmos_internal_newton_iters": int(profile_stats[3]),
+            "pmos_internal_newton_iters_avg": (
+                float(profile_stats[3] / profile_stats[2]) if profile_stats[2] else 0.0),
+            "internal_fd_jac_fallbacks": int(profile_stats[4]),
+            "terminal_fd_jac_fallbacks": int(profile_stats[5]),
+            "edge_substeps": int(profile_stats[6]),
+            "flat_substeps": int(profile_stats[7]),
+            "edge_newton_iters": int(profile_stats[8]),
+            "flat_newton_iters": int(profile_stats[9]),
+            "failed_substeps": int(profile_stats[10]),
+            "edge_time_s_est": float(edge_time_est),
+            "flat_time_s_est": float(flat_time_est),
+            "time_estimate_basis": "newton_iteration_weighted",
+        }
     if "VOP" in idx:
         result["vop"] = nodes["VOP"]
     if "VON" in idx:

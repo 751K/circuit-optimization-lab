@@ -8,9 +8,8 @@ stays a simple, reliable physics-surrogate search (no ML): the calibrated solver
 are fast enough to screen hundreds of candidates locally before sending the
 recommended few to Cadence.
 
-Configuration lives in an ``explore`` block, either inside a full circuit JSON
-(see ``examples/single_stage.json``) or alongside a built-in topology
-(``examples/afe_explore.json``):
+Configuration lives in an ``explore`` block inside a full circuit JSON (see
+``examples/single_stage.json`` and ``examples/afe_explore.json``):
 
     "explore": {
       "variables": {
@@ -50,17 +49,13 @@ try:
     from .ac_solver import ac_solve
     from .noise_solver import band_rms, noise_analysis
     from .pmos_tft_model import PMOS_TFT
-    from .topology import AFE_TOPO
     from .circuit_loader import circuit_from_dict
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_solver import ac_solve
     from noise_solver import band_rms, noise_analysis
     from pmos_tft_model import PMOS_TFT
-    from topology import AFE_TOPO
     from circuit_loader import circuit_from_dict
 
-
-_BUILTIN_TOPOLOGIES = {"AFE_TOPO": AFE_TOPO}
 
 METRICS = ("gain_dB", "gain_peak_dB", "bw_Hz", "irn_uV", "power_uW", "area")
 NOISE_METRICS = frozenset({"irn_uV"})
@@ -148,28 +143,16 @@ def parse_explore(cfg):
 def load_explore_json(path):
     """Return (topo, base_sizes, base_bias, nf, ExploreConfig) from a JSON file.
 
-    Two layouts are accepted: a full circuit JSON with an ``explore`` block, or a
-    file naming a ``builtin_topology`` (e.g. AFE_TOPO) plus baseline sizes/bias."""
+    The file must be a full circuit JSON carrying an ``explore`` block. Legacy
+    ``builtin_topology`` configs are intentionally no longer accepted; keeping
+    the topology in JSON makes circuit changes explicit and solver-independent."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     cfg = parse_explore(data.get("explore"))
-
-    builtin = data.get("builtin_topology")
-    if builtin is not None:
-        if builtin not in _BUILTIN_TOPOLOGIES:
-            raise ValueError(f"unknown builtin_topology {builtin!r}; "
-                             f"known: {sorted(_BUILTIN_TOPOLOGIES)}")
-        topo = _BUILTIN_TOPOLOGIES[builtin]
-        raw_sizes = data.get("sizes") or {}
-        sizes = {str(k): (float(v[0]), float(v[1])) for k, v in raw_sizes.items()}
-        missing = [name for name, *_ in topo.devices if name not in sizes]
-        if missing:
-            raise ValueError(f"baseline sizes missing devices: {', '.join(missing)}")
-        bias = {str(k): float(v) for k, v in data.get("bias", {}).items()}
-        nf = data.get("nf")
-    else:
-        spec = circuit_from_dict(data)
-        topo, sizes, bias, nf = spec.topology, dict(spec.sizes), dict(spec.bias), spec.nf
+    if "builtin_topology" in data:
+        raise ValueError("builtin_topology configs are deprecated; use a full circuit JSON")
+    spec = circuit_from_dict(data)
+    topo, sizes, bias, nf = spec.topology, dict(spec.sizes), dict(spec.bias), spec.nf
     return topo, sizes, bias, nf, cfg
 
 

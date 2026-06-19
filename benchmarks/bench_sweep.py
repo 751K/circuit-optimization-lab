@@ -18,23 +18,24 @@ Usage:
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 import time
 
 import numpy as np
 
 from core.ac_solver import ac_solve
-from core.noise_solver import band_rms, noise_analysis
+from core.circuit_loader import load_circuit_json
+from core.noise_solver import noise_analysis
 from core.numba_kernels import NUMBA_AVAILABLE
-from core.topology import AFE_TOPO
 
-# ── fixed AFE design (locked, from bench_afe.py) ──────────────────────
-BASE_SIZES = {
-    "M6": (2264, 78), "M7": (61365, 61), "M8": (61365, 61),
-    "M9": (3175, 468), "M10": (3175, 468), "M11": (465, 66),
-    "M12": (894, 85), "M13": (894, 85), "M14": (5224, 46), "M15": (5224, 46),
-}
-BASE_BIAS = {"VDD": 40.0, "VCM": 30.65, "VB": 9.84, "VC": 16.0}
+# ── fixed AFE design (locked, loaded from the canonical JSON) ─────────
+_ROOT = Path(__file__).resolve().parents[1]
+_SPEC = load_circuit_json(_ROOT / "examples" / "afe_explore.json")
+BASE_TOPO = _SPEC.topology
+BASE_SIZES = dict(_SPEC.sizes)
+BASE_BIAS = dict(_SPEC.bias)
+BASE_NF = _SPEC.nf
 
 # ── sweep parameters ───────────────────────────────────────────────────
 NFREQ = 61                     # frequency points per candidate
@@ -123,7 +124,7 @@ def run_benchmarks(warm_runs, n, seed=42):
         n_ok, n_fail = 0, 0
         t0 = time.perf_counter()
         for sizes in candidates:
-            ac = ac_solve(sizes, BASE_BIAS, freqs, topo=AFE_TOPO)
+            ac = ac_solve(sizes, BASE_BIAS, freqs, topo=BASE_TOPO, nf=BASE_NF)
             if ac is None:
                 n_fail += 1
             else:
@@ -153,12 +154,12 @@ def run_benchmarks(warm_runs, n, seed=42):
         n_ok, n_fail = 0, 0
         t0 = time.perf_counter()
         for sizes in candidates:
-            ac = ac_solve(sizes, BASE_BIAS, freqs, topo=AFE_TOPO)
+            ac = ac_solve(sizes, BASE_BIAS, freqs, topo=BASE_TOPO, nf=BASE_NF)
             if ac is None:
                 n_fail += 1
                 continue
-            noise = noise_analysis(sizes, BASE_BIAS, freqs, topo=AFE_TOPO,
-                                   x0_guess=ac["dc_op"])
+            noise = noise_analysis(sizes, BASE_BIAS, freqs, topo=BASE_TOPO,
+                                   nf=BASE_NF, x0_guess=ac["dc_op"])
             if noise is None:
                 n_fail += 1
             else:

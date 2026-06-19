@@ -4,6 +4,8 @@ from core.numba_kernels import (
     _capacitances_impl,
     _eval_currents_impl,
     _newton_internal_impl,
+    _residual_pair_jac_internal_impl,
+    _terminal_derivatives_from_jac_impl,
     _terminal_derivatives_impl,
     capacitances_numba,
     eval_currents_numba,
@@ -107,3 +109,32 @@ def test_additional_numba_kernels_match_python_impl_when_enabled():
     ref_td = _terminal_derivatives_impl(*td_args)
     assert got_td[0] == ref_td[0]
     np.testing.assert_allclose(got_td[1:], ref_td[1:], rtol=1e-14, atol=1e-18)
+
+
+def test_transient_analytic_terminal_derivatives_match_finite_difference():
+    t = PMOS_TFT(W=1000, L=20)
+    points = [
+        (40.0, 0.0, 20.0),
+        (36.32147406780545, 29.07917946549335, 30.65),
+        (29.07917946549335, 0.0, 5.5217968040937),
+        (38.08434178857114, 5.5217968040937, 29.07917946549335),
+        (32.0, 31.7, 40.0),
+    ]
+    for Vs, Vd, Vg in points:
+        Vs1, Vd1 = t.get_op(Vs, Vd, Vg)
+        F0a, F0b, j00, j01, j10, j11 = _residual_pair_jac_internal_impl(
+            Vs, Vd, Vg, Vs1, Vd1, t.Vfb, t.Vss, t.Lc, t.lambda_,
+            t._contact_scale, t._channel_exponent, t._current_scale,
+            t._inv_Rleak)
+        Idc0 = F0b - (Vs1 - Vd1) / 0.1
+        got = _terminal_derivatives_from_jac_impl(
+            Vs, Vd, Vg, Vs1, Vd1, F0a, F0b, Idc0, j00, j01, j10, j11,
+            True, True, True, 1e-3, t.Vfb, t.Vss, t.Lc, t.lambda_,
+            t._contact_scale, t._channel_exponent, t._current_scale,
+            t._inv_Rleak)
+        ref = _terminal_derivatives_impl(
+            Vs, Vd, Vg, Vs1, Vd1, True, True, True, 1e-3, 1e-6,
+            t.Vfb, t.Vss, t.Lc, t.lambda_, t._contact_scale,
+            t._channel_exponent, t._current_scale, t._inv_Rleak)
+        assert got[0] == ref[0]
+        np.testing.assert_allclose(got[1:], ref[1:], rtol=1e-7, atol=1e-17)

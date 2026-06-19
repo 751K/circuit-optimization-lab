@@ -12,6 +12,7 @@ work unless CIRCUIT_USE_NUMBA=0/false/off disables it.
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 import time
 
@@ -19,18 +20,18 @@ import numpy as np
 
 
 from core.ac_solver import ac_solve
+from core.circuit_loader import load_circuit_json
 from core.noise_solver import band_rms, noise_analysis
 from core.numba_kernels import NUMBA_AVAILABLE
 from core.transient_solver import transient
 
 
-SIZES = {
-    "M6": (2264, 78), "M7": (61365, 61), "M8": (61365, 61),
-    "M9": (3175, 468), "M10": (3175, 468), "M11": (465, 66),
-    "M12": (894, 85), "M13": (894, 85), "M14": (5224, 46), "M15": (5224, 46),
-}
-
-BIAS = {"VDD": 40.0, "VCM": 30.65, "VB": 9.84, "VC": 16.0}
+_ROOT = Path(__file__).resolve().parents[1]
+_SPEC = load_circuit_json(_ROOT / "examples" / "afe_explore.json")
+TOPO = _SPEC.topology
+SIZES = dict(_SPEC.sizes)
+BIAS = dict(_SPEC.bias)
+NF = _SPEC.nf
 
 
 def _time_call(fn):
@@ -75,7 +76,7 @@ def run_benchmarks(warm_runs, skip_noise=False, skip_tran=False):
 
     results.append(bench_case(
         "ac121",
-        lambda: ac_solve(SIZES, BIAS, freqs),
+        lambda: ac_solve(SIZES, BIAS, freqs, topo=TOPO, nf=NF),
         lambda r: {
             "gain_db": float(20 * np.log10(r["gains"].max())),
             "bw_Hz": float(r["bw_Hz"]),
@@ -87,7 +88,7 @@ def run_benchmarks(warm_runs, skip_noise=False, skip_tran=False):
     if not skip_noise:
         results.append(bench_case(
             "noise121",
-            lambda: noise_analysis(SIZES, BIAS, freqs),
+            lambda: noise_analysis(SIZES, BIAS, freqs, topo=TOPO, nf=NF),
             lambda r: {
                 "irn_uV_1_100Hz": float(band_rms(freqs, r["irn_psd"], 1.0, 100.0) * 1e6),
                 "out_uV_1_100Hz": float(band_rms(freqs, r["out_psd"], 1.0, 100.0) * 1e6),
@@ -98,7 +99,8 @@ def run_benchmarks(warm_runs, skip_noise=False, skip_tran=False):
     if not skip_tran:
         results.append(bench_case(
             "tran200",
-            lambda: transient(SIZES, BIAS, t, vp, vn),
+            lambda: transient(SIZES, BIAS, t, topo=TOPO, inputs={"vip": vp, "vin": vn},
+                              nf=NF),
             lambda r: {
                 "nfail": int(r["nfail"]),
                 "vout_end": float(r["vout"][-1]),

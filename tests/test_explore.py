@@ -14,7 +14,6 @@ from core.explore import (
     write_csv,
     write_jsonl,
 )
-from core.topology import AFE_TOPO
 
 
 def test_pareto_front_unit():
@@ -99,10 +98,7 @@ def test_single_stage_explore_end_to_end(tmp_path):
 def test_explore_with_corner_and_nf_variable():
     # NF variable + a process corner both flow through the search (added for the
     # slow-corner / fingers work). gain_peak_dB is the bandpass/corner spec metric.
-    base_sizes = {"M6": (2264, 78), "M7": (61365, 61), "M8": (61365, 61),
-                  "M9": (3175, 468), "M10": (3175, 468), "M11": (465, 66),
-                  "M12": (894, 85), "M13": (894, 85), "M14": (5224, 46), "M15": (5224, 46)}
-    base_bias = {"VDD": 40.0, "VCM": 30.65, "VB": 9.84, "VC": 16.0}
+    topo, base_sizes, base_bias, base_nf, _ = load_explore_json("examples/afe_explore.json")
     cfg = parse_explore({
         "variables": {"in_NF": {"min": 1, "max": 64, "int": True, "targets": ["M7.NF", "M8.NF"]},
                       "VCM": {"min": 30.0, "max": 31.5, "round": 2}},
@@ -110,7 +106,7 @@ def test_explore_with_corner_and_nf_variable():
         "objectives": {"bw_Hz": "max"},
         "freqs": {"start": -2, "stop": 4, "num": 41},
     })
-    res = explore(AFE_TOPO, base_sizes, base_bias, None, cfg, n=6, seed=0,
+    res = explore(topo, base_sizes, base_bias, base_nf, cfg, n=6, seed=0,
                   corner=CORNERS["slow"])
     assert res["summary"]["converged"] == 6
     for c in res["candidates"]:

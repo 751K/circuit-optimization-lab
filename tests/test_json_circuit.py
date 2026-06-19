@@ -7,18 +7,20 @@ import pytest
 from core.ac_solver import ac_solve
 from core.circuit_loader import circuit_from_dict, load_circuit_json
 from core.noise_solver import band_rms, noise_analysis
+from core.topology import AFE_TOPO
 from core.transient_solver import transient
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_single_stage_json_matches_schema_when_jsonschema_available():
+def test_example_json_matches_schema_when_jsonschema_available():
     jsonschema = pytest.importorskip("jsonschema")
     schema = json.loads((ROOT / "schemas" / "circuit.schema.json").read_text())
-    data = json.loads((ROOT / "examples" / "single_stage.json").read_text())
     jsonschema.Draft202012Validator.check_schema(schema)
-    jsonschema.validate(data, schema)
+    for name in ("single_stage.json", "resistor_load_stage.json", "afe_explore.json"):
+        data = json.loads((ROOT / "examples" / name).read_text())
+        jsonschema.validate(data, schema)
 
 
 def test_load_single_stage_json_runs_all_analyses():
@@ -43,6 +45,19 @@ def test_load_single_stage_json_runs_all_analyses():
     assert tr["nfail"] == 0
     assert np.isfinite(tr["output"]).all()
     assert abs(tr["output"][-1] - tr["output"][0]) > 1e-8
+
+
+def test_afe_json_matches_builtin_topology_ac():
+    spec = load_circuit_json("examples/afe_explore.json")
+    freqs = np.logspace(0, 4, 21)
+
+    json_ac = ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
+    builtin_ac = ac_solve(spec.sizes, spec.bias, freqs, topo=AFE_TOPO, nf=spec.nf)
+
+    assert json_ac is not None
+    assert builtin_ac is not None
+    np.testing.assert_allclose(json_ac["gains"], builtin_ac["gains"], rtol=1e-10, atol=1e-12)
+    assert json_ac["bw_Hz"] == pytest.approx(builtin_ac["bw_Hz"], rel=1e-10)
 
 
 def test_loader_rejects_unknown_device_node():
