@@ -9,11 +9,15 @@ from __future__ import annotations
 import numpy as np
 
 try:
-    from .ac_solver import ac_solve
+    from .ac_mna import _stamp_adm, _stamp_mos_lti
+    from .ac_solver import _dev_corner, ac_solve, get_ss_params
+    from .pmos_tft_model import PMOS_TFT
     from .topology import Topology
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_solver import ac_solve
+    from ac_mna import _stamp_adm, _stamp_mos_lti
+    from ac_solver import _dev_corner, ac_solve, get_ss_params
+    from pmos_tft_model import PMOS_TFT
     from topology import Topology
     from transient_solver import transient
 
@@ -131,7 +135,82 @@ def _drive_norm(input_drives, ac_drives):
     return float(max(abs(v) for v in vals) or 1.0)
 
 
-def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf):
+def _periodic_wave_derivatives(waves, period):
+    """Central periodic time derivative for uniformly sampled wave dictionaries."""
+    if not waves:
+        return {}
+    period = float(period)
+    first = next(iter(waves.values()))
+    n = len(first)
+    if n < 2 or period <= 0.0:
+        return {key: np.zeros_like(np.asarray(val, float)) for key, val in waves.items()}
+    dt = period / float(n)
+    return {
+        key: (np.roll(np.asarray(val, float), -1) -
+              np.roll(np.asarray(val, float), 1)) / (2.0 * dt)
+        for key, val in waves.items()
+    }
+
+
+def _cap_derivatives_fd(dev, Vs, Vd, Vg, step=1e-4):
+    """Finite-difference d(Cgs,Cgd)/d(Vs,Vd,Vg) including internal OP dependence."""
+    h = float(step)
+    if h <= 0.0:
+        h = 1e-4
+
+    def caps(vs, vd, vg):
+        return dev.get_capacitances(vs, vd, vg)
+
+    out = []
+    for axis in range(3):
+        plus = [float(Vs), float(Vd), float(Vg)]
+        minus = [float(Vs), float(Vd), float(Vg)]
+        plus[axis] += h
+        minus[axis] -= h
+        cp = caps(*plus)
+        cm = caps(*minus)
+        out.append(((cp[0] - cm[0]) / (2.0 * h),
+                    (cp[1] - cm[1]) / (2.0 * h)))
+    return out
+
+
+def _stamp_branch_control(G, p, q, ctrl, coeff):
+    """Stamp branch current p->q += coeff*V(ctrl) into an MNA G matrix."""
+    coeff = float(coeff)
+    if coeff == 0.0 or ctrl[0] != "n":
+        return
+    col = ctrl[1]
+    if p[0] == "n":
+        G[p[1], col] += coeff
+    if q[0] == "n":
+        G[q[1], col] -= coeff
+
+
+def _stamp_pmos_dynamic_cap_terms(G, d, g, s, dev, Vs, Vd, Vg,
+                                  dVs_dt, dVd_dt, dVg_dt, *, fd_step=1e-4):
+    """Linearize Verilog-A C(V)*ddt(V) terms around a periodic large-signal orbit.
+
+    Existing C stamps cover C(t)*d(delta_v)/dt.  This adds the conductance-like
+    term (dC/dx * delta_x) * dV_large/dt, which is significant on chopper edges.
+    """
+    vdot_gs = float(dVg_dt) - float(dVs_dt)
+    vdot_gd = float(dVg_dt) - float(dVd_dt)
+    if abs(vdot_gs) < 1e-30 and abs(vdot_gd) < 1e-30:
+        return
+    try:
+        derivs = _cap_derivatives_fd(dev, Vs, Vd, Vg, step=fd_step)
+    except Exception:
+        return
+    controls = (s, d, g)
+    for ctrl, (dCgs, dCgd) in zip(controls, derivs):
+        if vdot_gs != 0.0:
+            _stamp_branch_control(G, g, s, ctrl, -dCgs * vdot_gs)
+        if vdot_gd != 0.0:
+            _stamp_branch_control(G, g, d, ctrl, -dCgd * vdot_gd)
+
+
+def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
+                          compute_condition=False):
     """Use ordinary AC when the supplied PSS orbit is time invariant.
 
     This is an exact reduction for static operating points.  It is deliberately
@@ -238,17 +317,230 @@ def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf):
         "pac_state_cache_hit": False,
         "pac_input_cache_hits": 0,
         "pac_cache_enabled": False,
-        "pac_condition_computed": True,
+        "pac_condition_computed": bool(compute_condition),
         "nfail": np.zeros(len(freqs), dtype=int),
         "method": "lti_ac_fast_path",
         "ac": ac,
     }
 
 
+def _nfval(all_nf, name):
+    if isinstance(all_nf, dict):
+        return int(all_nf.get(name, 1))
+    return int(all_nf) if all_nf else 1
+
+
+def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
+                          all_nf, corner=None, n_period_samples=384,
+                          max_sideband=10, cache=True, pacmag=1.0,
+                          compute_condition=False):
+    """Analytic-adjoint PAC from the PSS-orbit small-signal matrices.
+
+    Samples the periodic small-signal G(t)/C(t) (and the input-coupling columns
+    G_in(t)/C_in(t)) along the PSS trajectory, forms the harmonic-balance
+    conversion matrix Y_HB(f) (blocks G_{kr-kc} + j*2pi*(f+kr*f0)*C_{kr-kc},
+    matching the d/dt(C x) LPTV form), and reads the sideband-0 conversion gain
+    from a single adjoint solve per frequency:
+
+        out_sb0(f) = adj . b_input(f),   adj = Y_HB(f)^{-T} e,
+        b_input[kr] = -(G_in_{kr} + j*2pi*(f+kr*f0)*C_in_{kr}) * drive
+
+    Cost is O(1) (2K+1)n-block solves per frequency instead of the O(n_state)
+    one-period transient runs of the finite-difference shooting kernel.
+    """
+    freqs = np.asarray(freqs, float)
+    topo = pss_result["topology"]
+    n = topo.n
+    idx = topo.idx
+    t_orbit = np.asarray(pss_result["t"], float)
+    period = float(pss_result.get("period", t_orbit[-1] - t_orbit[0]))
+    if period <= 0.0:
+        return None
+    fundamental = 1.0 / period
+    K = int(max_sideband)
+    # The HB matrix uses harmonics G_{kr-kc} for kr,kc in [-K,K], i.e. up to the
+    # 2K-th harmonic. Sampling the orbit with fewer than 4K points aliases those
+    # coefficients (a sharp-switched chopper has slowly-decaying harmonics), so
+    # keep the period sampling above the Nyquist limit for the bands we read.
+    N = max(int(n_period_samples), 4 * K + 2)
+    nb = 2 * K + 1
+    rails = topo.rail_values(tbias)
+    node_inputs = dict(pss_result.get("node_inputs", {}) or {})
+
+    # driven input NODES (rails) carrying the small-signal drive
+    drive_nodes = {}
+    for node, key in node_inputs.items():
+        if key in input_drive and node in topo.rails and node not in idx:
+            drive_nodes[node] = drive_nodes.get(node, 0j) + complex(input_drive[key])
+    dev_by_name = {name: (d, g, s) for name, d, g, s in topo.devices}
+    for dev, key in (getattr(topo, "transient_inputs", {}) or {}).items():
+        if key in input_drive and dev in dev_by_name:
+            gate = dev_by_name[dev][1]
+            if gate in topo.rails and gate not in idx:
+                drive_nodes[gate] = drive_nodes.get(gate, 0j) + complex(input_drive[key])
+    if not drive_nodes:
+        return None
+    drive_list = list(drive_nodes)
+    ext_idx = {node: n + i for i, node in enumerate(drive_list)}
+    n_ext = n + len(drive_list)
+    drive_amps = np.array([drive_nodes[node] for node in drive_list], dtype=complex)
+
+    t_uniform = np.linspace(0.0, period, N, endpoint=False)
+    node_wave = {
+        node: np.interp(t_uniform, t_orbit,
+                        np.asarray(pss_result["nodes"][node], float), period=period)
+        for node in topo.solved
+    }
+    input_wave = {
+        key: np.interp(t_uniform, t_orbit, np.asarray(val, float), period=period)
+        for key, val in pss_result.get("inputs", {}).items()
+    }
+    node_dot = _periodic_wave_derivatives(node_wave, period)
+    input_dot = _periodic_wave_derivatives(input_wave, period)
+
+    def term_value(node, m):
+        if node in idx:
+            return node_wave[node][m]
+        if node in node_inputs:
+            return input_wave[node_inputs[node]][m]
+        return rails[node]
+
+    def term_derivative(node, m):
+        if node in idx:
+            return node_dot[node][m]
+        if node in node_inputs:
+            return input_dot[node_inputs[node]][m]
+        return 0.0
+
+    def term(node):
+        if node in idx:
+            return ("n", idx[node])
+        if node in ext_idx:
+            return ("n", ext_idx[node])
+        return ("v", 0.0)
+
+    cache_store = pss_result.setdefault("_pac_analytic_cache", {}) if cache else {}
+    lin_key = (
+        "pac_analytic_lin_v2", tuple(topo.solved), tuple(topo.devices),
+        tuple(topo.resistors), tuple(topo.cap_list()), float(period), int(N),
+        _freeze_sizes(all_sizes), _freeze_nf(all_nf), _freeze_kwargs(corner or {}),
+        tuple(sorted(drive_list)),
+        _freeze_complex_map(dict(zip(drive_list, drive_amps))),
+    )
+    if cache and lin_key in cache_store:
+        lin = cache_store[lin_key]
+        Gf, Cf, Ginf, Cinf = lin["Gf"], lin["Cf"], lin["Ginf"], lin["Cinf"]
+    else:
+        dev_inst = {
+            name: PMOS_TFT(W=all_sizes[name][0], L=all_sizes[name][1],
+                           NF=_nfval(all_nf, name), **_dev_corner(corner, name))
+            for name, *_ in topo.devices
+        }
+        G_const = np.zeros((n_ext, n_ext)); C_const = np.zeros((n_ext, n_ext))
+        rg = np.zeros(n_ext); rc = np.zeros(n_ext)
+        for a, b, cap in topo.cap_list():
+            _stamp_adm(C_const, rc, term(a), term(b), cap)
+        for _, a, b, R in topo.resistors:
+            _stamp_adm(G_const, rg, term(a), term(b), 1.0 / R)
+        for k in range(n):
+            G_const[k, k] += 1e-12
+        Gt = np.zeros((N, n_ext, n_ext)); Ct = np.zeros((N, n_ext, n_ext))
+        for m in range(N):
+            Gt[m] += G_const; Ct[m] += C_const
+            for name, d, g, s in topo.devices:
+                Vs = term_value(s, m); Vd = term_value(d, m); Vg = term_value(g, m)
+                p = get_ss_params(all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
+                                  corner=_dev_corner(corner, name),
+                                  nf=_nfval(all_nf, name), dev_inst=dev_inst[name])
+                _stamp_mos_lti(Gt[m], Ct[m], rg, rc, term(d), term(g), term(s),
+                               p["gm"], p["gds"], p["Cgs"], p["Cgd"])
+                _stamp_pmos_dynamic_cap_terms(
+                    Gt[m], term(d), term(g), term(s), dev_inst[name],
+                    Vs, Vd, Vg,
+                    term_derivative(s, m), term_derivative(d, m),
+                    term_derivative(g, m))
+        Gf = np.fft.fft(Gt[:, :n, :n], axis=0) / N
+        Cf = np.fft.fft(Ct[:, :n, :n], axis=0) / N
+        Ginf = np.fft.fft(Gt[:, :n, n:] @ drive_amps, axis=0) / N      # (N, n)
+        Cinf = np.fft.fft(Ct[:, :n, n:] @ drive_amps, axis=0) / N
+        if cache:
+            cache_store[lin_key] = {"Gf": Gf, "Cf": Cf, "Ginf": Ginf, "Cinf": Cinf}
+
+    Y_base = np.zeros((nb * n, nb * n), dtype=complex)
+    C_block = np.zeros_like(Y_base)
+    for kr in range(-K, K + 1):
+        br = (kr + K) * n
+        for kc in range(-K, K + 1):
+            bc = (kc + K) * n
+            colom = 2j * np.pi * kc * fundamental
+            g = Gf[(kr - kc) % N]; c = Cf[(kr - kc) % N]
+            Y_base[br:br + n, bc:bc + n] = g + colom * c
+            C_block[br:br + n, bc:bc + n] = c
+    e = np.zeros(nb * n, dtype=complex)
+    base0 = K * n
+    for node, w in topo.output_weights().items():
+        e[base0 + idx[node]] = w
+
+    response = np.empty(len(freqs), dtype=complex)
+    residuals = np.zeros(len(freqs))
+    conditions = np.ones(len(freqs))
+    for fi, f in enumerate(freqs):
+        f = float(f)
+        Y = Y_base + (2j * np.pi * f) * C_block
+        if compute_condition:
+            try:
+                conditions[fi] = float(np.linalg.cond(Y))
+            except Exception:
+                conditions[fi] = np.inf
+        try:
+            adj = np.linalg.solve(Y.T, e)
+        except np.linalg.LinAlgError:
+            adj = np.linalg.lstsq(Y.T, e, rcond=None)[0]
+        b = np.zeros(nb * n, dtype=complex)
+        input_om = 2j * np.pi * f
+        for kr in range(-K, K + 1):
+            b[(kr + K) * n:(kr + K + 1) * n] = -(
+                Ginf[kr % N] + input_om * Cinf[kr % N])
+        response[fi] = adj @ b
+
+    gains = np.abs(response)
+    return {
+        "freqs": freqs,
+        "response": response,
+        "gains": gains,
+        "Hmag": gains,
+        "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300)) if len(gains) else np.nan,
+        "bw_Hz": _bw_from_gain(freqs, gains) if len(gains) else np.nan,
+        "pss": pss_result,
+        "input_drive": input_drive,
+        "pacmag": float(pacmag),
+        "pac_residual": residuals,
+        "pac_condition": conditions,
+        "pac_state_period_runs": 0,
+        "pac_input_period_runs": 0,
+        "pac_period_runs": 0,
+        "pac_state_cache_hit": bool(cache and lin_key in cache_store),
+        "pac_input_cache_hits": 0,
+        "pac_cache_enabled": bool(cache),
+        "pac_condition_computed": bool(compute_condition),
+        "pac_hb_size": int(nb * n),
+        "nfail": np.zeros(len(freqs), dtype=int),
+        "method": "pss_analytic_adjoint",
+    }
+
+
+def _resolve_compute_condition(compute_condition, profile=False, debug=False):
+    if compute_condition is None:
+        return bool(profile or debug)
+    return bool(compute_condition)
+
+
 def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
               fd_state_step=1e-4, fd_input_step=1e-4, transient_kwargs=None,
               pacmag=1.0, rail_margin=None, cache_linearization=True,
-              cache_forcing=True, compute_condition=True, lti_fast_path=True):
+              cache_forcing=True, compute_condition=None, lti_fast_path=True,
+              analytic=True, n_period_samples=384, max_sideband=10,
+              profile=False, debug=False):
     """Solve sideband-0 PAC around a PSS orbit.
 
     Parameters
@@ -273,6 +565,8 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
         raise ValueError("input_drive must contain at least one driven input key")
     input_drive = dict(input_drive)
     transient_kwargs = dict(transient_kwargs or {})
+    compute_condition = _resolve_compute_condition(
+        compute_condition, profile=profile, debug=debug)
 
     topo = pss_result["topology"]
     tgrid = np.asarray(pss_result["t"], float)
@@ -304,10 +598,21 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
         raise ValueError("finite-difference steps must be positive")
     if lti_fast_path:
         fast = _try_lti_ac_fast_path(all_sizes, tbias, freqs, pss_result,
-                                     input_drive, all_nf)
+                                     input_drive, all_nf,
+                                     compute_condition=compute_condition)
         if fast is not None:
             fast["pacmag"] = float(pacmag)
             return fast
+
+    if analytic:
+        ana = _analytic_adjoint_pac(
+            all_sizes, tbias, freqs, pss_result=pss_result,
+            input_drive=input_drive, all_nf=all_nf, corner=None,
+            n_period_samples=n_period_samples, max_sideband=max_sideband,
+            cache=cache_linearization, pacmag=pacmag,
+            compute_condition=compute_condition)
+        if ana is not None:
+            return ana
 
     common_tr = dict(
         topo=topo,

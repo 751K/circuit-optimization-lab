@@ -368,11 +368,15 @@ automatically reuse or create the required PSS result.
   "pss": {
     "residual_tol": 1e-12,
     "max_shooting_iters": 2,
-    "jacobian_reuse": true
+    "jacobian_reuse": true,
+    "analytic_jacobian": true
   },
   "pac": {
     "freqs": [100.0, 1000.0],
     "input_drive": {"vin": 1.0},
+    "analytic": true,
+    "max_sideband": 10,
+    "n_period_samples": 384,
     "lti_fast_path": true,
     "cache_linearization": true,
     "cache_forcing": true
@@ -393,16 +397,27 @@ automatically reuse or create the required PSS result.
 `{"start": 1.0, "stop": 1e4, "num": 41, "scale": "log"}`. `input_drive` is the
 PAC/PNoise small-signal complex amplitude map; JSON complex values can be a
 number, `[real, imag]`, or `{"real": ..., "imag": ...}`.
-PSS reuses the shooting Jacobian with a Broyden update by default; for difficult
-convergence or very tight reference comparisons, set `"jacobian_reuse": false`
-or periodically rebuild with `"jacobian_rebuild_interval": 2`.
+PSS uses the analytic monodromy Jacobian by default (`"analytic_jacobian": true`):
+it builds Φ in one orbit pass from the small-signal G(t)/C(t) stamps instead of
+`n_state` finite-difference period runs. Set to `false` for the original FD path.
+The Jacobian is then reused with a Broyden update; for difficult convergence or
+tight reference comparisons, set `"jacobian_reuse": false` or periodically rebuild
+with `"jacobian_rebuild_interval": 2`.
+PAC uses analytic-adjoint harmonic balance by default (`"analytic": true`): one
+adjoint linear solve per frequency on the orbit conversion matrix, with zero extra
+transient runs. `"max_sideband"` and `"n_period_samples"` control the HB resolution.
+Set `"analytic": false` for the original finite-difference shooting path.
 PAC and PNoise enable the static-orbit LTI fast path and PSS-attached caches by default.
 Set `"lti_fast_path": false`, `"cache_linearization": false`, or
 `"cache_forcing": false` to force fresh finite-difference or harmonic-balance
 work. PNoise reuses sampled `G(t)/C(t)`, HB blocks, and identical-frequency
-adjoint solves from `pss_result`. Set
-`"compute_condition": false` to skip PAC boundary-matrix condition diagnostics
-and save a small amount of linear-algebra overhead.
+adjoint solves from `pss_result`. For large PNoise HB systems, set
+`"hb_solver": "sparse"` or `"iterative"` to force sparse direct or block-Jacobi
+preconditioned GMRES; the default `"auto"` keeps small matrices dense and
+switches only when the HB matrix is large and very sparse. PAC boundary-matrix
+condition diagnostics are off by default because they require an SVD at every
+frequency; enable them with
+`"profile": true`, `"debug": true`, or explicit `"compute_condition": true`.
 
 ### `explore`
 

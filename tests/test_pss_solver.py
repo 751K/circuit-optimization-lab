@@ -71,6 +71,37 @@ def test_pss_constant_passive_network_uses_dc_seed():
     assert result["residual_norm"] < 1e-10
 
 
+def test_pss_reuses_converged_stabilization_period(monkeypatch):
+    period = 1e-3
+    t = np.linspace(0.0, period, 5)
+    topo = Topology(
+        solved=["A"],
+        devices=[],
+        rails={"GND": 0.0},
+        outputs=("A",),
+    )
+    calls = {"n": 0}
+
+    def fake_transient(_sizes, _bias, tgrid, V0=None, **_kwargs):
+        calls["n"] += 1
+        x0 = np.asarray(V0, float)
+        vals = np.full(len(tgrid), x0[0])
+        return {"t": tgrid, "nodes": {"A": vals}, "output": vals, "vout": vals,
+                "nfail": 0}
+
+    monkeypatch.setattr("core.pss_solver.transient", fake_transient)
+
+    result = pss_solve(
+        {}, {}, period, topo=topo, tgrid=t, V0=np.array([0.42]),
+        tstab_periods=3, residual_tol=1e-12, max_shooting_iters=2,
+    )
+
+    assert result["converged"]
+    assert result["shooting_period_runs"] == 1
+    assert calls["n"] == 1
+    assert result["x0"][0] == pytest.approx(0.42)
+
+
 def test_pss_reuses_broyden_jacobian_after_first_fd_build(monkeypatch):
     period = 1e-3
     t = np.linspace(0.0, period, 5)
@@ -105,6 +136,7 @@ def test_pss_reuses_broyden_jacobian_after_first_fd_build(monkeypatch):
         max_shooting_iters=2,
         fd_step=1e-5,
         rail_margin=None,
+        analytic_jacobian=False,   # this test exercises the FD + Broyden-reuse path
     )
     reused = pss_solve({}, {}, period, jacobian_reuse=True, **common)
     rebuilt = pss_solve({}, {}, period, jacobian_reuse=False, **common)

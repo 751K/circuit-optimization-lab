@@ -2,14 +2,25 @@ import math
 import numpy as np
 from scipy.optimize import fsolve
 try:
-    from .numba_kernels import eval_currents_numba, newton_internal_numba, capacitances_numba
+    from .numba_kernels import (
+        eval_currents_numba,
+        newton_internal_numba,
+        capacitances_numba,
+        capacitance_charges_numba,
+    )
 except Exception:  # pragma: no cover - optional acceleration only
     try:
-        from numba_kernels import eval_currents_numba, newton_internal_numba, capacitances_numba
+        from numba_kernels import (
+            eval_currents_numba,
+            newton_internal_numba,
+            capacitances_numba,
+            capacitance_charges_numba,
+        )
     except Exception:
         eval_currents_numba = None
         newton_internal_numba = None
         capacitances_numba = None
+        capacitance_charges_numba = None
 
 class PMOS_TFT:
     """
@@ -407,6 +418,70 @@ class PMOS_TFT:
         Cgss = self.k1 * (Cgs1 + Cgs2 + Cgs3) * 1e4 * 1e-12
         Cgdd = self.k1 * (Cgd1 + Cgd2 + Cgd3) * 1e4 * 1e-12
         return Cgss, Cgdd
+
+    @staticmethod
+    def _atan_cap_integral(y, scale, two_over_pi):
+        """Integral of ``2/pi*atan(scale*y)+1`` with respect to ``y``."""
+        ay = scale * y
+        return y + two_over_pi * (y * math.atan(ay) -
+                                  0.5 * math.log1p(ay * ay) / scale)
+
+    def _capacitance_charges_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
+        """Return branch charges and local caps from an already-solved OP.
+
+        The AT_4000TG Verilog-A capacitance equations are not a full
+        reciprocal multi-terminal charge model. These integrated branch charges
+        are kept for diagnostics and charge-oriented experiments; production
+        transient uses a step-integrated displacement-current companion based on
+        the same local Cgss/Cgdd equations.
+        """
+        if capacitance_charges_numba is not None:
+            try:
+                return capacitance_charges_numba(
+                    Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
+                    self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
+                    self._cap_cgs3_base, self._cap_cgd3_base, self.k1)
+            except Exception:
+                pass
+
+        v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+        y_s = v_s - Vg + self.Vfb
+        y_d = v_d - Vg + self.Vfb
+        x_gs = Vg - Vs
+        x_gd = Vg - Vd
+
+        cgs2_coeff = 1.43 * self._cap_half_wl_ci
+        cgd2_coeff = 0.33 * self._cap_half_wl_ci
+        cgs3_coeff = 0.34 * self._cap_cgs3_base
+        cgd3_coeff = 0.52 * self._cap_cgd3_base
+
+        f_s_060 = self._two_over_pi * math.atan(y_s * 0.6) + 1.0
+        f_s_201 = self._two_over_pi * math.atan(y_s * 2.01) + 1.0
+        f_d_021 = self._two_over_pi * math.atan(y_d * 0.21) + 1.0
+        f_d_042 = self._two_over_pi * math.atan(y_d * 0.42) + 1.0
+
+        cgs_cross = cgs3_coeff * f_d_021
+        cgd_cross = cgd2_coeff * f_s_201
+        qscale = self.k1 * 1e4 * 1e-12
+
+        qgs = qscale * (
+            self._cap_cgs1 * x_gs
+            - cgs2_coeff * self._atan_cap_integral(y_s, 0.6, self._two_over_pi)
+            + cgs_cross * x_gs
+        )
+        qgd = qscale * (
+            self._cap_cgd1 * x_gd
+            + cgd_cross * x_gd
+            - cgd3_coeff * self._atan_cap_integral(y_d, 0.42, self._two_over_pi)
+        )
+        Cgss = qscale * (self._cap_cgs1 + cgs2_coeff * f_s_060 + cgs_cross)
+        Cgdd = qscale * (self._cap_cgd1 + cgd_cross + cgd3_coeff * f_d_042)
+        return qgs, qgd, Cgss, Cgdd
+
+    def get_capacitance_charges(self, Vs, Vd, Vg):
+        """Return diagnostic branch charges (gate->source, gate->drain)."""
+        Vs1, Vd1 = self.get_op(Vs, Vd, Vg)
+        return self._capacitance_charges_from_op(Vs, Vd, Vg, Vs1, Vd1)
 
     def _capacitance_components_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
         """Return Verilog-A Cgs*/Cgd* components in farads.

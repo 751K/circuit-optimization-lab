@@ -342,8 +342,17 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
             )
         elif name == "noise":
             freqs = _frequency_grid(cfg.get("freqs"))
+            x0_guess = None
+            ac_result = None
+            if "ac" in results and results["ac"] is not None:
+                x0_guess = results["ac"].get("dc_op")
+                ac_freqs = np.asarray(results["ac"].get("freqs", ()), float)
+                if ac_freqs.shape == freqs.shape and np.allclose(
+                        ac_freqs, freqs, rtol=0.0, atol=0.0):
+                    ac_result = results["ac"]
             noise = noise_analysis(
-                spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf
+                spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf,
+                x0_guess=x0_guess, ac_result=ac_result,
             )
             if noise is not None and "band" in cfg:
                 lo, hi = map(float, cfg["band"])
@@ -366,8 +375,10 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
                 transient_kwargs=dict(cfg.get("transient_kwargs", {}) or {}),
                 cache_linearization=bool(cfg.get("cache_linearization", True)),
                 cache_forcing=bool(cfg.get("cache_forcing", True)),
-                compute_condition=bool(cfg.get("compute_condition", True)),
+                compute_condition=cfg.get("compute_condition"),
                 lti_fast_path=bool(cfg.get("lti_fast_path", True)),
+                profile=bool(cfg.get("profile", False)),
+                debug=bool(cfg.get("debug", False)),
             )
         elif name == "pnoise":
             pss = ensure_pss(cfg)
@@ -386,6 +397,13 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
                 gds_noise_devices=cfg.get("gds_noise_devices"),
                 cache_linearization=bool(cfg.get("cache_linearization", True)),
                 lti_fast_path=bool(cfg.get("lti_fast_path", True)),
+                hb_solver=cfg.get("hb_solver", "auto"),
+                hb_sparse_min_size=int(cfg.get("hb_sparse_min_size", 384)),
+                hb_sparse_max_density=float(cfg.get("hb_sparse_max_density", 0.12)),
+                hb_sparse_drop_tol=float(cfg.get("hb_sparse_drop_tol", 0.0)),
+                iterative_tol=float(cfg.get("iterative_tol", 1e-10)),
+                iterative_maxiter=cfg.get("iterative_maxiter", 10),
+                profile=bool(cfg.get("profile", False)),
             )
     return results
 

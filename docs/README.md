@@ -168,10 +168,12 @@ print(f"PNoise IRN: {pnoise['irn_uV_band']:.2f} µVrms")
 ```
 
 The PSS→PAC→PNoise pipeline is the local equivalent of Cadence Spectre
-`pss` + `pac` + `pnoise`. PAC uses finite-difference shooting (accurate but
-costs `n_state+2` transient runs per frequency). PNoise uses harmonic balance
-on the PSS orbit — it's a first-principles LPTV noise solve with no calibration
-fudge factors.
+`pss` + `pac` + `pnoise`. PAC uses an analytic-adjoint harmonic-balance kernel by
+default: one adjoint linear solve per frequency on the PSS-orbit conversion
+matrix, with zero extra transient runs. Set `analytic=False` for the original
+finite-difference shooting path (accurate but costs `n_state+2` transient runs
+per frequency). PNoise uses harmonic balance on the PSS orbit — it's a
+first-principles LPTV noise solve with no calibration fudge factors.
 `pmos_chopper_pac` / `pmos_chopper_pnoise` are chopper compatibility wrappers;
 generic periodic topologies can call `core.pac_solver.pac_solve` and
 `core.pnoise_solver.pnoise_solve` directly using the orbit returned by
@@ -325,8 +327,10 @@ python3 -m benchmarks.bench_chopper --warm-runs 3     # Chopper: 5 analysis leve
 python3 -m benchmarks.bench_sweep --n-candidates 200  # Batch explore workload
 ```
 
-Set `CIRCUIT_USE_NUMBA=0` for pure-Python comparison. Typical warm timings on a
-modern Mac (Numba enabled):
+Set `CIRCUIT_USE_NUMBA=0` for pure-Python comparison. Numba kernels use on-disk
+cache by default, so later Python processes can avoid most repeated cold-JIT
+startup cost; set `CIRCUIT_NUMBA_CACHE=0` to disable that cache. Typical warm
+timings on a modern Mac (Numba enabled):
 
 | Benchmark | Time |
 |-----------|------|
@@ -381,10 +385,20 @@ With Numba installed, large HB block assembly, noise folding, and gm/gds
 linearization also use compiled kernels.
 
 **PSS / periodic transient is slow.**
-For chopper PSS, use the non-robust transient mode once convergence behavior has
-been validated: `fallback_least_squares=False`. That keeps the full period in
-the Numba grid solver and records failed intervals without rerunning the period
-in Python.
+For chopper PSS, first ensure `analytic_jacobian=True` (the default), which builds
+the shooting Jacobian in one orbit pass instead of `n_state` finite-difference
+period runs. Chopper PSS defaults now use `fallback_least_squares=False`, keeping
+the full period in the Numba grid solver and recording failed intervals without
+rerunning the period in Python. Use `fallback_least_squares=True` only when
+debugging a difficult convergence case. One stabilization period is usually
+enough for the PMOS chopper wrappers; extra stabilization cycles are mostly a
+throughput tradeoff.
+
+**PAC is slow.**
+Leave `compute_condition` unset for normal runs. PAC condition diagnostics are
+computed only for `profile=True`, `debug=True`, or explicit
+`compute_condition=True`, because the diagnostic runs an SVD of the HB matrix at
+every frequency and does not affect gain/BW/noise.
 
 ---
 

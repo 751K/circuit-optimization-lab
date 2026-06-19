@@ -361,11 +361,15 @@ PAC/PNoise 需要 PSS 时会自动复用或先运行 PSS。
   "pss": {
     "residual_tol": 1e-12,
     "max_shooting_iters": 2,
-    "jacobian_reuse": true
+    "jacobian_reuse": true,
+    "analytic_jacobian": true
   },
   "pac": {
     "freqs": [100.0, 1000.0],
     "input_drive": {"vin": 1.0},
+    "analytic": true,
+    "max_sideband": 10,
+    "n_period_samples": 384,
     "lti_fast_path": true,
     "cache_linearization": true,
     "cache_forcing": true
@@ -385,13 +389,23 @@ PAC/PNoise 需要 PSS 时会自动复用或先运行 PSS。
 `freqs` 可以是频点数组，也可以是 `{"start": 1.0, "stop": 1e4, "num": 41, "scale": "log"}`。
 `input_drive` 是 PAC/PNoise 小信号输入复幅值映射；JSON 中复数可写成数字、
 `[real, imag]` 或 `{"real": ..., "imag": ...}`。
-PSS 默认复用 Broyden shooting Jacobian；疑难收敛或极高精度对比时可设置
-`"jacobian_reuse": false`，或用 `"jacobian_rebuild_interval": 2` 之类的值周期性重建。
-PAC/PNoise 默认启用静态轨道 LTI fast path 和 PSS 结果缓存；如需逐次强制重算有限差分或 HB，
+PSS 默认使用解析 monodromy Jacobian（`"analytic_jacobian": true`）：在收敛轨迹上
+一次性采样 G(t)/C(t) 小信号矩阵构建 Φ，替代 `n_state` 次有限差分瞬态。设置为
+`false` 可回退到原有限差分路径。Jacobian 构建后用 Broyden 更新复用；疑难收敛或
+极高精度对比时可设置 `"jacobian_reuse": false`，或用 `"jacobian_rebuild_interval": 2`
+周期性重建。
+PAC 默认使用解析伴随谐波平衡（`"analytic": true`）：在 PSS 轨道转换矩阵上每频率
+一次伴随线性求解，零额外瞬态运行。`"max_sideband"` 和 `"n_period_samples"` 控制
+HB 分辨率。设置 `"analytic": false` 可回退到原有限差分 shooting 路径。
+PAC/PNoise 默认启用静态轨道 LTI fast path 和 PSS 结果缓存；如需逐次强制重算，
 可设置 `"lti_fast_path": false`、`"cache_linearization": false`、
 `"cache_forcing": false`。PNoise 会复用 `pss_result` 上的采样 `G(t)/C(t)`、
-HB block 和相同频点的 adjoint 解。`"compute_condition": false` 可关闭 PAC
-边界矩阵 condition 诊断，减少少量线性代数开销。
+HB block 和相同频点的 adjoint 解。PNoise HB 系统变大时，可设置
+`"hb_solver": "sparse"` 或 `"iterative"` 强制 sparse direct 或 block-Jacobi
+预条件 GMRES；默认 `"auto"` 会让小矩阵继续走 dense，只在矩阵足够大且非常稀疏时切换。
+PAC 边界矩阵 condition 诊断默认关闭，因为它每个频点都需要一次 SVD；需要排查数值
+病态时可设置 `"profile": true`、`"debug": true`，或显式设置
+`"compute_condition": true`。
 
 ## 完整示例
 

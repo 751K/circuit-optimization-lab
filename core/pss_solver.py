@@ -15,13 +15,81 @@ from __future__ import annotations
 import numpy as np
 
 try:
-    from .ac_solver import ac_solve
+    from .ac_mna import _stamp_adm, _stamp_mos_lti
+    from .ac_solver import ac_solve, get_ss_params
+    from .pmos_tft_model import PMOS_TFT
     from .topology import AFE_TOPO
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_solver import ac_solve
+    from ac_mna import _stamp_adm, _stamp_mos_lti
+    from ac_solver import ac_solve, get_ss_params
+    from pmos_tft_model import PMOS_TFT
     from topology import AFE_TOPO
     from transient_solver import transient
+
+
+def _nfval(nf, name):
+    if isinstance(nf, dict):
+        return int(nf.get(name, 1))
+    return int(nf) if nf else 1
+
+
+def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
+                        dev_inst, gmin=1e-12):
+    """Analytic one-period monodromy d(x_end)/d(x0) from the orbit small signal.
+
+    Replicates the transient's backward-Euler step linearization on the converged
+    PSS trajectory: at each step the small-signal stamps give G(t), C(t), the
+    per-step map is A_m = (G_m + C_m/h_m)^{-1} (C_m/h_m), and Phi = prod_m A_m.
+    The shooting Jacobian is then Phi - I, built in one orbit pass instead of
+    n_state finite-difference one-period transient runs.
+    """
+    t = np.asarray(tr["t"], float)
+    nodes = tr["nodes"]
+    N = len(t)
+    n = topo.n
+    idx = topo.idx
+    rails = topo.rail_values(bias)
+
+    def term(node):
+        return ("n", idx[node]) if node in idx else ("v", 0.0)
+
+    def term_value(node, m):
+        if node in idx:
+            return nodes[node][m]
+        if node in node_inputs:
+            return inputs[node_inputs[node]][m]
+        return rails[node]
+
+    G0 = np.zeros((n, n)); C0 = np.zeros((n, n))
+    rg = np.zeros(n); rc = np.zeros(n)
+    for a, b, cap in topo.cap_list():
+        _stamp_adm(C0, rc, term(a), term(b), cap)
+    for _, a, b, R in topo.resistors:
+        _stamp_adm(G0, rg, term(a), term(b), 1.0 / R)
+    for k in range(n):
+        G0[k, k] += gmin
+
+    phi = np.eye(n)
+    for m in range(1, N):
+        h = float(t[m] - t[m - 1])
+        if h <= 0.0:
+            continue
+        G = G0.copy(); C = C0.copy()
+        for name, d, g, s in topo.devices:
+            Vs = term_value(s, m); Vd = term_value(d, m); Vg = term_value(g, m)
+            p = get_ss_params(sizes[name][0], sizes[name][1], Vs, Vd, Vg,
+                              nf=_nfval(nf, name), dev_inst=dev_inst[name])
+            _stamp_mos_lti(G, C, rg, rc, term(d), term(g), term(s),
+                           p["gm"], p["gds"], p["Cgs"], p["Cgd"])
+        Ch = C / h
+        J = G + Ch
+        try:
+            A = np.linalg.solve(J, Ch)
+        except np.linalg.LinAlgError:
+            A = np.linalg.lstsq(J, Ch, rcond=None)[0]
+        phi = A @ phi
+    return phi
 
 
 def _make_period_grid(period, tgrid, n_points):
@@ -118,6 +186,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               fallback_tol=1e-9, signed_devices=None, residual_tol=1e-7,
               max_shooting_iters=8, fd_step=1e-5, min_damping=1.0 / 64.0,
               jacobian_reuse=True, jacobian_rebuild_interval=0,
+              analytic_jacobian=True,
               rail_margin=0.5, check_periodic_inputs=True,
               input_periodic_tol=1e-9, profile=False, edge_mask=None):
     """Solve periodic steady state with transient shooting.
@@ -142,6 +211,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         if len(edge_mask) != len(tgrid):
             raise ValueError("edge_mask length must match tgrid")
 
+    step_fallback_tol = min(float(fallback_tol), 0.1 * float(residual_tol))
     transient_kwargs = dict(
         topo=topo,
         inputs=inputs,
@@ -156,7 +226,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         newton_vtol=newton_vtol,
         fallback_full_jacobian=fallback_full_jacobian,
         fallback_least_squares=fallback_least_squares,
-        fallback_tol=fallback_tol,
+        fallback_tol=step_fallback_tol,
         signed_devices=signed_devices,
         rail_margin=rail_margin,
         edge_mask=edge_mask,
@@ -168,11 +238,23 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     period_runs = 0
     shooting_jacobian_evals = 0
     shooting_jacobian_reuses = 0
+    converged_stabilization = None
     for _ in range(max(0, int(tstab_periods))):
+        x_start = x.copy()
         period_runs += 1
         tr_stab = transient(sizes, bias, tgrid, V0=x, profile=False,
                             **transient_kwargs)
-        x = _rail_clip(_end_vector(tr_stab, topo), topo, bias, rail_margin)
+        x_end_stab = _end_vector(tr_stab, topo)
+        residual_stab = x_end_stab - x_start
+        norm_stab = float(np.linalg.norm(residual_stab, ord=np.inf))
+        nfail_stab = int(tr_stab.get("nfail", 0))
+        if nfail_stab == 0 and norm_stab <= float(residual_tol):
+            converged_stabilization = (
+                tr_stab, x_start.copy(), x_end_stab.copy(), residual_stab.copy(),
+                norm_stab, nfail_stab,
+            )
+            break
+        x = _rail_clip(x_end_stab, topo, bias, rail_margin)
 
     history = []
 
@@ -187,7 +269,10 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         nfail = int(tr.get("nfail", 0))
         return tr, x_end, residual, norm, nfail
 
-    tr, x_end, residual, norm, nfail = run_period(x)
+    if converged_stabilization is None:
+        tr, x_end, residual, norm, nfail = run_period(x)
+    else:
+        tr, x, x_end, residual, norm, nfail = converged_stabilization
     best = {
         "x0": x.copy(),
         "x_end": x_end.copy(),
@@ -208,6 +293,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     iterations = 0
     jac = None
     jac_age = 0
+    mono_dev_inst = None
     jacobian_reuse = bool(jacobian_reuse)
     jacobian_rebuild_interval = max(0, int(jacobian_rebuild_interval))
 
@@ -268,8 +354,26 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
             )
             used_reused_jac = False
             if rebuild:
-                jac = build_shooting_jacobian(x, residual)
-                jacobian_kind = "finite_difference"
+                jac = None
+                if analytic_jacobian:
+                    try:
+                        if mono_dev_inst is None:
+                            mono_dev_inst = {
+                                name: PMOS_TFT(W=sizes[name][0], L=sizes[name][1],
+                                               NF=_nfval(nf, name))
+                                for name, *_ in topo.devices
+                            }
+                        phi = _shooting_monodromy(tr, topo, sizes, nf, bias, inputs,
+                                                  node_inputs or {}, mono_dev_inst)
+                        jac = phi - np.eye(topo.n)
+                        jacobian_kind = "analytic_monodromy"
+                        shooting_jacobian_evals += 1
+                        jac_age = 0
+                    except Exception:
+                        jac = None
+                if jac is None:
+                    jac = build_shooting_jacobian(x, residual)
+                    jacobian_kind = "finite_difference"
             else:
                 shooting_jacobian_reuses += 1
                 used_reused_jac = True

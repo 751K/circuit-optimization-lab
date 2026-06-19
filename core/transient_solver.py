@@ -9,15 +9,17 @@ matches the AC solver.
 Method
 ------
 - KCL at every solved node:  Σ device currents  +  Σ capacitor currents  = 0.
-- Capacitor companion (backward Euler), cap C between terminals a,b:
-      i_ab = C(V_n)·d(Va-Vb)/dt ≈ (C(V_n)/h)·[(Va-Vb)_n − (Va-Vb)_{n-1}]
-  C is evaluated IMPLICITLY at the current step (Cgss/Cgdd from get_capacitances,
-  re-evaluated each Newton iteration) — this is exactly the model's `Cgss(V)·ddt(V)`
-  form, so it tracks the bias-dependent cap on fast edges (chopper), not just slow
-  signals. The AT_4000TG model routes these caps through an internal gate1 node;
-  this solver keeps the long-timescale R_cap2 leakage from source/drain to gate1
-  and collapses the 100 Ω gate-to-gate1 RC because its ns-scale time constant is
-  far below the chopper edge times used here.
+- Capacitor companion (backward Euler), cap branch between terminals a,b:
+      i_ab ≈ C_step·[(Va-Vb)_n − (Va-Vb)_{n-1}] / h
+  Linear capacitors use their fixed C. PMOS Cgss/Cgdd use a step-integrated
+  displacement charge companion, with C_step = 0.5·(C_prev + C_now), from the
+  same PDK capacitance equations. This avoids the fast-edge endpoint error of
+  stamping C(V_n)·ΔV when the chopper clock moves through a strongly nonlinear
+  capacitance region. AC/PAC/noise still use the local small-signal
+  capacitances. The AT_4000TG model routes these caps through an internal gate1
+  node; this solver keeps the long-timescale R_cap2 leakage from source/drain
+  to gate1 and collapses the 100 Ω gate-to-gate1 RC because its ns-scale time
+  constant is far below the chopper edge times used here.
 - Each step: solve the 6 node voltages with a damped Newton iteration using an
   analytic conductance Jacobian (gm/gds finite-diff of get_Idc + cap C/h + gmin),
   seeded from the previous step, with step limiting that keeps it on the physical
@@ -265,11 +267,19 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             out[pos] = (dev, signed, di, gi, si, Vs, Vd, Vg, Vs1, Vd1, I, Cgs, Cgd)
         return out
 
-    def device_terminal_values(V, input_vals):
-        return [(termv(sterm, V, input_vals),
-                 termv(dterm, V, input_vals),
-                 termv(gterm, V, input_vals))
-                for _, _, dterm, gterm, sterm, *_ in dev_meta]
+    def device_prev_cap_terms(V, input_vals):
+        out = []
+        for dev, _, dterm, gterm, sterm, *_ in dev_meta:
+            Vs = termv(sterm, V, input_vals)
+            Vd = termv(dterm, V, input_vals)
+            Vg = termv(gterm, V, input_vals)
+            try:
+                Vs1, Vd1 = dev.get_op(Vs, Vd, Vg)
+                Cgs, Cgd = dev._capacitances_from_op(Vs, Vd, Vg, Vs1, Vd1)
+            except Exception:
+                Cgs = Cgd = 0.0
+            out.append((Vs, Vd, Vg, Cgs, Cgd))
+        return out
 
     def load_cap_dv_values(V, input_vals):
         return [termv(aterm, V, input_vals) - termv(bterm, V, input_vals)
@@ -311,11 +321,12 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 R[qi] += Ival
         for k in range(n):
             R[k] -= V[k] * gmin
-        # capacitor companion: C(V_now)·[(Va-Vb)_now - (Va-Vb)_prev]/h  (C implicit; Cmap
-        # is evaluated at the current iterate by the caller, ΔV_prev uses the prev step)
+        # PMOS dynamic caps use a step-integrated displacement charge companion:
+        # average the nonlinear C over the step, while keeping C_now/h as the
+        # compact Newton linearization in build_jac.
         for state, prev_terms in zip(states, prev_dev_terms):
             _, _, di, gi, si, Vs, Vd, Vg, _, _, _, Cgs, Cgd = state
-            pVs, pVd, pVg = prev_terms
+            pVs, pVd, pVg, pCgs, pCgd = prev_terms
             gate_leak_g = 1.0 / state[0].R_cap2
             if gate_leak_g != 0.0:
                 i_sg = (Vs - Vg) * gate_leak_g          # source -> gate1≈gate
@@ -329,13 +340,15 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 if gi is not None:
                     R[gi] += i_dg
             if Cgs != 0.0:
-                i_ab = Cgs * inv_h * ((Vg - Vs) - (pVg - pVs))  # gate-source
+                c_step = 0.5 * (Cgs + pCgs)
+                i_ab = c_step * inv_h * ((Vg - Vs) - (pVg - pVs))  # gate -> source
                 if gi is not None:
                     R[gi] -= i_ab
                 if si is not None:
                     R[si] += i_ab
             if Cgd != 0.0:
-                i_ab = Cgd * inv_h * ((Vg - Vd) - (pVg - pVd))  # gate-drain
+                c_step = 0.5 * (Cgd + pCgd)
+                i_ab = c_step * inv_h * ((Vg - Vd) - (pVg - pVd))  # gate -> drain
                 if gi is not None:
                     R[gi] -= i_ab
                 if di is not None:
@@ -377,7 +390,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             return I_s_s1 - I_s1_d1, I_s1_d1 - I_d1_d, -I_d1_d
 
         F0a, F0b, Idc0 = eval_at(Vs, Vd, Vg, Vs1, Vd1)
-        if abs(Idc0) < 1e-30:
+        if (not signed) and abs(Idc0) < 1e-30:
             raise FloatingPointError("abs(Idc) kink")
         Fpa, Fpb, Ip = eval_at(Vs, Vd, Vg, Vs1 + hx, Vd1)
         j00 = (Fpa - F0a) / hx
@@ -392,7 +405,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             raise np.linalg.LinAlgError("singular internal Jacobian")
 
         sign = 1.0 if Idc0 > 0.0 else -1.0
-        current_sign = sign if not signed else -1.0
+        current_sign = -1.0 if signed else sign
 
         def deriv(vs_p, vd_p, vg_p, vs_m, vd_m, vg_m):
             Fpa, Fpb, Ip = eval_at(vs_p, vd_p, vg_p, Vs1, Vd1)
@@ -408,7 +421,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         gds = deriv(Vs, Vd + HH, Vg, Vs, Vd - HH, Vg) if need_gds else 0.0
         return gm, gds
 
-    def build_jac(V, states, h):
+    def build_jac(V, states, prev_dev_terms, h):
         """Analytic conductance Jacobian dR/dV (n×n).
 
         Device part = small-signal conductance stamp: gm=dI/dVg, gds=dI/dVd
@@ -451,7 +464,9 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 J[si, si] -= dI_dVs
         for k in range(n):
             J[k, k] -= gmin
-        for dev, _, di, gi, si, _, _, _, _, _, _, Cgs, Cgd in states:
+        for state, prev_terms in zip(states, prev_dev_terms):
+            dev, _, di, gi, si, _, _, _, _, _, _, Cgs, Cgd = state
+            _, _, _, pCgs, pCgd = prev_terms
             gate_leak_g = 1.0 / dev.R_cap2
             if gate_leak_g != 0.0:
                 if si is not None:
@@ -471,7 +486,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                         (1 if si is not None else 0) +
                         (1 if di is not None else 0))
             if Cgs != 0.0:                              # gate-source
-                g = Cgs * inv_h
+                g = 0.5 * (Cgs + pCgs) * inv_h
                 if gi is not None:
                     J[gi, gi] -= g
                     if si is not None:
@@ -481,7 +496,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                     if gi is not None:
                         J[si, gi] += g
             if Cgd != 0.0:                              # gate-drain
-                g = Cgd * inv_h
+                g = 0.5 * (Cgd + pCgd) * inv_h
                 if gi is not None:
                     J[gi, gi] -= g
                     if di is not None:
@@ -525,10 +540,9 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         previous-step seed (verified: |R| 6e-9→1e-13→1e-16 in 2 iters at h=10µs).
         |ΔV|≤5 V/iter caps branch jumps; also accept once |ΔV| stalls at its floor.
 
-        Caps are evaluated IMPLICITLY (at the current iterate V), matching the Verilog-A
-        `Cgss(V)·ddt(V)`. Freezing them at the previous step is fine for slow signals but
-        lags on fast edges (chopper) where Cgss/Cgdd swing with bias — implicit keeps the
-        engine faithful there."""
+        PMOS dynamic caps use a step-averaged capacitance in the residual.
+        Freezing them at the previous step is fine for slow signals but lags on
+        fast edges (chopper) where Cgss/Cgdd swing with bias."""
         maxit = int(newton_maxit if maxit is None else maxit)
         step_limit = float(newton_step_limit)
         if use_numba_newton:
@@ -570,7 +584,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
 
         V = np.array(seed, float)
         prev = np.inf
-        prev_dev_terms = device_terminal_values(Vp, input_prev)
+        prev_dev_terms = device_prev_cap_terms(Vp, input_prev)
         load_prev_dv = load_cap_dv_values(Vp, input_prev)
         for it in range(maxit):
             states = device_states(V, input_now)         # implicit caps at current iterate
@@ -578,7 +592,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             if ((fallback_full_jacobian or fallback_least_squares) and
                     np.linalg.norm(R, ord=np.inf) < float(fallback_tol)):
                 return V, it + 1, True
-            J = build_jac(V, states, h)
+            J = build_jac(V, states, prev_dev_terms, h)
             try:
                 dV = np.linalg.solve(J, -R)
             except np.linalg.LinAlgError:
@@ -613,7 +627,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         expensive, so it is only used after the fast Newton has failed.
         """
         V = np.array(seed, float)
-        prev_dev_terms = device_terminal_values(Vp, input_prev)
+        prev_dev_terms = device_prev_cap_terms(Vp, input_prev)
         load_prev_dv = load_cap_dv_values(Vp, input_prev)
         step_limit = float(newton_step_limit)
 
@@ -773,7 +787,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 return V, False, raised
             lo = min(rails) - 0.5
             hi = max(rails) + 0.5
-            prev_dev_terms = device_terminal_values(Vp, input_prev)
+            prev_dev_terms = device_prev_cap_terms(Vp, input_prev)
             load_prev_dv = load_cap_dv_values(Vp, input_prev)
 
             def residual(z):

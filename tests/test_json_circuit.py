@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import core.analysis_dispatch as dispatch_mod
 from core.ac_solver import ac_solve
 from core.analysis_dispatch import run_analysis_suite
 from core.circuit_loader import circuit_from_dict, load_circuit_json
@@ -69,6 +70,7 @@ def test_periodic_json_dispatch_runs_generic_pss_pac_pnoise():
     assert set(results) == {"ac", "noise", "pss", "pac", "pnoise"}
     assert results["pss"]["converged"]
     assert results["pss"]["nfail"] == 0
+    assert results["pac"]["pac_condition_computed"] is False
 
     freqs = np.array([100.0, 1000.0])
     R = 1e5
@@ -83,6 +85,35 @@ def test_periodic_json_dispatch_runs_generic_pss_pac_pnoise():
     assert results["pnoise"]["method"] == "lti_noise_fast_path"
     assert results["pnoise"]["pnoise_hb_solve_count"] == 0
     assert results["pnoise"]["irn_uV_band"] > 0.0
+
+
+def test_dispatch_reuses_ac_dc_op_as_noise_seed(monkeypatch):
+    spec = load_circuit_json("examples/single_stage.json")
+    freqs = np.array([1.0, 10.0])
+    ac_dc = {"OUT": 12.0}
+    ac_result = {"dc_op": ac_dc, "gains": np.ones_like(freqs), "freqs": freqs.copy()}
+
+    def fake_ac_solve(*_args, **_kwargs):
+        return ac_result
+
+    def fake_noise_analysis(*_args, **kwargs):
+        assert kwargs["x0_guess"] is ac_dc
+        assert kwargs["ac_result"] is ac_result
+        return {
+            "out_psd": np.ones_like(freqs),
+            "irn_psd": np.ones_like(freqs),
+        }
+
+    monkeypatch.setattr(dispatch_mod, "ac_solve", fake_ac_solve)
+    monkeypatch.setattr(dispatch_mod, "noise_analysis", fake_noise_analysis)
+
+    results = run_analysis_suite(
+        spec,
+        analyses={"ac": {"freqs": freqs.tolist()},
+                  "noise": {"freqs": freqs.tolist()}},
+    )
+
+    assert set(results) == {"ac", "noise"}
 
 
 def test_loader_rejects_unknown_device_node():

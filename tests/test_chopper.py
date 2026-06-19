@@ -3,6 +3,7 @@ import os
 import numpy as np
 import pytest
 
+import core.chopper as chopper_mod
 from core.circuit_loader import load_circuit_json
 from core.chopper import (
     build_afe_pmos_chopper,
@@ -200,6 +201,37 @@ def test_pmos_chopper_auto_seed_handles_changed_ui_sizes():
         assert abs(dc["CH_AMP_ON"] - dc["CH_VON"]) < 1e-3
 
 
+def test_pmos_chopper_auto_seed_reuses_bare_dc_cache(monkeypatch):
+    build = build_afe_pmos_chopper(switch_size=(5000.0, 30.0))
+    chopper_mod._PMOS_CHOPPER_BARE_DC_SEED_CACHE.clear()
+    calls = {"n": 0}
+    dc_op = {
+        "VOP": 10.0,
+        "VON": 11.0,
+        "VFBP": 12.0,
+        "VFBN": 13.0,
+        "NET20": 14.0,
+        "NET2": 15.0,
+    }
+
+    def fake_ac_solve(*_args, **_kwargs):
+        calls["n"] += 1
+        return {"dc_op": dict(dc_op)}
+
+    monkeypatch.setattr(chopper_mod, "ac_solve", fake_ac_solve)
+
+    seed_a = chopper_mod._pmos_chopper_auto_seed(
+        CHOPPER_UI_SIZES, CHOPPER_UI_BIAS, "A", build, nf=None,
+        base_topo=AFE_TOPO)
+    seed_b = chopper_mod._pmos_chopper_auto_seed(
+        CHOPPER_UI_SIZES, CHOPPER_UI_BIAS, "B", build, nf=None,
+        base_topo=AFE_TOPO)
+
+    assert calls["n"] == 1
+    assert seed_a["CH_VOP"] == dc_op["VOP"]
+    assert seed_b["CH_VOP"] == dc_op["VON"]
+
+
 def test_pmos_chopper_lptv_analysis_runs_with_finite_edges():
     freqs = np.array([1.0, 10.0])
     result = pmos_chopper_lptv_analysis(
@@ -367,6 +399,8 @@ def test_pmos_chopper_pss_shooting_smoke_converges():
     assert result["nfail"] == 0
     assert result["residual_norm"] < 1e-5
     assert len(result["t"]) == 17
+    assert result["shooting_period_runs"] <= 3
+    assert result.get("numba_grid_solver") is True
 
 
 def test_pmos_chopper_transient_flat_step_profile_reduces_work():
@@ -433,6 +467,7 @@ def test_pmos_chopper_pac_pss_finite_difference_smoke():
         CHOPPER_UI_BIAS,
         freqs,
         225.0,
+        analytic=False,
         pss_kwargs=dict(
             switch_size=(5000.0, 30.0),
             edge_time=20e-6,
@@ -486,3 +521,31 @@ def test_pmos_chopper_pnoise_matches_cadence_band():
     assert np.all(np.isfinite(r["out_psd"])) and np.all(r["out_psd"] > 0.0)
     # within ~25% of the Cadence reference at reduced resolution (full-res lands ~6%)
     assert 6.5 < r["irn_uV_band"] < 11.0
+
+
+@pytest.mark.skipif(not os.environ.get("RUN_SLOW_CHOPPER"),
+                    reason="slow PSS+PAC verification; set RUN_SLOW_CHOPPER=1 to run")
+def test_pmos_chopper_pac_matches_cadence_baseband_gain():
+    # PSS+PAC vs Cadence design-#3 PSS/PAC reference at f_chop=200 Hz
+    # (chop_tb_d3_typical: baseband conversion gain 13.92 V/V at voutp_f,
+    # rolling off to 4.96 V/V at the 200 Hz fundamental).  The hard switch edges
+    # spread the commutation over many sidebands, so the default max_sideband=32
+    # is what brings the baseband gain to within ~3% of Spectre (max_sideband=10
+    # under-counts and lands ~13% low).
+    freqs = np.array([0.05, 1.0, 200.0])
+    pss = pmos_chopper_pss(
+        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
+        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
+        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
+        fallback_least_squares=False, n_points=161,
+        output_filter=(1e6, 680e-12))
+    pac = pmos_chopper_pac(
+        _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
+        nf=_CHOP_D3_NF)
+    assert pac["method"] == "pss_analytic_adjoint"
+    g = pac["gains"]
+    # baseband within ~4% of Cadence 13.92; the residual is model level.
+    assert abs(g[0] - 13.92) / 13.92 < 0.04
+    assert abs(g[1] - 13.92) / 13.92 < 0.04
+    # the high-frequency roll-off tracks Cadence (4.96 V/V at the fundamental).
+    assert abs(g[2] - 4.96) / 4.96 < 0.05

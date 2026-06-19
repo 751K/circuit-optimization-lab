@@ -6,7 +6,19 @@ orbit, optional PAC gains, and device-specific noise policy.
 """
 from __future__ import annotations
 
+import time
+import warnings
+
 import numpy as np
+
+try:
+    from scipy import linalg as _la
+    from scipy import sparse as _sp
+    from scipy.sparse import linalg as _spla
+except Exception:  # pragma: no cover - scipy is a project dependency
+    _la = None
+    _sp = None
+    _spla = None
 
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti
@@ -14,6 +26,8 @@ try:
     from .noise_solver import band_rms, noise_analysis
     from .numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
     from .pac_solver import (
+        _periodic_wave_derivatives,
+        _stamp_pmos_dynamic_cap_terms,
         _freeze_kwargs,
         _freeze_nf,
         _freeze_sizes,
@@ -27,6 +41,8 @@ except ImportError:  # pragma: no cover - legacy direct module import
     from noise_solver import band_rms, noise_analysis
     from numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
     from pac_solver import (
+        _periodic_wave_derivatives,
+        _stamp_pmos_dynamic_cap_terms,
         _freeze_kwargs,
         _freeze_nf,
         _freeze_sizes,
@@ -38,6 +54,7 @@ except ImportError:  # pragma: no cover - legacy direct module import
 
 _KB = 1.380649e-23
 _TEMP = 300.15
+_HB_SOLVERS = {"auto", "dense", "sparse", "iterative"}
 
 
 def _merge_sizes_and_nf(sizes, nf, pss_result):
@@ -182,15 +199,226 @@ def _hb_blocks(Gf, Cf, K, N, n, fundamental):
     Y_base = np.zeros((nb * n, nb * n), dtype=complex)
     C_block = np.zeros_like(Y_base)
     for kr in range(-K, K + 1):
-        row_omega = 2j * np.pi * kr * fundamental
         br = (kr + K) * n
         for kc in range(-K, K + 1):
+            col_omega = 2j * np.pi * kc * fundamental
             bc = (kc + K) * n
             g_coeff = Gf[(kr - kc) % N]
             c_coeff = Cf[(kr - kc) % N]
-            Y_base[br:br + n, bc:bc + n] = g_coeff + row_omega * c_coeff
+            Y_base[br:br + n, bc:bc + n] = g_coeff + col_omega * c_coeff
             C_block[br:br + n, bc:bc + n] = c_coeff
     return Y_base, C_block, False
+
+
+def _hb_blocks_sparse(Gf, Cf, K, N, n, fundamental, drop_tol=0.0):
+    if _sp is None:
+        raise RuntimeError("scipy.sparse is required for sparse PNoise HB")
+    nb = 2 * K + 1
+    size = nb * n
+    y_rows = []
+    y_cols = []
+    y_data = []
+    c_rows = []
+    c_cols = []
+    c_data = []
+    for kr_i in range(nb):
+        kr = kr_i - K
+        br = kr_i * n
+        for kc_i in range(nb):
+            kc = kc_i - K
+            col_omega = 2.0j * np.pi * kc * fundamental
+            bc = kc_i * n
+            coeff_idx = (kr - kc) % N
+            c_block = Cf[coeff_idx]
+            y_block = Gf[coeff_idx] + col_omega * c_block
+            if drop_tol > 0.0:
+                y_nz = np.nonzero(np.abs(y_block) > drop_tol)
+                c_nz = np.nonzero(np.abs(c_block) > drop_tol)
+            else:
+                y_nz = np.nonzero(y_block)
+                c_nz = np.nonzero(c_block)
+            if len(y_nz[0]):
+                y_rows.extend((br + y_nz[0]).tolist())
+                y_cols.extend((bc + y_nz[1]).tolist())
+                y_data.extend(y_block[y_nz].tolist())
+            if len(c_nz[0]):
+                c_rows.extend((br + c_nz[0]).tolist())
+                c_cols.extend((bc + c_nz[1]).tolist())
+                c_data.extend(c_block[c_nz].tolist())
+    Y_base = _sp.csc_matrix((y_data, (y_rows, y_cols)), shape=(size, size),
+                            dtype=np.complex128)
+    C_block = _sp.csc_matrix((c_data, (c_rows, c_cols)), shape=(size, size),
+                             dtype=np.complex128)
+    Y_base.sum_duplicates()
+    C_block.sum_duplicates()
+    Y_base.eliminate_zeros()
+    C_block.eliminate_zeros()
+    return Y_base, C_block
+
+
+def _to_sparse_hb(Y_base, C_block):
+    if _sp is None:
+        raise RuntimeError("scipy.sparse is required for sparse PNoise HB")
+    Y_sparse = _sp.csc_matrix(Y_base)
+    C_sparse = _sp.csc_matrix(C_block)
+    Y_sparse.eliminate_zeros()
+    C_sparse.eliminate_zeros()
+    return Y_sparse, C_sparse
+
+
+def _sparse_density(mat):
+    if mat is None:
+        return 1.0
+    total = mat.shape[0] * mat.shape[1]
+    return 0.0 if total == 0 else float(mat.nnz) / float(total)
+
+
+def _estimate_hb_sparse_density(Gf, Cf, K, N, n, drop_tol=0.0):
+    nb = 2 * K + 1
+    counts = np.zeros(N, dtype=float)
+    for k in range(N):
+        if drop_tol > 0.0:
+            mask = (np.abs(Gf[k]) > drop_tol) | (np.abs(Cf[k]) > drop_tol)
+        else:
+            mask = (Gf[k] != 0.0) | (Cf[k] != 0.0)
+        counts[k] = float(np.count_nonzero(mask))
+    total = 0.0
+    for kr in range(-K, K + 1):
+        for kc in range(-K, K + 1):
+            total += counts[(kr - kc) % N]
+    denom = float(nb * nb * n * n)
+    return 0.0 if denom == 0.0 else total / denom
+
+
+def _resolve_hb_solver(requested, hb_size, sparse_density,
+                       sparse_min_size, sparse_max_density):
+    solver = str(requested or "auto").lower()
+    if solver not in _HB_SOLVERS:
+        raise ValueError(f"hb_solver must be one of {sorted(_HB_SOLVERS)}")
+    if solver != "auto":
+        if solver in {"sparse", "iterative"} and (_sp is None or _spla is None):
+            return "dense"
+        return solver
+    if (_sp is not None and _spla is not None and
+            int(hb_size) >= int(sparse_min_size) and
+            float(sparse_density) <= float(sparse_max_density)):
+        return "sparse"
+    return "dense"
+
+
+def _block_jacobi_preconditioner(Gf, Cf, K, n, fundamental, freq):
+    if _spla is None:
+        return None
+    nb = 2 * K + 1
+    G0 = np.asarray(Gf[0], dtype=np.complex128)
+    C0 = np.asarray(Cf[0], dtype=np.complex128)
+    factors = []
+    for ki in range(nb):
+        kh = ki - K
+        block = (G0 + (2.0j * np.pi * (float(freq) + kh * fundamental)) * C0).T
+        if _la is not None:
+            try:
+                factors.append(("lu", _la.lu_factor(block)))
+                continue
+            except Exception:
+                pass
+        factors.append(("dense", block))
+
+    def apply(rhs):
+        rhs = np.asarray(rhs, dtype=np.complex128)
+        out = np.empty_like(rhs)
+        for ki, factor in enumerate(factors):
+            lo = ki * n
+            hi = lo + n
+            mode, data = factor
+            try:
+                if mode == "lu" and _la is not None:
+                    out[lo:hi] = _la.lu_solve(data, rhs[lo:hi])
+                else:
+                    out[lo:hi] = np.linalg.solve(data, rhs[lo:hi])
+            except Exception:
+                mat = data if mode != "lu" else (
+                    G0 + (2.0j * np.pi * (float(freq) + (ki - K) * fundamental)) * C0
+                ).T
+                out[lo:hi] = np.linalg.lstsq(mat, rhs[lo:hi], rcond=None)[0]
+        return out
+
+    size = nb * n
+    return _spla.LinearOperator((size, size), matvec=apply, dtype=np.complex128)
+
+
+def _solve_hb_adjoint(Y_base, C_block, Y_sparse, C_sparse, freq, e, solver,
+                      iterative_tol, iterative_maxiter, preconditioner=None):
+    omega = 2j * np.pi * float(freq)
+    info = {
+        "solver": solver,
+        "iterative_info": 0,
+        "iterative_iterations": 0,
+        "iterative_fallback": False,
+        "dense_fallback": False,
+        "preconditioner": "none" if preconditioner is None else "block_jacobi",
+    }
+    if solver == "dense":
+        Y = Y_base + omega * C_block
+        try:
+            return np.linalg.solve(Y.T, e), info
+        except np.linalg.LinAlgError:
+            info["dense_fallback"] = True
+            return np.linalg.lstsq(Y.T, e, rcond=None)[0], info
+
+    if _sp is None or _spla is None:
+        info["solver"] = "dense"
+        info["dense_fallback"] = True
+        Y = Y_base + omega * C_block
+        try:
+            return np.linalg.solve(Y.T, e), info
+        except np.linalg.LinAlgError:
+            return np.linalg.lstsq(Y.T, e, rcond=None)[0], info
+
+    Y = Y_sparse + omega * C_sparse
+    A = Y.T.tocsc()
+    if solver == "iterative":
+        maxiter = None if iterative_maxiter is None else int(iterative_maxiter)
+        iter_count = {"n": 0}
+
+        def _cb(_value):
+            iter_count["n"] += 1
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                try:
+                    adj, gmres_info = _spla.gmres(
+                        A, e, rtol=float(iterative_tol), atol=0.0,
+                        maxiter=maxiter, M=preconditioner, callback=_cb,
+                        callback_type="pr_norm")
+                except TypeError:
+                    adj, gmres_info = _spla.gmres(
+                        A, e, rtol=float(iterative_tol), atol=0.0,
+                        maxiter=maxiter, M=preconditioner, callback=_cb)
+            info["iterative_info"] = int(gmres_info)
+            info["iterative_iterations"] = int(iter_count["n"])
+            if gmres_info == 0 and np.all(np.isfinite(adj)):
+                return adj, info
+        except Exception:
+            info["iterative_info"] = -1
+        info["iterative_fallback"] = True
+
+    try:
+        adj = _spla.spsolve(A, e)
+        if np.all(np.isfinite(adj)):
+            return adj, info
+    except Exception:
+        pass
+    info["dense_fallback"] = True
+    if Y_base is None or C_block is None:
+        dense = Y.toarray()
+    else:
+        dense = Y_base + omega * C_block
+    try:
+        return np.linalg.solve(dense.T, e), info
+    except np.linalg.LinAlgError:
+        return np.linalg.lstsq(dense.T, e, rcond=None)[0], info
 
 
 def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
@@ -198,7 +426,11 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                  band=(0.05, 100.0), gains=None, pac_result=None,
                  input_drive=None, noise_devices=None,
                  gds_noise_devices=None, switch_noise_conductance_gated=True,
-                 cache_linearization=True, lti_fast_path=True):
+                 cache_linearization=True, lti_fast_path=True,
+                 hb_solver="auto", hb_sparse_min_size=384,
+                 hb_sparse_max_density=0.12, hb_sparse_drop_tol=0.0,
+                 iterative_tol=1e-10, iterative_maxiter=10,
+                 profile=False):
     """Solve periodic output noise around a PSS orbit.
 
     The circuit is linearized along the supplied PSS trajectory.  Fourier
@@ -232,6 +464,16 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     K = int(max_sideband)
     if K < 0:
         raise ValueError("max_sideband must be non-negative")
+    # The HB conversion matrix reads G/C harmonics up to order 2K; sampling the
+    # orbit below 4K points aliases those coefficients (sharp switch edges carry
+    # slowly-decaying harmonics), so lift N above the Nyquist limit we depend on.
+    N = max(N, 4 * K + 2)
+    hb_solver_requested = str(hb_solver or "auto").lower()
+    if hb_solver_requested not in _HB_SOLVERS:
+        raise ValueError(f"hb_solver must be one of {sorted(_HB_SOLVERS)}")
+    hb_sparse_min_size = int(hb_sparse_min_size)
+    hb_sparse_max_density = float(hb_sparse_max_density)
+    hb_sparse_drop_tol = float(hb_sparse_drop_tol)
     tbias = dict(pss_result.get("bias", bias))
     all_sizes, all_nf = _merge_sizes_and_nf(sizes, nf, pss_result)
     if lti_fast_path:
@@ -258,6 +500,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         key: _periodic_interp(t_orbit, val, t_uniform, period)
         for key, val in pss_result.get("inputs", {}).items()
     }
+    node_dot = _periodic_wave_derivatives(node_wave, period)
+    input_dot = _periodic_wave_derivatives(input_wave, period)
     devices = list(topo.devices)
     gated_noise = set(gds_noise_devices or ())
     if not switch_noise_conductance_gated:
@@ -271,11 +515,18 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
             return input_wave[node_inputs[node]][m]
         return rails[node]
 
+    def term_derivative(node, m):
+        if node in idx:
+            return node_dot[node][m]
+        if node in node_inputs:
+            return input_dot[node_inputs[node]][m]
+        return 0.0
+
     def term(node):
         return ("n", idx[node]) if node in idx else ("v", 0.0)
 
     lin_key = (
-        "pnoise_lin_v1",
+        "pnoise_lin_v2",
         tuple(topo.solved),
         tuple(topo.devices),
         tuple(topo.resistors),
@@ -290,6 +541,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     )
     cache = pss_result.setdefault("_pnoise_cache", {}) if cache_linearization else {}
     cache_hit = bool(cache_linearization and lin_key in cache)
+    t_linear0 = time.perf_counter()
     if cache_hit:
         lin = cache[lin_key]
         Gf = lin["Gf"]
@@ -336,6 +588,11 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                     Gm, Cm, rhs_g, rhs_c, term(d), term(g), term(s),
                     p["gm"], p["gds"], p["Cgs"], p["Cgd"],
                 )
+                _stamp_pmos_dynamic_cap_terms(
+                    Gm, term(d), term(g), term(s), dev_inst[name],
+                    Vs, Vd, Vg,
+                    term_derivative(s, m), term_derivative(d, m),
+                    term_derivative(g, m))
                 if name in gated_noise:
                     S_th = 4.0 * _KB * _TEMP * abs(p["gds"])
                     S_fl1 = 0.0
@@ -368,6 +625,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 "Cf": Cf,
                 "noise_sources": all_noise_sources,
             }
+    linearization_time_s = time.perf_counter() - t_linear0
 
     noise_sources = [
         item for item in all_noise_sources
@@ -382,21 +640,73 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     def coeff(F, k):
         return F[np.asarray(k) % N]
 
-    hb_key = ("pnoise_hb_v1", lin_key, int(K), float(fundamental))
+    hb_key = ("pnoise_hb_v2", lin_key, int(K), float(fundamental),
+              float(hb_sparse_drop_tol))
     hb_cache_hit = bool(cache_linearization and hb_key in cache)
+    hb_size = int(nb * n)
+    sparse_density_estimate = _estimate_hb_sparse_density(
+        Gf, Cf, K, N, n, drop_tol=hb_sparse_drop_tol)
+    prefer_sparse = (
+        hb_solver_requested in {"sparse", "iterative"} or
+        (hb_solver_requested == "auto" and hb_size >= hb_sparse_min_size and
+         _sp is not None and _spla is not None and
+         sparse_density_estimate <= hb_sparse_max_density)
+    )
+    t_hb0 = time.perf_counter()
+    Y_base = None
+    C_block = None
+    Y_sparse = None
+    C_sparse = None
+    hb_numba_used = False
     if hb_cache_hit:
         hb = cache[hb_key]
-        Y_base = hb["Y_base"]
-        C_block = hb["C_block"]
+        Y_base = hb.get("Y_base")
+        C_block = hb.get("C_block")
+        Y_sparse = hb.get("Y_base_sparse")
+        C_sparse = hb.get("C_block_sparse")
         hb_numba_used = bool(hb.get("numba_used", False))
     else:
+        hb = {}
+    if prefer_sparse and Y_sparse is None:
+        try:
+            if Y_base is not None and C_block is not None and hb_sparse_drop_tol == 0.0:
+                Y_sparse, C_sparse = _to_sparse_hb(Y_base, C_block)
+            else:
+                Y_sparse, C_sparse = _hb_blocks_sparse(
+                    Gf, Cf, K, N, n, fundamental, drop_tol=hb_sparse_drop_tol)
+            hb["Y_base_sparse"] = Y_sparse
+            hb["C_block_sparse"] = C_sparse
+        except Exception:
+            Y_sparse = None
+            C_sparse = None
+    sparse_density = (_sparse_density(Y_sparse)
+                      if Y_sparse is not None else sparse_density_estimate)
+    solver_used = _resolve_hb_solver(
+        hb_solver_requested, hb_size, sparse_density,
+        hb_sparse_min_size, hb_sparse_max_density)
+    need_dense = solver_used == "dense" or Y_sparse is None or C_sparse is None
+    if need_dense and (Y_base is None or C_block is None):
         Y_base, C_block, hb_numba_used = _hb_blocks(Gf, Cf, K, N, n, fundamental)
-        if cache_linearization:
-            cache[hb_key] = {
-                "Y_base": Y_base,
-                "C_block": C_block,
-                "numba_used": bool(hb_numba_used),
-            }
+        hb["Y_base"] = Y_base
+        hb["C_block"] = C_block
+        hb["numba_used"] = bool(hb_numba_used)
+        if prefer_sparse and (Y_sparse is None or C_sparse is None) and hb_sparse_drop_tol == 0.0:
+            try:
+                Y_sparse, C_sparse = _to_sparse_hb(Y_base, C_block)
+                hb["Y_base_sparse"] = Y_sparse
+                hb["C_block_sparse"] = C_sparse
+                sparse_density = _sparse_density(Y_sparse)
+                solver_used = _resolve_hb_solver(
+                    hb_solver_requested, hb_size, sparse_density,
+                    hb_sparse_min_size, hb_sparse_max_density)
+            except Exception:
+                pass
+    if solver_used in {"sparse", "iterative"} and (Y_sparse is None or C_sparse is None):
+        solver_used = "dense"
+    sparse_nnz = int(Y_sparse.nnz) if Y_sparse is not None else 0
+    if cache_linearization:
+        cache[hb_key] = hb
+    hb_assembly_time_s = time.perf_counter() - t_hb0
 
     harm_offsets = np.arange(nb, dtype=int) * n
     source_grids = [
@@ -414,17 +724,34 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     for node, weight in out_w.items():
         e[base0 + idx[node]] = weight
 
+    hb_preconditioner_kind = (
+        "block_jacobi" if solver_used == "iterative" and _spla is not None
+        else "none"
+    )
     adj_cache = pss_result.setdefault("_pnoise_adjoint_cache", {}) if cache_linearization else {}
     adj_prefix = (
         "pnoise_adj_v1",
         lin_key,
         int(K),
         float(fundamental),
+        float(hb_sparse_drop_tol),
+        str(solver_used),
+        float(iterative_tol) if solver_used == "iterative" else None,
+        None if iterative_maxiter is None or solver_used != "iterative" else int(iterative_maxiter),
+        hb_preconditioner_kind if solver_used == "iterative" else None,
         tuple((node, float(weight)) for node, weight in sorted(out_w.items())),
     )
     adj_cache_hits = 0
     hb_solve_count = 0
+    hb_sparse_direct_count = 0
+    hb_iterative_count = 0
+    hb_iterative_fallbacks = 0
+    hb_dense_fallbacks = 0
+    hb_block_preconditioner_count = 0
+    hb_iterative_infos = []
+    hb_iterative_iterations = []
     adjs = np.empty((len(freqs), nb * n), dtype=complex)
+    t_solve0 = time.perf_counter()
     for fi, freq in enumerate(freqs):
         freq = float(freq)
         adj_key = adj_prefix + (freq,)
@@ -432,19 +759,38 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
             adj = adj_cache[adj_key]
             adj_cache_hits += 1
         else:
-            Y = Y_base + (2j * np.pi * freq) * C_block
-            try:
-                adj = np.linalg.solve(Y.T, e)
-            except np.linalg.LinAlgError:
-                adj = np.linalg.lstsq(Y.T, e, rcond=None)[0]
+            preconditioner = None
+            if hb_preconditioner_kind == "block_jacobi":
+                preconditioner = _block_jacobi_preconditioner(
+                    Gf, Cf, K, n, fundamental, freq)
+                if preconditioner is not None:
+                    hb_block_preconditioner_count += 1
+            adj, solve_info = _solve_hb_adjoint(
+                Y_base, C_block, Y_sparse, C_sparse, freq, e, solver_used,
+                iterative_tol, iterative_maxiter,
+                preconditioner=preconditioner)
+            if solve_info["solver"] == "sparse":
+                hb_sparse_direct_count += 1
+            elif solve_info["solver"] == "iterative":
+                hb_iterative_count += 1
+                hb_iterative_infos.append(int(solve_info["iterative_info"]))
+                hb_iterative_iterations.append(
+                    int(solve_info["iterative_iterations"]))
+            if solve_info["iterative_fallback"]:
+                hb_iterative_fallbacks += 1
+                hb_sparse_direct_count += 1
+            if solve_info["dense_fallback"]:
+                hb_dense_fallbacks += 1
             hb_solve_count += 1
             if cache_linearization:
                 adj_cache[adj_key] = adj
         adjs[fi] = adj
+    hb_solve_time_s = time.perf_counter() - t_solve0
 
     fold_work = len(freqs) * max(1, len(source_grids)) * nb * nb
     use_numba_fold = pnoise_fold_psd_numba is not None and fold_work >= 1000
     source_names = [name for name, *_ in source_grids]
+    t_fold0 = time.perf_counter()
     if use_numba_fold:
         ns = len(source_grids)
         p_indices = np.full((ns, nb), -1, dtype=np.int64)
@@ -495,6 +841,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 contrib = max(contrib, 0.0)
                 dev_psd[name][fi] += contrib
                 out_psd[fi] += contrib
+    fold_time_s = time.perf_counter() - t_fold0
 
     if gains is None:
         if pac_result is None:
@@ -531,5 +878,24 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         "pnoise_noise_source_count": int(len(noise_sources)),
         "pnoise_numba_hb_used": bool(hb_numba_used),
         "pnoise_numba_fold_used": bool(use_numba_fold),
+        "pnoise_hb_solver_requested": hb_solver_requested,
+        "pnoise_hb_solver": str(solver_used),
+        "pnoise_hb_sparse_available": bool(_sp is not None and _spla is not None),
+        "pnoise_hb_sparse_nnz": int(sparse_nnz),
+        "pnoise_hb_sparse_density": float(sparse_density),
+        "pnoise_hb_sparse_density_estimate": float(sparse_density_estimate),
+        "pnoise_hb_sparse_direct_count": int(hb_sparse_direct_count),
+        "pnoise_hb_iterative_count": int(hb_iterative_count),
+        "pnoise_hb_iterative_fallbacks": int(hb_iterative_fallbacks),
+        "pnoise_hb_dense_fallbacks": int(hb_dense_fallbacks),
+        "pnoise_hb_preconditioner": hb_preconditioner_kind,
+        "pnoise_hb_block_preconditioner_count": int(hb_block_preconditioner_count),
+        "pnoise_hb_iterative_infos": tuple(hb_iterative_infos),
+        "pnoise_hb_iterative_iterations": tuple(hb_iterative_iterations),
+        "pnoise_linearization_time_s": float(linearization_time_s),
+        "pnoise_hb_assembly_time_s": float(hb_assembly_time_s),
+        "pnoise_hb_solve_time_s": float(hb_solve_time_s),
+        "pnoise_fold_time_s": float(fold_time_s),
+        "pnoise_profile_enabled": bool(profile),
         "method": "pss_harmonic_balance_conversion_matrix",
     }

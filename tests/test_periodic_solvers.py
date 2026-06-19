@@ -46,6 +46,65 @@ def test_generic_pac_solves_non_chopper_rc_lowpass():
     assert pac["pac_period_runs"] == 0
 
 
+def test_pss_analytic_jacobian_matches_fd_jacobian():
+    # The analytic-monodromy shooting Jacobian must converge to the same orbit as
+    # the finite-difference Jacobian (it only changes the Newton path), and the
+    # history should record that the analytic Jacobian was used.
+    period = 1e-3
+    t = np.linspace(0.0, period, 201)
+    topo = _rc_lowpass_topology()
+    kw = dict(topo=topo, tgrid=t, inputs={"vin": np.zeros_like(t)},
+              node_inputs={"VIN": "vin"}, V0=np.array([10.0]),
+              residual_tol=1e-10, max_shooting_iters=12)
+    ana = pss_solve({}, {"VIN": 0.0}, period, analytic_jacobian=True, **kw)
+    fd = pss_solve({}, {"VIN": 0.0}, period, analytic_jacobian=False, **kw)
+    assert ana["converged"] and fd["converged"]
+    np.testing.assert_allclose(ana["x0"], fd["x0"], atol=1e-8)
+    assert any(h.get("jacobian") == "analytic_monodromy"
+               for h in ana["shooting_history"])
+
+
+def test_generic_analytic_pac_matches_rc_transfer():
+    # The analytic-adjoint kernel reduces to the exact RC transfer on an LTI orbit,
+    # with no per-frequency transient runs (O(1) linear solve each).
+    R = 1e5
+    C = 1e-9
+    period = 1e-3
+    t = np.linspace(0.0, period, 101)
+    topo = _rc_lowpass_topology(R, C)
+    pss = pss_solve(
+        {}, {"VIN": 0.0}, period, topo=topo, tgrid=t,
+        inputs={"vin": np.zeros_like(t)}, node_inputs={"VIN": "vin"},
+        V0=np.array([0.0]), residual_tol=1e-12, max_shooting_iters=2,
+    )
+    freqs = np.array([100.0, 500.0, 1000.0])
+    pac = pac_solve(
+        {}, {"VIN": 0.0}, freqs, pss_result=pss, input_drive={"vin": 1.0},
+        lti_fast_path=False, analytic=True, max_sideband=2, n_period_samples=32,
+    )
+    expected = 1.0 / (1.0 + 2j * np.pi * freqs * R * C)
+    assert pac["method"] == "pss_analytic_adjoint"
+    assert pac["pac_period_runs"] == 0
+    assert pac["pac_condition_computed"] is False
+    np.testing.assert_allclose(pac["response"], expected, rtol=1e-6)
+
+    with_condition = pac_solve(
+        {}, {"VIN": 0.0}, freqs, pss_result=pss, input_drive={"vin": 1.0},
+        lti_fast_path=False, analytic=True, max_sideband=2, n_period_samples=32,
+        compute_condition=True,
+    )
+    assert with_condition["pac_condition_computed"] is True
+    np.testing.assert_allclose(with_condition["response"], pac["response"],
+                               rtol=0, atol=0)
+
+    profiled = pac_solve(
+        {}, {"VIN": 0.0}, freqs, pss_result=pss, input_drive={"vin": 1.0},
+        lti_fast_path=False, analytic=True, max_sideband=2, n_period_samples=32,
+        profile=True,
+    )
+    assert profiled["pac_condition_computed"] is True
+
+
 def test_generic_pac_reuses_pss_attached_linearization_cache():
     period = 1e-3
     t = np.linspace(0.0, period, 101)
@@ -58,12 +117,12 @@ def test_generic_pac_reuses_pss_attached_linearization_cache():
 
     freqs = np.array([100.0, 500.0])
     first = pac_solve({}, {"VIN": 0.0}, freqs, pss_result=pss,
-                      input_drive={"vin": 1.0}, lti_fast_path=False)
+                      input_drive={"vin": 1.0}, lti_fast_path=False, analytic=False)
     second = pac_solve({}, {"VIN": 0.0}, freqs, pss_result=pss,
-                       input_drive={"vin": 1.0}, lti_fast_path=False)
+                       input_drive={"vin": 1.0}, lti_fast_path=False, analytic=False)
     overlap = pac_solve({}, {"VIN": 0.0}, np.array([500.0, 1000.0]),
                         pss_result=pss, input_drive={"vin": 1.0},
-                        lti_fast_path=False)
+                        lti_fast_path=False, analytic=False)
 
     assert first["pac_period_runs"] == 1 + 2 * len(freqs)
     assert first["pac_state_cache_hit"] is False
@@ -132,3 +191,44 @@ def test_generic_pnoise_reuses_hb_and_adjoint_cache():
     assert second["pnoise_adjoint_cache_hits"] == len(freqs)
     assert second["pnoise_hb_solve_count"] == 0
     np.testing.assert_allclose(second["out_psd"], first["out_psd"], rtol=0, atol=0)
+
+
+def test_generic_pnoise_sparse_and_iterative_solvers_match_dense():
+    R = 1e5
+    C = 1e-9
+    period = 1e-3
+    t = np.linspace(0.0, period, 101)
+    topo = _rc_lowpass_topology(R, C)
+    pss = pss_solve(
+        {}, {"VIN": 0.0}, period, topo=topo, tgrid=t,
+        inputs={"vin": np.zeros_like(t)}, node_inputs={"VIN": "vin"},
+        V0=np.array([0.0]), residual_tol=1e-12, max_shooting_iters=2,
+    )
+
+    freqs = np.array([10.0, 100.0, 1000.0])
+    common = dict(
+        max_sideband=2, n_period_samples=32, gains=np.ones_like(freqs),
+        lti_fast_path=False, cache_linearization=False,
+    )
+    dense = pnoise_solve(
+        {}, {"VIN": 0.0}, freqs, pss_result=pss,
+        hb_solver="dense", **common)
+    sparse = pnoise_solve(
+        {}, {"VIN": 0.0}, freqs, pss_result=pss,
+        hb_solver="sparse", **common)
+    iterative = pnoise_solve(
+        {}, {"VIN": 0.0}, freqs, pss_result=pss,
+        hb_solver="iterative", iterative_tol=1e-12, **common)
+
+    assert dense["pnoise_hb_solver"] == "dense"
+    assert sparse["pnoise_hb_solver"] == "sparse"
+    assert iterative["pnoise_hb_solver"] == "iterative"
+    assert sparse["pnoise_hb_sparse_density"] < 1.0
+    assert iterative["pnoise_hb_preconditioner"] == "block_jacobi"
+    assert iterative["pnoise_hb_block_preconditioner_count"] == len(freqs)
+    assert iterative["pnoise_hb_iterative_fallbacks"] == 0
+    assert max(iterative["pnoise_hb_iterative_iterations"]) <= 2
+    np.testing.assert_allclose(sparse["out_psd"], dense["out_psd"],
+                               rtol=1e-8, atol=1e-30)
+    np.testing.assert_allclose(iterative["out_psd"], dense["out_psd"],
+                               rtol=1e-8, atol=1e-30)

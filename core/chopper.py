@@ -33,7 +33,9 @@ thermal noise are not included in this ideal analysis.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
+from threading import RLock
 
 import numpy as np
 
@@ -64,6 +66,9 @@ except ImportError:  # pragma: no cover - legacy direct module import
 # correction; PNoise also contains a small cyclostationary noise increment.
 _CADENCE_PMOS_CHOPPER_CONVERSION_PHASE_RAD = np.deg2rad(24.93)
 _CADENCE_PMOS_CHOPPER_PERIODIC_NOISE_PSD_SCALE = 1.0355281448906577
+_PMOS_CHOPPER_BARE_DC_SEED_CACHE_MAX = 64
+_PMOS_CHOPPER_BARE_DC_SEED_CACHE = OrderedDict()
+_PMOS_CHOPPER_BARE_DC_SEED_CACHE_LOCK = RLock()
 
 
 @dataclass(frozen=True)
@@ -193,10 +198,22 @@ def finite_edge_clock_pair(tgrid, f_chop, *, v_low=0.0, v_high=40.0,
         raise ValueError("dead_time must be less than half the chopper period")
 
     phase = (tgrid * f_chop + float(phase_offset)) % 1.0
-    a_on = _periodic_pulse_weight(phase, 0.5 * dead_fraction,
-                                  0.5 - 0.5 * dead_fraction, edge_fraction)
-    b_on = _periodic_pulse_weight(phase, 0.5 + 0.5 * dead_fraction,
-                                  1.0 - 0.5 * dead_fraction, edge_fraction)
+    if dead_fraction <= 0.0 and edge_fraction > 0.0:
+        edge = min(edge_fraction, 0.5)
+        half_edge = 0.5 * edge
+        a_on = np.where(phase < 0.5, 1.0, 0.0)
+        rise = phase < half_edge
+        rise_wrap = phase >= 1.0 - half_edge
+        fall = (phase >= 0.5 - half_edge) & (phase < 0.5 + half_edge)
+        a_on[rise] = _smoothstep((phase[rise] + half_edge) / edge)
+        a_on[rise_wrap] = _smoothstep((phase[rise_wrap] - (1.0 - half_edge)) / edge)
+        a_on[fall] = 1.0 - _smoothstep((phase[fall] - (0.5 - half_edge)) / edge)
+        b_on = 1.0 - a_on
+    else:
+        a_on = _periodic_pulse_weight(phase, 0.5 * dead_fraction,
+                                      0.5 - 0.5 * dead_fraction, edge_fraction)
+        b_on = _periodic_pulse_weight(phase, 0.5 + 0.5 * dead_fraction,
+                                      1.0 - 0.5 * dead_fraction, edge_fraction)
     vspan = float(v_high) - float(v_low)
     clk_a = float(v_high) - a_on * vspan
     clk_b = float(v_high) - b_on * vspan
@@ -211,10 +228,10 @@ def spectre_pulse_clock_pair(tgrid, f_chop, *, v_low=0.0, v_high=40.0,
 
     ``delay=T/2 width=T/2 period=T rise=edge_time fall=edge_time``.
 
-    Spectre applies the finite rise before starting the high-width interval, so
-    the falling edge starts at ``T + edge_time`` for the first cycle.  This
-    helper intentionally follows that source semantics rather than the ideal
-    centered-edge periodic chopper waveform used by the frequency-domain helper.
+    The source is periodic in local pulse time: at each period boundary it
+    returns to ``val0``.  With the verified netlist's width, the high interval
+    reaches the period boundary before the finite fall can complete, so the
+    reset edge is a period-boundary transition.
     """
     tgrid = np.asarray(tgrid, float)
     f_chop = float(f_chop)
@@ -228,22 +245,23 @@ def spectre_pulse_clock_pair(tgrid, f_chop, *, v_low=0.0, v_high=40.0,
 
     def pulse(val0, val1):
         out = np.full_like(tgrid, float(val0), dtype=float)
-        active = tgrid >= half
-        if not np.any(active):
-            return out
-        tau = np.mod(tgrid[active] - half, period)
-        vals = np.full_like(tau, float(val0), dtype=float)
+        tau = np.mod(tgrid, period)
         if edge <= 0.0:
-            vals[tau < half] = float(val1)
-        else:
-            rise = tau < edge
-            high_region = (tau >= edge) & (tau < edge + half)
-            fall = (tau >= edge + half) & (tau < 2.0 * edge + half)
-            vals[rise] = val0 + (val1 - val0) * (tau[rise] / edge)
-            vals[high_region] = val1
-            vals[fall] = val1 + (val0 - val1) * ((tau[fall] - edge - half) / edge)
-        out[active] = vals
-        return out
+            out[tau >= half] = float(val1)
+            return out
+        width = half
+        vals = np.full_like(tau, float(val0), dtype=float)
+        rise = (tau >= half) & (tau < half + edge)
+        high_stop = min(period, half + edge + width)
+        high_region = (tau >= half + edge) & (tau < high_stop)
+        fall_start = half + edge + width
+        fall = ((fall_start < period) & (tau >= fall_start) &
+                (tau < min(period, fall_start + edge)))
+        vals[rise] = val0 + (val1 - val0) * ((tau[rise] - half) / edge)
+        vals[high_region] = val1
+        if np.any(fall):
+            vals[fall] = val1 + (val0 - val1) * ((tau[fall] - fall_start) / edge)
+        return vals
 
     clk_a = pulse(low, high)
     clk_b = pulse(high, low)
@@ -519,6 +537,57 @@ def _dc_get(dc, *names, default=None):
     return default
 
 
+def _freeze_mapping(mapping):
+    if mapping is None:
+        return None
+    if isinstance(mapping, dict):
+        return tuple((str(k), repr(v)) for k, v in sorted(mapping.items()))
+    return repr(mapping)
+
+
+def _topology_seed_key(topo):
+    return (
+        tuple(topo.solved),
+        tuple(topo.devices),
+        tuple(sorted(topo.rails.items())),
+        tuple(topo.resistors),
+        tuple(topo.cap_list()),
+        tuple(topo.isources),
+        tuple(topo.outputs),
+        tuple(sorted(topo.input_drives.items())),
+        tuple(sorted(topo.ac_drives.items())),
+    )
+
+
+def _bare_dc_seed_cache_key(sizes, bias, nf, corner, base_topo):
+    return (
+        tuple((str(k), float(v[0]), float(v[1])) for k, v in sorted(sizes.items())),
+        tuple((str(k), float(v)) for k, v in sorted(bias.items())),
+        _freeze_mapping(nf),
+        _freeze_mapping(corner),
+        _topology_seed_key(base_topo),
+    )
+
+
+def _get_cached_bare_dc_seed(key):
+    with _PMOS_CHOPPER_BARE_DC_SEED_CACHE_LOCK:
+        if key not in _PMOS_CHOPPER_BARE_DC_SEED_CACHE:
+            return None
+        value = _PMOS_CHOPPER_BARE_DC_SEED_CACHE.pop(key)
+        _PMOS_CHOPPER_BARE_DC_SEED_CACHE[key] = value
+    return None if value is None else dict(value)
+
+
+def _store_cached_bare_dc_seed(key, dc_op):
+    if dc_op is None:
+        return
+    with _PMOS_CHOPPER_BARE_DC_SEED_CACHE_LOCK:
+        _PMOS_CHOPPER_BARE_DC_SEED_CACHE[key] = dict(dc_op)
+        _PMOS_CHOPPER_BARE_DC_SEED_CACHE.move_to_end(key)
+        while len(_PMOS_CHOPPER_BARE_DC_SEED_CACHE) > _PMOS_CHOPPER_BARE_DC_SEED_CACHE_MAX:
+            _PMOS_CHOPPER_BARE_DC_SEED_CACHE.popitem(last=False)
+
+
 def _pmos_chopper_seed_from_core_dc(build, bias, phase, core_dc):
     """Map a bare-AFE DC operating point onto the PMOS chopper wrapper nodes."""
     if not isinstance(core_dc, dict):
@@ -543,7 +612,7 @@ def _pmos_chopper_seed_from_core_dc(build, bias, phase, core_dc):
     phase = str(phase).upper()
     inp, inn = (vip, vin) if phase == "A" else (vin, vip)
     vop, von = (vop_core, von_core) if phase == "A" else (von_core, vop_core)
-    return {
+    seed = {
         build.amp_input_nodes[0]: inp,
         build.amp_input_nodes[1]: inn,
         build.amp_output_nodes[0]: vop_core,
@@ -555,6 +624,10 @@ def _pmos_chopper_seed_from_core_dc(build, bias, phase, core_dc):
         "NET20": net20,
         "NET2": net2,
     }
+    if getattr(build, "sense_output_nodes", build.output_nodes) != build.output_nodes:
+        seed[build.sense_output_nodes[0]] = vop
+        seed[build.sense_output_nodes[1]] = von
+    return seed
 
 
 def _pmos_chopper_auto_seed(sizes, bias, phase, build, *, nf=None, corner=None,
@@ -563,10 +636,19 @@ def _pmos_chopper_auto_seed(sizes, bias, phase, build, *, nf=None, corner=None,
     mapped = _pmos_chopper_seed_from_core_dc(build, bias, phase, x0_guess)
     if mapped is not None:
         return mapped
+    cache_key = None
+    if x0_guess is None:
+        cache_key = _bare_dc_seed_cache_key(sizes, bias, nf, corner, base_topo)
+        bare_dc = _get_cached_bare_dc_seed(cache_key)
+        mapped = _pmos_chopper_seed_from_core_dc(build, bias, phase, bare_dc)
+        if mapped is not None:
+            return mapped
     bare = ac_solve(sizes, bias, np.array([1.0]), topo=base_topo,
                     nf=nf, corner=corner)
     if bare is None:
         return None
+    if cache_key is not None:
+        _store_cached_bare_dc_seed(cache_key, bare["dc_op"])
     return _pmos_chopper_seed_from_core_dc(build, bias, phase, bare["dc_op"])
 
 
@@ -772,21 +854,28 @@ def refine_pulse_clock_tgrid(tgrid, f_chop, *, edge_time=0.0,
     t1 = float(tgrid[-1])
     edge_points = max(3, int(edge_points))
     time_shift = float(time_shift)
-    starts = []
+    finite_edges = []
+    hard_edges = []
     k_min = int(np.floor((t0 - half - 2.0 * edge_window) / period)) - 1
     k_max = int(np.ceil((t1 - half + 2.0 * edge_window) / period)) + 1
     for k in range(k_min, k_max + 1):
-        starts.append(half + k * period - time_shift)
-        starts.append(half + edge_time + half + k * period - time_shift)
+        finite_edges.append(half + k * period - time_shift)
+        hard_edges.append(k * period - time_shift)
 
     points = [tgrid]
-    for start in starts:
-        if edge_time > 0.0:
-            lo = start
-            hi = start + edge_time
-        else:
+    for start in finite_edges:
+        lo = start
+        hi = start + edge_time if edge_time > 0.0 else start
+        if edge_time <= 0.0:
             lo = start - 0.5 * edge_window
             hi = start + 0.5 * edge_window
+        lo = max(t0, lo)
+        hi = min(t1, hi)
+        if hi >= lo:
+            points.append(np.linspace(lo, hi, edge_points))
+    for start in hard_edges:
+        lo = start - 0.5 * edge_window
+        hi = start + 0.5 * edge_window
         lo = max(t0, lo)
         hi = min(t1, hi)
         if hi >= lo:
@@ -929,13 +1018,11 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
             tgrid, f_chop, v_low=0.0, v_high=bias["VDD"],
             edge_time=edge_time, dead_time=dead_time,
             phase_offset=clock_phase_offset)
-    transient_edge_mask = None
-    if profile:
-        edge_intervals = ((np.abs(np.diff(clk_a)) > 1e-12) |
-                          (np.abs(np.diff(clk_b)) > 1e-12))
-        transient_edge_mask = np.zeros(len(tgrid), dtype=bool)
-        transient_edge_mask[:-1] |= edge_intervals
-        transient_edge_mask[1:] |= edge_intervals
+    edge_intervals = ((np.abs(np.diff(clk_a)) > 1e-12) |
+                      (np.abs(np.diff(clk_b)) > 1e-12))
+    transient_edge_mask = np.zeros(len(tgrid), dtype=bool)
+    transient_edge_mask[:-1] |= edge_intervals
+    transient_edge_mask[1:] |= edge_intervals
     tbias = dict(bias)
     tbias.update({"VIP": float(vip[0]), "VIN": float(vin[0]),
                   "CLK_A": float(clk_a[0]), "CLK_B": float(clk_b[0])})
@@ -959,7 +1046,7 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
         transient_max_step = (float(edge_time) / 20.0
                               if edge_time else period / 200.0)
     if transient_flat_max_step is None:
-        transient_flat_max_step = (max(float(transient_max_step), float(edge_time) / 8.0)
+        transient_flat_max_step = (max(float(transient_max_step), float(edge_time) / 18.0)
                                    if edge_time else 0.0)
     if V0 is None:
         start_phase = "A" if float(a_on[0]) >= float(b_on[0]) else "B"
@@ -1040,7 +1127,8 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
                      max_retry_subdivisions=1, newton_maxit=60,
                      newton_step_limit=2.0, newton_vtol=1e-8,
                      fallback_full_jacobian=False,
-                     fallback_least_squares=True, fallback_tol=1e-10,
+                     fallback_least_squares=False, fallback_tol=1e-10,
+                     analytic_jacobian=True,
                      base_topo=AFE_TOPO, output_filter=None, profile=False):
     """Periodic steady state of the eight-PMOS chopper.
 
@@ -1115,13 +1203,11 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
             edge_time=edge_time, dead_time=dead_time,
             phase_offset=clock_phase_offset)
 
-    edge_mask = None
-    if profile:
-        edge_intervals = ((np.abs(np.diff(clk_a)) > 1e-12) |
-                          (np.abs(np.diff(clk_b)) > 1e-12))
-        edge_mask = np.zeros(len(tgrid_work), dtype=bool)
-        edge_mask[:-1] |= edge_intervals
-        edge_mask[1:] |= edge_intervals
+    edge_intervals = ((np.abs(np.diff(clk_a)) > 1e-12) |
+                      (np.abs(np.diff(clk_b)) > 1e-12))
+    edge_mask = np.zeros(len(tgrid_work), dtype=bool)
+    edge_mask[:-1] |= edge_intervals
+    edge_mask[1:] |= edge_intervals
 
     tbias = dict(bias)
     tbias.update({"VIP": float(vip[0]), "VIN": float(vin[0]),
@@ -1146,7 +1232,7 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
         transient_max_step = (float(edge_time) / 20.0
                               if edge_time else period / 200.0)
     if transient_flat_max_step is None:
-        transient_flat_max_step = (max(float(transient_max_step), float(edge_time) / 8.0)
+        transient_flat_max_step = (max(float(transient_max_step), float(edge_time) / 18.0)
                                    if edge_time else 0.0)
     if V0 is None:
         start_phase = "A" if float(a_on[0]) >= float(b_on[0]) else "B"
@@ -1174,6 +1260,7 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
         fallback_least_squares=fallback_least_squares, fallback_tol=fallback_tol,
         signed_devices=signed_devices, residual_tol=residual_tol,
         max_shooting_iters=max_shooting_iters, fd_step=fd_step,
+        analytic_jacobian=analytic_jacobian,
         rail_margin=rail_margin, check_periodic_inputs=False, profile=profile,
         edge_mask=edge_mask,
     )
@@ -1215,17 +1302,28 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
                      pacmag=1.0, fd_state_step=1e-4, fd_input_step=1e-4,
                      pss_kwargs=None, transient_kwargs=None,
                      cache_linearization=True, cache_forcing=True,
-                     compute_condition=True, lti_fast_path=True):
+                     compute_condition=None, lti_fast_path=True,
+                     analytic=True, n_period_samples=384, max_sideband=32,
+                     profile=False, debug=False):
     """PSS-assisted small-signal PAC for the PMOS chopper.
 
-    This wrapper builds the chopper PSS orbit when needed, then delegates the
-    finite-difference shooting solve to :func:`core.pac_solver.pac_solve`.
+    Builds the chopper PSS orbit when needed, then delegates to
+    :func:`core.pac_solver.pac_solve`. By default this uses the analytic-adjoint
+    conversion-matrix kernel (O(1) linear solve per frequency, built from the
+    small-signal matrices sampled on the PSS orbit); set ``analytic=False`` for
+    the finite-difference shooting kernel.
+
+    ``max_sideband`` defaults to 32 here (vs. 10 for smooth orbits): the hard
+    switch edges spread the input/output commutation across many sidebands, so
+    the baseband conversion gain only converges to Spectre PAC once ~30 sidebands
+    are kept. Against the Cadence design-#3 reference this moves the baseband gain
+    from -13% (K=10) to within ~-2.5% (K=32); the residual is model level.
     """
     pss_kwargs = dict(pss_kwargs or {})
     transient_kwargs = dict(transient_kwargs or {})
     if pss_result is None:
         pss_defaults = dict(charge_injection=False, max_shooting_iters=0,
-                            tstab_periods=3, fallback_least_squares=False)
+                            tstab_periods=1, fallback_least_squares=False)
         if nf is not None:
             pss_defaults["nf"] = nf
         pss_defaults.update(pss_kwargs)
@@ -1240,15 +1338,21 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
         cache_forcing=cache_forcing,
         compute_condition=compute_condition,
         lti_fast_path=lti_fast_path,
+        analytic=analytic, n_period_samples=n_period_samples,
+        max_sideband=max_sideband,
+        profile=profile, debug=debug,
     )
 
 
 def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
-                        max_sideband=10, n_period_samples=384,
+                        max_sideband=32, n_period_samples=384,
                         band=(0.05, 100.0), gains=None, pac_result=None,
                         noise_devices=None, switch_noise_conductance_gated=True,
                         cache_linearization=True, lti_fast_path=True,
-                        pss_kwargs=None, base_topo=AFE_TOPO):
+                        hb_solver="auto", hb_sparse_min_size=384,
+                        hb_sparse_max_density=0.12, hb_sparse_drop_tol=0.0,
+                        iterative_tol=1e-10, iterative_maxiter=10,
+                        profile=False, pss_kwargs=None, base_topo=AFE_TOPO):
     """PSS-based LPTV periodic noise for the eight-PMOS chopper.
 
     This wrapper builds the chopper PSS orbit when needed, then delegates the
@@ -1260,7 +1364,7 @@ def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
 
     pss_kwargs = dict(pss_kwargs or {})
     if pss_result is None:
-        pss_defaults = dict(charge_injection=False, tstab_periods=3,
+        pss_defaults = dict(charge_injection=False, tstab_periods=1,
                             fallback_least_squares=False)
         if nf is not None:
             pss_defaults["nf"] = nf
@@ -1277,6 +1381,13 @@ def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
         switch_noise_conductance_gated=switch_noise_conductance_gated,
         cache_linearization=cache_linearization,
         lti_fast_path=lti_fast_path,
+        hb_solver=hb_solver,
+        hb_sparse_min_size=hb_sparse_min_size,
+        hb_sparse_max_density=hb_sparse_max_density,
+        hb_sparse_drop_tol=hb_sparse_drop_tol,
+        iterative_tol=iterative_tol,
+        iterative_maxiter=iterative_maxiter,
+        profile=profile,
     )
 
 

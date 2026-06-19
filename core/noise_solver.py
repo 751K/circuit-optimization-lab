@@ -51,9 +51,13 @@ def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1):
     return S_th + S_fl_1 / freqs, S_th, S_fl_1
 
 
-def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=None):
+def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO,
+                   nf=None, ac_result=None):
     # ── 1. DC + small-signal params + gain (reuse the validated AC solver) ──
-    ac = ac_solve(sizes, bias, freqs, corner=corner, x0_guess=x0_guess, topo=topo, nf=nf)
+    ac = ac_result
+    if ac is None:
+        ac = ac_solve(
+            sizes, bias, freqs, corner=corner, x0_guess=x0_guess, topo=topo, nf=nf)
     if ac is None:
         return None
     dc = ac["dc_op"]

@@ -178,7 +178,8 @@
         "max_shooting_iters": {"type": "integer", "minimum": 0},
         "residual_tol": {"$ref": "#/$defs/positiveNumber"},
         "jacobian_reuse": {"type": "boolean"},
-        "jacobian_rebuild_interval": {"type": "integer", "minimum": 0}
+        "jacobian_rebuild_interval": {"type": "integer", "minimum": 0},
+        "analytic_jacobian": {"type": "boolean"}
       }
     },
     "pacAnalysis": {
@@ -188,9 +189,14 @@
         "freqs": {"$ref": "#/$defs/frequencyGrid"},
         "input_drive": {"$ref": "#/$defs/complexMap"},
         "pss": {"$ref": "#/$defs/pssAnalysis"},
+        "analytic": {"type": "boolean"},
+        "max_sideband": {"type": "integer", "minimum": 0},
+        "n_period_samples": {"type": "integer", "minimum": 2},
         "cache_linearization": {"type": "boolean"},
         "cache_forcing": {"type": "boolean"},
         "compute_condition": {"type": "boolean"},
+        "profile": {"type": "boolean"},
+        "debug": {"type": "boolean"},
         "lti_fast_path": {"type": "boolean"}
       }
     },
@@ -204,6 +210,13 @@
         "max_sideband": {"type": "integer", "minimum": 0},
         "n_period_samples": {"type": "integer", "minimum": 2},
         "cache_linearization": {"type": "boolean"},
+        "hb_solver": {"enum": ["auto", "dense", "sparse", "iterative"]},
+        "hb_sparse_min_size": {"type": "integer", "minimum": 1},
+        "hb_sparse_max_density": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "hb_sparse_drop_tol": {"type": "number", "minimum": 0.0},
+        "iterative_tol": {"type": "number", "exclusiveMinimum": 0.0},
+        "iterative_maxiter": {"type": ["integer", "null"], "minimum": 1},
+        "profile": {"type": "boolean"},
         "lti_fast_path": {"type": "boolean"},
         "pss": {"$ref": "#/$defs/pssAnalysis"}
       }
