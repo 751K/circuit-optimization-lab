@@ -15,15 +15,15 @@ from __future__ import annotations
 import numpy as np
 
 try:
-    from .ac_mna import _stamp_adm, _stamp_mos_lti
+    from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from .ac_solver import ac_solve, _dev_corner, get_ss_params
-    from .pmos_tft_model import PMOS_TFT
+    from .device_model import create_device
     from .topology import AFE_TOPO
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_mna import _stamp_adm, _stamp_mos_lti
+    from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from ac_solver import ac_solve, _dev_corner, get_ss_params
-    from pmos_tft_model import PMOS_TFT
+    from device_model import create_device
     from topology import AFE_TOPO
     from transient_solver import transient
 
@@ -51,8 +51,10 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
     nodes = tr["nodes"]
     N = len(t)
     n = topo.n
+    nbr = topo.n_branches                       # ideal voltage-source branch unknowns
     idx = topo.idx
     rails = topo.rail_values(bias)
+    Binc = _branch_incidence(topo.vsources, idx, n) if nbr else None
 
     def term(node):
         return ("n", idx[node]) if node in idx else ("v", 0.0)
@@ -89,6 +91,23 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
         except np.linalg.LinAlgError:
             return np.linalg.lstsq(J, B, rcond=None)[0]
 
+    def _bsolve(Jnode, B):
+        """Node-space step operator ``inv([[Jnode, Binc],[Binc^T, 0]])[:n, :n] @ B``.
+
+        Ideal voltage sources add one branch-current unknown each. The branch current is
+        algebraic (no capacitor -> zero row/col in C, so it never enters the C/h
+        propagation), hence the exact node-voltage monodromy is the node block of the
+        bordered per-step solve. With no sources (Binc is None) this is just _solve."""
+        if Binc is None:
+            return _solve(Jnode, B)
+        Jaug = np.zeros((n + nbr, n + nbr))
+        Jaug[:n, :n] = Jnode
+        Jaug[:n, n:] = Binc
+        Jaug[n:, :n] = Binc.T
+        rhs = np.zeros((n + nbr, n))
+        rhs[:n] = B
+        return _solve(Jaug, rhs)[:n]
+
     gear2 = str(integration_method).lower() in ("gear2", "bdf2")
     if not gear2:
         phi = np.eye(n)
@@ -98,7 +117,7 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
                 continue
             G, C = _GC(m)
             Ch = C / h
-            phi = _solve(G + Ch, Ch) @ phi
+            phi = _bsolve(G + Ch, Ch) @ phi
         return phi
 
     # gear2/BDF2: augmented 2n-state monodromy on [x_m; x_{m-1}]
@@ -113,7 +132,7 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
         Ch = C / h
         rho = (h / h_prev) if h_prev is not None else 0.0
         if P is None or rho > 2.0:              # BE self-start / large-ratio step
-            A1 = _solve(G + Ch, Ch)             # a0=1, a1=-1, a2=0
+            A1 = _bsolve(G + Ch, Ch)            # a0=1, a1=-1, a2=0
             if P is None:
                 P = np.vstack([A1, eye])
             else:
@@ -123,8 +142,8 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
             a1 = -(1.0 + rho)
             a2 = (rho * rho) / (1.0 + rho)
             J = G + a0 * Ch
-            B1 = _solve(J, a1 * Ch)
-            B2 = _solve(J, a2 * Ch)
+            B1 = _bsolve(J, a1 * Ch)
+            B2 = _bsolve(J, a2 * Ch)
             top = -(B1 @ P[:n]) - (B2 @ P[n:])
             P = np.vstack([top, P[:n]])
         h_prev = h
@@ -178,7 +197,9 @@ def _initial_vector(sizes, bias, topo, nf, V0, corner=None):
     if V0 is not None:
         if isinstance(V0, dict):
             default = topo.default_guess_value(bias)
-            return np.asarray(topo.guess_vector(V0, default=default), float)
+            # guess_vector pads ideal-source branch currents (n_aug); the shooting state
+            # is node voltages only -> slice to n.
+            return np.asarray(topo.guess_vector(V0, default=default), float)[:topo.n]
         arr = np.asarray(V0, float)
         if arr.shape != (topo.n,):
             raise ValueError(f"V0 shape {arr.shape} does not match topology size {topo.n}")
@@ -195,7 +216,7 @@ def _initial_vector(sizes, bias, topo, nf, V0, corner=None):
     guesses = topo.dc_guess_vectors(bias)
     if not guesses:
         return np.full(topo.n, topo.default_guess_value(bias), dtype=float)
-    return np.asarray(guesses[0], float)
+    return np.asarray(guesses[0], float)[:topo.n]   # node voltages only (drop branch pads)
 
 
 def _end_vector(tran_result, topo):
@@ -406,9 +427,10 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                     try:
                         if mono_dev_inst is None:
                             mono_dev_inst = {
-                                name: PMOS_TFT(W=sizes[name][0], L=sizes[name][1],
-                                               NF=_nfval(nf, name),
-                                               **_dev_corner(corner, name))
+                                name: create_device("pmos_tft",
+                                    W=sizes[name][0], L=sizes[name][1],
+                                    NF=_nfval(nf, name),
+                                    **_dev_corner(corner, name))
                                 for name, *_ in topo.devices
                             }
                         phi = _shooting_monodromy(tr, topo, sizes, nf, bias, inputs,

@@ -121,6 +121,65 @@ def _load_elements(raw_items, label, term_keys, value_key, positive=False):
     return out
 
 
+def _load_vccs(raw_items):
+    """Parse VCCS elements into (name, p, q, ctrl_p, ctrl_n, gm) tuples.
+
+    Object form: {"name": "G1", "p": "OUT", "q": "GND",
+                   "ctrl_p": "IN", "ctrl_n": "GND", "gm": 1e-4}
+    Tuple form:  ["G1", "OUT", "GND", "IN", "GND", 1e-4]
+    """
+    out = []
+    for i, item in enumerate(raw_items or []):
+        where = f"vccs[{i}]"
+        if isinstance(item, dict):
+            try:
+                name = item["name"]
+                p = item["p"]
+                q = item["q"]
+                cp = item["ctrl_p"]
+                cn = item["ctrl_n"]
+                gm = item["gm"]
+            except KeyError as exc:
+                raise ValueError(f"{where} missing {exc.args[0]!r}") from exc
+        elif isinstance(item, (list, tuple)) and len(item) == 6:
+            name, p, q, cp, cn, gm = item
+        else:
+            raise ValueError(f"{where} must be an object or "
+                             f"[name, p, q, ctrl_p, ctrl_n, gm]")
+        out.append((str(name), str(p), str(q), str(cp), str(cn),
+                    _as_number(gm, f"{where}.gm")))
+    return out
+
+
+def _load_vsources(raw_items):
+    """Parse ideal voltage sources into (name, p, q, value) tuples.
+
+    `value` is a constant EMF (number) or a transient input-waveform key (string).
+    Object form: {"name": "V1", "p": "IN", "q": "GND", "value": 1.0}
+    Tuple form:  ["V1", "IN", "GND", 1.0]
+    """
+    out = []
+    for i, item in enumerate(raw_items or []):
+        where = f"vsources[{i}]"
+        if isinstance(item, dict):
+            try:
+                name = item["name"]
+                p = item["p"]
+                q = item["q"]
+                value = item["value"]
+            except KeyError as exc:
+                raise ValueError(f"{where} missing {exc.args[0]!r}") from exc
+        elif isinstance(item, (list, tuple)) and len(item) == 4:
+            name, p, q, value = item
+        else:
+            raise ValueError(f"{where} must be an object or [name, p, q, value]")
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ValueError(f"{where}.value must be a number (EMF) or a waveform-key string")
+        v = float(value) if isinstance(value, (int, float)) else str(value)
+        out.append((str(name), str(p), str(q), v))
+    return out
+
+
 def _validate_nodes(topo):
     known = set(topo.solved) | set(topo.rails)
     for name, d, g, s in topo.devices:
@@ -138,6 +197,19 @@ def _validate_nodes(topo):
             for node in (x, y):
                 if node not in known:
                     raise ValueError(f"{label} {name} references unknown node {node!r}")
+    for name, p, q, cp, cn, _ in topo.vccs:
+        for node in (p, q, cp, cn):
+            if node not in known:
+                raise ValueError(f"VCCS {name} references unknown node {node!r}")
+    for name, p, q, _ in topo.vsources:
+        for node in (p, q):
+            if node not in known:
+                raise ValueError(f"Voltage source {name} references unknown node {node!r}")
+        if p == q:
+            raise ValueError(f"Voltage source {name} has identical terminals {p!r}")
+        if p not in topo.idx and q not in topo.idx:
+            raise ValueError(f"Voltage source {name} must connect at least one solved node "
+                             f"(both {p!r} and {q!r} are rails)")
     for node in topo.outputs:
         if node not in topo.idx:
             raise ValueError(f"Output node {node!r} must be a solved node")
@@ -201,6 +273,8 @@ def circuit_from_dict(data):
                                   positive=True),
         isources=_load_elements(data.get("current_sources"), "current_sources",
                                 ("nplus", "nminus"), "I"),
+        vccs=_load_vccs(data.get("vccs")),
+        vsources=_load_vsources(data.get("vsources")),
     )
     _validate_nodes(topo)
     bias = {str(k): float(v) for k, v in data.get("bias", {}).items()}

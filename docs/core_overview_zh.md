@@ -18,7 +18,7 @@
 - 工艺角与逐器件 mismatch 扰动。
 - 面向 Cadence/Spectre 的验证，涵盖工作点、AC、噪声、瞬态、PSS、PAC 和 PNoise 行为。
 
-实现刻意保持小而自包含。目前由 `core/` 下的十六个 Python 源文件组成（另含 `__init__.py` 和 CLI 入口 `__main__.py`）。
+实现刻意保持小而自包含。目前由 `core/` 下的十八个 Python 源文件组成（另含 `__init__.py` 和 CLI 入口 `__main__.py`）。
 
 ## 文件结构
 
@@ -27,6 +27,7 @@ core/
   topology.py          电路拓扑单一事实来源。
   compiled_topology.py 运行态拓扑/index/stamp 元数据编译层。
   circuit_loader.py    JSON 电路描述加载器。
+  device_model.py      TransistorModel ABC + NumbaParams + 模型工厂/注册表。
   pmos_tft_model.py    AT4000TG PMOS-OTFT 紧凑模型实现。
   numba_kernels.py     可选 Numba 加速标量内核。
   ac_mna.py            MNA stamp 原语。
@@ -49,17 +50,18 @@ topology.py          <- 无内部依赖
 compiled_topology.py <- 无内部依赖；运行时消费 Topology 风格对象
 circuit_loader.py    <- topology
 numba_kernels.py     <- 无内部依赖；运行时可选 numba
-pmos_tft_model.py    <- 可选 numba_kernels
+device_model.py      <- 无内部依赖（仅 abc、dataclasses）
+pmos_tft_model.py    <- 可选 numba_kernels、device_model
 ac_mna.py            <- 无内部依赖
-ac_solver.py         <- topology, compiled_topology, ac_mna, pmos_tft_model
-noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, pmos_tft_model
-transient_solver.py  <- ac_solver, compiled_topology, topology, pmos_tft_model
-pss_solver.py        <- ac_solver, ac_mna, pmos_tft_model, topology, transient_solver
-pac_solver.py        <- ac_mna, ac_solver, pmos_tft_model, transient_solver
-pnoise_solver.py     <- ac_solver, noise_solver, pac_solver, pmos_tft_model, ac_mna
+ac_solver.py         <- topology, compiled_topology, ac_mna, device_model
+noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, device_model
+transient_solver.py  <- ac_solver, compiled_topology, topology, device_model
+pss_solver.py        <- ac_solver, ac_mna, device_model, topology, transient_solver
+pac_solver.py        <- ac_mna, ac_solver, device_model, transient_solver
+pnoise_solver.py     <- ac_solver, noise_solver, pac_solver, device_model, ac_mna
 analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader
-chopper.py           <- noise_solver, pss_solver, pac_solver, pnoise_solver, topology
-explore.py           <- ac_solver, noise_solver, pmos_tft_model, topology, circuit_loader
+chopper.py           <- noise_solver, pss_solver, pac_solver, pnoise_solver, device_model, topology
+explore.py           <- ac_solver, noise_solver, device_model, topology, circuit_loader
 corners.py           <- ac_solver, noise_solver, topology
 ```
 
@@ -80,11 +82,23 @@ corners.py           <- ac_solver, noise_solver, topology
 
 AC 和噪声分析时，求解器通过有限差分 `get_Idc` 提取端 `gm` 和 `gds`，与电路求解器使用的端行为保持一致。
 
+`PMOS_TFT` 继承 :class:`~device_model.TransistorModel`，即所有求解器消费的抽象基类。
+它还提供 `get_numba_params()` 供瞬态求解器编译内循环使用，
+以及 Numba 加速的 `get_ss_params()` 覆盖方法。
+
+### `device_model.py`
+
+定义抽象器件模型接口，将求解器与具体晶体管实现解耦：
+
+- **`TransistorModel` (ABC)** — 七个抽象方法（`get_Idc`、`get_op`、`get_capacitances`、`get_capacitance_charges_from_op`、`get_capacitance_branch_terms_from_op`、`get_noise_psd`、`get_numba_params`）；`get_ss_params` 提供有限差分默认实现，子类可覆盖。
+- **`NumbaParams` (frozen dataclass)** — 16 个标量参数，瞬态求解器每个器件提取一次，传入 Numba 加速内核。
+- **`register_model()` / `create_device()`** — 工厂 + 注册表。求解器文件调用 `create_device("pmos_tft", W=…, L=…)` 而非直接导入 `PMOS_TFT`。新增晶体管模型只需一个新子类 + 一次 `register_model` 调用。
+
 ### `topology.py`
 
 将电路拓扑定义为单一事实来源。拓扑包含晶体管列表、被求解节点列表、rail/bias 节点、输出、AC 输入驱动、负载电容、瞬态输入映射、DC 初值猜测和 DC 别名。求解器运行态元数据均从这个拓扑派生，而不是在各个求解器中分别手写。
 
-除了 PMOS_TFT 晶体管之外，还承载两端无源/源元件——`resistors`（a-b，阻值 R 欧姆）、`capacitors`（a-b，容值 C 法拉）和 `isources`（理想直流电流源，I 从 nplus 流向 nminus）。这些通用于全部四种分析：电阻支路电流和电流源注入进入 DC KCL；电阻在 AC/噪声中按 `1/R` stamp，电容按 `jωC` stamp；电阻贡献热噪声 `4kT/R`；瞬态加入电导、电容伴随模型及恒定源电流。电流源在小信号 AC 系统中视为开路（且无噪声）。这些都不影响 PMOS_TFT 相关逻辑。
+除了晶体管之外，还承载无源/源元件——`resistors`（a-b，阻值 R 欧姆）、`capacitors`（a-b，容值 C 法拉）、`isources`（理想直流电流源，I 从 nplus 流向 nminus）、`vccs`（压控电流源：p、q、ctrl_p、ctrl_n、gm）和 `vsources`（理想电压源，真·MNA：p、q、value）。每个电压源新增一个支路电流未知量和一行约束 ``V_p − V_q = value``，系统从 `n` 增长到 `n_aug = n + m`。这些通用于全部分析：电阻支路电流和电流源注入进入 DC KCL；电阻在 AC/噪声中按 `1/R` stamp，电容按 `jωC` stamp，VCCS 按 ``gm*(Vcp-Vcn)`` stamp，电压源按 bordered ``[[Y,B],[B^T,0]]`` 块 stamp；电阻贡献热噪声 `4kT/R`（VCCS、电流源和理想电压源无噪声）；瞬态加入电导、电容伴随模型、恒定/VCCS 源电流以及带 ``E(t)`` 约束的电压源支路电流。电流源在小信号 AC 系统中视为开路。这些都不影响晶体管模型相关逻辑。
 
 默认拓扑是 `AFE_TOPO`，一个 10 管全差分 AFE 核心，包含尾电流器件、输入对、输出级和交叉耦合正反馈电平移位器件。
 
@@ -94,7 +108,7 @@ AC 和噪声分析时，求解器通过有限差分 `get_Idc` 提取端 `gm` 和
 
 - solved-node index 和 rail 数值；
 - 每个器件的 drain/gate/source terminal token；
-- 电阻、电容和电流源的 stamp 元数据；
+- 电阻、电容、电流源和 VCCS 的 stamp 元数据；
 - AC/噪声使用的 `("n", idx)` / `("v", value)` 端表；
 - transient input 与 `node_inputs` 映射。
 

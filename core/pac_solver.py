@@ -9,15 +9,15 @@ from __future__ import annotations
 import numpy as np
 
 try:
-    from .ac_mna import _stamp_adm, _stamp_mos_lti
+    from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from .ac_solver import _dev_corner, ac_solve, get_ss_params
-    from .pmos_tft_model import PMOS_TFT
+    from .device_model import create_device
     from .topology import Topology
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_mna import _stamp_adm, _stamp_mos_lti
+    from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from ac_solver import _dev_corner, ac_solve, get_ss_params
-    from pmos_tft_model import PMOS_TFT
+    from device_model import create_device
     from topology import Topology
     from transient_solver import transient
 
@@ -301,6 +301,8 @@ def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
         resistors=topo.resistors,
         capacitors=topo.capacitors,
         isources=topo.isources,
+        vccs=topo.vccs,
+        vsources=topo.vsources,
         dc_tol=topo.dc_tol,
         require_dc_in_box=topo.require_dc_in_box,
     )
@@ -449,8 +451,9 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         Gf, Cf, Ginf, Cinf = lin["Gf"], lin["Cf"], lin["Ginf"], lin["Cinf"]
     else:
         dev_inst = {
-            name: PMOS_TFT(W=all_sizes[name][0], L=all_sizes[name][1],
-                           NF=_nfval(all_nf, name), **_dev_corner(corner, name))
+            name: create_device("pmos_tft",
+                W=all_sizes[name][0], L=all_sizes[name][1],
+                NF=_nfval(all_nf, name), **_dev_corner(corner, name))
             for name, *_ in topo.devices
         }
         G_const = np.zeros((n_ext, n_ext)); C_const = np.zeros((n_ext, n_ext))
@@ -500,6 +503,27 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     for node, w in topo.output_weights().items():
         e[base0 + idx[node]] = w
 
+    # Ideal voltage sources: border the harmonic-balance system with branch-current
+    # unknowns (one per source per harmonic, appended after the nb*n node block). The
+    # incidence is constant, so it couples node<->branch only within the same harmonic;
+    # branch rows carry no capacitance (C border = 0) and the source is an AC short
+    # (no stimulus -> b stays 0 there).
+    nbr = topo.n_branches
+    if nbr:
+        Binc = _branch_incidence(topo.vsources, idx, n)
+        nt = nb * (n + nbr)
+        Ya = np.zeros((nt, nt), dtype=complex)
+        Ca = np.zeros((nt, nt), dtype=complex)
+        Ya[:nb * n, :nb * n] = Y_base
+        Ca[:nb * n, :nb * n] = C_block
+        boff = nb * n
+        for h in range(nb):
+            r0, c0 = h * n, boff + h * nbr
+            Ya[r0:r0 + n, c0:c0 + nbr] = Binc            # KCL: node <- branch current
+            Ya[c0:c0 + nbr, r0:r0 + n] = Binc.T          # constraint: V_p - V_q = 0
+        Y_base, C_block = Ya, Ca
+        e = np.concatenate([e, np.zeros(nb * nbr, dtype=complex)])
+
     response = np.empty(len(freqs), dtype=complex)
     residuals = np.zeros(len(freqs))
     conditions = np.ones(len(freqs))
@@ -515,7 +539,7 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             adj = np.linalg.solve(Y.T, e)
         except np.linalg.LinAlgError:
             adj = np.linalg.lstsq(Y.T, e, rcond=None)[0]
-        b = np.zeros(nb * n, dtype=complex)
+        b = np.zeros(e.shape[0], dtype=complex)      # branch entries stay 0 (short)
         for kr in range(-K, K + 1):
             input_om = 2j * np.pi * (f + kr * fundamental) if charge_caps else 2j * np.pi * f
             b[(kr + K) * n:(kr + K + 1) * n] = -(

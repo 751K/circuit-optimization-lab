@@ -137,3 +137,66 @@ def test_loader_accepts_tuple_current_source():
             "outputs": ["OUT"]}
     spec = circuit_from_dict(data)
     assert spec.topology.isources == [("IB", "OUT", "GND", -1e-6)]
+
+
+# ── VCCS tests ────────────────────────────────────────────────────────────
+
+def test_vccs_dc():
+    """VCCS gm*R — I = gm*(Vcp-Vcn), loaded by resistor: Vout = gm*R*Vctrl."""
+    topo = Topology(
+        solved=["OUT"], devices=[],
+        rails={"VDD": "VDD", "GND": 0.0, "CTRL": "VCTRL"},
+        vccs=[("G1", "OUT", "GND", "CTRL", "GND", 2e-4)],
+        resistors=[("RL", "OUT", "GND", 500)],
+        outputs=("OUT",),
+    )
+    ac = ac_solve({}, {"VDD": 40.0, "VCTRL": 1.5}, np.array([1.0]), topo=topo)
+    # Vout = gm * Vctrl * RL = 2e-4 * 1.5 * 500 = 0.15 V
+    assert ac["dc_op"]["OUT"] == pytest.approx(0.15, rel=1e-6)
+
+
+def test_vccs_ac_gain():
+    """VCCS transconductance amplifier — AC gain = gm*R."""
+    topo = Topology(
+        solved=["OUT"], devices=[],
+        rails={"VDD": "VDD", "GND": 0.0, "CTRL": "VCTRL"},
+        vccs=[("G1", "OUT", "GND", "CTRL", "GND", 1e-3)],
+        resistors=[("RL", "OUT", "GND", 1000)],
+        ac_drives={"CTRL": 0.5},
+        outputs=("OUT",),
+    )
+    ac = ac_solve({}, {"VDD": 40.0, "VCTRL": 0.6}, np.array([1.0, 100.0]), topo=topo)
+    # gm*1000 = 1 V/V → |gain| = 1.0 (AC drive 0.5 V is normalised out)
+    assert ac["gains"][0] == pytest.approx(1.0, rel=1e-6)
+
+
+def test_vccs_json_roundtrip():
+    """VCCS loaded from JSON with object form."""
+    data = {
+        "solved": ["OUT"], "rails": {"VDD": 40.0, "GND": 0.0, "IN": "VIN"},
+        "devices": [],
+        "vccs": [{"name": "G1", "p": "OUT", "q": "GND",
+                   "ctrl_p": "IN", "ctrl_n": "GND", "gm": 1e-4}],
+        "resistors": [{"name": "R1", "a": "OUT", "b": "GND", "R": 2000}],
+        "bias": {"VIN": 5.0},
+        "outputs": ["OUT"],
+    }
+    spec = circuit_from_dict(data)
+    assert spec.topology.vccs == [("G1", "OUT", "GND", "IN", "GND", 1e-4)]
+    ac = ac_solve(spec.sizes, spec.bias, np.array([1.0]),
+                  topo=spec.topology, nf=spec.nf)
+    # Vout = 1e-4 * VIN * 2000 = 1e-4 * 5.0 * 2000 = 1.0 V
+    assert ac["dc_op"]["OUT"] == pytest.approx(1.0, rel=1e-6)
+
+
+def test_vccs_json_tuple_form():
+    """VCCS loaded from JSON with tuple form."""
+    data = {
+        "solved": ["OUT"], "rails": {"VDD": 40.0, "GND": 0.0},
+        "devices": [],
+        "vccs": [["G1", "VDD", "OUT", "VDD", "GND", 5e-5]],
+        "resistors": [["R1", "OUT", "GND", 1000]],
+        "outputs": ["OUT"],
+    }
+    spec = circuit_from_dict(data)
+    assert spec.topology.vccs == [("G1", "VDD", "OUT", "VDD", "GND", 5e-5)]

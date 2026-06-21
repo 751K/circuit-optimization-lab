@@ -48,7 +48,7 @@ A valid circuit JSON needs at minimum:
 
 - `solved` — nodes the solver must find voltages for.
 - `rails` — known-voltage nodes. Values can be numeric constants or keys in `bias`.
-- `devices` — list of PMOS_TFT transistors.
+- `devices` — list of transistor devices (currently PMOS_TFT; model type is determined by the ``device_model`` factory, default ``"pmos_tft"``).
 - `bias` — DC voltages for rail references.
 - `outputs` — nodes observed for AC/noise/transient results.
 
@@ -92,7 +92,7 @@ Required. Known-voltage node map.
 
 ### `devices`
 
-Required. Each active device is a three-terminal PMOS_TFT (drain/gate/source).
+Required. Each active device is a three-terminal transistor (drain/gate/source). Model implementation is selected by the ``device_model`` factory (default ``"pmos_tft"``).
 
 Object form (preferred):
 
@@ -265,6 +265,47 @@ Constant current in transient.
 ```
 
 Array form: `["IB", "VDD", "OUT", 1e-6]`.
+
+### `vccs`
+
+Optional. Voltage‑controlled current sources. Output current flows ``p → q``:
+``I = gm * (Vctrl_p - Vctrl_n)``. DC enters KCL; AC stamps into G matrix; noiseless
+(ideal); instantaneous in transient with full Jacobian contribution.
+
+```json
+"vccs": [
+  {"name": "G1", "p": "OUT", "q": "GND",
+   "ctrl_p": "IN", "ctrl_n": "GND", "gm": 1e-4}
+]
+```
+
+Array form: `["G1", "OUT", "GND", "IN", "GND", 1e-4]`.
+
+### `vsources`
+
+Optional. Ideal voltage sources, solved with **true MNA**: each source adds one
+branch‑current unknown and one constraint row ``V_p − V_q = value``, so the system grows
+from `n` nodes to `n_aug = n + m`. `value` is a constant EMF (number) or a transient
+input‑waveform key (string) for a time‑varying ``E(t)``.
+
+```json
+"vsources": [
+  {"name": "V1", "p": "IN", "q": "GND", "value": 2.0}
+]
+```
+
+Array form: `["V1", "IN", "GND", 2.0]`. At least one of `p`, `q` must be a solved node
+(a source between two rails is rejected).
+
+- **DC** pins the node voltage exactly (the node stays in the solved set); `ac_solve`
+  reports the source currents under `branch_currents` (sign: `p → q` through the source).
+- **AC / Noise** treat a DC source as a short (AC ground); the ideal source carries no
+  thermal noise. If the source name appears in `ac_drives`, it acts as an AC stimulus.
+- **Transient** supports constant or waveform‑keyed `E(t)`. Circuits containing a voltage
+  source run on the pure‑Python `n_aug` path (the numba kernels are fixed at `n` nodes).
+- **PSS / PAC / PNoise** are supported too: the shooting monodromy and the harmonic‑balance
+  matrices are bordered with the branch‑current unknowns (PNoise forces its dense path when
+  a source is present).
 
 ### `dc_guesses`
 
@@ -449,8 +490,9 @@ feasibility constraints (gain, BW, IRN, power, area), and optimization objective
 ## Complete Examples
 
 ```text
-examples/single_stage.json        # Pure PMOS_TFT
+examples/single_stage.json        # Single-transistor common-source (PMOS_TFT)
 examples/resistor_load_stage.json # PMOS + resistive load + output cap + current source
+examples/voltage_divider.json     # Ideal voltage source (true MNA) — resistor divider
 examples/afe_explore.json         # 10-transistor AFE with explore config
 examples/periodic_rc.json         # Passive RC with PSS/PAC/PNoise dispatch
 ```
@@ -495,9 +537,9 @@ The JSON format is a local-solver circuit description, not a full SPICE netlist.
 
 Supported:
 
-- PMOS_TFT three-terminal devices.
-- Resistors, capacitors, ideal DC current sources.
-- DC/AC/noise/transient shared topology (resistors include thermal noise).
+- Three-terminal transistor devices (PMOS_TFT via ``TransistorModel`` interface).
+- Resistors, capacitors, ideal DC current sources, VCCS (voltage‑controlled current sources), ideal voltage sources (true MNA).
+- DC/AC/noise/transient shared topology (resistors include thermal noise; VCCS and ideal voltage sources are ideal/noiseless).
 - Single-ended or differential outputs.
 - Fixed load capacitance.
 - AC gate drive and node drive.
@@ -505,13 +547,16 @@ Supported:
 - Periodic PSS/PAC/PNoise dispatch from JSON.
 - DC initial guesses.
 
+Supported (model abstraction):
+
+- Device model registry (`core/device_model.py`) — ``TransistorModel`` ABC + factory.
+  New model types can be added without modifying solver code.
+
 Not yet supported:
 
-- NMOS or other compact models (no NMOS in this PDK).
-- Ideal voltage sources, controlled sources, switched/time-varying elements.
+- NMOS or other compact model implementations (interface is ready, implementations pending).
+- Other controlled sources (CCCS, CCVS, VCVS), switched/time-varying elements.
 - Multi-output simultaneous analysis.
 - Hierarchical subcircuits.
 - SPICE syntax parsing.
-
-These should be added after a device model registry and additional MNA stamp
-elements are in place.
+- Per-device ``"model"`` field in JSON (currently defaults to ``"pmos_tft"``).

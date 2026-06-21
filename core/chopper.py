@@ -41,18 +41,18 @@ import numpy as np
 
 try:
     from .ac_solver import ac_solve, _dev_corner, _dev_nf, _is_afe_topology
+    from .device_model import create_device
     from .noise_solver import band_rms, noise_analysis
     from .pac_solver import pac_solve
-    from .pmos_tft_model import PMOS_TFT
     from .pnoise_solver import pnoise_solve
     from .pss_solver import pss_solve
     from .topology import AFE_TOPO, Topology
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_solver import ac_solve, _dev_corner, _dev_nf, _is_afe_topology
+    from device_model import create_device
     from noise_solver import band_rms, noise_analysis
     from pac_solver import pac_solve
-    from pmos_tft_model import PMOS_TFT
     from pnoise_solver import pnoise_solve
     from pss_solver import pss_solve
     from topology import AFE_TOPO, Topology
@@ -949,8 +949,9 @@ def _charge_injection_sources(build, all_sizes, all_nf, bias, tgrid, clk_a, clk_
         Vs = _node_bias_value(topo, pbias, dc, source)
         Vd = _node_bias_value(topo, pbias, dc, drain)
         Vg_on = pbias["CLK_A"] if phase == "A" else pbias["CLK_B"]
-        dev = PMOS_TFT(W=all_sizes[name][0], L=all_sizes[name][1],
-                       NF=_dev_nf(all_nf, name), **_dev_corner(corner, name))
+        dev = create_device("pmos_tft",
+            W=all_sizes[name][0], L=all_sizes[name][1],
+            NF=_dev_nf(all_nf, name), **_dev_corner(corner, name))
         qch = float(charge_scale) * dev.estimate_channel_charge(Vs, Vd, Vg_on)
         if qch <= 0.0:
             continue

@@ -16,6 +16,9 @@ build/
 dist/
 *.egg-info/
 
+# Claude Code
+.claude/
+
 # Test and tool caches
 .pytest_cache/
 .mypy_cache/

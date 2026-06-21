@@ -2,9 +2,9 @@
 Nonlinear transient solver for the AFE (backward-Euler + per-step Newton).
 
 Integrates the full 6-node circuit DAE in time. Built on the same device model
-(PMOS_TFT.get_Idc / get_capacitances) and topology (AFE_TOPO) as the DC/AC/Noise
-stack, so the steady state matches the DC solver and the small-signal response
-matches the AC solver.
+(:class:`~device_model.TransistorModel`) and topology (AFE_TOPO) as the
+DC/AC/Noise stack, so the steady state matches the DC solver and the
+small-signal response matches the AC solver.
 
 Method
 ------
@@ -43,7 +43,7 @@ import time
 
 import numpy as np
 try:
-    from .pmos_tft_model import PMOS_TFT
+    from .device_model import create_device
     from .topology import AFE_TOPO
     from .ac_solver import ac_solve, _dev_corner, _dev_nf
     from .numba_kernels import (
@@ -54,7 +54,7 @@ try:
     )
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
-    from pmos_tft_model import PMOS_TFT
+    from device_model import create_device
     from topology import AFE_TOPO
     from ac_solver import ac_solve, _dev_corner, _dev_nf
     from compiled_topology import CompiledTopology
@@ -141,8 +141,8 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     fields are included when those nodes exist.
     """
     devs = topo.devices
-    tft = {name: PMOS_TFT(W=sizes[name][0], L=sizes[name][1],
-                          NF=_dev_nf(nf, name), **_dev_corner(corner, name))
+    tft = {name: create_device("pmos_tft", W=sizes[name][0], L=sizes[name][1],
+                               NF=_dev_nf(nf, name), **_dev_corner(corner, name))
            for name, *_ in devs}
     tgrid = np.asarray(tgrid, float)
     N = len(tgrid)
@@ -167,6 +167,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     plan = CompiledTopology(topo, bias, input_keys=input_keys,
                             node_inputs=node_inputs, transient_inputs=True)
     idx, n = plan.idx, plan.n
+    n_aug = plan.n_aug                 # n nodes + m ideal-voltage-source branch currents
     termv = plan.term_value
     signed_devices = set(signed_devices or ())
     dev_meta = [(tft[item.name], item.name in signed_devices,
@@ -177,6 +178,13 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     res_meta = [(item.a, item.b, item.ai, item.bi, item.g)
                 for item in plan.resistors]
     isrc_meta = [(item.pi, item.qi, item.value) for item in plan.isources]
+    vccs_meta = [(item.pi, item.qi, item.cp, item.cn, item.gm)
+                 for item in plan.vccs]
+    # Ideal voltage sources (true MNA, Python path): (a_term, b_term, pi, qi, bi,
+    # e_const, e_input_idx). Branch current is the unknown at V[bi]; constraint row
+    # bi pins V_p - V_q = E. Vsource circuits force the pure-Python step path below.
+    vs_meta = [(item.p, item.q, item.pi, item.qi, item.bi, item.e_const, item.e_input_idx)
+               for item in plan.vsources]
     dyn_isrc_meta = []
     for pos, item in enumerate(current_inputs or ()):
         if isinstance(item, dict):
@@ -221,22 +229,23 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     dev_si = _index_array(item[7] for item in dev_meta)
     dev_use_abs = np.array([not item[1] for item in dev_meta], dtype=np.bool_)
     dev_objs = [item[0] for item in dev_meta]
-    p_Vfb = np.array([dev.Vfb for dev in dev_objs], dtype=float)
-    p_Vss = np.array([dev.Vss for dev in dev_objs], dtype=float)
-    p_Lc = np.array([dev.Lc for dev in dev_objs], dtype=float)
-    p_lambda = np.array([dev.lambda_ for dev in dev_objs], dtype=float)
-    p_contact_scale = np.array([dev._contact_scale for dev in dev_objs], dtype=float)
-    p_exponent = np.array([dev._channel_exponent for dev in dev_objs], dtype=float)
-    p_current_scale = np.array([dev._current_scale for dev in dev_objs], dtype=float)
-    p_inv_Rleak = np.array([dev._inv_Rleak for dev in dev_objs], dtype=float)
-    p_two_over_pi = np.array([dev._two_over_pi for dev in dev_objs], dtype=float)
-    p_cap_cgs1 = np.array([dev._cap_cgs1 for dev in dev_objs], dtype=float)
-    p_cap_cgd1 = np.array([dev._cap_cgd1 for dev in dev_objs], dtype=float)
-    p_cap_half_wl_ci = np.array([dev._cap_half_wl_ci for dev in dev_objs], dtype=float)
-    p_cap_cgs3_base = np.array([dev._cap_cgs3_base for dev in dev_objs], dtype=float)
-    p_cap_cgd3_base = np.array([dev._cap_cgd3_base for dev in dev_objs], dtype=float)
-    p_k1 = np.array([dev.k1 for dev in dev_objs], dtype=float)
-    p_gate_leak_g = np.array([1.0 / dev.R_cap2 for dev in dev_objs], dtype=float)
+    _np_params = [d.get_numba_params() for d in dev_objs]
+    p_Vfb = np.array([p.Vfb for p in _np_params], dtype=float)
+    p_Vss = np.array([p.Vss for p in _np_params], dtype=float)
+    p_Lc = np.array([p.Lc for p in _np_params], dtype=float)
+    p_lambda = np.array([p.lambda_ for p in _np_params], dtype=float)
+    p_contact_scale = np.array([p.contact_scale for p in _np_params], dtype=float)
+    p_exponent = np.array([p.channel_exponent for p in _np_params], dtype=float)
+    p_current_scale = np.array([p.current_scale for p in _np_params], dtype=float)
+    p_inv_Rleak = np.array([p.inv_Rleak for p in _np_params], dtype=float)
+    p_two_over_pi = np.array([p.two_over_pi for p in _np_params], dtype=float)
+    p_cap_cgs1 = np.array([p.cap_cgs1 for p in _np_params], dtype=float)
+    p_cap_cgd1 = np.array([p.cap_cgd1 for p in _np_params], dtype=float)
+    p_cap_half_wl_ci = np.array([p.cap_half_wl_ci for p in _np_params], dtype=float)
+    p_cap_cgs3_base = np.array([p.cap_cgs3_base for p in _np_params], dtype=float)
+    p_cap_cgd3_base = np.array([p.cap_cgd3_base for p in _np_params], dtype=float)
+    p_k1 = np.array([p.k1 for p in _np_params], dtype=float)
+    p_gate_leak_g = np.array([p.gate_leak_g for p in _np_params], dtype=float)
     op_cache_valid = np.zeros(len(dev_meta), dtype=np.bool_)
     op_cache_vs1 = np.zeros(len(dev_meta), dtype=float)
     op_cache_vd1 = np.zeros(len(dev_meta), dtype=float)
@@ -257,6 +266,15 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     isrc_qi = _index_array(item[1] for item in isrc_meta)
     isrc_value = np.array([item[2] for item in isrc_meta], dtype=float)
 
+    vccs_pi  = _index_array(item[0] for item in vccs_meta)
+    vccs_qi  = _index_array(item[1] for item in vccs_meta)
+    # For control nodes, extract solved index from the terminal tuple; rails → -1
+    vccs_cpi = _index_array(
+        item[2][1] if item[2][0] == 0 else None for item in vccs_meta)
+    vccs_cni = _index_array(
+        item[3][1] if item[3][0] == 0 else None for item in vccs_meta)
+    vccs_gm  = np.array([item[4] for item in vccs_meta], dtype=float)
+
     dyn_pi = _index_array(item[0] for item in dyn_isrc_meta)
     dyn_qi = _index_array(item[1] for item in dyn_isrc_meta)
     dyn_input_idx = np.array([item[2] for item in dyn_isrc_meta], dtype=np.int64)
@@ -269,7 +287,9 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         if rails:
             clip_lo = min(rails) - float(rail_margin)
             clip_hi = max(rails) + float(rail_margin)
-    use_numba_newton = transient_newton_numba is not None
+    # Ideal voltage sources add branch-current unknowns (n_aug > n); the numba kernels
+    # are fixed at n nodes, so those circuits run on the pure-Python n_aug path instead.
+    use_numba_newton = transient_newton_numba is not None and n_aug == n
     numba_newton_attempts = 0
     numba_newton_success = 0
     numba_newton_fallback = 0
@@ -324,7 +344,10 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                       corner=corner)
         dc = ac["dc_op"]
         V0 = np.array([dc[name] for name in topo.solved])
-    Vhist = np.zeros((N, n)); Vhist[0] = V0
+    V0 = np.asarray(V0, float)
+    if V0.shape[0] < n_aug:                  # pad ideal-source branch currents (seed 0)
+        V0 = np.concatenate([V0, np.zeros(n_aug - V0.shape[0])])
+    Vhist = np.zeros((N, n_aug)); Vhist[0] = V0
     gmin = 1e-12
 
     def step_residual(V, input_now, states, prev_dev_terms, load_prev_dv, h,
@@ -334,7 +357,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         # BDF2/gear2 passes (a0, a1, a2) with a2 weighting the n-2 history.  Only
         # the charge-mode (q-stamp) caps and the linear/load caps use BDF2 here.
         ca0, ca1, ca2 = cap_coeffs
-        R = np.zeros(n)
+        R = np.zeros(n_aug)
         inv_h = 1.0 / h
         # device DC currents (into-node convention: +Id at drain, -Id at source)
         for _, _, di, _, si, _, _, _, _, _, I, _, _ in states:
@@ -353,12 +376,26 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 R[pi] -= Ival
             if qi is not None:
                 R[qi] += Ival
+        for pi, qi, cpterm, cnterm, gm in vccs_meta:      # VCCS: I = gm*(Vcp - Vcn), p->q
+            i_vccs = (termv(cpterm, V, input_now) - termv(cnterm, V, input_now)) * gm
+            if pi is not None:
+                R[pi] += i_vccs
+            if qi is not None:
+                R[qi] -= i_vccs
         for pi, qi, key_idx in dyn_isrc_meta:            # time-varying source p -> q
             Ival = input_now[key_idx]
             if pi is not None:
                 R[pi] -= Ival
             if qi is not None:
                 R[qi] += Ival
+        for aterm, bterm, pi, qi, bi, e_const, e_idx in vs_meta:  # ideal voltage source (MNA)
+            ibr = V[bi]                                  # branch current p -> q (unknown)
+            if pi is not None:
+                R[pi] -= ibr                             # current leaves p
+            if qi is not None:
+                R[qi] += ibr                             # and enters q
+            E = e_const if e_idx < 0 else input_now[e_idx]
+            R[bi] = termv(aterm, V, input_now) - termv(bterm, V, input_now) - E
         for k in range(n):
             R[k] -= V[k] * gmin
         # Default PMOS dynamic caps mirror the Verilog-A source:
@@ -501,7 +538,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         Plus capacitor companion (C/h) and gmin on the diagonal. A well-scaled
         Jacobian is exactly what bare fsolve lacked — it lets Newton track the
         correct (physical) branch of the positive-feedback circuit."""
-        J = np.zeros((n, n))
+        J = np.zeros((n_aug, n_aug))
         inv_h = 1.0 / h
         for dev, signed, di, gi, si, Vs, Vd, Vg, Vs1, Vd1, _, _, _ in states:
             get_idc = dev.get_Idc
@@ -596,7 +633,24 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                     J[bi, bi] -= gval
                     if ai is not None:
                         J[bi, ai] += gval
+        # VCCS: dI/dVcp = gm, dI/dVcn = -gm; only for solved control nodes
+        for pi, qi, cpi, cni, gm in zip(vccs_pi, vccs_qi, vccs_cpi, vccs_cni, vccs_gm):
+            if pi is not None and cpi is not None:
+                J[pi, cpi] += gm
+            if pi is not None and cni is not None:
+                J[pi, cni] -= gm
+            if qi is not None and cpi is not None:
+                J[qi, cpi] -= gm
+            if qi is not None and cni is not None:
+                J[qi, cni] += gm
         # ideal DC current sources are constant -> no Jacobian contribution.
+        for aterm, bterm, pi, qi, bi, e_const, e_idx in vs_meta:  # ideal voltage source (MNA)
+            if pi is not None:
+                J[pi, bi] -= 1.0          # dR[p]/d(ibr)
+                J[bi, pi] += 1.0          # d(constraint)/dV_p
+            if qi is not None:
+                J[qi, bi] += 1.0          # dR[q]/d(ibr)
+                J[bi, qi] -= 1.0          # d(constraint)/dV_q
         return J
 
     def newton(seed, Vp, input_now, input_prev, h, maxit=None, vtol=1e-8):
@@ -712,8 +766,8 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             norm = np.linalg.norm(R, ord=np.inf)
             if norm < residual_tol:
                 return V, True
-            J = np.zeros((n, n))
-            for col in range(n):
+            J = np.zeros((n_aug, n_aug))
+            for col in range(n_aug):
                 eps = 1e-5 * max(1.0, abs(V[col]))
                 zp = V.copy()
                 zp[col] += eps
@@ -815,7 +869,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     gear2_done = False
     gear2_numba_used = False
     if (integration_method == "gear2" and _GEAR2_NUMBA_GRID and
-            transient_solve_grid_gear2_numba is not None):
+            transient_solve_grid_gear2_numba is not None and n_aug == n):
         try:
             t_profile0 = time.perf_counter()
             # Run the single-step gear2 grid on the requested tgrid directly.
@@ -916,7 +970,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         be_result["gear2_nfail_before_fallback"] = int(nfail)
         return be_result
 
-    if (not gear2_done and transient_solve_grid_numba is not None):
+    if (not gear2_done and transient_solve_grid_numba is not None and n_aug == n):
         try:
             max_step_arg = -1.0 if max_step is None else float(max_step)
             flat_max_step_arg = -1.0 if flat_max_step is None else float(flat_max_step)
@@ -1024,6 +1078,9 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 return V, False, raised
             lo = min(rails) - 0.5
             hi = max(rails) + 0.5
+            if n_aug > n:                       # ideal-source branch currents are unbounded
+                lo = np.concatenate([np.full(n, lo), np.full(n_aug - n, -np.inf)])
+                hi = np.concatenate([np.full(n, hi), np.full(n_aug - n, np.inf)])
             prev_dev_terms = device_prev_cap_terms(Vp, input_prev)
             load_prev_dv = load_cap_dv_values(Vp, input_prev)
 

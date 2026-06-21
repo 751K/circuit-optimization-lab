@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover - scipy is a project dependency
     _spla = None
 
 try:
-    from .ac_mna import _stamp_adm, _stamp_mos_lti
+    from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from .ac_solver import _dev_corner, get_ss_params
     from .noise_solver import band_rms, noise_analysis
     from .numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
@@ -34,9 +34,9 @@ try:
         _is_constant_wave,
         pac_solve,
     )
-    from .pmos_tft_model import PMOS_TFT
+    from .device_model import create_device
 except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_mna import _stamp_adm, _stamp_mos_lti
+    from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from ac_solver import _dev_corner, get_ss_params
     from noise_solver import band_rms, noise_analysis
     from numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - legacy direct module import
         _is_constant_wave,
         pac_solve,
     )
-    from pmos_tft_model import PMOS_TFT
+    from device_model import create_device
 
 
 _KB = 1.380649e-23
@@ -562,7 +562,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         all_noise_sources = lin["noise_sources"]
     else:
         dev_inst = {
-            name: PMOS_TFT(
+            name: create_device("pmos_tft",
                 W=all_sizes[name][0], L=all_sizes[name][1],
                 NF=_nfval(all_nf, name), **_dev_corner(corner, name),
             )
@@ -767,7 +767,31 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     hb_block_preconditioner_count = 0
     hb_iterative_infos = []
     hb_iterative_iterations = []
-    adjs = np.empty((len(freqs), nb * n), dtype=complex)
+    # Ideal voltage sources: border the HB adjoint with branch-current unknowns appended
+    # after the nb*n node block (node positions in the fold stay unchanged). Force the
+    # dense path; vsource circuits are small testbenches, not the large chopper HB.
+    nbr = topo.n_branches
+    if nbr:
+        if Y_base is None or C_block is None:
+            Y_base, C_block, _ = _hb_blocks(Gf, Cf, K, N, n, fundamental,
+                                            charge_caps=charge_caps)
+        Binc = _branch_incidence(topo.vsources, idx, n)
+        nt = nb * (n + nbr)
+        Ya = np.zeros((nt, nt), dtype=complex)
+        Ca = np.zeros((nt, nt), dtype=complex)
+        Ya[:nb * n, :nb * n] = Y_base
+        Ca[:nb * n, :nb * n] = C_block
+        boff = nb * n
+        for h in range(nb):
+            r0, c0 = h * n, boff + h * nbr
+            Ya[r0:r0 + n, c0:c0 + nbr] = Binc
+            Ya[c0:c0 + nbr, r0:r0 + n] = Binc.T
+        Y_base, C_block = Ya, Ca
+        Y_sparse = C_sparse = None
+        solver_used = "dense"
+        e = np.concatenate([e, np.zeros(nb * nbr, dtype=complex)])
+
+    adjs = np.empty((len(freqs), e.shape[0]), dtype=complex)
     t_solve0 = time.perf_counter()
     for fi, freq in enumerate(freqs):
         freq = float(freq)
@@ -805,7 +829,9 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     hb_solve_time_s = time.perf_counter() - t_solve0
 
     fold_work = len(freqs) * max(1, len(source_grids)) * nb * nb
-    use_numba_fold = pnoise_fold_psd_numba is not None and fold_work >= 1000
+    # The numba fold assumes nb*n-wide adjoints; bordered (vsource) adjoints are wider,
+    # so fold in Python (node positions index the same nb*n prefix).
+    use_numba_fold = pnoise_fold_psd_numba is not None and fold_work >= 1000 and nbr == 0
     source_names = [name for name, *_ in source_grids]
     t_fold0 = time.perf_counter()
     if use_numba_fold:

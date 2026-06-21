@@ -19,6 +19,7 @@ from core.numba_kernels import (
     pnoise_hb_blocks_numba,
     terminal_derivatives_numba,
 )
+import core.pmos_tft_model as pmos_tft_model
 from core.pmos_tft_model import PMOS_TFT
 
 
@@ -200,7 +201,7 @@ def test_get_ss_params_numba_fast_path_matches_finite_difference(monkeypatch):
     fast_dev = PMOS_TFT(W=5000, L=30)
     fast = ac_solver.get_ss_params(5000, 30, *point, dev_inst=fast_dev)
 
-    monkeypatch.setattr(ac_solver, "terminal_derivatives_numba", None)
+    monkeypatch.setattr(pmos_tft_model, "terminal_derivatives_numba", None)
     fd_dev = PMOS_TFT(W=5000, L=30)
     ref = ac_solver.get_ss_params(5000, 30, *point, dev_inst=fd_dev)
 

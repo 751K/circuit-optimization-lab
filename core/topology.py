@@ -19,19 +19,33 @@ The default AFE topology is `AFE_TOPO`.
 class Topology:
     def __init__(self, solved, devices, rails, outputs=None, input_drives=None,
                  load_caps=None, dc_guesses=None, aliases=None, transient_inputs=None,
-                 resistors=None, capacitors=None, isources=None, ac_drives=None,
+                 resistors=None, capacitors=None, isources=None, vccs=None,
+                 vsources=None, ac_drives=None,
                  dc_tol=None, require_dc_in_box=False):
         self.solved = list(solved)                 # MNA node order (index = position)
         self.idx = {n: i for i, n in enumerate(self.solved)}
         self.n = len(self.solved)
         self.devices = list(devices)               # (name, drain, gate, source) by node name
         self.rails = dict(rails)                   # rail name -> bias-key (str) or constant (float)
-        # Passive / source elements (two-terminal). Transistors stay in `devices`;
-        # these never touch the PMOS_TFT machinery.
+        # Passive / source elements (two-terminal). Transistors stay in `devices`
+        # and are handled by the :class:`~device_model.TransistorModel` interface;
+        # these never touch the transistor model machinery.
         self.resistors = list(resistors or [])     # (name, a, b, R[ohm])
         self.capacitors = list(capacitors or [])   # (name, a, b, C[farad])
         self.isources = list(isources or [])       # (name, nplus, nminus, I[amp]); I flows
         #                                            nplus->nminus inside the source.
+        self.vccs = list(vccs or [])               # (name, p, q, ctrl_p, ctrl_n, gm[A/V])
+        #                                            I_p->q = gm * (Vctrl_p - Vctrl_n)
+        # Ideal voltage sources (true MNA). Each adds one branch-current UNKNOWN and
+        # one constraint row V_p - V_q = E, growing the system from n to n_aug = n + m.
+        # `value` is a constant E (float) or a transient input-waveform key (str); for
+        # DC/AC the waveform-keyed source uses E=0 (pure stimulus). Branch current k has
+        # global index n + k.
+        self.vsources = list(vsources or [])       # (name, p, q, value)
+        self.n_branches = len(self.vsources)
+        self.n_aug = self.n + self.n_branches
+        self.vsource_index = {name: self.n + k
+                              for k, (name, *_rest) in enumerate(self.vsources)}
         # Analysis metadata. These keep the solvers topology-driven instead of
         # hard-coding AFE node/device names.
         self.outputs = tuple(outputs or ())
@@ -62,7 +76,7 @@ class Topology:
         ideal current-source injections, minus gmin*V. Idfun(name, Vs, Vd, Vg)
         returns the device current; capacitors are open at DC."""
         nv = {self.solved[k]: x[k] for k in range(self.n)}
-        res = [0.0] * self.n
+        res = [0.0] * self.n_aug
         for name, d, g, s in self.devices:
             i = Idfun(name, self.node_v(s, nv, bias),
                       self.node_v(d, nv, bias), self.node_v(g, nv, bias))
@@ -81,6 +95,23 @@ class Topology:
                 res[self.idx[p]] -= I              # source draws I from nplus
             if q in self.idx:
                 res[self.idx[q]] += I              # and injects I into nminus
+        for name, p, q, cp, cn, gm in self.vccs:
+            I_vccs = gm * (self.node_v(cp, nv, bias) - self.node_v(cn, nv, bias))
+            if p in self.idx:
+                res[self.idx[p]] += I_vccs         # injects into p
+            if q in self.idx:
+                res[self.idx[q]] -= I_vccs         # extracts from q
+        # Ideal voltage sources (true MNA): branch current x[n+k] flows p->q inside the
+        # source; the constraint row pins V_p - V_q = E. gmin is applied to NODE rows only.
+        for k, (name, p, q, value) in enumerate(self.vsources):
+            bi = self.n + k
+            i = x[bi]
+            if p in self.idx:
+                res[self.idx[p]] -= i              # current leaves p
+            if q in self.idx:
+                res[self.idx[q]] += i              # and enters q
+            E = float(value) if isinstance(value, (int, float)) else 0.0
+            res[bi] = self.node_v(p, nv, bias) - self.node_v(q, nv, bias) - E
         for k in range(self.n):
             res[k] -= x[k] * gmin
         return res
@@ -97,8 +128,10 @@ class Topology:
         return {self.solved[k]: sol[k] for k in range(self.n)}
 
     def guess_vector(self, node_vals, default=0.0):
-        """Turn a {name: voltage} guess dict into a vector in solved order."""
-        return [node_vals.get(self.solved[k], default) for k in range(self.n)]
+        """Turn a {name: voltage} guess dict into a vector in solved order. Ideal
+        voltage-source branch currents (if any) are appended as zeros -> length n_aug."""
+        return ([node_vals.get(self.solved[k], default) for k in range(self.n)]
+                + [0.0] * self.n_branches)
 
     def rail_values(self, bias):
         out = {}
@@ -121,14 +154,15 @@ class Topology:
             g = guess(bias) if callable(guess) else guess
             guesses.append(self.guess_vector(g, default=default))
         rails = [v for v in self.rail_values(bias).values() if isinstance(v, (int, float))]
+        pad = [0.0] * self.n_branches
         if rails:
             lo, hi = min(rails), max(rails)
-            guesses.extend([[default] * self.n,
-                            [0.5 * (lo + hi)] * self.n,
-                            [lo] * self.n,
-                            [hi] * self.n])
+            guesses.extend([[default] * self.n + pad,
+                            [0.5 * (lo + hi)] * self.n + pad,
+                            [lo] * self.n + pad,
+                            [hi] * self.n + pad])
         else:
-            guesses.append([default] * self.n)
+            guesses.append([default] * self.n + pad)
         return guesses
 
     def in_voltage_box(self, node_vals, bias, margin=0.5):

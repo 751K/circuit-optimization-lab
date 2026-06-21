@@ -20,7 +20,7 @@ The current solver stack covers:
 - Cadence/Spectre-oriented validation for operating point, AC, noise, transient,
   PSS, PAC, and PNoise behavior.
 
-The implementation is intentionally small and self-contained. It currently consists of sixteen Python source files under `core/` (plus `__init__.py` and `__main__.py` for CLI entry).
+The implementation is intentionally small and self-contained. It currently consists of eighteen Python source files under `core/` (plus `__init__.py` and `__main__.py` for CLI entry).
 
 ## File Structure
 
@@ -29,6 +29,7 @@ core/
   topology.py          Circuit topology source of truth.
   compiled_topology.py Runtime-compiled topology/index/stamp metadata.
   circuit_loader.py    JSON circuit description loader.
+  device_model.py      TransistorModel ABC + NumbaParams + model factory/registry.
   pmos_tft_model.py    AT4000TG PMOS-OTFT compact-model implementation.
   numba_kernels.py     Optional Numba-accelerated scalar kernels.
   ac_mna.py            MNA stamping primitives.
@@ -51,17 +52,18 @@ topology.py          <- no internal dependency
 compiled_topology.py <- no internal dependency; consumes Topology-like objects at runtime
 circuit_loader.py    <- topology
 numba_kernels.py     <- no internal dependency; optional numba at runtime
-pmos_tft_model.py    <- optional numba_kernels
+device_model.py      <- no internal dependency (abc, dataclasses only)
+pmos_tft_model.py    <- optional numba_kernels, device_model
 ac_mna.py            <- no internal dependency
-ac_solver.py         <- topology, compiled_topology, ac_mna, pmos_tft_model
-noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, pmos_tft_model
-transient_solver.py  <- ac_solver, compiled_topology, topology, pmos_tft_model
-pss_solver.py        <- ac_solver, ac_mna, pmos_tft_model, topology, transient_solver
-pac_solver.py        <- ac_mna, ac_solver, pmos_tft_model, transient_solver
-pnoise_solver.py     <- ac_solver, noise_solver, pac_solver, pmos_tft_model, ac_mna
+ac_solver.py         <- topology, compiled_topology, ac_mna, device_model
+noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, device_model
+transient_solver.py  <- ac_solver, compiled_topology, topology, device_model
+pss_solver.py        <- ac_solver, ac_mna, device_model, topology, transient_solver
+pac_solver.py        <- ac_mna, ac_solver, device_model, transient_solver
+pnoise_solver.py     <- ac_solver, noise_solver, pac_solver, device_model, ac_mna
 analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader
-chopper.py           <- noise_solver, pss_solver, pac_solver, pnoise_solver, topology
-explore.py           <- ac_solver, noise_solver, pmos_tft_model, topology, circuit_loader
+chopper.py           <- noise_solver, pss_solver, pac_solver, pnoise_solver, device_model, topology
+explore.py           <- ac_solver, noise_solver, device_model, topology, circuit_loader
 corners.py           <- ac_solver, noise_solver, topology
 ```
 
@@ -83,11 +85,24 @@ Implements the AT4000TG PMOS-OTFT compact model in Python. It provides:
 
 For AC and noise analysis, the solver extracts terminal `gm` and `gds` by finite-differencing `get_Idc`, matching the terminal behavior used by the circuit solver.
 
+`PMOS_TFT` inherits from :class:`~device_model.TransistorModel`, the abstract
+base class consumed by all solvers. It also provides `get_numba_params()` for the
+transient solver’s compiled inner loop and a Numba-accelerated `get_ss_params()`
+override.
+
+### `device_model.py`
+
+Defines the abstract device‑model interface that decouples solvers from concrete transistor implementations:
+
+- **`TransistorModel` (ABC)** — seven abstract methods (`get_Idc`, `get_op`, `get_capacitances`, `get_capacitance_charges_from_op`, `get_capacitance_branch_terms_from_op`, `get_noise_psd`, `get_numba_params`); `get_ss_params` provides a finite‑difference default that subclasses can override.
+- **`NumbaParams` (frozen dataclass)** — the 16 scalar parameters extracted once per device and passed to numba‑accelerated transient kernels.
+- **`register_model()` / `create_device()`** — factory + registry. Solver files call `create_device("pmos_tft", W=…, L=…)` instead of importing `PMOS_TFT` directly. Adding a new transistor model only requires a new subclass and one `register_model` call.
+
 ### `topology.py`
 
 Defines the circuit topology as the single source of truth. The topology contains the transistor list, solved node list, rail/bias nodes, outputs, AC input drives, load capacitors, transient input mapping, DC guesses, and DC aliases. Solver runtime metadata is derived from this topology instead of being hand-written separately in each solver.
 
-Alongside the PMOS_TFT transistors it also carries two-terminal passive/source elements — `resistors` (a-b, R in ohms), `capacitors` (a-b, C in farads), and `isources` (ideal DC current sources, I from nplus to nminus). These flow through all four analyses: resistor branch currents and current-source injections enter the DC KCL; resistors stamp as `1/R` and capacitors as `jωC` in AC/noise; resistors add `4kT/R` thermal noise; transient adds resistor conductances, capacitor companions, and constant source currents. Current sources are open-circuit (and noiseless) in the small-signal AC system. None of these touch the PMOS_TFT machinery.
+Alongside the transistors it also carries passive/source elements — `resistors` (a-b, R in ohms), `capacitors` (a-b, C in farads), `isources` (ideal DC current sources, I from nplus to nminus), `vccs` (voltage-controlled current sources: p, q, ctrl_p, ctrl_n, gm), and `vsources` (ideal voltage sources, true MNA: p, q, value). Each voltage source adds one branch-current unknown and a constraint row ``V_p − V_q = value``, growing the system from `n` to `n_aug = n + m`. These flow through all analyses: resistor branch currents and current-source injections enter the DC KCL; resistors stamp as `1/R`, capacitors as `jωC`, VCCS as ``gm*(Vcp-Vcn)``, and voltage sources as a bordered ``[[Y,B],[B^T,0]]`` block in AC/noise; resistors add `4kT/R` thermal noise (VCCS, current sources, and ideal voltage sources are noiseless); transient adds resistor conductances, capacitor companions, constant/VCCS source currents, and voltage-source branch-current unknowns with ``E(t)`` constraint. Current sources are open-circuit in the small-signal AC system. None of these touch the transistor model machinery.
 
 The default topology is `AFE_TOPO`, a 10-transistor fully differential AFE core with tail current device, input pair, output stage, and cross-coupled positive-feedback level shifting devices.
 
@@ -97,7 +112,7 @@ Builds a runtime plan from a declarative `Topology` and a bias/input context. It
 
 - solved-node indices and rail values;
 - per-device drain/gate/source terminal tokens;
-- resistor, capacitor, and current-source stamp metadata;
+- resistor, capacitor, current-source, and VCCS stamp metadata;
 - AC/noise `("n", idx)` / `("v", value)` terminal tables;
 - transient input and `node_inputs` mappings.
 

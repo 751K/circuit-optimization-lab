@@ -115,6 +115,26 @@
         ]
       }
     },
+    "vccs": {
+      "type": "array",
+      "description": "Voltage-controlled current sources; I = gm*(Vcp - Vcn), current flows p->q.",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/vccsObject"},
+          {"$ref": "#/$defs/vccsTuple"}
+        ]
+      }
+    },
+    "vsources": {
+      "type": "array",
+      "description": "Ideal voltage sources (true MNA). Each adds a branch-current unknown and constraint V_p - V_q = value. value is a constant EMF (number) or a transient input-waveform key (string).",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/vsourceObject"},
+          {"$ref": "#/$defs/vsourceTuple"}
+        ]
+      }
+    },
     "dc_guesses": {
       "type": "array",
       "description": "Optional DC initial guesses; each object maps solved node to voltage.",
@@ -561,6 +581,56 @@
         {"$ref": "#/$defs/name"},
         {"$ref": "#/$defs/name"},
         {"type": "number"}
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "vccsObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "p", "q", "ctrl_p", "ctrl_n", "gm"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "p": {"$ref": "#/$defs/name"},
+        "q": {"$ref": "#/$defs/name"},
+        "ctrl_p": {"$ref": "#/$defs/name"},
+        "ctrl_n": {"$ref": "#/$defs/name"},
+        "gm": {"type": "number"}
+      }
+    },
+    "vccsTuple": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"type": "number"}
+      ],
+      "items": false,
+      "minItems": 6,
+      "maxItems": 6
+    },
+    "vsourceObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "p", "q", "value"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "p": {"$ref": "#/$defs/name"},
+        "q": {"$ref": "#/$defs/name"},
+        "value": {"oneOf": [{"type": "number"}, {"$ref": "#/$defs/name"}]}
+      }
+    },
+    "vsourceTuple": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"oneOf": [{"type": "number"}, {"$ref": "#/$defs/name"}]}
       ],
       "items": false,
       "minItems": 4,

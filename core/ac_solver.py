@@ -5,13 +5,11 @@ Includes ALL transistors + load capacitors.
 """
 import numpy as np
 try:
-    from .numba_kernels import terminal_derivatives_numba
-    from .pmos_tft_model import PMOS_TFT
+    from .device_model import create_device
     from .topology import AFE_TOPO
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
-    from numba_kernels import terminal_derivatives_numba
-    from pmos_tft_model import PMOS_TFT
+    from device_model import create_device
     from topology import AFE_TOPO
     from compiled_topology import CompiledTopology
 
@@ -110,6 +108,13 @@ def _bounded_least_squares_dc(residuals, guesses, topo, bias, tol=_DC_FALLBACK_T
         return None
     lo = min(rails) - 0.5
     hi = max(rails) + 0.5
+    # Ideal voltage-source branch currents are NOT node voltages: keep node rows in the
+    # rail box but leave branch rows unbounded, else least_squares would clamp the source
+    # current to the voltage box. (m=0 -> scalar bounds, unchanged.)
+    m = getattr(topo, "n_branches", 0)
+    if m:
+        lo = np.concatenate([np.full(topo.n, lo), np.full(m, -np.inf)])
+        hi = np.concatenate([np.full(topo.n, hi), np.full(m, np.inf)])
     best_x = None
     best_norm = np.inf
     for x0 in guesses[:6]:
@@ -226,42 +231,14 @@ def get_ss_params(W, L, Vs, Vd, Vg, corner=None, nf=1, dev_inst=None):
     <0.05 dB / <0.1 Hz across the band; channel gm was 0.8 dB / 18 Hz off.
 
     corner: optional dict of model process shifts, e.g. {'pvt0':.., 'pbeta0':..}.
-    dev_inst: optional pre-built PMOS_TFT instance to reuse (warm-start cache).
-    """
-    t = dev_inst if dev_inst is not None else PMOS_TFT(W=W, L=L, NF=nf, **(corner or {}))
-    h = 1e-3
-    if terminal_derivatives_numba is not None:
-        try:
-            s1, d1 = t.get_op(Vs, Vd, Vg)
-            _, _, I_d1_d, _, _ = t._eval_currents(Vs, Vd, Vg, s1, d1)
-            Idc0 = -I_d1_d
-            if abs(Idc0) < 1e-10:
-                raise FloatingPointError("small-current finite-difference fallback")
-            ok, gm_neg, gds_neg = terminal_derivatives_numba(
-                Vs, Vd, Vg, s1, d1, True, True, False, h, 1e-6,
-                t.Vfb, t.Vss, t.Lc, t.lambda_, t._contact_scale,
-                t._channel_exponent, t._current_scale, t._inv_Rleak)
-            if ok and np.isfinite(gm_neg) and np.isfinite(gds_neg):
-                gm = -gm_neg
-                gds = -gds_neg
-            else:
-                raise FloatingPointError("terminal derivative fallback")
-            Cgss, Cgdd = t._capacitances_from_op(Vs, Vd, Vg, s1, d1)
-            Ich = t._eval_channel(Vs, Vd, Vg, s1, d1)["Ich"]
-            return {"gm": gm, "gds": gds, "Cgs": Cgss, "Cgd": Cgdd, "Ich": Ich}
-        except Exception:
-            pass
+    dev_inst: optional pre-built :class:`TransistorModel` instance to reuse
+        (warm-start cache).
 
-    try:
-        Id = lambda vs, vd, vg: t.get_Idc(vs, vd, vg)
-        gm = (Id(Vs, Vd, Vg + h) - Id(Vs, Vd, Vg - h)) / (2 * h)
-        gds = (Id(Vs, Vd + h, Vg) - Id(Vs, Vd - h, Vg)) / (2 * h)
-        Cgss, Cgdd = t.get_capacitances(Vs, Vd, Vg)
-        s1, d1 = t.get_op(Vs, Vd, Vg)
-        Ich = t._eval_channel(Vs, Vd, Vg, s1, d1)["Ich"]
-        return {"gm": gm, "gds": gds, "Cgs": Cgss, "Cgd": Cgdd, "Ich": Ich}
-    except Exception:
-        return {"gm": 0, "gds": 1e-12, "Cgs": 0, "Cgd": 0, "Ich": 0}
+    Thin adapter — delegates to :meth:`TransistorModel.get_ss_params`.
+    """
+    t = dev_inst if dev_inst is not None else create_device(
+        "pmos_tft", W=W, L=L, NF=nf, **(corner or {}))
+    return t.get_ss_params(Vs, Vd, Vg)
 
 
 def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=None):
@@ -282,12 +259,13 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     gmin = 1e-12
     dc_tol = getattr(topo, "dc_tol", None) or _DC_FALLBACK_TOL
     plan = CompiledTopology(topo, bias)
+    branch_currents = {}                           # ideal voltage-source currents (p->q interior)
 
     # ── pre-build device instances so the warm-start Newton cache survives
     #     across fsolve iterations instead of being reset on every Id() call.
     _dev_inst = {
-        name: PMOS_TFT(W=sizes[name][0], L=sizes[name][1],
-                       NF=_dev_nf(nf, name), **_dev_corner(corner, name))
+        name: create_device("pmos_tft", W=sizes[name][0], L=sizes[name][1],
+                            NF=_dev_nf(nf, name), **_dev_corner(corner, name))
         for name, *_ in topo.devices
     }
 
@@ -342,7 +320,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
             # ── FALLBACK (runs ONLY when every standard guess failed; never alters
             # already-converged points). Goal: pick the SAME physical branch Spectre
             # picks, even for multistable points. ──
-            base_g = guesses[0] if guesses else [VCM] * topo.n
+            base_g = guesses[0] if guesses else [VCM] * topo.n_aug
 
             def _solve(bias_d, gm, x0):
                 try:
@@ -395,6 +373,9 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
                 return None  # DC didn't converge even with continuation
 
         nv = topo.node_vals(sol)                  # {node_name: voltage}, full asymmetric op
+        if topo.n_branches:                       # ideal voltage-source branch currents
+            branch_currents = {name: float(sol[topo.n + k])
+                               for k, (name, *_r) in enumerate(topo.vsources)}
 
     if getattr(topo, "require_dc_in_box", False) and not topo.in_voltage_box(nv, bias):
         sbox = _bounded_least_squares_dc(residuals, guesses, topo, bias, tol=dc_tol)
@@ -455,10 +436,10 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
 
     # ── 3. Build & solve the small-signal MNA (terminals from the topology) ──
     try:
-        from .ac_mna import _stamp_adm, _stamp_mos_lti
+        from .ac_mna import _stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource
     except ImportError:  # pragma: no cover - legacy direct module import
-        from ac_mna import _stamp_adm, _stamp_mos_lti
-    NN = plan.n
+        from ac_mna import _stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource
+    NN = plan.n_aug
     drive = topo.input_drives
     # Normalize the gain by the differential input magnitude. The stimulus is either
     # a per-gate drive (input_drives) or, for a front-end testbench, AC sources at
@@ -488,6 +469,10 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         _stamp_adm(C, RHS_C, a, b, cap)
     for _, a, b, _, gval in ac_res:
         _stamp_adm(G, RHS_G, a, b, gval)
+    for p, q, cp, cn, gm in plan.ac_vccs(ac_drives):
+        _stamp_vccs(G, RHS_G, p, cp, cn, gm)
+    for p, q, bi, e_ac in plan.ac_vsources(ac_drives):  # voltage source: short (E_ac=0)
+        _stamp_vsource(G, RHS_G, p, q, bi, e_ac)
     # ideal current sources are open-circuit in the small-signal AC system.
     jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
     Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]
@@ -517,6 +502,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         "response": response,
         "freqs": freqs,
         "dc_op": dc_op,
+        "branch_currents": branch_currents,
         "ss": ss,
         "corner": corner,
     }

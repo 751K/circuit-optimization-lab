@@ -42,7 +42,7 @@ print("=" * 70)
 
 from core.topology import AFE_TOPO
 from core.ac_solver import ac_solve
-from core.pmos_tft_model import PMOS_TFT
+from core.device_model import create_device
 
 ac_result = ac_solve(SIZES, BIAS, np.array([1.0]), topo=AFE_TOPO)
 dc = ac_result["dc_op"]
@@ -58,7 +58,7 @@ def _v(node):
 ss = {}
 for name, d, g, s in AFE_TOPO.devices:
     W, L = SIZES[name]
-    tft = PMOS_TFT(W=W, L=L)
+    tft = create_device("pmos_tft", W=W, L=L)
     osv = tft.get_os(_v(s), _v(d), _v(g))
     rout = osv["rout"]
     gds = 1.0 / rout if rout != 0 and np.isfinite(rout) else 0.0

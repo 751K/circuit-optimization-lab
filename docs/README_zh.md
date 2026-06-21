@@ -85,6 +85,7 @@ python -m core chopper examples/afe_explore.json --level transient
 | **NF**           | Number of fingers（晶体管并联数，等比例放大电流）    | JSON `nf` 字段，或每个器件单独指定 `devices[].NF`            |
 | **Bias（偏置）**     | `{节点名: 电压}`——各 rail 节点的 DC 工作电压      | JSON `bias` 字段                                   |
 | **Solver（求解器）**  | 接收 拓扑 + 尺寸 + 偏置 → 输出结果（增益、噪声、波形…）的函数 | `core/ac_solver.py`、`core/transient_solver.py` 等 |
+| **Device Model（器件模型）** | 抽象接口（`TransistorModel`）——求解器面向接口调用，不依赖具体模型；通过工厂切换模型类型 | `core/device_model.py`、`core/pmos_tft_model.py` |
 
 所有求解器的调用模式都一样：
 
@@ -327,6 +328,8 @@ print(f"Latch 率: {mc['latch_rate']*100:.1f}%,  "
 | `resistors`        | —   | `[名称, 节点A, 节点B, 阻值]`                                                                                  |
 | `capacitors`       | —   | `[名称, 节点A, 节点B, 容值]`                                                                                  |
 | `current_sources`  | —   | 理想直流电流源：`[名称, nplus, nminus, 电流]`                                                                     |
+| `vccs`             | —   | 压控电流源（VCCS）：`[名称, p, q, ctrl_p, ctrl_n, gm]`，``I = gm*(Vcp-Vcn)``                                    |
+| `vsources`         | —   | 理想电压源（真·MNA）：`[名称, p, q, value]`，`value` 为常数 EMF 或波形 key                                              |
 | `nf`               | —   | 全局 NF（fingers），作用于所有器件；可被器件自身的 `NF` 覆盖                                                                |
 | `dc_guesses`       | —   | DC 收敛的初始电压猜测，复杂电路需要此字段帮助收敛                                                                            |
 | `transient_inputs` | —   | 瞬态输入波形名到驱动节点的映射                                                                                       |
@@ -388,6 +391,7 @@ python3 -m benchmarks.bench_sweep --n-candidates 200  # 批量 explore 负载
 | `examples/single_stage.json`        | 最小单管共源级——新建电路的最佳起点                                |
 | `examples/resistor_load_stage.json` | 带电阻负载的单管电路，演示 `resistors` 和 `current_sources` 字段         |
 | `examples/periodic_rc.json`         | 无源 RC 低通，带 PSS/PAC/PNoise dispatch——最简单的端到端周期示例           |
+| `examples/voltage_divider.json`     | 理想电压源（真·MNA）分压器，含电阻电容——vsource 演示                          |
 | `examples/afe_testbench.py`         | 完整 testbench：干电极前端（R∥C 网络）→ AFE 核心 → AC + 噪声 + 瞬态 |
 | `examples/mc_mismatch.py`           | Monte Carlo mismatch 驱动：工艺角表 + 3-corner MC 图      |
 

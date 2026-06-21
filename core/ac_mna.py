@@ -55,6 +55,46 @@ def _stamp_vccs(Y, RHS, d, g, s, gm):
     addrow(s, g, -gm); addrow(s, s, +gm)
 
 
+def _branch_incidence(vsources, idx, n):
+    """n×m incidence matrix B of ideal voltage sources for the bordered MNA system
+    ``[[Y, B], [B^T, 0]]``: column k has +1 at the source's p node and -1 at its q node
+    (solved nodes only; rail terminals drop out). Used by the periodic solvers (PSS
+    monodromy, PAC/PNoise harmonic balance) to carry the branch-current unknowns.
+    Each ``vsources`` entry is ``(name, p, q, value)``."""
+    import numpy as np
+    B = np.zeros((n, len(vsources)))
+    for k, vs in enumerate(vsources):
+        p, q = vs[1], vs[2]
+        if p in idx:
+            B[idx[p], k] += 1.0
+        if q in idx:
+            B[idx[q], k] -= 1.0
+    return B
+
+
+def _stamp_vsource(Y, RHS, P, Q, bi, E):
+    """Ideal voltage source (true MNA). Branch current I_b (P->Q through the source
+    interior) is the unknown at index `bi`; the constraint row enforces V_P - V_Q = E.
+    P/Q are ("n", idx) solved nodes or ("v", val) known AC voltages. A DC bias source
+    has E=0 -> an AC short. Frequency-independent: stamp into G / RHS_G.
+
+        KCL_P:  Y[P,bi] += 1     KCL_Q:  Y[Q,bi] -= 1
+        BR_b:   Y[bi,P] += 1, Y[bi,Q] -= 1, RHS[bi] = E - V_P(known) + V_Q(known)
+    """
+    rhs_b = complex(E)
+    if P[0] == "n":
+        Y[P[1], bi] += 1.0          # branch current leaves node P
+        Y[bi, P[1]] += 1.0          # constraint: +V_P
+    else:
+        rhs_b -= P[1]               # known V_P -> RHS
+    if Q[0] == "n":
+        Y[Q[1], bi] -= 1.0          # branch current enters node Q
+        Y[bi, Q[1]] -= 1.0          # constraint: -V_Q
+    else:
+        rhs_b += Q[1]               # known V_Q -> RHS
+    RHS[bi] += rhs_b
+
+
 def _stamp_mos(Y, RHS, d, g, s, gm, gds, Cgs, Cgd, jw):
     # gds between drain and source
     _stamp_adm(Y, RHS, d, s, gds)

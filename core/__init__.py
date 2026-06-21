@@ -15,8 +15,11 @@ try:
     from .ac_solver import ac_solve
     from .analysis_dispatch import run_analysis_suite, run_json_analyses
     from .circuit_loader import CircuitSpec, load_circuit_json
+    from .device_model import (TransistorModel, NumbaParams, create_device,
+                               register_model, get_default_model_type)
     from .noise_solver import band_rms, noise_analysis
     from .pac_solver import pac_solve
+    from . import pmos_tft_model  # noqa: F401 — triggers register_model("pmos_tft")
     from .pnoise_solver import pnoise_solve
     from .pss_solver import pss_solve
     from .topology import Topology
@@ -25,8 +28,11 @@ except ImportError:  # pragma: no cover - legacy direct module import
     from ac_solver import ac_solve
     from analysis_dispatch import run_analysis_suite, run_json_analyses
     from circuit_loader import CircuitSpec, load_circuit_json
+    from device_model import (TransistorModel, NumbaParams, create_device,
+                              register_model, get_default_model_type)
     from noise_solver import band_rms, noise_analysis
     from pac_solver import pac_solve
+    import pmos_tft_model  # noqa: F401
     from pnoise_solver import pnoise_solve
     from pss_solver import pss_solve
     from topology import Topology
@@ -38,6 +44,12 @@ except ImportError:  # pragma: no cover - legacy direct module import
 # All other top-level names exported below have no module-name collision.
 
 __all__ = [
+    # device model abstraction
+    "TransistorModel",
+    "NumbaParams",
+    "create_device",
+    "register_model",
+    "get_default_model_type",
     # circuit loading
     "load_circuit_json",
     "CircuitSpec",

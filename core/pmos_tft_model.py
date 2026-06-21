@@ -7,6 +7,7 @@ try:
         newton_internal_numba,
         capacitances_numba,
         capacitance_charges_numba,
+        terminal_derivatives_numba,
     )
 except Exception:  # pragma: no cover - optional acceleration only
     try:
@@ -15,19 +16,26 @@ except Exception:  # pragma: no cover - optional acceleration only
             newton_internal_numba,
             capacitances_numba,
             capacitance_charges_numba,
+            terminal_derivatives_numba,
         )
     except Exception:
         eval_currents_numba = None
         newton_internal_numba = None
         capacitances_numba = None
         capacitance_charges_numba = None
+        terminal_derivatives_numba = None
 
-class PMOS_TFT:
+from .device_model import TransistorModel, NumbaParams, register_model
+
+class PMOS_TFT(TransistorModel):
     """
     Python equivalent of the Verilog-A model for AT4000TG pmos_TFT.
     Now includes DC solving, Parasitic Capacitances, and Noise Power Spectral Density evaluation.
     Note: Python is mainly used here for DC Operating Point, Capacitance, and Noise evaluation.
     Full transient (ddt) simulation would require an external ODE solver like SPICE.
+
+    Implements :class:`~device_model.TransistorModel` — the abstract interface
+    consumed by all solvers in the stack.
     """
     def __init__(self, W=1000, L=20, VT=-3.03, Roff=1, NF=1, Reg=1,
                  C1=37.5, C2=50, C3=35, C4=35, Ci=2.4, kv=1, kh=1,
@@ -392,6 +400,74 @@ class PMOS_TFT:
         I_s_s1, I_s1_d1, I_d1_d, _, _ = self._eval_currents(Vs, Vd, Vg, Vs1, Vd1)
         return -I_d1_d
 
+    # ── TransistorModel interface methods ────────────────────────────────
+
+    def get_numba_params(self):
+        """Return the scalar parameter bundle consumed by numba kernels."""
+        return NumbaParams(
+            Vfb=self.Vfb,
+            Vss=self.Vss,
+            Lc=self.Lc,
+            lambda_=self.lambda_,
+            contact_scale=self._contact_scale,
+            channel_exponent=self._channel_exponent,
+            current_scale=self._current_scale,
+            inv_Rleak=self._inv_Rleak,
+            two_over_pi=self._two_over_pi,
+            cap_cgs1=self._cap_cgs1,
+            cap_cgd1=self._cap_cgd1,
+            cap_half_wl_ci=self._cap_half_wl_ci,
+            cap_cgs3_base=self._cap_cgs3_base,
+            cap_cgd3_base=self._cap_cgd3_base,
+            k1=self.k1,
+            gate_leak_g=1.0 / self.R_cap2,
+        )
+
+    def get_ss_params(self, Vs, Vd, Vg):
+        """Terminal small-signal parameters at the given bias.
+
+        Overrides the base-class finite-difference default with an
+        optimised path that uses :func:`terminal_derivatives_numba` for
+        gm/gds and reuses the internal OP solve for capacitances.
+        """
+        h = 1e-3
+        if terminal_derivatives_numba is not None:
+            try:
+                s1, d1 = self.get_op(Vs, Vd, Vg)
+                _, _, I_d1_d, _, _ = self._eval_currents(Vs, Vd, Vg, s1, d1)
+                Idc0 = -I_d1_d
+                if abs(Idc0) < 1e-10:
+                    raise RuntimeError("small-current finite-difference fallback")
+                ok, gm_neg, gds_neg = terminal_derivatives_numba(
+                    Vs, Vd, Vg, s1, d1, True, True, False, h, 1e-6,
+                    self.Vfb, self.Vss, self.Lc, self.lambda_,
+                    self._contact_scale, self._channel_exponent,
+                    self._current_scale, self._inv_Rleak)
+                if ok and np.isfinite(gm_neg) and np.isfinite(gds_neg):
+                    gm = -gm_neg
+                    gds = -gds_neg
+                else:
+                    raise RuntimeError("terminal derivative fallback")
+                Cgss, Cgdd = self._capacitances_from_op(Vs, Vd, Vg, s1, d1)
+                Ich = self._eval_channel(Vs, Vd, Vg, s1, d1)["Ich"]
+                return {"gm": gm, "gds": gds, "Cgs": Cgss, "Cgd": Cgdd, "Ich": Ich}
+            except Exception:
+                pass
+
+        # Finite-difference fallback (pure Python)
+        try:
+            Id = lambda vs, vd, vg: self.get_Idc(vs, vd, vg)
+            gm = (Id(Vs, Vd, Vg + h) - Id(Vs, Vd, Vg - h)) / (2 * h)
+            gds = (Id(Vs, Vd + h, Vg) - Id(Vs, Vd - h, Vg)) / (2 * h)
+            Cgss, Cgdd = self.get_capacitances(Vs, Vd, Vg)
+            s1, d1 = self.get_op(Vs, Vd, Vg)
+            Ich = self._eval_channel(Vs, Vd, Vg, s1, d1)["Ich"]
+            return {"gm": gm, "gds": gds, "Cgs": Cgss, "Cgd": Cgdd, "Ich": Ich}
+        except Exception:
+            return {"gm": 0.0, "gds": 1e-12, "Cgs": 0.0, "Cgd": 0.0, "Ich": 0.0}
+
+    # ── Private helpers ──────────────────────────────────────────────────
+
     def _capacitances_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
         """Capacitance equations evaluated from an already-solved internal OP."""
         if capacitances_numba is not None:
@@ -516,6 +592,19 @@ class PMOS_TFT:
         Cgss = qscale * (self._cap_cgs1 + cgs2_coeff * f_s_060) + cgs_cross
         Cgdd = qscale * (self._cap_cgd1 + cgd3_coeff * f_d_042) + cgd_cross
         return qgs_self, qgd_self, cgs_cross, cgd_cross, Cgss, Cgdd
+
+    # ── TransistorModel abstract capacitance interface ──
+    # These are the public ABC methods; they delegate to the private
+    # ``_from_op`` helpers that are also used internally by get_ss_params
+    # and the transient solver closures.
+
+    def get_capacitance_charges_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
+        """Return branch charges from a pre‑solved operating point."""
+        return self._capacitance_charges_from_op(Vs, Vd, Vg, Vs1, Vd1)
+
+    def get_capacitance_branch_terms_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
+        """Return self‑charge branch terms from a pre‑solved operating point."""
+        return self._capacitance_branch_terms_from_op(Vs, Vd, Vg, Vs1, Vd1)
 
     def get_capacitance_charges(self, Vs, Vd, Vg):
         """Return diagnostic branch charges (gate->source, gate->drain)."""
@@ -685,13 +774,18 @@ if __name__ == "__main__":
     # Test the complete model
     tft = PMOS_TFT(W=1000, L=20)
     Vs, Vd, Vg = 40.0, 0.0, 20.0
-    
+
     Id = tft.get_Idc(Vs, Vd, Vg)
     Cgss, Cgdd = tft.get_capacitances(Vs, Vd, Vg)
     S_th, S_fl = tft.get_noise_psd(Vs, Vd, Vg, frequency=100.0)
-    
+
     print("=== PMOS TFT Python Model Output ===")
     print(f"Drain Current (Id): {Id*1e6:.2f} uA")
     print(f"Cgss: {Cgss*1e12:.4f} pF, Cgdd: {Cgdd*1e12:.4f} pF")
     print(f"Thermal Noise PSD: {S_th:.4e} A^2/Hz")
     print(f"Flicker Noise PSD @ 100Hz: {S_fl:.4e} A^2/Hz")
+
+
+# Register in the device model factory so solvers can create instances via
+# ``create_device("pmos_tft", W=…, L=…)``.
+register_model("pmos_tft", PMOS_TFT)

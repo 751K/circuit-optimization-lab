@@ -90,6 +90,7 @@ Before diving into the workflows, a one-minute map of the concepts:
 | **NF** | Number of fingers (parallel transistor multiplier; increases current) | JSON `nf` field, or per-device in `devices[].NF` |
 | **Bias** | `{node: voltage}` — DC operating voltages at rail nodes | JSON `bias` field |
 | **Solver** | A function that takes topology + sizes + bias → results (gain, noise, waveforms, …) | `core/ac_solver.py`, `core/transient_solver.py`, etc. |
+| **Device Model** | Abstract interface (`TransistorModel`) — solvers call the interface, not a concrete model; swap models via factory | `core/device_model.py`, `core/pmos_tft_model.py` |
 
 Any solver call follows the same pattern:
 
@@ -340,6 +341,8 @@ Key top-level fields:
 | `resistors` | — | `[name, node_a, node_b, R_ohm]` |
 | `capacitors` | — | `[name, node_a, node_b, C_farad]` |
 | `current_sources` | — | Ideal DC current sources: `[name, nplus, nminus, I_amp]` |
+| `vccs` | — | Voltage-controlled current sources: `[name, p, q, ctrl_p, ctrl_n, gm]` |
+| `vsources` | — | Ideal voltage sources (true MNA): `[name, p, q, value]` — constant EMF or waveform key |
 | `nf` | — | Global NF (fingers) applied to all devices; overridden by per-device `NF` |
 | `dc_guesses` | — | Initial voltage guesses for DC convergence on tricky circuits |
 | `transient_inputs` | — | Maps input waveform names to the nodes they drive |
@@ -402,6 +405,7 @@ timings on a modern Mac (Numba enabled):
 | `examples/single_stage.json` | Minimal single-transistor common-source stage — best starting point for a new circuit |
 | `examples/resistor_load_stage.json` | Single transistor with resistive load, demoing `resistors` and `current_sources` fields |
 | `examples/periodic_rc.json` | Passive RC lowpass with PSS/PAC/PNoise dispatch — simplest end-to-end periodic example |
+| `examples/voltage_divider.json` | Ideal voltage source (true MNA) divider with resistors, capacitors — vsource demo |
 | `examples/afe_testbench.py` | Full testbench: dry-electrode front-end (R∥C network) → AFE core → AC + noise + transient |
 | `examples/mc_mismatch.py` | Monte Carlo mismatch driver: corner table + 3-corner MC figure |
 

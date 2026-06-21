@@ -2,8 +2,9 @@
 
 `Topology` remains the declarative source of truth. `CompiledTopology` is the
 runtime view: node names are resolved once into compact terminal tokens and
-two-terminal elements are expanded into stamp-ready metadata. Solvers can then
-share the same terminal/index convention instead of rebuilding it locally.
+circuit elements (resistors, capacitors, current sources, VCCS) are expanded
+into stamp-ready metadata. Solvers can then share the same terminal/index
+convention instead of rebuilding it locally.
 """
 from dataclasses import dataclass
 
@@ -66,6 +67,41 @@ class CurrentSourcePlan:
     value: float
 
 
+@dataclass(frozen=True)
+class VccsPlan:
+    name: str
+    p_node: str
+    q_node: str
+    cp_node: str
+    cn_node: str
+    p: tuple
+    q: tuple
+    cp: tuple
+    cn: tuple
+    pi: int | None
+    qi: int | None
+    cpi: int | None
+    cni: int | None
+    gm: float
+
+
+@dataclass(frozen=True)
+class VsourcePlan:
+    """Ideal voltage source (true MNA). Adds branch-current unknown `bi = n + k` and a
+    constraint row V_p - V_q = E. `e_const` is the constant EMF; `e_input_idx >= 0`
+    selects a per-timestep transient waveform (time-varying E), else -1."""
+    name: str
+    p_node: str
+    q_node: str
+    p: tuple
+    q: tuple
+    pi: int | None
+    qi: int | None
+    bi: int
+    e_const: float
+    e_input_idx: int
+
+
 class CompiledTopology:
     """Bias/input-specific compiled view of a `Topology`.
 
@@ -103,10 +139,14 @@ class CompiledTopology:
             if key not in self.input_index:
                 raise ValueError(f"node_inputs[{node!r}] references missing waveform {key!r}")
 
+        self.n_branches = topo.n_branches
+        self.n_aug = self.n + self.n_branches
         self.devices = self._compile_devices()
         self.resistors = self._compile_resistors()
         self.capacitors = self._compile_capacitors()
         self.isources = self._compile_isources()
+        self.vccs = self._compile_vccs()
+        self.vsources = self._compile_vsources()
 
     # -- scalar terminal tokens -------------------------------------------------
     def _transient_gate_node(self, name, gate):
@@ -205,9 +245,41 @@ class CompiledTopology:
                 value=float(value)))
         return tuple(out)
 
+    def _compile_vccs(self):
+        out = []
+        for name, p, q, cp, cn, gm in self.topo.vccs:
+            pt = self.compile_term(p)
+            qt = self.compile_term(q)
+            cpt = self.compile_term(cp)
+            cnt = self.compile_term(cn)
+            out.append(VccsPlan(
+                name=name, p_node=p, q_node=q, cp_node=cp, cn_node=cn,
+                p=pt, q=qt, cp=cpt, cn=cnt,
+                pi=self.solved_index(pt), qi=self.solved_index(qt),
+                cpi=self.solved_index(cpt), cni=self.solved_index(cnt),
+                gm=float(gm)))
+        return tuple(out)
+
+    def _compile_vsources(self):
+        out = []
+        for k, (name, p, q, value) in enumerate(self.topo.vsources):
+            pt = self.compile_term(p)
+            qt = self.compile_term(q)
+            if isinstance(value, (int, float)):
+                e_const, e_input_idx = float(value), -1
+            elif value in self.input_index:
+                e_const, e_input_idx = 0.0, self.input_index[value]
+            else:                                   # unknown string -> 0 EMF (no DC bias)
+                e_const, e_input_idx = 0.0, -1
+            out.append(VsourcePlan(
+                name=name, p_node=p, q_node=q, p=pt, q=qt,
+                pi=self.solved_index(pt), qi=self.solved_index(qt),
+                bi=self.n + k, e_const=e_const, e_input_idx=e_input_idx))
+        return tuple(out)
+
     def dc_residuals(self, x, Idfun, gmin):
-        """KCL residual using compiled terminal tokens."""
-        res = np.zeros(self.n)
+        """KCL residual using compiled terminal tokens (length n_aug; gmin on node rows)."""
+        res = np.zeros(self.n_aug)
         for dev in self.devices:
             i = Idfun(dev.name,
                       self.term_value(dev.s, x),
@@ -228,6 +300,22 @@ class CompiledTopology:
                 res[item.pi] -= item.value
             if item.qi is not None:
                 res[item.qi] += item.value
+        for item in self.vccs:
+            vc = (self.term_value(item.cp, x)
+                  - self.term_value(item.cn, x))
+            i = item.gm * vc
+            if item.pi is not None:
+                res[item.pi] += i
+            if item.qi is not None:
+                res[item.qi] -= i
+        for item in self.vsources:                  # ideal voltage source (true MNA)
+            ibr = x[item.bi]                         # branch current p->q (unknown)
+            if item.pi is not None:
+                res[item.pi] -= ibr                 # current leaves p
+            if item.qi is not None:
+                res[item.qi] += ibr                 # and enters q
+            res[item.bi] = (self.term_value(item.p, x)
+                            - self.term_value(item.q, x) - item.e_const)
         for k in range(self.n):
             res[k] -= x[k] * gmin
         return res
@@ -283,8 +371,29 @@ class CompiledTopology:
             for item in self.resistors
         )
 
+    def ac_vccs(self, drives=None):
+        return tuple(
+            (self.ac_term(item.p_node, drives),
+             self.ac_term(item.q_node, drives),
+             self.ac_term(item.cp_node, drives),
+             self.ac_term(item.cn_node, drives),
+             item.gm)
+            for item in self.vccs
+        )
+
+    def ac_vsources(self, drives=None):
+        """Small-signal MNA tokens for ideal voltage sources: (p_term, q_term, bi, E_ac).
+        A DC bias source is an AC short (E_ac = 0); a stimulus EMF (keyed by source name
+        in `drives`) becomes the constraint RHS."""
+        out = []
+        for item in self.vsources:
+            e_ac = complex(drives[item.name]) if (drives and item.name in drives) else 0.0
+            out.append((self.ac_term(item.p_node, drives),
+                        self.ac_term(item.q_node, drives), item.bi, e_ac))
+        return tuple(out)
+
     def output_sense(self, dtype=complex):
-        sense = np.zeros(self.n, dtype=dtype)
+        sense = np.zeros(self.n_aug, dtype=dtype)
         for node, weight in self.output_weights.items():
             sense[self.idx[node]] = weight
         return sense

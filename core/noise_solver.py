@@ -24,14 +24,14 @@ Ground-truth check (Cadence Spectre, afe_gt/tb_noise.raw/noiseAnal.noise):
 """
 import numpy as np
 try:
-    from .pmos_tft_model import PMOS_TFT
-    from .ac_mna import _stamp_adm, _stamp_mos_lti
+    from .device_model import create_device
+    from .ac_mna import _stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource
     from .ac_solver import ac_solve, _dev_corner, _dev_nf
     from .topology import AFE_TOPO
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
-    from pmos_tft_model import PMOS_TFT
-    from ac_mna import _stamp_adm, _stamp_mos_lti
+    from device_model import create_device
+    from ac_mna import _stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource
     from ac_solver import ac_solve, _dev_corner, _dev_nf
     from topology import AFE_TOPO
     from compiled_topology import CompiledTopology
@@ -43,7 +43,7 @@ _TEMP = 300.15              # physical temperature for resistor thermal noise [K
 
 def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1):
     """Drain-current noise PSD A^2/Hz over freqs: S_th + S_fl_1Hz/f."""
-    t = PMOS_TFT(W=W, L=L, NF=nf, **(corner or {}))
+    t = create_device("pmos_tft", W=W, L=L, NF=nf, **(corner or {}))
     try:
         S_th, S_fl_1 = t.get_noise_psd(Vs, Vd, Vg, frequency=1.0)
     except Exception:
@@ -73,8 +73,9 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
     devs = plan.ac_devices(drive={})
     ac_caps = plan.ac_capacitors()
     ac_res = plan.ac_resistors()
+    ac_vccs = plan.ac_vccs()
     inj = {name: (d, s) for name, d, g, s in devs}   # drain/source for noise injection
-    NN = plan.n
+    NN = plan.n_aug
 
     # per-device noise PSD
     psd = {}
@@ -108,6 +109,10 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
         _stamp_adm(C, RHS_C, a, b, cap)
     for _, a, b, _, gval in ac_res:
         _stamp_adm(G, RHS_G, a, b, gval)
+    for p, q, cp, cn, gm in ac_vccs:
+        _stamp_vccs(G, RHS_G, p, cp, cn, gm)
+    for p, q, bi, e_ac in plan.ac_vsources():        # short; ideal source carries NO noise
+        _stamp_vsource(G, RHS_G, p, q, bi, e_ac)
 
     jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
     Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]
