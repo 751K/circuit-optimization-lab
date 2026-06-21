@@ -37,6 +37,43 @@ python3 -m benchmarks.bench_afe --warm-runs 1 --skip-noise
 无需编写任何 Python 代码。打印出数字即说明一切正常。之后可替换任意电路 JSON 文件，
 或用 `-a ac,noise` 选择特定分析。
 
+### CLI 参考
+
+`python -m core` 使用子命令（向后兼容——无子命令时默认为 `run`）：
+
+```bash
+# ── 分析调度（默认："run"） ──
+python -m core examples/periodic_rc.json                          # 运行所有已配置的分析
+python -m core examples/periodic_rc.json -a ac,noise,pss          # 指定分析类型
+python -m core run examples/periodic_rc.json -a ac,noise          # 显式子命令
+
+# ── 设计空间探索 ──
+python -m core examples/afe_explore.json --explore -n 500         # --explore 标志（旧用法）
+python -m core explore examples/afe_explore.json -n 500 --seed 1  # 子命令
+
+# ── 工艺角扫描 ──
+python -m core corners examples/afe_explore.json                  # typ/slow/fast
+python -m core corners examples/afe_explore.json --freqs-num 61
+
+# ── Mismatch Monte Carlo ──
+python -m core mc examples/afe_explore.json -n 200 --seed 1      # typical corner
+python -m core mc examples/afe_explore.json --corner slow -n 500
+
+# ── Chopper 分析 ──
+python -m core chopper examples/afe_explore.json --level ideal    # 方波 LPTV
+python -m core chopper examples/afe_explore.json --level pmos     # 静态相位 PMOS
+python -m core chopper examples/afe_explore.json --level lptv     # PMOS 边带折叠
+python -m core chopper examples/afe_explore.json --level pss      # shooting PSS
+python -m core chopper examples/afe_explore.json --level pnoise   # PSS→PAC→PNoise
+python -m core chopper examples/afe_explore.json --level transient
+
+# 所有子命令通用选项：
+#   --noise-band LO HI  IRN 积分带宽（默认：0.05 100.0）
+#   -o PATH             结果输出到文件
+#   --no-numba          关闭 Numba 加速
+#   --quiet             关闭进度输出
+```
+
 ### 一分钟搞懂代码结构
 
 在看具体工作流之前，先搞清楚几个核心概念：
@@ -100,11 +137,21 @@ t = np.linspace(0, 4e-3, 400)
 vip = np.where(t >= 0.5e-3, 30.65 + 0.5e-3, 30.65)
 vin = np.where(t >= 0.5e-3, 30.65 - 0.5e-3, 30.65)
 
+# 默认：后向欧拉（BE）——鲁棒、经过充分验证
 tran = transient(spec.sizes, spec.bias, t, vip, vin,
                  topo=spec.topology, nf=spec.nf)
 print(f"瞬态步数: {len(t)},  失败步数: {tran['nfail']}")
 # → 瞬态步数: 400,  失败步数: 0
+
+# 可选：gear2/BDF2 —— 二阶、刚性稳定（chopper PSS/PAC/PNoise 默认使用）
+tran_gear2 = transient(spec.sizes, spec.bias, t, vip, vin,
+                       topo=spec.topology, nf=spec.nf,
+                       integration_method="gear2")
 ```
+Gear2（变步长 BDF2）将 PAC baseband 误差从 BE 的约 −2.5% 降到三 corner 全部 <1%。
+在刚性电路（如 chopper）上，`integration_method="gear2"` 在失败步数过多时自动回退
+到 BE——该设置始终安全。PSS/PAC/PNoise 管线默认使用 gear2 以保证精度；
+裸 `transient()` 默认使用 BE。
 
 ### 3. Chopper 分析（三种精度层级）
 
@@ -355,7 +402,9 @@ python3 -m benchmarks.bench_sweep --n-candidates 200  # 批量 explore 负载
 **Transient 出现 `nfail > 0`。**
 部分 Newton 步失败。尝试：(a) 增加时间点 `np.linspace(0, T, more_steps)`；
 (b) 收紧 `newton_vtol`（默认 `1e-8`）；(c) 启用 `fallback_least_squares=True`。
-对开关电路，确保 `max_step` 小于最快的边沿时间。
+对开关电路，确保 `max_step` 小于最快的边沿时间。如果使用 `integration_method="gear2"`
+在刚性电路上遇到失败，求解器在 `nfail` 超过阈值时会自动回退到 BE——检查结果中的
+`gear2_be_fallback_used` 字段。
 
 **PSS 不收敛（`converged=False`）。**
 增加 `tstab_periods`（shooting 前的额外稳定周期），或降低 `max_shooting_iters`。

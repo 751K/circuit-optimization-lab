@@ -20,7 +20,7 @@ The current solver stack covers:
 - Cadence/Spectre-oriented validation for operating point, AC, noise, transient,
   PSS, PAC, and PNoise behavior.
 
-The implementation is intentionally small and self-contained. It currently consists of sixteen Python source files under `core/` (excluding `__init__.py`).
+The implementation is intentionally small and self-contained. It currently consists of sixteen Python source files under `core/` (plus `__init__.py` and `__main__.py` for CLI entry).
 
 ## File Structure
 

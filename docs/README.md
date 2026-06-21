@@ -42,6 +42,43 @@ lowpass and prints a summary. No Python scripting needed. If it prints numbers,
 everything works. From there, swap in any circuit JSON or use
 `-a ac,noise` to pick specific analyses.
 
+### CLI Reference
+
+`python -m core` uses subcommands (backward compatible — bare `circuit.json` defaults to `run`):
+
+```bash
+# ── Analysis dispatch (default: "run") ──
+python -m core examples/periodic_rc.json                          # all configured analyses
+python -m core examples/periodic_rc.json -a ac,noise,pss          # specific analyses
+python -m core run examples/periodic_rc.json -a ac,noise          # explicit subcommand
+
+# ── Design-space exploration ──
+python -m core examples/afe_explore.json --explore -n 500         # --explore flag (legacy)
+python -m core explore examples/afe_explore.json -n 500 --seed 1  # subcommand
+
+# ── Process corners sweep ──
+python -m core corners examples/afe_explore.json                  # typ/slow/fast
+python -m core corners examples/afe_explore.json --freqs-num 61
+
+# ── Mismatch Monte Carlo ──
+python -m core mc examples/afe_explore.json -n 200 --seed 1      # typical corner
+python -m core mc examples/afe_explore.json --corner slow -n 500
+
+# ── Chopper analysis ──
+python -m core chopper examples/afe_explore.json --level ideal    # square-wave LPTV
+python -m core chopper examples/afe_explore.json --level pmos     # static-phase PMOS
+python -m core chopper examples/afe_explore.json --level lptv     # PMOS sideband fold
+python -m core chopper examples/afe_explore.json --level pss      # shooting PSS
+python -m core chopper examples/afe_explore.json --level pnoise   # PSS→PAC→PNoise
+python -m core chopper examples/afe_explore.json --level transient
+
+# Common options for all subcommands:
+#   --noise-band LO HI  IRN integration band (default: 0.05 100.0)
+#   -o PATH             write results to file
+#   --no-numba          disable Numba acceleration
+#   --quiet             suppress progress output
+```
+
 ### How the code is organized
 
 Before diving into the workflows, a one-minute map of the concepts:
@@ -106,11 +143,21 @@ t = np.linspace(0, 4e-3, 400)
 vip = np.where(t >= 0.5e-3, 30.65 + 0.5e-3, 30.65)
 vin = np.where(t >= 0.5e-3, 30.65 - 0.5e-3, 30.65)
 
+# Default: backward Euler (BE) — robust, well-validated
 tran = transient(spec.sizes, spec.bias, t, vip, vin,
                  topo=spec.topology, nf=spec.nf)
 print(f"Transient steps: {len(t)},  nfail: {tran['nfail']}")
 # → Transient steps: 400,  nfail: 0
+
+# Optional: gear2/BDF2 — second-order, stiffly stable (chopper PSS/PAC/PNoise default)
+tran_gear2 = transient(spec.sizes, spec.bias, t, vip, vin,
+                       topo=spec.topology, nf=spec.nf,
+                       integration_method="gear2")
 ```
+Gear2 (variable-step BDF2) reduces PAC baseband error from BE's ~−2.5% to <1%
+across all corners. On stiff circuits (e.g. chopper), `integration_method="gear2"`
+automatically falls back to BE if too many steps fail — the setting is always safe.
+PSS/PAC/PNoise pipelines default to gear2 for accuracy; bare `transient()` defaults to BE.
 
 ### 3. Chopper Analysis (Three Levels)
 
@@ -371,7 +418,9 @@ node voltages. The locked AFE JSON includes these.
 Some Newton steps failed. Try: (a) more time points (`np.linspace(0, T, more_steps)`),
 (b) tighter `newton_vtol` (default `1e-8`), or (c) enable
 `fallback_least_squares=True`. For switched circuits, make sure `max_step` is
-smaller than the fastest edge.
+smaller than the fastest edge. If using `integration_method="gear2"` on a stiff
+circuit, the solver automatically falls back to BE when `nfail` exceeds the
+threshold — check `gear2_be_fallback_used` in the result.
 
 **PSS doesn't converge (`converged=False`).**
 Increase `tstab_periods` (extra stabilization cycles before shooting starts)

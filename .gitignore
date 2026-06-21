@@ -70,6 +70,7 @@ spectre.ic
 
 # SLiCAP generated files
 cir/
+sphinx/
 SLiCAP.ini
 lib/
 html/

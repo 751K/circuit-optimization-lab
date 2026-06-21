@@ -123,7 +123,7 @@ RHP 零点: ω_z ≈ gm12 / Cgd12  (≈ 60.7 kHz)
 ---
 
 *生成脚本: `tools/slicap/full_circuit.py`, `tools/slicap/half_circuit.py`*
-*网表文件: `cir/afe_full.cir`, `cir/afe_half.cir`*
+*网表文件由上述脚本运行后生成（SLiCAP runtime 产物，已在 .gitignore 中）*
 
 ---
 

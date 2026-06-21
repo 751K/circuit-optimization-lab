@@ -1,11 +1,22 @@
-# 任务计划书：transient 积分器从 backward-Euler 升级到 gear2/BDF2
+# Gear2/BDF2 积分器升级 — 完成报告
+
+> **状态：✅ 已完成（2026-06-21）**
+> 
+> 所有 5 个里程碑（M1–M5）均已交付，chopper PSS/PAC/PNoise 默认使用 gear2，
+> 三 corner PAC baseband 全部 <1%。裸 `transient()` 保留 BE 默认，
+> `integration_method="gear2"` 带自动 BE 回退保证安全。
+> 回归测试 93 passed（含 RUN_SLOW_CHOPPER）。
+> 
+> 此文档保留原始任务计划作为历史参考。
+
+---
 
 ## 0. 一句话目标
 
 把瞬态积分从一阶 backward-Euler（BE）换成二阶刚性稳定的 **变步长 BDF2（gear2）**，
 在**稳定的 charge 电容公式**上做，使 chopper PAC baseband 三个 corner 都对齐到 **<1%**。
 
-## 进度（2026-06-20）
+## 进度（最终：2026-06-21，全部完成）
 
 - ✅ **M1 完成**：变步长 BDF2 在 Python transient 路径实现（`integration_method="gear2"`，
   charge 模式 + load/线性电容）。解析 RC 单元测试验证 **二阶收敛**（BE 误差 ~h 减半、gear2 ~h² 减到 1/4，

@@ -18,7 +18,7 @@
 - 工艺角与逐器件 mismatch 扰动。
 - 面向 Cadence/Spectre 的验证，涵盖工作点、AC、噪声、瞬态、PSS、PAC 和 PNoise 行为。
 
-实现刻意保持小而自包含。目前由 `core/` 下的十六个 Python 源文件组成（不含 `__init__.py`）。
+实现刻意保持小而自包含。目前由 `core/` 下的十六个 Python 源文件组成（另含 `__init__.py` 和 CLI 入口 `__main__.py`）。
 
 ## 文件结构
 
