@@ -164,7 +164,8 @@
       "additionalProperties": true,
       "properties": {
         "freqs": {"$ref": "#/$defs/frequencyGrid"},
-        "band": {"$ref": "#/$defs/band"}
+        "band": {"$ref": "#/$defs/band"},
+        "corner": {"$ref": "#/$defs/corner"}
       }
     },
     "pssAnalysis": {
@@ -179,7 +180,8 @@
         "residual_tol": {"$ref": "#/$defs/positiveNumber"},
         "jacobian_reuse": {"type": "boolean"},
         "jacobian_rebuild_interval": {"type": "integer", "minimum": 0},
-        "analytic_jacobian": {"type": "boolean"}
+        "analytic_jacobian": {"type": "boolean"},
+        "corner": {"$ref": "#/$defs/corner"}
       }
     },
     "pacAnalysis": {
@@ -197,7 +199,8 @@
         "compute_condition": {"type": "boolean"},
         "profile": {"type": "boolean"},
         "debug": {"type": "boolean"},
-        "lti_fast_path": {"type": "boolean"}
+        "lti_fast_path": {"type": "boolean"},
+        "corner": {"$ref": "#/$defs/corner"}
       }
     },
     "pnoiseAnalysis": {
@@ -218,7 +221,8 @@
         "iterative_maxiter": {"type": ["integer", "null"], "minimum": 1},
         "profile": {"type": "boolean"},
         "lti_fast_path": {"type": "boolean"},
-        "pss": {"$ref": "#/$defs/pssAnalysis"}
+        "pss": {"$ref": "#/$defs/pssAnalysis"},
+        "corner": {"$ref": "#/$defs/corner"}
       }
     },
     "transientAnalysis": {
@@ -229,7 +233,8 @@
         "periodic": {"$ref": "#/$defs/periodic"},
         "duration": {"$ref": "#/$defs/positiveNumber"},
         "tstop": {"$ref": "#/$defs/positiveNumber"},
-        "n_points": {"type": "integer", "minimum": 2}
+        "n_points": {"type": "integer", "minimum": 2},
+        "corner": {"$ref": "#/$defs/corner"}
       }
     },
     "periodic": {
@@ -336,6 +341,24 @@
           "properties": {
             "real": {"type": "number"},
             "imag": {"type": "number"}
+          }
+        }
+      ]
+    },
+    "corner": {
+      "description": "Process corner name or explicit PMOS_TFT model-shift map.",
+      "oneOf": [
+        {"enum": ["typical", "slow", "fast"]},
+        {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {"type": "number"},
+              {
+                "type": "object",
+                "additionalProperties": {"type": "number"}
+              }
+            ]
           }
         }
       ]

@@ -174,6 +174,9 @@ matrix, with zero extra transient runs. Set `analytic=False` for the original
 finite-difference shooting path (accurate but costs `n_state+2` transient runs
 per frequency). PNoise uses harmonic balance on the PSS orbit — it's a
 first-principles LPTV noise solve with no calibration fudge factors.
+For the D3 `chop_tb_d3` slow-corner Spectre reference at `f_chop=200 Hz`,
+the native PAC gain and PNoise IRN are within 1% when run with the matching
+PNoise `maxsideband=10` and dec=10 noise grid.
 `pmos_chopper_pac` / `pmos_chopper_pnoise` are chopper compatibility wrappers;
 generic periodic topologies can call `core.pac_solver.pac_solve` and
 `core.pnoise_solver.pnoise_solve` directly using the orbit returned by

@@ -7,21 +7,31 @@
 项目已从单一 AFE 原型推进为通用本地电路仿真框架。已完成的能力：
 
 - **JSON 电路描述**：schema 校验、多器件、多输出、仿真参数内嵌（`schemas/circuit.schema.json`）
-- **求解器栈**：DC 工作点、AC 小信号、噪声（热噪声+闪烁噪声）、瞬态
+- **求解器栈**：DC 工作点、AC 小信号、噪声（热噪声+闪烁噪声）、瞬态（BE 默认，可选 gear2/BDF2）
 - **元件类型**：PMOS_TFT、电阻、电容、理想直流电流源
-- **周期分析**：通用 shooting PSS（`pss_solve`，默认解析 monodromy Jacobian）、通用 PSS 辅助 PAC（`pac_solve`，默认解析伴随谐波平衡，`O(1)` 每频点）、通用 harmonic-balance PNoise（`pnoise_solve`）；chopper 侧保留 `pmos_chopper_pss/pac/pnoise` 兼容包装器
+- **周期分析**：通用 shooting PSS（`pss_solve`，默认解析 monodromy Jacobian，gear2 支持增广 2n 态 monodromy）、通用 PSS 辅助 PAC（`pac_solve`，默认解析伴随谐波平衡，`O(1)` 每频点）、通用 harmonic-balance PNoise（`pnoise_solve`）；chopper 侧保留 `pmos_chopper_pss/pac/pnoise` 兼容包装器
 - **Chopper 分析**：理想 LPTV 频域、PMOS 静态相位、有限边沿谐波、charge injection、PMOS quasi-LPTV 边带折叠（需 Cadence 标定常数）、hard-switched PMOS transient（已对齐 Spectre `tran`）、PMOS 八开关 PSS/PAC/PNoise（无需标定常数，已对齐 Spectre PNoise）
 - **设计空间探索**：JSON 配置层、LHS 采样、约束过滤、Pareto 选择、CSV/JSONL 导出（`core/explore.py`）
 - **工艺角与鲁棒性**：全局 corner、逐器件 mismatch MC、latch 筛查（`core/corners.py`）
 - **交互式 demo**：Web 前端 + REST API（`demo/server.py`）
 - **性能基准**：4 个固定 benchmark（AFE / model / chopper / sweep），支持 Numba 对比
 - **测试覆盖**：12 个测试文件覆盖核心路径
-- **Numba 加速**：已覆盖 PMOS 电流、内部节点 Newton、transient 热路径
+- **Numba 加速**：已覆盖 PMOS 电流、内部节点 Newton、transient 热路径、gear2 grid 求解器
 
 PSS/PAC/PNoise 三件套已落地，并已把 PAC/PNoise 抽成通用拓扑级周期小信号/噪声求解器。
 ✅ PAC 已从有限差分升级为解析伴随谐波平衡（`analytic=True`，默认），PSS shooting
 Jacobian 也已有解析 monodromy 路径（`analytic_jacobian=True`，默认）。下一步重点：
 完善 Cadence 校准闭环，深化 transient/PNoise 性能，以及扩展更多周期拓扑验证。
+
+### gear2/BDF2 积分器升级（2026-06 完成主体）
+
+chopper PSS 已默认使用 gear2（二阶 BDF2），三 corner PAC baseband 全部 <1%（BE 时 typ/fast 差 −2.5%）。关键交付：
+- ✅ 变步长 BDF2（charge 模式 + 步长比限制 ρ≤2 保证零稳定），gear2 二阶收敛已验证
+- ✅ Numba gear2 grid 求解器（单步/区间，BE 自启动，warm 0.89s）
+- ✅ 解析 gear2 monodromy（增广 2n 态，warm 0.24s，比 FD shooting 快 4×）
+- ✅ PSS/PAC/PNoise/chopper 全部默认 gear2；裸 `transient()` 保留 BE 默认
+- ⚠️ **待硬化**：gear2 grid 的 subdivision/retry（像 BE grid 一样 pieces + rolling 两步历史）。试过一次重构但引入了不可接受的 PAC 回归（−3.5%，收敛到了另一个有效周期解），已回退到可靠的单步版。裸 `transient()` 要在 gear2 默认下健壮运行需要这个硬化。
+- 全套 93 passed（含 RUN_SLOW_CHOPPER）；详见 `docs/gear2_integration_plan.md`。
 
 ---
 
@@ -33,7 +43,6 @@ PSS/PAC/PNoise 第一版已完成并通过 Cadence 对标：
 2. **PAC**（`core/pac_solver.py::pac_solve()`）：✅ 默认解析伴随谐波平衡（`analytic=True`）：沿 PSS 轨道采样 G(t)/C(t) 和输入耦合列，FFT 到谐波系数，构建转换矩阵 Y_HB(f)，每频率一次伴随线性求解得到 sideband-0 增益 — O(1) 求解，零额外瞬态运行。`analytic=False` 可回退到原有限差分 shooting 路径。静态 PSS 仍走 LTI `ac_solve` fast path。`pmos_chopper_pac()` 现在只是 chopper 差分输入包装器。
 3. **PNoise**（`core/pnoise_solver.py::pnoise_solve()`）：PSS 轨道上的 harmonic-balance 转换矩阵法。沿 PSS 轨道 N 点采样 → 时变小信号 G(t)/C(t) → FFT 到频域 → 组装 `nb×nb` 块对角系统 `Y[kr,kc] = G_{kr-kc} + jω·C_{kr-kc}` → 伴随求解传递阻抗 Z_{j,k} → 循环平稳器件/电阻噪声折叠 `S_out = Σ_j Σ_k |Z_{j,k}|² S_j`。无需 Cadence 标定常数，已是第一性原理 LPTV 噪声解。静态轨道自动走 LTI noise fast path；LPTV 轨道在 `pss_result` 上复用采样 `G(t)/C(t)`、HB block 和相同频点 adjoint 解。HB 求解支持 dense / sparse direct / block-Jacobi 预条件 GMRES；默认 auto 在矩阵大且非常稀疏时切 sparse。`pmos_chopper_pnoise()` 现在只是 chopper 包装器。
 4. **对标**：UI 锁定尺寸、`f_chop=225 Hz`（或 300 Hz）、switch `5000/30`、`rise/fall=20 us` 下，PNoise IRN 经输出 RC 滤波后与 Spectre PNoise 吻合（`test_pmos_chopper_pnoise_matches_cadence_band`）。
-5. **PAC/PNoise sideband 收敛**：硬开关 chopper 的换流被展开到很多 sideband，解析伴随 HB 转换矩阵需要足够的 `max_sideband` 才能收敛到 Spectre。对 design #3（`f_chop=200 Hz`，Cadence PSS/PAC 参考 baseband 增益 13.92 V/V），`max_sideband=10` 偏低 ~13%，`max_sideband=32`（chopper 包装器新默认值）收敛到 ~-2.5%（剩余为模型级差异），rolloff 与 IRN 对齐到 <1%。HB 用到 2K 阶谐波，采样数已自动保证 `n_period_samples >= 4K+2` 以避免混叠。回归测试 `test_pmos_chopper_pac_matches_cadence_baseband_gain`。
 
 后续工作：
 
@@ -56,8 +65,9 @@ PSS/PAC/PNoise 第一版已完成并通过 Cadence 对标：
 
 ## 3. 深化 transient 性能
 
-第一阶段 Numba 内核优化已完成（PMOS 电流、内部节点 Newton、偏置电容、terminal derivative、transient Newton 内循环）。后续方向：
+第一阶段 Numba 内核优化已完成（PMOS 电流、内部节点 Newton、偏置电容、terminal derivative、transient Newton 内循环）。gear2/BDF2 积分器已上线（chopper PSS/PAC/PNoise 默认 gear2），chopper PAC baseband 从 BE 的 −2.5% 改善到 <1%。后续方向：
 
+- **gear2 grid subdivision/retry 硬化**：当前 gear2 grid 是单步版（无 pieces + retry），裸 `transient()` 仍默认 BE。需要把 BE grid 的 subdivision/retry/rolling 两步历史正确复刻到 gear2 grid，才能让裸 `transient()` 安全默认 gear2。上次尝试因轨道漂移（−3.5% PAC）已回退，需更仔细地保持与单步版的轨道一致。
 - 把每个 interval/substep 的重试拆步和输出采样做成 compiled step plan，减少 Python 调度开销
 - 对常用小矩阵（6x6 / chopper 拓扑规模）做更专门的 solve 路径
 - chopper transient 固定开关拓扑的深度编译化

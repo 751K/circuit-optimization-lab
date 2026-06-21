@@ -172,10 +172,11 @@ def test_pnoise_numba_kernels_match_reference_when_enabled():
     Gf = rng.normal(size=(N, n, n)) + 1j * rng.normal(size=(N, n, n))
     Cf = rng.normal(size=(N, n, n)) + 1j * rng.normal(size=(N, n, n))
 
-    got_y, got_c = pnoise_hb_blocks_numba(Gf, Cf, K, 225.0)
-    ref_y, ref_c = _pnoise_hb_blocks_impl.py_func(Gf, Cf, K, 225.0)
-    np.testing.assert_allclose(got_y, ref_y, rtol=1e-14, atol=1e-14)
-    np.testing.assert_allclose(got_c, ref_c, rtol=1e-14, atol=1e-14)
+    for charge_caps in (False, True):
+        got_y, got_c = pnoise_hb_blocks_numba(Gf, Cf, K, 225.0, charge_caps)
+        ref_y, ref_c = _pnoise_hb_blocks_impl.py_func(Gf, Cf, K, 225.0, charge_caps)
+        np.testing.assert_allclose(got_y, ref_y, rtol=1e-14, atol=1e-14)
+        np.testing.assert_allclose(got_c, ref_c, rtol=1e-14, atol=1e-14)
 
     nfreq = 3
     nb = 2 * K + 1

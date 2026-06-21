@@ -228,8 +228,9 @@ The PMOS-switch sideband path was initially validated with
 native `pmos_chopper_pac` and `pmos_chopper_pnoise` now replace those
 calibration-dependent paths with first-principles periodic small-signal and
 noise solves. The finite-edge transient path has been checked against Spectre
-`tran`, and the native PNoise IRN matches Spectre PNoise to within ~6% at full
-resolution (see `test_pmos_chopper_pnoise_matches_cadence_band`).
+`tran`. For the D3 `chop_tb_d3` slow-corner PSS/PAC/PNoise reference, native
+PAC is within 1% at baseband and 200 Hz, and native PNoise IRN is within 1%
+when run on the same dec=10 noise grid and `maxsideband=10`.
 
 ### `pss_solver.py`
 
@@ -324,9 +325,9 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
 
 ### `transient_solver.py`
 
-Solves the time-domain response of the topology-defined system using backward Euler integration:
+Solves the time-domain response of the topology-defined system using backward Euler (default) or variable-step BDF2/gear2 integration:
 
-- `transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None, topo=AFE_TOPO, inputs=None, node_inputs=None)`
+- `transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None, topo=AFE_TOPO, inputs=None, node_inputs=None, integration_method="be")`
 - Supports legacy AFE `vip/vin` inputs and generic `inputs={name: waveform}` driven through `topo.transient_inputs`.
 - `node_inputs={node: input_key}` drives a (rail) NODE with a waveform — used by a front-end testbench where the stimulus enters at source nodes and propagates through a passive network, rather than driving device gates directly.
 - `current_inputs=[{"p": node_a, "q": node_b, "input": key}]` stamps a
@@ -359,6 +360,24 @@ Solves the time-domain response of the topology-defined system using backward Eu
   finite-difference Jacobian recovery can be applied only when requested.
 - Uses implicit differentiation of the PMOS internal nodes for faster transient
   Jacobians, with finite-difference fallback.
+
+**Gear2/BDF2 integration** (`integration_method="gear2"`): The transient solver
+also supports variable-step BDF2 (second-order, stiffly stable). Key properties:
+
+- Uses the stable charge-mode capacitor companion `i_n = (α0·Q_n + α1·Q_{n-1} +
+  α2·Q_{n-2})/h_n`, same as BE's `(Q_n − Q_{n-1})/h` but with two-step history.
+- Step-ratio clamp ρ≤2 guarantees zero-stability on non-uniform grids.
+- BE self-start on the first step of every interval.
+- A compiled Numba gear2 grid solver (`_transient_solve_grid_gear2_impl`) handles
+  single-step intervals; the analytic gear2 monodromy (augmented 2n-state) feeds
+  the PSS shooting Jacobian.
+- Chopper PSS/PAC/PNoise default to gear2 — PAC baseband errors drop from BE's
+  −2.5% (typ/fast) to <1% across all three corners.
+- Raw `transient()` defaults to BE. The gear2 grid currently lacks the
+  subdivision/retry machinery that BE's grid has (pieces + rolling 2-step
+  history); an attempted rewrite introduced a −3.5% PAC regression (converged
+  to a different valid periodic orbit) and was reverted. This hardening is the
+  remaining step before gear2 can become the raw-transient default.
 
 ### Front-end stimulus (`ac_drives`)
 
@@ -538,9 +557,9 @@ The current core was calibrated against Cadence Spectre 24.1 for the AT4000TG AF
   `21.369 dB`, bandwidth `738.6 Hz` vs `721.9 Hz`, and IRN `12.592 uVrms` vs
   `12.591 uVrms`.
 - Native `pmos_chopper_pac` and `pmos_chopper_pnoise` (first-principles,
-  no calibration constants) match Spectre PSS/PAC/PNoise: PNoise IRN
-  within ~6% of Cadence at full resolution for the D3 design case
-  (f_chop=300 Hz, output RC filter, K=6 sidebands).
+  no calibration constants) match the D3 `chop_tb_d3` slow-corner Spectre
+  PSS/PAC/PNoise reference at `f_chop=200 Hz`: PAC baseband and 200 Hz gain
+  are within 1%, and PNoise IRN is within 1% on the same dec=10 noise grid.
 - Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms
   input-referred noise.
 

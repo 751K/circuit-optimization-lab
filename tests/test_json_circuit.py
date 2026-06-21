@@ -8,6 +8,7 @@ import core.analysis_dispatch as dispatch_mod
 from core.ac_solver import ac_solve
 from core.analysis_dispatch import run_analysis_suite
 from core.circuit_loader import circuit_from_dict, load_circuit_json
+from core.corners import CORNERS
 from core.noise_solver import _KB, _TEMP, band_rms, noise_analysis
 from core.topology import AFE_TOPO
 from core.transient_solver import transient
@@ -114,6 +115,84 @@ def test_dispatch_reuses_ac_dc_op_as_noise_seed(monkeypatch):
     )
 
     assert set(results) == {"ac", "noise"}
+
+
+def test_dispatch_resolves_and_keeps_process_corner_consistent(monkeypatch):
+    spec = load_circuit_json("examples/periodic_rc.json")
+    freqs = np.array([100.0, 1000.0])
+    seen = []
+
+    def fake_ac_solve(*_args, **kwargs):
+        seen.append(("ac", kwargs.get("corner")))
+        return {
+            "dc_op": {"OUT": 0.0},
+            "freqs": freqs.copy(),
+            "gains": np.ones_like(freqs),
+            "response": np.ones_like(freqs, dtype=complex),
+            "corner": kwargs.get("corner"),
+        }
+
+    def fake_noise_analysis(*_args, **kwargs):
+        seen.append(("noise", kwargs.get("corner"), kwargs.get("ac_result") is not None))
+        return {"out_psd": np.ones_like(freqs), "irn_psd": np.ones_like(freqs)}
+
+    def fake_pss_solve(*args, **kwargs):
+        seen.append(("pss", kwargs.get("corner")))
+        return {"converged": True, "period": args[2], "corner": kwargs.get("corner")}
+
+    def fake_pac_solve(*_args, **kwargs):
+        seen.append(("pac", kwargs.get("corner"), kwargs["pss_result"].get("corner")))
+        return {"gains": np.ones_like(freqs), "response": np.ones_like(freqs, dtype=complex)}
+
+    def fake_pnoise_solve(*_args, **kwargs):
+        seen.append(("pnoise", kwargs.get("corner"), kwargs["pss_result"].get("corner")))
+        return {"out_psd": np.ones_like(freqs), "irn_psd": np.ones_like(freqs)}
+
+    monkeypatch.setattr(dispatch_mod, "ac_solve", fake_ac_solve)
+    monkeypatch.setattr(dispatch_mod, "noise_analysis", fake_noise_analysis)
+    monkeypatch.setattr(dispatch_mod, "pss_solve", fake_pss_solve)
+    monkeypatch.setattr(dispatch_mod, "pac_solve", fake_pac_solve)
+    monkeypatch.setattr(dispatch_mod, "pnoise_solve", fake_pnoise_solve)
+
+    analyses = {
+        "ac": {"freqs": freqs.tolist(), "corner": "slow"},
+        "noise": {"freqs": freqs.tolist()},
+        "pss": {"max_shooting_iters": 0},
+        "pac": {"freqs": freqs.tolist(), "input_drive": {"vin": 1.0}, "corner": "slow"},
+        "pnoise": {"freqs": freqs.tolist(), "input_drive": {"vin": 1.0}, "corner": "slow"},
+    }
+    run_analysis_suite(spec, analyses=analyses)
+
+    slow = CORNERS["slow"]
+    assert seen == [
+        ("ac", slow),
+        ("noise", slow, True),
+        ("pss", slow),
+        ("pac", slow, slow),
+        ("pnoise", slow, slow),
+    ]
+
+
+def test_dispatch_rejects_mixed_pss_and_pac_corners(monkeypatch):
+    spec = load_circuit_json("examples/periodic_rc.json")
+
+    def fake_pss_solve(*args, **kwargs):
+        return {"converged": True, "period": args[2], "corner": kwargs.get("corner")}
+
+    monkeypatch.setattr(dispatch_mod, "pss_solve", fake_pss_solve)
+
+    with pytest.raises(ValueError, match="corner mismatch"):
+        run_analysis_suite(
+            spec,
+            analyses={
+                "pss": {"corner": "typical", "max_shooting_iters": 0},
+                "pac": {
+                    "freqs": [100.0],
+                    "input_drive": {"vin": 1.0},
+                    "corner": "slow",
+                },
+            },
+        )
 
 
 def test_loader_rejects_unknown_device_node():

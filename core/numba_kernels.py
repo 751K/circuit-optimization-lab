@@ -21,6 +21,9 @@ if _USE_NUMBA_FLAG is not None and _USE_NUMBA_FLAG.lower() in _FALSE_ENV_VALUES:
 _NUMBA_CACHE_FLAG = os.environ.get("CIRCUIT_NUMBA_CACHE")
 NUMBA_CACHE = (_NUMBA_CACHE_FLAG is None or
                _NUMBA_CACHE_FLAG.lower() not in _FALSE_ENV_VALUES)
+_CAP_MODE_FLAG = os.environ.get("CIRCUIT_PMOS_TRANSIENT_CAP_MODE", "charge").lower()
+USE_CHARGE_CAPS = _CAP_MODE_FLAG in {"charge", "q", "qstamp", "q-stamp"}
+USE_AVERAGE_CAPS = _CAP_MODE_FLAG in {"average", "avg", "trapezoid", "trap"}
 
 try:
     from numba import njit
@@ -342,6 +345,44 @@ def _capacitance_charges_impl(Vs, Vd, Vg, Vs1, Vd1, Vfb, two_over_pi,
     return qgs, qgd, Cgss, Cgdd
 
 
+def _va_sorted_nodes_impl(Vs, Vd, Vs1, Vd1):
+    v_s = Vs if Vs > Vs1 else Vs1
+    v_s1 = Vs1 if Vs > Vs1 else Vs
+    v_d = Vd1 if Vd1 > Vd else Vd
+    v_d1 = Vd if Vd1 > Vd else Vd1
+    return v_s, v_s1, v_d, v_d1
+
+
+def _capacitance_branch_terms_impl(Vs, Vd, Vg, Vs1, Vd1, Vfb, two_over_pi,
+                                   cap_cgs1, cap_cgd1, cap_half_wl_ci,
+                                   cap_cgs3_base, cap_cgd3_base, k1):
+    v_s, _, v_d, _ = _va_sorted_nodes_impl(Vs, Vd, Vs1, Vd1)
+    y_s = v_s - Vg + Vfb
+    y_d = v_d - Vg + Vfb
+    x_gs = Vg - Vs
+    x_gd = Vg - Vd
+    cgs2_coeff = 1.43 * cap_half_wl_ci
+    cgd2_coeff = 0.33 * cap_half_wl_ci
+    cgs3_coeff = 0.34 * cap_cgs3_base
+    cgd3_coeff = 0.52 * cap_cgd3_base
+    f_s_060 = two_over_pi * math.atan(y_s * 0.6) + 1.0
+    f_s_201 = two_over_pi * math.atan(y_s * 2.01) + 1.0
+    f_d_021 = two_over_pi * math.atan(y_d * 0.21) + 1.0
+    f_d_042 = two_over_pi * math.atan(y_d * 0.42) + 1.0
+    qscale = k1 * 1e4 * 1e-12
+    cgs_cross = qscale * cgs3_coeff * f_d_021
+    cgd_cross = qscale * cgd2_coeff * f_s_201
+    qgs_self = qscale * (
+        cap_cgs1 * x_gs -
+        cgs2_coeff * _atan_cap_integral_impl(y_s, 0.6, two_over_pi))
+    qgd_self = qscale * (
+        cap_cgd1 * x_gd -
+        cgd3_coeff * _atan_cap_integral_impl(y_d, 0.42, two_over_pi))
+    Cgss = qscale * (cap_cgs1 + cgs2_coeff * f_s_060) + cgs_cross
+    Cgdd = qscale * (cap_cgd1 + cgd3_coeff * f_d_042) + cgd_cross
+    return qgs_self, qgd_self, cgs_cross, cgd_cross, Cgss, Cgdd
+
+
 def _eval_at_impl(Vs, Vd, Vg, Vs1, Vd1, Vfb, Vss, Lc, lambda_,
                   contact_scale, exponent, current_scale, inv_Rleak):
     I_s_s1, I_s1_d1, I_d1_d, _, _ = _eval_currents_impl(
@@ -623,6 +664,7 @@ def _fill_prev_terms_impl(
         op_cache_valid, op_cache_vs1, op_cache_vd1,
         cap_a_kind, cap_a_ref, cap_a_val,
         cap_b_kind, cap_b_ref, cap_b_val,
+        cap_mode,
         prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv):
     for pos in range(prev_vs.shape[0]):
         pVs = _term_value_impl(dev_s_kind[pos], dev_s_ref[pos],
@@ -644,12 +686,21 @@ def _fill_prev_terms_impl(
         op_cache_valid[pos] = True
         op_cache_vs1[pos] = pVs1
         op_cache_vd1[pos] = pVd1
-        Cgs, Cgd = _capacitances_impl(
-            pVs, pVd, pVg, pVs1, pVd1, p_Vfb[pos], p_two_over_pi[pos],
-            p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
-            p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
-        prev_cgs[pos] = Cgs
-        prev_cgd[pos] = Cgd
+        if cap_mode == 3:
+            qgs, qgd, _, _, Cgs, Cgd = _capacitance_branch_terms_impl(
+                pVs, pVd, pVg, pVs1, pVd1, p_Vfb[pos], p_two_over_pi[pos],
+                p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
+                p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
+        else:
+            qgs, qgd, Cgs, Cgd = _capacitance_charges_impl(
+                pVs, pVd, pVg, pVs1, pVd1, p_Vfb[pos], p_two_over_pi[pos],
+                p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
+                p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
+        if cap_mode == 1:
+            qgs = Cgs
+            qgd = Cgd
+        prev_cgs[pos] = qgs
+        prev_cgd[pos] = qgd
     for pos in range(cap_prev_dv.shape[0]):
         pva = _term_value_impl(cap_a_kind[pos], cap_a_ref[pos],
                                cap_a_val[pos], Vp, input_prev)
@@ -769,8 +820,13 @@ def _stamp_transient_system_impl(
         cap_b_val, cap_ai, cap_bi, cap_value,
         isrc_pi, isrc_qi, isrc_value,
         dyn_pi, dyn_qi, dyn_input_idx,
+        cap_mode,
         prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv,
-        R, J, profile_enabled, profile_stats):
+        R, J, profile_enabled, profile_stats,
+        bdf_a0, bdf_a1, bdf_a2, prev2_cgs, prev2_cgd, cap_prev2_dv):
+    # cap history weights: backward-Euler = (1, -1, 0); variable-step BDF2/gear2
+    # passes (a0, a1, a2) with prev2_* the n-2 charges/dv. Only the charge-mode
+    # (cap_mode 0) device caps and the linear/load caps use the BDF2 form.
     for i in range(n):
         R[i] = 0.0
         for j in range(n):
@@ -808,10 +864,18 @@ def _stamp_transient_system_impl(
             Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_Vss[pos], p_Lc[pos],
             p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
             p_current_scale[pos], p_inv_Rleak[pos])
-        Cgs, Cgd = _capacitances_impl(
-            Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_two_over_pi[pos],
-            p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
-            p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
+        if cap_mode == 3:
+            qgs, qgd, cgs_cross, cgd_cross, Cgs, Cgd = _capacitance_branch_terms_impl(
+                Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_two_over_pi[pos],
+                p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
+                p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
+        else:
+            qgs, qgd, Cgs, Cgd = _capacitance_charges_impl(
+                Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_two_over_pi[pos],
+                p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
+                p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
+            cgs_cross = 0.0
+            cgd_cross = 0.0
 
         di = dev_di[pos]
         gi = dev_gi[pos]
@@ -837,15 +901,31 @@ def _stamp_transient_system_impl(
                 R[gi] += i_dg
 
         if Cgs != 0.0:
-            c_step = 0.5 * (Cgs + prev_cgs[pos])
-            i_ab = c_step * inv_h * ((Vg - Vs) - (pVg - pVs))
+            if cap_mode == 0:
+                i_ab = (bdf_a0 * qgs + bdf_a1 * prev_cgs[pos] +
+                        bdf_a2 * prev2_cgs[pos]) * inv_h
+            elif cap_mode == 1:
+                i_ab = 0.5 * (Cgs + prev_cgs[pos]) * ((Vg - Vs) - (pVg - pVs)) * inv_h
+            elif cap_mode == 3:
+                i_ab = ((qgs - prev_cgs[pos]) +
+                        cgs_cross * ((Vg - Vs) - (pVg - pVs))) * inv_h
+            else:
+                i_ab = Cgs * ((Vg - Vs) - (pVg - pVs)) * inv_h
             if gi >= 0:
                 R[gi] -= i_ab
             if si >= 0:
                 R[si] += i_ab
         if Cgd != 0.0:
-            c_step = 0.5 * (Cgd + prev_cgd[pos])
-            i_ab = c_step * inv_h * ((Vg - Vd) - (pVg - pVd))
+            if cap_mode == 0:
+                i_ab = (bdf_a0 * qgd + bdf_a1 * prev_cgd[pos] +
+                        bdf_a2 * prev2_cgd[pos]) * inv_h
+            elif cap_mode == 1:
+                i_ab = 0.5 * (Cgd + prev_cgd[pos]) * ((Vg - Vd) - (pVg - pVd)) * inv_h
+            elif cap_mode == 3:
+                i_ab = ((qgd - prev_cgd[pos]) +
+                        cgd_cross * ((Vg - Vd) - (pVg - pVd))) * inv_h
+            else:
+                i_ab = Cgd * ((Vg - Vd) - (pVg - pVd)) * inv_h
             if gi >= 0:
                 R[gi] -= i_ab
             if di >= 0:
@@ -897,9 +977,7 @@ def _stamp_transient_system_impl(
                     count += 1
                 J[gi, gi] -= leak_g * count
         if Cgs != 0.0:
-            gc = Cgs * inv_h
-            c_step = 0.5 * (Cgs + prev_cgs[pos])
-            gc = c_step * inv_h
+            gc = bdf_a0 * Cgs * inv_h
             if gi >= 0:
                 J[gi, gi] -= gc
                 if si >= 0:
@@ -909,9 +987,7 @@ def _stamp_transient_system_impl(
                 if gi >= 0:
                     J[si, gi] += gc
         if Cgd != 0.0:
-            gc = Cgd * inv_h
-            c_step = 0.5 * (Cgd + prev_cgd[pos])
-            gc = c_step * inv_h
+            gc = bdf_a0 * Cgd * inv_h
             if gi >= 0:
                 J[gi, gi] -= gc
                 if di >= 0:
@@ -971,8 +1047,9 @@ def _stamp_transient_system_impl(
                                   cap_a_val[pos], V, input_now)
             vb = _term_value_impl(cap_b_kind[pos], cap_b_ref[pos],
                                   cap_b_val[pos], V, input_now)
-            i_ab = cap * inv_h * ((va - vb) - cap_prev_dv[pos])
-            gc = cap * inv_h
+            i_ab = cap * inv_h * (bdf_a0 * (va - vb) + bdf_a1 * cap_prev_dv[pos] +
+                                  bdf_a2 * cap_prev2_dv[pos])
+            gc = bdf_a0 * cap * inv_h
             ai = cap_ai[pos]
             bi = cap_bi[pos]
             if ai >= 0:
@@ -1007,11 +1084,12 @@ def _transient_newton_impl(
         cap_b_val, cap_ai, cap_bi, cap_value,
         isrc_pi, isrc_qi, isrc_value,
         dyn_pi, dyn_qi, dyn_input_idx,
+        cap_mode,
         clip_lo, clip_hi):
     V = seed.copy()
     R = np.empty(n)
     J = np.empty((n, n))
-    profile_stats = np.zeros(16)
+    profile_stats = np.zeros(24)
     prev_vs = np.empty(dev_di.shape[0])
     prev_vd = np.empty(dev_di.shape[0])
     prev_vg = np.empty(dev_di.shape[0])
@@ -1030,6 +1108,7 @@ def _transient_newton_impl(
         op_cache_valid, op_cache_vs1, op_cache_vd1,
         cap_a_kind, cap_a_ref, cap_a_val,
         cap_b_kind, cap_b_ref, cap_b_val,
+        cap_mode,
         prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv)
     if not ok_prev:
         return V, 0, False, False
@@ -1052,8 +1131,10 @@ def _transient_newton_impl(
             cap_b_val, cap_ai, cap_bi, cap_value,
             isrc_pi, isrc_qi, isrc_value,
             dyn_pi, dyn_qi, dyn_input_idx,
+            cap_mode,
             prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv,
-            R, J, False, profile_stats)
+            R, J, False, profile_stats,
+            1.0, -1.0, 0.0, prev_cgs, prev_cgd, cap_prev_dv)
         if not ok:
             return V, it + 1, False, False
 
@@ -1118,9 +1199,11 @@ def _transient_newton_reuse_impl(
         cap_b_val, cap_ai, cap_bi, cap_value,
         isrc_pi, isrc_qi, isrc_value,
         dyn_pi, dyn_qi, dyn_input_idx,
+        cap_mode,
         clip_lo, clip_hi,
         V, R, J, prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv,
-        profile_enabled, profile_stats):
+        profile_enabled, profile_stats,
+        bdf_a0, bdf_a1, bdf_a2, prev2_cgs, prev2_cgd, cap_prev2_dv):
     for i in range(n):
         V[i] = seed[i]
     ok_prev = _fill_prev_terms_impl(
@@ -1135,10 +1218,15 @@ def _transient_newton_reuse_impl(
         op_cache_valid, op_cache_vs1, op_cache_vd1,
         cap_a_kind, cap_a_ref, cap_a_val,
         cap_b_kind, cap_b_ref, cap_b_val,
+        cap_mode,
         prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv)
     if not ok_prev:
+        if profile_enabled:
+            profile_stats[20] += 1.0
         return 0, False, False
     prev = math.inf
+    last_rmax = math.inf
+    last_mx = math.inf
     for it in range(maxit):
         ok = _stamp_transient_system_impl(
             V, Vp, input_now, input_prev, h, n, gmin, HH,
@@ -1157,28 +1245,49 @@ def _transient_newton_reuse_impl(
             cap_b_val, cap_ai, cap_bi, cap_value,
             isrc_pi, isrc_qi, isrc_value,
             dyn_pi, dyn_qi, dyn_input_idx,
+            cap_mode,
             prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv,
-            R, J, profile_enabled, profile_stats)
+            R, J, profile_enabled, profile_stats,
+            bdf_a0, bdf_a1, bdf_a2, prev2_cgs, prev2_cgd, cap_prev2_dv)
         if not ok:
+            if profile_enabled:
+                profile_stats[20] += 1.0
+                profile_stats[16] = last_rmax
+                if last_rmax > profile_stats[17]:
+                    profile_stats[17] = last_rmax
+                profile_stats[18] = last_mx
+                if last_mx > profile_stats[19]:
+                    profile_stats[19] = last_mx
             return it + 1, False, False
 
-        if fallback_accept:
-            rmax = 0.0
+        if profile_enabled:
+            last_rmax = 0.0
             for i in range(n):
                 val = abs(R[i])
-                if val > rmax:
-                    rmax = val
+                if val > last_rmax:
+                    last_rmax = val
+        if fallback_accept:
+            rmax = last_rmax
             if rmax < fallback_tol:
                 return it + 1, True, True
 
         solved, dV = _solve_dense_neg_rhs_inplace_impl(J, R)
         if not solved:
+            if profile_enabled:
+                profile_stats[21] += 1.0
+                profile_stats[16] = last_rmax
+                if last_rmax > profile_stats[17]:
+                    profile_stats[17] = last_rmax
+                profile_stats[18] = last_mx
+                if last_mx > profile_stats[19]:
+                    profile_stats[19] = last_mx
             return it + 1, False, True
         mx = 0.0
         for i in range(n):
             val = abs(dV[i])
             if val > mx:
                 mx = val
+        last_mx = mx
         if mx > step_limit:
             scale = step_limit / mx
             for i in range(n):
@@ -1202,6 +1311,14 @@ def _transient_newton_reuse_impl(
                 continue
             return it + 1, True, True
         prev = mx
+    if profile_enabled:
+        profile_stats[22] += 1.0
+        profile_stats[16] = last_rmax
+        if last_rmax > profile_stats[17]:
+            profile_stats[17] = last_rmax
+        profile_stats[18] = last_mx
+        if last_mx > profile_stats[19]:
+            profile_stats[19] = last_mx
     return maxit, False, True
 
 
@@ -1225,6 +1342,7 @@ def _transient_solve_grid_impl(
         cap_b_val, cap_ai, cap_bi, cap_value,
         isrc_pi, isrc_qi, isrc_value,
         dyn_pi, dyn_qi, dyn_input_idx,
+        cap_mode,
         clip_lo, clip_hi):
     N = tgrid.shape[0]
     ninputs = input_values.shape[0]
@@ -1248,14 +1366,16 @@ def _transient_solve_grid_impl(
     prev_cgs = np.empty(dev_di.shape[0])
     prev_cgd = np.empty(dev_di.shape[0])
     cap_prev_dv = np.empty(cap_value.shape[0])
-    profile_stats = np.zeros(16)
+    profile_stats = np.zeros(24)
+    failed_interval_indices = np.full(N, -1, dtype=np.int64)
+    failed_interval_count = 0
     nsubsteps = 0
 
     for k in range(1, N):
         nsubsteps_before_interval = nsubsteps
         h = tgrid[k] - tgrid[k - 1]
         if h <= 0.0:
-            return False, Vhist, nsubsteps, k, profile_stats
+            return False, Vhist, nsubsteps, k, profile_stats, failed_interval_indices
         for ii in range(ninputs):
             input_start[ii] = input_values[ii, k - 1]
             input_end[ii] = input_values[ii, k]
@@ -1301,10 +1421,12 @@ def _transient_solve_grid_impl(
                 cap_b_val, cap_ai, cap_bi, cap_value,
                 isrc_pi, isrc_qi, isrc_value,
                 dyn_pi, dyn_qi, dyn_input_idx,
+                cap_mode,
                 clip_lo, clip_hi,
                 Vwork, R, J, prev_vs, prev_vd, prev_vg,
                 prev_cgs, prev_cgd, cap_prev_dv,
-                profile_enabled, profile_stats)
+                profile_enabled, profile_stats,
+                1.0, -1.0, 0.0, prev_cgs, prev_cgd, cap_prev_dv)
             if not ok:
                 retry_count = 1
                 for _retry_pow in range(max_retry_subdivisions):
@@ -1314,7 +1436,7 @@ def _transient_solve_grid_impl(
                     if fallback_accept:
                         if profile_enabled:
                             profile_stats[0] += iters
-                        return False, Vhist, nsubsteps_before_interval, k, profile_stats
+                        return False, Vhist, nsubsteps_before_interval, k, profile_stats, failed_interval_indices
                     if profile_enabled:
                         profile_stats[0] += iters
                     interval_failed = True
@@ -1351,10 +1473,12 @@ def _transient_solve_grid_impl(
                         cap_value,
                         isrc_pi, isrc_qi, isrc_value,
                         dyn_pi, dyn_qi, dyn_input_idx,
+                        cap_mode,
                         clip_lo, clip_hi,
                         Vwork, R, J, prev_vs, prev_vd, prev_vg,
                         prev_cgs, prev_cgd, cap_prev_dv,
-                        profile_enabled, profile_stats)
+                        profile_enabled, profile_stats,
+                        1.0, -1.0, 0.0, prev_cgs, prev_cgd, cap_prev_dv)
                     if profile_enabled:
                         profile_stats[0] += iters_r
                     if not ok_r:
@@ -1375,7 +1499,7 @@ def _transient_solve_grid_impl(
                         in0[ii] = in1[ii]
                 if not retry_ok:
                     if fallback_accept:
-                        return False, Vhist, nsubsteps_before_interval, k, profile_stats
+                        return False, Vhist, nsubsteps_before_interval, k, profile_stats, failed_interval_indices
                     interval_failed = True
                     break
             else:
@@ -1397,15 +1521,153 @@ def _transient_solve_grid_impl(
             # non-robust mode: keep the last accepted state, count the failed
             # interval, and continue the trajectory.
             profile_stats[13] += 1.0
+            if interval_edge:
+                profile_stats[14] += 1.0
+            else:
+                profile_stats[15] += 1.0
+            if profile_enabled and failed_interval_count < N:
+                failed_interval_indices[failed_interval_count] = k
+                failed_interval_count += 1
         for i in range(n):
             Vhist[k, i] = Vp[i]
     if profile_enabled:
         profile_stats[11] = N - 1
         profile_stats[12] = nsubsteps
-    return True, Vhist, nsubsteps, -1, profile_stats
+    return True, Vhist, nsubsteps, -1, profile_stats, failed_interval_indices
 
 
-def _pnoise_hb_blocks_impl(Gf, Cf, K, fundamental):
+def _transient_solve_grid_gear2_impl(
+        V0, tgrid, input_values, profile_enabled,
+        n, maxit, step_limit, vtol,
+        gmin, fallback_accept, fallback_tol, HH,
+        dev_d_kind, dev_d_ref, dev_d_val,
+        dev_g_kind, dev_g_ref, dev_g_val,
+        dev_s_kind, dev_s_ref, dev_s_val,
+        dev_di, dev_gi, dev_si, dev_use_abs,
+        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+        p_current_scale, p_inv_Rleak,
+        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+        p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+        op_cache_valid, op_cache_vs1, op_cache_vd1,
+        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+        res_b_val, res_ai, res_bi, res_g,
+        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+        cap_b_val, cap_ai, cap_bi, cap_value,
+        isrc_pi, isrc_qi, isrc_value,
+        dyn_pi, dyn_qi, dyn_input_idx,
+        cap_mode, clip_lo, clip_hi):
+    """Variable-step BDF2/gear2 grid solver: one full BDF2 step per interval
+    (single-step, no maxstep subdivision), backward-Euler self-start + step-ratio
+    limiting (rho>2 -> BE step for zero-stability).  Edge resolution comes from the
+    (refined/fine) tgrid the PSS supplies."""
+    N = tgrid.shape[0]
+    ninputs = input_values.shape[0]
+    ndev = dev_di.shape[0]
+    ncap = cap_value.shape[0]
+    Vhist = np.zeros((N, n))
+    for i in range(n):
+        Vhist[0, i] = V0[i]
+    Vp = V0.copy()
+    Vp2 = V0.copy()
+    Vwork = np.empty(n)
+    R = np.empty(n)
+    J = np.empty((n, n))
+    prev_vs = np.empty(ndev); prev_vd = np.empty(ndev); prev_vg = np.empty(ndev)
+    prev_cgs = np.empty(ndev); prev_cgd = np.empty(ndev)
+    cap_prev_dv = np.empty(ncap)
+    p2_vs = np.empty(ndev); p2_vd = np.empty(ndev); p2_vg = np.empty(ndev)
+    prev2_cgs = np.empty(ndev); prev2_cgd = np.empty(ndev)
+    cap_prev2_dv = np.empty(ncap)
+    # separate internal-node cache for the prev2 fill so it does not overwrite the
+    # main op_cache that reuse_impl seeds from (a far Vhist[k-2] seed there makes
+    # the reuse internal solve land on the wrong multistable branch).
+    op2_valid = np.zeros(ndev, dtype=np.bool_)
+    op2_vs1 = np.empty(ndev); op2_vd1 = np.empty(ndev)
+    input_now = np.empty(ninputs)
+    input_prev = np.empty(ninputs)
+    input_prev2 = np.empty(ninputs)
+    profile_stats = np.zeros(24)
+    failed = np.full(N, -1, dtype=np.int64)
+    nsubsteps = 0
+    nfail = 0
+    for k in range(1, N):
+        h_n = tgrid[k] - tgrid[k - 1]
+        if h_n <= 0.0:
+            return False, Vhist, nsubsteps, k, profile_stats, failed
+        for ii in range(ninputs):
+            input_now[ii] = input_values[ii, k]
+            input_prev[ii] = input_values[ii, k - 1]
+        for i in range(n):
+            Vp[i] = Vhist[k - 1, i]
+        if k >= 2:
+            rho = h_n / (tgrid[k - 1] - tgrid[k - 2])
+            if rho > 2.0:
+                # BE step: prev2 is unused (a2=0). Seed prev2/op_cache from the
+                # nearest point (k-1), NOT Vhist[0] -- _fill_prev_terms shares the
+                # internal-node op_cache, and a far V0 seed makes the following
+                # reuse solve the wrong internal branch (corrupts the orbit).
+                a0 = 1.0; a1 = -1.0; a2 = 0.0
+                kp2 = k - 1
+            else:
+                a0 = (1.0 + 2.0 * rho) / (1.0 + rho)
+                a1 = -(1.0 + rho)
+                a2 = (rho * rho) / (1.0 + rho)
+                kp2 = k - 2
+        else:
+            a0 = 1.0; a1 = -1.0; a2 = 0.0
+            kp2 = k - 1
+        for ii in range(ninputs):
+            input_prev2[ii] = input_values[ii, kp2]
+        for i in range(n):
+            Vp2[i] = Vhist[kp2, i]
+        ok2 = _fill_prev_terms_impl(
+            Vp2, input_prev2,
+            dev_d_kind, dev_d_ref, dev_d_val,
+            dev_g_kind, dev_g_ref, dev_g_val,
+            dev_s_kind, dev_s_ref, dev_s_val,
+            p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+            p_current_scale, p_inv_Rleak,
+            p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+            p_cap_cgs3_base, p_cap_cgd3_base, p_k1,
+            op2_valid, op2_vs1, op2_vd1,
+            cap_a_kind, cap_a_ref, cap_a_val,
+            cap_b_kind, cap_b_ref, cap_b_val,
+            cap_mode,
+            p2_vs, p2_vd, p2_vg, prev2_cgs, prev2_cgd, cap_prev2_dv)
+        if not ok2:
+            return False, Vhist, nsubsteps, k, profile_stats, failed
+        iters, ok, usable = _transient_newton_reuse_impl(
+            Vp, Vp, input_now, input_prev, h_n, n, maxit, step_limit, vtol,
+            gmin, fallback_accept, fallback_tol, HH,
+            dev_d_kind, dev_d_ref, dev_d_val,
+            dev_g_kind, dev_g_ref, dev_g_val,
+            dev_s_kind, dev_s_ref, dev_s_val,
+            dev_di, dev_gi, dev_si, dev_use_abs,
+            p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+            p_current_scale, p_inv_Rleak,
+            p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+            p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+            op_cache_valid, op_cache_vs1, op_cache_vd1,
+            res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+            res_b_val, res_ai, res_bi, res_g,
+            cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+            cap_b_val, cap_ai, cap_bi, cap_value,
+            isrc_pi, isrc_qi, isrc_value,
+            dyn_pi, dyn_qi, dyn_input_idx,
+            cap_mode, clip_lo, clip_hi,
+            Vwork, R, J, prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd,
+            cap_prev_dv, profile_enabled, profile_stats,
+            a0, a1, a2, prev2_cgs, prev2_cgd, cap_prev2_dv)
+        if not ok:
+            nfail += 1
+        for i in range(n):
+            Vhist[k, i] = Vwork[i]
+        nsubsteps += 1
+    profile_stats[13] = nfail
+    return True, Vhist, nsubsteps, -1, profile_stats, failed
+
+
+def _pnoise_hb_blocks_impl(Gf, Cf, K, fundamental, charge_caps):
     N = Gf.shape[0]
     n = Gf.shape[1]
     nb = 2 * K + 1
@@ -1417,7 +1679,8 @@ def _pnoise_hb_blocks_impl(Gf, Cf, K, fundamental):
         br = kr_i * n
         for kc_i in range(nb):
             kc = kc_i - K
-            col_omega = 2.0j * math.pi * kc * fundamental
+            sideband = kr if charge_caps else kc
+            sideband_omega = 2.0j * math.pi * sideband * fundamental
             bc = kc_i * n
             coeff_idx = (kr - kc) % N
             for r in range(n):
@@ -1425,7 +1688,7 @@ def _pnoise_hb_blocks_impl(Gf, Cf, K, fundamental):
                 for c in range(n):
                     cc = bc + c
                     c_coeff = Cf[coeff_idx, r, c]
-                    Y_base[rr, cc] = Gf[coeff_idx, r, c] + col_omega * c_coeff
+                    Y_base[rr, cc] = Gf[coeff_idx, r, c] + sideband_omega * c_coeff
                     C_block[rr, cc] = c_coeff
     return Y_base, C_block
 
@@ -1489,6 +1752,8 @@ if NUMBA_AVAILABLE:
     _capacitances_impl = njit(cache=NUMBA_CACHE)(_capacitances_impl)
     _atan_cap_integral_impl = njit(cache=NUMBA_CACHE)(_atan_cap_integral_impl)
     _capacitance_charges_impl = njit(cache=NUMBA_CACHE)(_capacitance_charges_impl)
+    _va_sorted_nodes_impl = njit(cache=NUMBA_CACHE)(_va_sorted_nodes_impl)
+    _capacitance_branch_terms_impl = njit(cache=NUMBA_CACHE)(_capacitance_branch_terms_impl)
     _eval_at_impl = njit(cache=NUMBA_CACHE)(_eval_at_impl)
     _terminal_deriv_one_impl = njit(cache=NUMBA_CACHE)(_terminal_deriv_one_impl)
     _terminal_derivatives_from_base_impl = njit(cache=NUMBA_CACHE)(_terminal_derivatives_from_base_impl)
@@ -1506,6 +1771,7 @@ if NUMBA_AVAILABLE:
     _transient_newton_impl = njit(cache=NUMBA_CACHE)(_transient_newton_impl)
     _transient_newton_reuse_impl = njit(cache=NUMBA_CACHE)(_transient_newton_reuse_impl)
     _transient_solve_grid_impl = njit(cache=NUMBA_CACHE)(_transient_solve_grid_impl)
+    _transient_solve_grid_gear2_impl = njit(cache=NUMBA_CACHE)(_transient_solve_grid_gear2_impl)
     _pnoise_hb_blocks_impl = njit(cache=NUMBA_CACHE)(_pnoise_hb_blocks_impl)
     _pnoise_fold_psd_impl = njit(cache=NUMBA_CACHE)(_pnoise_fold_psd_impl)
     eval_currents_numba = _eval_currents_impl
@@ -1515,6 +1781,7 @@ if NUMBA_AVAILABLE:
     terminal_derivatives_numba = _terminal_derivatives_impl
     transient_newton_numba = _transient_newton_impl
     transient_solve_grid_numba = _transient_solve_grid_impl
+    transient_solve_grid_gear2_numba = _transient_solve_grid_gear2_impl
     pnoise_hb_blocks_numba = _pnoise_hb_blocks_impl
     pnoise_fold_psd_numba = _pnoise_fold_psd_impl
 else:
@@ -1525,5 +1792,6 @@ else:
     terminal_derivatives_numba = None
     transient_newton_numba = None
     transient_solve_grid_numba = None
+    transient_solve_grid_gear2_numba = None
     pnoise_hb_blocks_numba = None
     pnoise_fold_psd_numba = None

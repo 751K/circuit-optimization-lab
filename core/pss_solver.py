@@ -16,13 +16,13 @@ import numpy as np
 
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti
-    from .ac_solver import ac_solve, get_ss_params
+    from .ac_solver import ac_solve, _dev_corner, get_ss_params
     from .pmos_tft_model import PMOS_TFT
     from .topology import AFE_TOPO
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_mna import _stamp_adm, _stamp_mos_lti
-    from ac_solver import ac_solve, get_ss_params
+    from ac_solver import ac_solve, _dev_corner, get_ss_params
     from pmos_tft_model import PMOS_TFT
     from topology import AFE_TOPO
     from transient_solver import transient
@@ -35,14 +35,17 @@ def _nfval(nf, name):
 
 
 def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
-                        dev_inst, gmin=1e-12):
+                        dev_inst, gmin=1e-12, integration_method="be"):
     """Analytic one-period monodromy d(x_end)/d(x0) from the orbit small signal.
 
-    Replicates the transient's backward-Euler step linearization on the converged
-    PSS trajectory: at each step the small-signal stamps give G(t), C(t), the
-    per-step map is A_m = (G_m + C_m/h_m)^{-1} (C_m/h_m), and Phi = prod_m A_m.
-    The shooting Jacobian is then Phi - I, built in one orbit pass instead of
-    n_state finite-difference one-period transient runs.
+    Replicates the transient's step linearization on the converged PSS
+    trajectory.  For backward-Euler the per-step map is A_m = (G_m + C_m/h_m)^{-1}
+    (C_m/h_m) and Phi = prod_m A_m.  For gear2/BDF2 the step is a 2-history
+    recurrence, so the monodromy is built on the augmented state [x_m; x_{m-1}]:
+    M_m = [[-B1, -B2], [I, 0]] with B1 = J^{-1}(a1 C/h), B2 = J^{-1}(a2 C/h),
+    J = G + a0 C/h (step 1 is backward-Euler self-start); d(x_end)/d(x0) is the
+    top n rows of (prod M_m)[A_1; I].  Either way the shooting Jacobian is Phi-I,
+    built in one orbit pass instead of n_state finite-difference period runs.
     """
     t = np.asarray(tr["t"], float)
     nodes = tr["nodes"]
@@ -70,11 +73,7 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
     for k in range(n):
         G0[k, k] += gmin
 
-    phi = np.eye(n)
-    for m in range(1, N):
-        h = float(t[m] - t[m - 1])
-        if h <= 0.0:
-            continue
+    def _GC(m):
         G = G0.copy(); C = C0.copy()
         for name, d, g, s in topo.devices:
             Vs = term_value(s, m); Vd = term_value(d, m); Vg = term_value(g, m)
@@ -82,14 +81,54 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
                               nf=_nfval(nf, name), dev_inst=dev_inst[name])
             _stamp_mos_lti(G, C, rg, rc, term(d), term(g), term(s),
                            p["gm"], p["gds"], p["Cgs"], p["Cgd"])
-        Ch = C / h
-        J = G + Ch
+        return G, C
+
+    def _solve(J, B):
         try:
-            A = np.linalg.solve(J, Ch)
+            return np.linalg.solve(J, B)
         except np.linalg.LinAlgError:
-            A = np.linalg.lstsq(J, Ch, rcond=None)[0]
-        phi = A @ phi
-    return phi
+            return np.linalg.lstsq(J, B, rcond=None)[0]
+
+    gear2 = str(integration_method).lower() in ("gear2", "bdf2")
+    if not gear2:
+        phi = np.eye(n)
+        for m in range(1, N):
+            h = float(t[m] - t[m - 1])
+            if h <= 0.0:
+                continue
+            G, C = _GC(m)
+            Ch = C / h
+            phi = _solve(G + Ch, Ch) @ phi
+        return phi
+
+    # gear2/BDF2: augmented 2n-state monodromy on [x_m; x_{m-1}]
+    eye = np.eye(n)
+    P = None                                    # 2n x n  (maps dx0 -> [dx_m; dx_{m-1}])
+    h_prev = None
+    for m in range(1, N):
+        h = float(t[m] - t[m - 1])
+        if h <= 0.0:
+            continue
+        G, C = _GC(m)
+        Ch = C / h
+        rho = (h / h_prev) if h_prev is not None else 0.0
+        if P is None or rho > 2.0:              # BE self-start / large-ratio step
+            A1 = _solve(G + Ch, Ch)             # a0=1, a1=-1, a2=0
+            if P is None:
+                P = np.vstack([A1, eye])
+            else:
+                P = np.vstack([A1 @ P[:n], P[:n]])
+        else:
+            a0 = (1.0 + 2.0 * rho) / (1.0 + rho)
+            a1 = -(1.0 + rho)
+            a2 = (rho * rho) / (1.0 + rho)
+            J = G + a0 * Ch
+            B1 = _solve(J, a1 * Ch)
+            B2 = _solve(J, a2 * Ch)
+            top = -(B1 @ P[:n]) - (B2 @ P[n:])
+            P = np.vstack([top, P[:n]])
+        h_prev = h
+    return P[:n] if P is not None else np.eye(n)
 
 
 def _make_period_grid(period, tgrid, n_points):
@@ -135,7 +174,7 @@ def _prepare_inputs(inputs, tgrid, *, check_periodic, periodic_tol):
     return out
 
 
-def _initial_vector(sizes, bias, topo, nf, V0):
+def _initial_vector(sizes, bias, topo, nf, V0, corner=None):
     if V0 is not None:
         if isinstance(V0, dict):
             default = topo.default_guess_value(bias)
@@ -146,7 +185,8 @@ def _initial_vector(sizes, bias, topo, nf, V0):
         return arr.copy()
 
     try:
-        ac = ac_solve(sizes, bias, np.array([1.0]), topo=topo, nf=nf)
+        ac = ac_solve(sizes, bias, np.array([1.0]), topo=topo, nf=nf,
+                      corner=corner)
         if ac is not None and "dc_op" in ac:
             return np.asarray([ac["dc_op"][node] for node in topo.solved], float)
     except Exception:
@@ -179,6 +219,7 @@ def _residual_score(norm, nfail):
 
 def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               n_points=161, inputs=None, node_inputs=None, current_inputs=None,
+              corner=None,
               V0=None, tstab_periods=0, max_step=None, flat_max_step=None,
               max_retry_subdivisions=0, newton_maxit=30,
               newton_step_limit=5.0, newton_vtol=1e-8,
@@ -188,7 +229,8 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               jacobian_reuse=True, jacobian_rebuild_interval=0,
               analytic_jacobian=True,
               rail_margin=0.5, check_periodic_inputs=True,
-              input_periodic_tol=1e-9, profile=False, edge_mask=None):
+              input_periodic_tol=1e-9, profile=False, edge_mask=None,
+              integration_method="gear2"):
     """Solve periodic steady state with transient shooting.
 
     Parameters are intentionally close to :func:`transient` so the same topology,
@@ -218,6 +260,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         node_inputs=node_inputs,
         current_inputs=current_inputs,
         nf=nf,
+        corner=corner,
         max_step=max_step,
         flat_max_step=flat_max_step,
         max_retry_subdivisions=max_retry_subdivisions,
@@ -230,9 +273,13 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         signed_devices=signed_devices,
         rail_margin=rail_margin,
         edge_mask=edge_mask,
+        integration_method=integration_method,
+        # Shooting manages its own convergence per period; never let a single
+        # period silently fall back to a BE orbit mid-iteration.
+        gear2_be_fallback=False,
     )
 
-    x = _initial_vector(sizes, bias, topo, nf, V0)
+    x = _initial_vector(sizes, bias, topo, nf, V0, corner=corner)
     x = _rail_clip(x, topo, bias, rail_margin)
 
     period_runs = 0
@@ -360,11 +407,13 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                         if mono_dev_inst is None:
                             mono_dev_inst = {
                                 name: PMOS_TFT(W=sizes[name][0], L=sizes[name][1],
-                                               NF=_nfval(nf, name))
+                                               NF=_nfval(nf, name),
+                                               **_dev_corner(corner, name))
                                 for name, *_ in topo.devices
                             }
                         phi = _shooting_monodromy(tr, topo, sizes, nf, bias, inputs,
-                                                  node_inputs or {}, mono_dev_inst)
+                                                  node_inputs or {}, mono_dev_inst,
+                                                  integration_method=integration_method)
                         jac = phi - np.eye(topo.n)
                         jacobian_kind = "analytic_monodromy"
                         shooting_jacobian_evals += 1
@@ -495,5 +544,6 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         "transient_max_step": max_step,
         "transient_flat_max_step": flat_max_step,
         "rail_margin": rail_margin,
+        "corner": corner,
     })
     return result

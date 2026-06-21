@@ -58,7 +58,7 @@ _HB_SOLVERS = {"auto", "dense", "sparse", "iterative"}
 
 
 def _merge_sizes_and_nf(sizes, nf, pss_result):
-    all_sizes = dict(sizes)
+    all_sizes = dict(pss_result.get("all_sizes", sizes))
     all_sizes.update(pss_result.get("switch_sizes", {}))
 
     if "all_nf" in pss_result and nf is None:
@@ -147,7 +147,7 @@ def _try_lti_noise_fast_path(sizes, bias, freqs, *, pss_result, nf, corner,
                 raise ValueError("gains, pac_result, or input_drive is required")
             pac_result = pac_solve(
                 sizes, tbias, freqs, pss_result=pss_result,
-                input_drive=input_drive, nf=nf,
+                input_drive=input_drive, nf=nf, corner=corner,
             )
         gains = pac_result["gains"]
     gains = np.asarray(gains, float)
@@ -182,7 +182,7 @@ def _try_lti_noise_fast_path(sizes, bias, freqs, *, pss_result, nf, corner,
     }
 
 
-def _hb_blocks(Gf, Cf, K, N, n, fundamental):
+def _hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
     use_numba = (
         pnoise_hb_blocks_numba is not None and
         (2 * int(K) + 1) * int(n) >= 16
@@ -193,6 +193,7 @@ def _hb_blocks(Gf, Cf, K, N, n, fundamental):
             np.asarray(Cf, dtype=np.complex128),
             int(K),
             float(fundamental),
+            bool(charge_caps),
         ) + (True,)
 
     nb = 2 * K + 1
@@ -201,16 +202,18 @@ def _hb_blocks(Gf, Cf, K, N, n, fundamental):
     for kr in range(-K, K + 1):
         br = (kr + K) * n
         for kc in range(-K, K + 1):
-            col_omega = 2j * np.pi * kc * fundamental
+            sideband = kr if charge_caps else kc
+            sideband_omega = 2j * np.pi * sideband * fundamental
             bc = (kc + K) * n
             g_coeff = Gf[(kr - kc) % N]
             c_coeff = Cf[(kr - kc) % N]
-            Y_base[br:br + n, bc:bc + n] = g_coeff + col_omega * c_coeff
+            Y_base[br:br + n, bc:bc + n] = g_coeff + sideband_omega * c_coeff
             C_block[br:br + n, bc:bc + n] = c_coeff
     return Y_base, C_block, False
 
 
-def _hb_blocks_sparse(Gf, Cf, K, N, n, fundamental, drop_tol=0.0):
+def _hb_blocks_sparse(Gf, Cf, K, N, n, fundamental, drop_tol=0.0,
+                      *, charge_caps=False):
     if _sp is None:
         raise RuntimeError("scipy.sparse is required for sparse PNoise HB")
     nb = 2 * K + 1
@@ -226,11 +229,12 @@ def _hb_blocks_sparse(Gf, Cf, K, N, n, fundamental, drop_tol=0.0):
         br = kr_i * n
         for kc_i in range(nb):
             kc = kc_i - K
-            col_omega = 2.0j * np.pi * kc * fundamental
+            sideband = kr if charge_caps else kc
+            sideband_omega = 2.0j * np.pi * sideband * fundamental
             bc = kc_i * n
             coeff_idx = (kr - kc) % N
             c_block = Cf[coeff_idx]
-            y_block = Gf[coeff_idx] + col_omega * c_block
+            y_block = Gf[coeff_idx] + sideband_omega * c_block
             if drop_tol > 0.0:
                 y_nz = np.nonzero(np.abs(y_block) > drop_tol)
                 c_nz = np.nonzero(np.abs(c_block) > drop_tol)
@@ -452,6 +456,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     period = float(pss_result.get("period", t_orbit[-1] - t_orbit[0]))
     if period <= 0.0:
         raise ValueError("PSS result must span one positive period")
+    if corner is None:
+        corner = pss_result.get("corner")
     if fundamental is None:
         fundamental = 1.0 / period
     fundamental = float(fundamental)
@@ -504,6 +510,12 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     input_dot = _periodic_wave_derivatives(input_wave, period)
     devices = list(topo.devices)
     gated_noise = set(gds_noise_devices or ())
+    # Spectre PNoise linearizes the Verilog-A small-signal model expressions
+    # (not the local transient companion form used to generate the PSS orbit).
+    # Keeping PNoise on the C(V)*ddt(V) operator matches the Cadence reference
+    # noise folding; using the transient Q-stamp operator under-counts output
+    # noise by ~20% for the hard-switched chopper.
+    charge_caps = False
     if not switch_noise_conductance_gated:
         gated_noise = set()
     keep = set(noise_devices) if noise_devices is not None else None
@@ -526,7 +538,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         return ("n", idx[node]) if node in idx else ("v", 0.0)
 
     lin_key = (
-        "pnoise_lin_v2",
+        "pnoise_lin_v3",
         tuple(topo.solved),
         tuple(topo.devices),
         tuple(topo.resistors),
@@ -536,6 +548,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         _freeze_sizes(all_sizes),
         _freeze_nf(all_nf),
         _freeze_kwargs(corner or {}),
+        "charge_caps" if charge_caps else "veriloga_caps",
         tuple(sorted(gated_noise)),
         bool(switch_noise_conductance_gated),
     )
@@ -588,11 +601,12 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                     Gm, Cm, rhs_g, rhs_c, term(d), term(g), term(s),
                     p["gm"], p["gds"], p["Cgs"], p["Cgd"],
                 )
-                _stamp_pmos_dynamic_cap_terms(
-                    Gm, term(d), term(g), term(s), dev_inst[name],
-                    Vs, Vd, Vg,
-                    term_derivative(s, m), term_derivative(d, m),
-                    term_derivative(g, m))
+                if not charge_caps:
+                    _stamp_pmos_dynamic_cap_terms(
+                        Gm, term(d), term(g), term(s), dev_inst[name],
+                        Vs, Vd, Vg,
+                        term_derivative(s, m), term_derivative(d, m),
+                        term_derivative(g, m))
                 if name in gated_noise:
                     S_th = 4.0 * _KB * _TEMP * abs(p["gds"])
                     S_fl1 = 0.0
@@ -641,7 +655,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         return F[np.asarray(k) % N]
 
     hb_key = ("pnoise_hb_v2", lin_key, int(K), float(fundamental),
-              float(hb_sparse_drop_tol))
+              float(hb_sparse_drop_tol),
+              "charge_caps" if charge_caps else "veriloga_caps")
     hb_cache_hit = bool(cache_linearization and hb_key in cache)
     hb_size = int(nb * n)
     sparse_density_estimate = _estimate_hb_sparse_density(
@@ -673,7 +688,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 Y_sparse, C_sparse = _to_sparse_hb(Y_base, C_block)
             else:
                 Y_sparse, C_sparse = _hb_blocks_sparse(
-                    Gf, Cf, K, N, n, fundamental, drop_tol=hb_sparse_drop_tol)
+                    Gf, Cf, K, N, n, fundamental,
+                    drop_tol=hb_sparse_drop_tol, charge_caps=charge_caps)
             hb["Y_base_sparse"] = Y_sparse
             hb["C_block_sparse"] = C_sparse
         except Exception:
@@ -686,7 +702,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         hb_sparse_min_size, hb_sparse_max_density)
     need_dense = solver_used == "dense" or Y_sparse is None or C_sparse is None
     if need_dense and (Y_base is None or C_block is None):
-        Y_base, C_block, hb_numba_used = _hb_blocks(Gf, Cf, K, N, n, fundamental)
+        Y_base, C_block, hb_numba_used = _hb_blocks(
+            Gf, Cf, K, N, n, fundamental, charge_caps=charge_caps)
         hb["Y_base"] = Y_base
         hb["C_block"] = C_block
         hb["numba_used"] = bool(hb_numba_used)
@@ -849,7 +866,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 raise ValueError("gains, pac_result, or input_drive is required")
             pac_result = pac_solve(
                 sizes, bias, freqs, pss_result=pss_result,
-                input_drive=input_drive, nf=nf,
+                input_drive=input_drive, nf=nf, corner=corner,
             )
         gains = pac_result["gains"]
     gains = np.asarray(gains, float)

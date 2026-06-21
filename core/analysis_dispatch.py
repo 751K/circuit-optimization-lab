@@ -35,12 +35,12 @@ _PSS_KWARGS = {
     "fallback_full_jacobian", "fallback_least_squares", "fallback_tol",
     "residual_tol", "max_shooting_iters", "fd_step", "min_damping",
     "jacobian_reuse", "jacobian_rebuild_interval", "rail_margin",
-    "check_periodic_inputs", "input_periodic_tol", "profile",
+    "check_periodic_inputs", "input_periodic_tol", "profile", "corner",
 }
 _TRANSIENT_KWARGS = {
     "max_step", "flat_max_step", "max_retry_subdivisions", "newton_maxit",
     "newton_step_limit", "newton_vtol", "fallback_full_jacobian",
-    "fallback_least_squares", "fallback_tol", "profile", "rail_margin",
+    "fallback_least_squares", "fallback_tol", "profile", "rail_margin", "corner",
 }
 
 
@@ -249,6 +249,23 @@ def _complex_value(value, field):
     raise ValueError(f"{field} must be a number, [real, imag], or object")
 
 
+def _resolve_corner(corner):
+    if isinstance(corner, str):
+        try:
+            from .corners import CORNERS
+        except ImportError:  # pragma: no cover - legacy direct module import
+            from corners import CORNERS
+        if corner not in CORNERS:
+            raise ValueError(f"Unknown process corner {corner!r}; expected one of {sorted(CORNERS)}")
+        return CORNERS[corner]
+    return corner
+
+
+def _corner_from_cfg(cfg, *, default=None):
+    corner = (cfg or {}).get("corner", default)
+    return _resolve_corner(corner)
+
+
 def _input_drive(cfg, periodic):
     raw = cfg.get("input_drive")
     if raw is None:
@@ -259,9 +276,29 @@ def _input_drive(cfg, periodic):
     return {str(k): _complex_value(v, f"input_drive.{k}") for k, v in raw.items()}
 
 
+def _propagate_shared_pss_corner(analysis_cfg):
+    pss_cfg = analysis_cfg.get("pss")
+    if not isinstance(pss_cfg, dict) or "corner" in pss_cfg:
+        return
+    dep_corners = []
+    for name in ("pac", "pnoise"):
+        cfg = analysis_cfg.get(name)
+        if isinstance(cfg, dict) and "corner" in cfg:
+            dep_corners.append(cfg["corner"])
+    if not dep_corners:
+        return
+    first = _resolve_corner(dep_corners[0])
+    for raw in dep_corners[1:]:
+        if _resolve_corner(raw) != first:
+            raise ValueError("PAC and PNoise request different process corners for shared PSS")
+    pss_cfg["corner"] = dep_corners[0]
+
+
 def _pss_config(spec, analyses, owner_cfg):
     cfg = dict((analyses or {}).get("pss", {}) or {})
     cfg.update(owner_cfg.get("pss", {}) or {})
+    if "corner" not in cfg and "corner" in owner_cfg:
+        cfg["corner"] = owner_cfg["corner"]
     periodic = _merge_periodic(spec.periodic or {}, cfg.pop("periodic", None))
     return cfg, periodic
 
@@ -269,6 +306,8 @@ def _pss_config(spec, analyses, owner_cfg):
 def _run_pss(spec, pss_cfg, periodic):
     context = build_periodic_context(spec, periodic)
     kwargs = {k: v for k, v in pss_cfg.items() if k in _PSS_KWARGS}
+    if "corner" in kwargs:
+        kwargs["corner"] = _corner_from_cfg(pss_cfg)
     return pss_solve(
         spec.sizes, spec.bias, context["period"], topo=spec.topology, nf=spec.nf,
         tgrid=context["tgrid"], inputs=context["inputs"],
@@ -293,6 +332,8 @@ def _run_transient(spec, cfg):
                            default_points=int(cfg.get("n_points", 101)))
         context = build_periodic_context(spec, periodic, tgrid=tgrid)
         kwargs = {k: v for k, v in cfg.items() if k in _TRANSIENT_KWARGS}
+        if "corner" in kwargs:
+            kwargs["corner"] = _corner_from_cfg(cfg)
         return transient(
             spec.sizes, spec.bias, tgrid, topo=spec.topology, nf=spec.nf,
             inputs=context["inputs"], node_inputs=context["node_inputs"],
@@ -302,6 +343,8 @@ def _run_transient(spec, cfg):
     tgrid = _time_grid(cfg.get("tgrid", cfg), default_stop=cfg.get("tstop", cfg.get("duration")),
                        default_points=int(cfg.get("n_points", 101)))
     kwargs = {k: v for k, v in cfg.items() if k in _TRANSIENT_KWARGS}
+    if "corner" in kwargs:
+        kwargs["corner"] = _corner_from_cfg(cfg)
     return transient(
         spec.sizes, spec.bias, tgrid, topo=spec.topology, nf=spec.nf,
         signed_devices=tuple(cfg.get("signed_devices", ()) or ()), **kwargs,
@@ -316,9 +359,14 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
     it is not already present.
     """
     spec = _as_spec(spec_or_path)
-    analysis_cfg = dict(analyses if analyses is not None else (spec.analyses or {}))
+    raw_analysis_cfg = analyses if analyses is not None else (spec.analyses or {})
+    analysis_cfg = {
+        key: (dict(value) if isinstance(value, dict) else value)
+        for key, value in dict(raw_analysis_cfg).items()
+    }
     if not analysis_cfg:
         raise ValueError("No analyses configured")
+    _propagate_shared_pss_corner(analysis_cfg)
     selected_set = set(selected) if selected is not None else None
     results = {}
 
@@ -329,6 +377,14 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
         if "pss" not in results:
             pss_cfg, periodic = _pss_config(spec, analysis_cfg, owner_cfg)
             results["pss"] = _run_pss(spec, pss_cfg, periodic)
+        elif "corner" in owner_cfg:
+            requested = _corner_from_cfg(owner_cfg)
+            existing = results["pss"].get("corner")
+            if existing != requested:
+                raise ValueError(
+                    "PSS/PAC/PNoise corner mismatch: existing PSS was run with "
+                    f"{existing!r}, but dependent analysis requested {requested!r}"
+                )
         return results["pss"]
 
     for name in _ANALYSIS_ORDER:
@@ -337,22 +393,28 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
         cfg = dict(analysis_cfg.get(name) or {})
         if name == "ac":
             freqs = _frequency_grid(cfg.get("freqs"))
+            corner = _corner_from_cfg(cfg)
             results[name] = ac_solve(
-                spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf
+                spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf,
+                corner=corner,
             )
         elif name == "noise":
             freqs = _frequency_grid(cfg.get("freqs"))
+            corner_default = (analysis_cfg.get("ac") or {}).get("corner")
+            corner = _corner_from_cfg(cfg, default=corner_default)
             x0_guess = None
             ac_result = None
             if "ac" in results and results["ac"] is not None:
-                x0_guess = results["ac"].get("dc_op")
-                ac_freqs = np.asarray(results["ac"].get("freqs", ()), float)
-                if ac_freqs.shape == freqs.shape and np.allclose(
-                        ac_freqs, freqs, rtol=0.0, atol=0.0):
-                    ac_result = results["ac"]
+                same_corner = results["ac"].get("corner") == corner
+                if same_corner:
+                    x0_guess = results["ac"].get("dc_op")
+                    ac_freqs = np.asarray(results["ac"].get("freqs", ()), float)
+                    if ac_freqs.shape == freqs.shape and np.allclose(
+                            ac_freqs, freqs, rtol=0.0, atol=0.0):
+                        ac_result = results["ac"]
             noise = noise_analysis(
                 spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf,
-                x0_guess=x0_guess, ac_result=ac_result,
+                corner=corner, x0_guess=x0_guess, ac_result=ac_result,
             )
             if noise is not None and "band" in cfg:
                 lo, hi = map(float, cfg["band"])
@@ -367,9 +429,11 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
             pss = ensure_pss(cfg)
             freqs = _frequency_grid(cfg.get("freqs"))
             _, periodic = _pss_config(spec, analysis_cfg, cfg)
+            corner = _corner_from_cfg(cfg, default=pss.get("corner"))
             results[name] = pac_solve(
                 spec.sizes, spec.bias, freqs, pss_result=pss,
                 input_drive=_input_drive(cfg, periodic), nf=spec.nf,
+                corner=corner,
                 fd_state_step=float(cfg.get("fd_state_step", 1e-4)),
                 fd_input_step=float(cfg.get("fd_input_step", 1e-4)),
                 transient_kwargs=dict(cfg.get("transient_kwargs", {}) or {}),
@@ -386,9 +450,11 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
             _, periodic = _pss_config(spec, analysis_cfg, cfg)
             input_drive = _input_drive(cfg, periodic)
             pac_result = results.get("pac")
+            corner = _corner_from_cfg(cfg, default=pss.get("corner"))
             results[name] = pnoise_solve(
                 spec.sizes, spec.bias, freqs, pss_result=pss,
                 fundamental=_fundamental_from(periodic), nf=spec.nf,
+                corner=corner,
                 max_sideband=int(cfg.get("max_sideband", 10)),
                 n_period_samples=int(cfg.get("n_period_samples", 384)),
                 band=tuple(cfg.get("band", (0.05, 100.0))),

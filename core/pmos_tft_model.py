@@ -478,6 +478,45 @@ class PMOS_TFT:
         Cgdd = qscale * (self._cap_cgd1 + cgd_cross + cgd3_coeff * f_d_042)
         return qgs, qgd, Cgss, Cgdd
 
+    def _capacitance_branch_terms_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
+        """Branch self-charge terms for step-integrated C(V)*dV experiments.
+
+        The returned q terms integrate only the capacitance components controlled
+        by the same branch voltage. Cross-dependent overlap pieces are returned
+        separately so a timestep can multiply them by the branch voltage change
+        without adding an artificial dC_cross/dt feedthrough current.
+        """
+        v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+        y_s = v_s - Vg + self.Vfb
+        y_d = v_d - Vg + self.Vfb
+        x_gs = Vg - Vs
+        x_gd = Vg - Vd
+
+        cgs2_coeff = 1.43 * self._cap_half_wl_ci
+        cgd2_coeff = 0.33 * self._cap_half_wl_ci
+        cgs3_coeff = 0.34 * self._cap_cgs3_base
+        cgd3_coeff = 0.52 * self._cap_cgd3_base
+
+        f_s_060 = self._two_over_pi * math.atan(y_s * 0.6) + 1.0
+        f_s_201 = self._two_over_pi * math.atan(y_s * 2.01) + 1.0
+        f_d_021 = self._two_over_pi * math.atan(y_d * 0.21) + 1.0
+        f_d_042 = self._two_over_pi * math.atan(y_d * 0.42) + 1.0
+
+        qscale = self.k1 * 1e4 * 1e-12
+        cgs_cross = qscale * cgs3_coeff * f_d_021
+        cgd_cross = qscale * cgd2_coeff * f_s_201
+        qgs_self = qscale * (
+            self._cap_cgs1 * x_gs
+            - cgs2_coeff * self._atan_cap_integral(y_s, 0.6, self._two_over_pi)
+        )
+        qgd_self = qscale * (
+            self._cap_cgd1 * x_gd
+            - cgd3_coeff * self._atan_cap_integral(y_d, 0.42, self._two_over_pi)
+        )
+        Cgss = qscale * (self._cap_cgs1 + cgs2_coeff * f_s_060) + cgs_cross
+        Cgdd = qscale * (self._cap_cgd1 + cgd3_coeff * f_d_042) + cgd_cross
+        return qgs_self, qgd_self, cgs_cross, cgd_cross, Cgss, Cgdd
+
     def get_capacitance_charges(self, Vs, Vd, Vg):
         """Return diagnostic branch charges (gate->source, gate->drain)."""
         Vs1, Vd1 = self.get_op(Vs, Vd, Vg)

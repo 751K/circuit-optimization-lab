@@ -366,6 +366,7 @@ automatically reuse or create the required PSS result.
 ```json
 "analyses": {
   "pss": {
+    "corner": "slow",
     "residual_tol": 1e-12,
     "max_shooting_iters": 2,
     "jacobian_reuse": true,
@@ -397,6 +398,11 @@ automatically reuse or create the required PSS result.
 `{"start": 1.0, "stop": 1e4, "num": 41, "scale": "log"}`. `input_drive` is the
 PAC/PNoise small-signal complex amplitude map; JSON complex values can be a
 number, `[real, imag]`, or `{"real": ..., "imag": ...}`.
+Each analysis may set `corner` to `"typical"`, `"slow"`, `"fast"`, or an explicit
+model-shift map. For PAC/PNoise, keep the PSS orbit on the same corner; when PSS
+does not specify a corner, dispatch inherits the unique PAC/PNoise corner, and it
+raises an error if a dependent analysis requests a different corner from an
+already-built PSS.
 PSS uses the analytic monodromy Jacobian by default (`"analytic_jacobian": true`):
 it builds Φ in one orbit pass from the small-signal G(t)/C(t) stamps instead of
 `n_state` finite-difference period runs. Set to `false` for the original FD path.

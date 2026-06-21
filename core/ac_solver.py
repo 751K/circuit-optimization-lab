@@ -21,6 +21,7 @@ def _dev_corner(corner, name):
 
     corner may be:
       - None / {}                              -> nominal (no shift)
+      - 'typical' / 'slow' / 'fast'            -> named process corner
       - flat dict {'pvt0':.., 'pbeta0':..}     -> GLOBAL shift, same for all devices
                                                   (process corner)
       - per-device map {'M7':{...}, 'M8':{...}}-> PER-DEVICE shift (mismatch:
@@ -28,9 +29,23 @@ def _dev_corner(corner, name):
     """
     if not corner:
         return {}
+    if isinstance(corner, str):
+        try:
+            from .corners import CORNERS
+        except ImportError:  # pragma: no cover - legacy direct module import
+            from corners import CORNERS
+        if corner not in CORNERS:
+            raise ValueError(f"Unknown process corner {corner!r}; expected one of {sorted(CORNERS)}")
+        return CORNERS[corner]
     if any(isinstance(v, dict) for v in corner.values()):     # per-device map
         return corner.get(name, {})
     return corner                                             # global shift
+
+
+def _is_per_device_corner(corner):
+    if not corner or isinstance(corner, str):
+        return False
+    return any(isinstance(v, dict) for v in corner.values())
 
 
 def _dev_nf(nf, name):
@@ -284,7 +299,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
 
     # ── 1. DC solve (residuals built from the topology) ──
     residuals = lambda x: plan.dc_residuals(x, Id, gmin)
-    per_dev = bool(corner) and any(isinstance(v, dict) for v in corner.values())
+    per_dev = _is_per_device_corner(corner)
     symmetric_fast = (x0_guess is None and not per_dev
                       and _is_pairwise_symmetric_afe(sizes, nf, topo))
     guesses = []
@@ -503,6 +518,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         "freqs": freqs,
         "dc_op": dc_op,
         "ss": ss,
+        "corner": corner,
     }
 
 

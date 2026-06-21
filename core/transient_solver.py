@@ -11,15 +11,14 @@ Method
 - KCL at every solved node:  Σ device currents  +  Σ capacitor currents  = 0.
 - Capacitor companion (backward Euler), cap branch between terminals a,b:
       i_ab ≈ C_step·[(Va-Vb)_n − (Va-Vb)_{n-1}] / h
-  Linear capacitors use their fixed C. PMOS Cgss/Cgdd use a step-integrated
-  displacement charge companion, with C_step = 0.5·(C_prev + C_now), from the
-  same PDK capacitance equations. This avoids the fast-edge endpoint error of
-  stamping C(V_n)·ΔV when the chopper clock moves through a strongly nonlinear
-  capacitance region. AC/PAC/noise still use the local small-signal
-  capacitances. The AT_4000TG model routes these caps through an internal gate1
-  node; this solver keeps the long-timescale R_cap2 leakage from source/drain
-  to gate1 and collapses the 100 Ω gate-to-gate1 RC because its ns-scale time
-  constant is far below the chopper edge times used here.
+  Linear capacitors use their fixed C. PMOS Cgss/Cgdd follow the AT_4000TG
+  experimental step companion selected by CIRCUIT_PMOS_TRANSIENT_CAP_MODE:
+  `charge` (default), `average`, or `veriloga`. AC/PAC/noise still use the
+  local small-signal capacitances.
+  The AT_4000TG model routes these caps through an internal gate1 node; this
+  solver keeps the long-timescale R_cap2 leakage from source/drain to gate1 and
+  collapses the 100 Ω gate-to-gate1 RC because its ns-scale time constant is far
+  below the chopper edge times used here.
 - Each step: solve the 6 node voltages with a damped Newton iteration using an
   analytic conductance Jacobian (gm/gds finite-diff of get_Idc + cap C/h + gmin),
   seeded from the previous step, with step limiting that keeps it on the physical
@@ -39,46 +38,72 @@ Clock feedthrough from the Verilog-A Cgss/Cgdd terms is included when the switch
 gate clocks are finite-edge waveforms. Additional explicit charge-injection
 pulses can be supplied through current_inputs.
 """
+import os
 import time
 
 import numpy as np
 try:
     from .pmos_tft_model import PMOS_TFT
     from .topology import AFE_TOPO
-    from .ac_solver import ac_solve, _dev_nf
+    from .ac_solver import ac_solve, _dev_corner, _dev_nf
     from .numba_kernels import (
         terminal_derivatives_numba,
         transient_newton_numba,
         transient_solve_grid_numba,
+        transient_solve_grid_gear2_numba,
     )
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
     from pmos_tft_model import PMOS_TFT
     from topology import AFE_TOPO
-    from ac_solver import ac_solve, _dev_nf
+    from ac_solver import ac_solve, _dev_corner, _dev_nf
     from compiled_topology import CompiledTopology
     try:
         from numba_kernels import (
             terminal_derivatives_numba,
             transient_newton_numba,
             transient_solve_grid_numba,
+            transient_solve_grid_gear2_numba,
         )
     except Exception:
         terminal_derivatives_numba = None
         transient_newton_numba = None
         transient_solve_grid_numba = None
+        transient_solve_grid_gear2_numba = None
+
+
+_CAP_MODE = os.environ.get("CIRCUIT_PMOS_TRANSIENT_CAP_MODE", "charge").lower()
+_USE_CHARGE_CAPS = _CAP_MODE in {"charge", "q", "qstamp", "q-stamp"}
+_USE_AVERAGE_CAPS = _CAP_MODE in {"average", "avg", "trapezoid", "trap"}
+_USE_BRANCH_CAPS = _CAP_MODE in {"branch", "self", "self-charge"}
+_CAP_MODE_ID = 3 if _USE_BRANCH_CAPS else (1 if _USE_AVERAGE_CAPS else (0 if _USE_CHARGE_CAPS else 2))
+
+# Use the numba gear2 grid for the periodic/PSS path (fast).  Set
+# CIRCUIT_GEAR2_NUMBA=0 to fall back to the verified pure-Python gear2 loop.
+_GEAR2_NUMBA_GRID = os.environ.get("CIRCUIT_GEAR2_NUMBA", "1").lower() in {"1", "true", "on"}
 
 
 def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
               topo=AFE_TOPO, inputs=None, node_inputs=None, current_inputs=None,
+              corner=None,
               max_step=None, flat_max_step=None,
               max_retry_subdivisions=0, newton_maxit=30,
               newton_step_limit=5.0, newton_vtol=1e-8,
               fallback_full_jacobian=False,
               fallback_least_squares=False, fallback_tol=1e-9,
               signed_devices=None, profile=False, edge_mask=None,
-              rail_margin=None):
-    """Backward-Euler transient.
+              rail_margin=None, integration_method="be",
+              gear2_be_fallback=True):
+    """Backward-Euler (default) or gear2/BDF2 transient.
+
+      integration_method : "be" (backward-Euler, 1st order; the default for the
+               raw transient because its numba grid keeps substep subdivision +
+               retry, which hard standalone transients rely on) or "gear2"
+               (variable-step BDF2, 2nd order, numba-accelerated, single-step per
+               interval with step-ratio limiting). The PSS/chopper periodic path
+               defaults to gear2 (it closes the chopper PAC switch-edge error to
+               <1% and its grid is well-conditioned); raw transient callers can
+               opt in on uniform/well-conditioned grids.
       tgrid : (N,) time points [s]
       vip,vin : legacy AFE M7/M8 gate waveforms [V]
       inputs : generic mapping {input_key: waveform}; device gates are mapped by
@@ -116,7 +141,8 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     fields are included when those nodes exist.
     """
     devs = topo.devices
-    tft = {name: PMOS_TFT(W=sizes[name][0], L=sizes[name][1], NF=_dev_nf(nf, name))
+    tft = {name: PMOS_TFT(W=sizes[name][0], L=sizes[name][1],
+                          NF=_dev_nf(nf, name), **_dev_corner(corner, name))
            for name, *_ in devs}
     tgrid = np.asarray(tgrid, float)
     N = len(tgrid)
@@ -275,10 +301,17 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             Vg = termv(gterm, V, input_vals)
             try:
                 Vs1, Vd1 = dev.get_op(Vs, Vd, Vg)
-                Cgs, Cgd = dev._capacitances_from_op(Vs, Vd, Vg, Vs1, Vd1)
+                if _USE_BRANCH_CAPS:
+                    qgs, qgd, _, _, Cgs, Cgd = dev._capacitance_branch_terms_from_op(
+                        Vs, Vd, Vg, Vs1, Vd1)
+                else:
+                    qgs, qgd, Cgs, Cgd = dev._capacitance_charges_from_op(
+                        Vs, Vd, Vg, Vs1, Vd1)
+                if _USE_AVERAGE_CAPS:
+                    qgs, qgd = Cgs, Cgd
             except Exception:
-                Cgs = Cgd = 0.0
-            out.append((Vs, Vd, Vg, Cgs, Cgd))
+                qgs = qgd = 0.0
+            out.append((Vs, Vd, Vg, qgs, qgd))
         return out
 
     def load_cap_dv_values(V, input_vals):
@@ -287,13 +320,20 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
 
     # ── initial condition: DC op at static bias ──
     if V0 is None:
-        ac = ac_solve(sizes, bias, np.array([1.0]), nf=nf, topo=topo)
+        ac = ac_solve(sizes, bias, np.array([1.0]), nf=nf, topo=topo,
+                      corner=corner)
         dc = ac["dc_op"]
         V0 = np.array([dc[name] for name in topo.solved])
     Vhist = np.zeros((N, n)); Vhist[0] = V0
     gmin = 1e-12
 
-    def step_residual(V, input_now, states, prev_dev_terms, load_prev_dv, h):
+    def step_residual(V, input_now, states, prev_dev_terms, load_prev_dv, h,
+                      cap_coeffs=(1.0, -1.0, 0.0), prev2_dev_terms=None,
+                      load_prev2_dv=None):
+        # cap_coeffs = (a0, a1, a2): backward-Euler is (1, -1, 0); variable-step
+        # BDF2/gear2 passes (a0, a1, a2) with a2 weighting the n-2 history.  Only
+        # the charge-mode (q-stamp) caps and the linear/load caps use BDF2 here.
+        ca0, ca1, ca2 = cap_coeffs
         R = np.zeros(n)
         inv_h = 1.0 / h
         # device DC currents (into-node convention: +Id at drain, -Id at source)
@@ -321,12 +361,14 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 R[qi] += Ival
         for k in range(n):
             R[k] -= V[k] * gmin
-        # PMOS dynamic caps use a step-integrated displacement charge companion:
-        # average the nonlinear C over the step, while keeping C_now/h as the
-        # compact Newton linearization in build_jac.
-        for state, prev_terms in zip(states, prev_dev_terms):
+        # Default PMOS dynamic caps mirror the Verilog-A source:
+        # I(s,gate1)=Cgss*d(Vs-gate1)/dt and I(d,gate1)=Cgdd*d(Vd-gate1)/dt.
+        # The optional charge mode uses the branch-charge integral for experiments.
+        p2_terms = prev2_dev_terms if prev2_dev_terms is not None else prev_dev_terms
+        for state, prev_terms, prev2_terms in zip(states, prev_dev_terms, p2_terms):
             _, _, di, gi, si, Vs, Vd, Vg, _, _, _, Cgs, Cgd = state
-            pVs, pVd, pVg, pCgs, pCgd = prev_terms
+            pVs, pVd, pVg, pQgs, pQgd = prev_terms
+            ppQgs, ppQgd = prev2_terms[3], prev2_terms[4]
             gate_leak_g = 1.0 / state[0].R_cap2
             if gate_leak_g != 0.0:
                 i_sg = (Vs - Vg) * gate_leak_g          # source -> gate1≈gate
@@ -340,23 +382,51 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 if gi is not None:
                     R[gi] += i_dg
             if Cgs != 0.0:
-                c_step = 0.5 * (Cgs + pCgs)
-                i_ab = c_step * inv_h * ((Vg - Vs) - (pVg - pVs))  # gate -> source
+                if _USE_CHARGE_CAPS:
+                    qgs = state[0]._capacitance_charges_from_op(
+                        Vs, Vd, Vg, state[8], state[9])[0]
+                    i_ab = (ca0 * qgs + ca1 * pQgs + ca2 * ppQgs) * inv_h  # gate -> source
+                elif _USE_AVERAGE_CAPS:
+                    i_ab = 0.5 * (Cgs + pQgs) * ((Vg - Vs) - (pVg - pVs)) * inv_h
+                elif _USE_BRANCH_CAPS:
+                    qgs_self, _, cgs_cross, _, _, _ = state[0]._capacitance_branch_terms_from_op(
+                        Vs, Vd, Vg, state[8], state[9])
+                    i_ab = (
+                        (qgs_self - pQgs) +
+                        cgs_cross * ((Vg - Vs) - (pVg - pVs))
+                    ) * inv_h
+                else:
+                    i_ab = Cgs * ((Vg - Vs) - (pVg - pVs)) * inv_h
                 if gi is not None:
                     R[gi] -= i_ab
                 if si is not None:
                     R[si] += i_ab
             if Cgd != 0.0:
-                c_step = 0.5 * (Cgd + pCgd)
-                i_ab = c_step * inv_h * ((Vg - Vd) - (pVg - pVd))  # gate -> drain
+                if _USE_CHARGE_CAPS:
+                    qgd = state[0]._capacitance_charges_from_op(
+                        Vs, Vd, Vg, state[8], state[9])[1]
+                    i_ab = (ca0 * qgd + ca1 * pQgd + ca2 * ppQgd) * inv_h  # gate -> drain
+                elif _USE_AVERAGE_CAPS:
+                    i_ab = 0.5 * (Cgd + pQgd) * ((Vg - Vd) - (pVg - pVd)) * inv_h
+                elif _USE_BRANCH_CAPS:
+                    _, qgd_self, _, cgd_cross, _, _ = state[0]._capacitance_branch_terms_from_op(
+                        Vs, Vd, Vg, state[8], state[9])
+                    i_ab = (
+                        (qgd_self - pQgd) +
+                        cgd_cross * ((Vg - Vd) - (pVg - pVd))
+                    ) * inv_h
+                else:
+                    i_ab = Cgd * ((Vg - Vd) - (pVg - pVd)) * inv_h
                 if gi is not None:
                     R[gi] -= i_ab
                 if di is not None:
                     R[di] += i_ab
-        for (aterm, bterm, ai, bi, cap), dv_pre in zip(load_meta, load_prev_dv):
+        load_p2 = load_prev2_dv if load_prev2_dv is not None else load_prev_dv
+        for (aterm, bterm, ai, bi, cap), dv_pre, dv_pre2 in zip(
+                load_meta, load_prev_dv, load_p2):
             if cap != 0.0:
                 dv_now = termv(aterm, V, input_now) - termv(bterm, V, input_now)
-                i_ab = cap * inv_h * (dv_now - dv_pre)
+                i_ab = cap * inv_h * (ca0 * dv_now + ca1 * dv_pre + ca2 * dv_pre2)
                 if ai is not None:
                     R[ai] -= i_ab
                 if bi is not None:
@@ -421,8 +491,9 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         gds = deriv(Vs, Vd + HH, Vg, Vs, Vd - HH, Vg) if need_gds else 0.0
         return gm, gds
 
-    def build_jac(V, states, prev_dev_terms, h):
-        """Analytic conductance Jacobian dR/dV (n×n).
+    def build_jac(V, states, prev_dev_terms, h, cap_a0=1.0):
+        """Analytic conductance Jacobian dR/dV (n×n).  ``cap_a0`` scales the
+        capacitor companion conductance (1 for backward-Euler, a0 for BDF2).
 
         Device part = small-signal conductance stamp: gm=dI/dVg, gds=dI/dVd
         (finite-diff of get_Idc, same as get_ss_params), dI/dVs=-(gm+gds).
@@ -466,7 +537,6 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             J[k, k] -= gmin
         for state, prev_terms in zip(states, prev_dev_terms):
             dev, _, di, gi, si, _, _, _, _, _, _, Cgs, Cgd = state
-            _, _, _, pCgs, pCgd = prev_terms
             gate_leak_g = 1.0 / dev.R_cap2
             if gate_leak_g != 0.0:
                 if si is not None:
@@ -486,7 +556,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                         (1 if si is not None else 0) +
                         (1 if di is not None else 0))
             if Cgs != 0.0:                              # gate-source
-                g = 0.5 * (Cgs + pCgs) * inv_h
+                g = cap_a0 * Cgs * inv_h
                 if gi is not None:
                     J[gi, gi] -= g
                     if si is not None:
@@ -496,7 +566,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                     if gi is not None:
                         J[si, gi] += g
             if Cgd != 0.0:                              # gate-drain
-                g = 0.5 * (Cgd + pCgd) * inv_h
+                g = cap_a0 * Cgd * inv_h
                 if gi is not None:
                     J[gi, gi] -= g
                     if di is not None:
@@ -507,7 +577,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                         J[di, gi] += g
         for _, _, ai, bi, cap in load_meta:
             if cap != 0.0:
-                g = cap * inv_h
+                g = cap_a0 * cap * inv_h
                 if ai is not None:
                     J[ai, ai] -= g
                     if bi is not None:
@@ -540,9 +610,9 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         previous-step seed (verified: |R| 6e-9→1e-13→1e-16 in 2 iters at h=10µs).
         |ΔV|≤5 V/iter caps branch jumps; also accept once |ΔV| stalls at its floor.
 
-        PMOS dynamic caps use a step-averaged capacitance in the residual.
-        Freezing them at the previous step is fine for slow signals but lags on
-        fast edges (chopper) where Cgss/Cgdd swing with bias."""
+        PMOS dynamic caps use charge differences in the residual.  Freezing them
+        at the previous step is fine for slow signals but lags on fast edges
+        (chopper) where Cgss/Cgdd swing with bias."""
         maxit = int(newton_maxit if maxit is None else maxit)
         step_limit = float(newton_step_limit)
         if use_numba_newton:
@@ -571,6 +641,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                     cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value,
                     isrc_pi, isrc_qi, isrc_value,
                     dyn_pi, dyn_qi, dyn_input_idx,
+                    int(_CAP_MODE_ID),
                     float(clip_lo), float(clip_hi),
                 )
                 if ok:
@@ -671,6 +742,52 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 return V, False
         return V, np.linalg.norm(residual_at(V), ord=np.inf) < residual_tol
 
+    def gear2_step(seed, Vp, Vp2, input_now, input_prev, input_prev2,
+                   h_n, h_prev, maxit, step_limit, vtol):
+        """One variable-step BDF2 step.  Self-starts with backward-Euler when
+        there is no n-2 history (Vp2 is None).  Single full-step Newton with the
+        analytic Jacobian (cap diagonal scaled by a0)."""
+        if (Vp2 is None or h_prev is None or h_prev <= 0.0 or
+                h_n / h_prev > 2.0):                     # BE self-start / large ratio
+            a0, a1, a2 = 1.0, -1.0, 0.0
+            prev2_terms = None
+            load_prev2 = None
+        else:
+            rho = h_n / h_prev
+            a0 = (1.0 + 2.0 * rho) / (1.0 + rho)
+            a1 = -(1.0 + rho)
+            a2 = (rho * rho) / (1.0 + rho)
+            prev2_terms = device_prev_cap_terms(Vp2, input_prev2)
+            load_prev2 = load_cap_dv_values(Vp2, input_prev2)
+        prev_terms = device_prev_cap_terms(Vp, input_prev)
+        load_prev = load_cap_dv_values(Vp, input_prev)
+        coeffs = (a0, a1, a2)
+        V = np.array(seed, float)
+        prevmx = np.inf
+        for it in range(int(maxit)):
+            states = device_states(V, input_now)
+            R = step_residual(V, input_now, states, prev_terms, load_prev, h_n,
+                              cap_coeffs=coeffs, prev2_dev_terms=prev2_terms,
+                              load_prev2_dv=load_prev2)
+            J = build_jac(V, states, prev_terms, h_n, cap_a0=a0)
+            try:
+                dV = np.linalg.solve(J, -R)
+            except np.linalg.LinAlgError:
+                dV = np.linalg.lstsq(J, -R, rcond=None)[0]
+            mx = float(np.max(np.abs(dV)))
+            if mx > step_limit:
+                dV *= step_limit / mx
+                mx = step_limit
+            V = V + dV
+            if clip_lo <= clip_hi:
+                V = np.clip(V, clip_lo, clip_hi)
+            if mx < vtol:
+                return V, it + 1, True
+            if it >= 4 and mx >= prevmx and mx < 1e-5:
+                return V, it + 1, True
+            prevmx = mx
+        return V, int(maxit), False
+
     nfail = 0
     nretry = 0
     nsubsteps = 0
@@ -687,6 +804,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     numba_grid_failed_index = None
     numba_grid_failed_substeps = 0
     numba_grid_failed_profile = None
+    numba_grid_failed_intervals = None
     if edge_mask is None:
         edge_mask_arr = np.empty(0, dtype=np.bool_)
     else:
@@ -694,12 +812,116 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         if len(edge_mask_arr) != N:
             raise ValueError("edge_mask length must match tgrid")
 
-    if transient_solve_grid_numba is not None:
+    gear2_done = False
+    gear2_numba_used = False
+    if (integration_method == "gear2" and _GEAR2_NUMBA_GRID and
+            transient_solve_grid_gear2_numba is not None):
+        try:
+            t_profile0 = time.perf_counter()
+            # Run the single-step gear2 grid on the requested tgrid directly.
+            # NOTE: do NOT pre-refine the grid here.  The single-step gear2 grid
+            # has no in-solver retry, so refining a periodic grid (e.g. the chopper
+            # PSS, which passes a small max_step) into many fine pieces does not
+            # help the hard switch-edge steps -- it just multiplies the steps that
+            # fail and corrupts the orbit.  The coarse periodic grid is well
+            # conditioned for BE-self-start + BDF2 (matches the Python loop).  A
+            # correct raw-transient gear2 with subdivision needs in-solver retry
+            # (future work); raw transient stays on the BE grid for now.
+            g2_orig_idx = None
+            g2 = transient_solve_grid_gear2_numba(
+                np.asarray(V0, float), np.asarray(tgrid, float),
+                np.asarray(input_values, float), profile,
+                int(n), int(newton_maxit), float(newton_step_limit),
+                float(newton_vtol), float(gmin),
+                bool(fallback_full_jacobian or fallback_least_squares),
+                float(fallback_tol), float(HH),
+                dev_d_kind, dev_d_ref, dev_d_val,
+                dev_g_kind, dev_g_ref, dev_g_val,
+                dev_s_kind, dev_s_ref, dev_s_val,
+                dev_di, dev_gi, dev_si, dev_use_abs,
+                p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+                p_current_scale, p_inv_Rleak,
+                p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+                p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+                op_cache_valid, op_cache_vs1, op_cache_vd1,
+                res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref, res_b_val,
+                res_ai, res_bi, res_g,
+                cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref, cap_b_val,
+                cap_ai, cap_bi, cap_value,
+                isrc_pi, isrc_qi, isrc_value,
+                dyn_pi, dyn_qi, dyn_input_idx,
+                int(_CAP_MODE_ID), float(clip_lo), float(clip_hi),
+            )
+            ok_g2, Vfast, fast_substeps, fail_index, raw_profile, _rfi = g2
+            profile_wall_s = time.perf_counter() - t_profile0
+            if ok_g2:
+                if g2_orig_idx is not None:
+                    Vhist = np.ascontiguousarray(Vfast[g2_orig_idx])
+                else:
+                    Vhist = Vfast
+                nsubsteps = int(fast_substeps)
+                nfail = int(np.asarray(raw_profile, float)[13])
+                gear2_done = True
+                gear2_numba_used = True
+        except Exception as exc:
+            numba_grid_error = f"gear2: {type(exc).__name__}: {exc}"
+
+    if integration_method == "gear2" and not gear2_done:
+        for k in range(1, N):
+            h_n = tgrid[k] - tgrid[k - 1]
+            if h_n <= 0.0:
+                raise ValueError("tgrid must be strictly increasing")
+            Vp = Vhist[k - 1]
+            input_now = input_values[:, k]
+            input_prev = input_values[:, k - 1]
+            if k >= 2:
+                Vp2 = Vhist[k - 2]
+                input_prev2 = input_values[:, k - 2]
+                h_prev = tgrid[k - 1] - tgrid[k - 2]
+            else:
+                Vp2 = input_prev2 = h_prev = None
+            try:
+                V, _, ok = gear2_step(Vp, Vp, Vp2, input_now, input_prev,
+                                      input_prev2, h_n, h_prev, newton_maxit,
+                                      newton_step_limit, float(newton_vtol))
+            except Exception:
+                V, ok = Vp, False
+            if not ok:
+                nfail += 1
+            Vhist[k] = V
+            nsubsteps += 1
+        gear2_done = True
+
+    # Graceful fallback: gear2's single-step Newton stalls on stiff transients
+    # (e.g. the chopper switch edges), where it can fail a large fraction of
+    # steps and drift.  When too many steps fail, the gear2 result is unreliable,
+    # so re-run with the robust backward-Euler path (recursive bisection + LS).
+    # The PSS/periodic path opts out (gear2_be_fallback=False): shooting manages
+    # its own convergence and must not mix a BE orbit into the gear2 iteration.
+    if (integration_method == "gear2" and gear2_done and gear2_be_fallback and
+            nfail > max(8, int(0.10 * (N - 1)))):
+        be_result = transient(
+            sizes, bias, tgrid, vip=vip, vin=vin, nf=nf, V0=V0, topo=topo,
+            inputs=inputs, node_inputs=node_inputs, current_inputs=current_inputs,
+            corner=corner, max_step=max_step, flat_max_step=flat_max_step,
+            max_retry_subdivisions=max_retry_subdivisions,
+            newton_maxit=newton_maxit, newton_step_limit=newton_step_limit,
+            newton_vtol=newton_vtol,
+            fallback_full_jacobian=fallback_full_jacobian,
+            fallback_least_squares=fallback_least_squares, fallback_tol=fallback_tol,
+            signed_devices=signed_devices, profile=profile, edge_mask=edge_mask,
+            rail_margin=rail_margin, integration_method="be",
+            gear2_be_fallback=False)
+        be_result["gear2_be_fallback_used"] = True
+        be_result["gear2_nfail_before_fallback"] = int(nfail)
+        return be_result
+
+    if (not gear2_done and transient_solve_grid_numba is not None):
         try:
             max_step_arg = -1.0 if max_step is None else float(max_step)
             flat_max_step_arg = -1.0 if flat_max_step is None else float(flat_max_step)
             t_profile0 = time.perf_counter()
-            ok_grid, Vfast, fast_substeps, fail_index, raw_profile = transient_solve_grid_numba(
+            grid_result = transient_solve_grid_numba(
                 np.asarray(V0, float), np.asarray(tgrid, float),
                 np.asarray(input_values, float), edge_mask_arr, profile,
                 max_step_arg, flat_max_step_arg,
@@ -723,8 +945,15 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value,
                 isrc_pi, isrc_qi, isrc_value,
                 dyn_pi, dyn_qi, dyn_input_idx,
+                int(_CAP_MODE_ID),
                 float(clip_lo), float(clip_hi),
             )
+            if len(grid_result) == 5:
+                ok_grid, Vfast, fast_substeps, fail_index, raw_profile = grid_result
+                raw_failed_intervals = None
+            else:
+                (ok_grid, Vfast, fast_substeps, fail_index, raw_profile,
+                 raw_failed_intervals) = grid_result
             profile_wall_s = time.perf_counter() - t_profile0
             if ok_grid:
                 Vhist = Vfast
@@ -736,10 +965,18 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 numba_newton_success += nsubsteps
                 used_grid_numba = True
                 profile_stats = raw_profile_arr
+                if raw_failed_intervals is None:
+                    numba_grid_failed_intervals = None
+                else:
+                    numba_grid_failed_intervals = np.asarray(raw_failed_intervals, int)
             else:
                 numba_grid_failed_index = int(fail_index)
                 numba_grid_failed_substeps = int(fast_substeps)
                 numba_grid_failed_profile = np.asarray(raw_profile, float)
+                if raw_failed_intervals is None:
+                    numba_grid_failed_intervals = None
+                else:
+                    numba_grid_failed_intervals = np.asarray(raw_failed_intervals, int)
                 if numba_grid_failed_index is not None and numba_grid_failed_index > 1:
                     Vhist = Vfast
                     nsubsteps = int(fast_substeps)
@@ -824,7 +1061,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 return right_v, True, left_steps + right_steps, left_retry + right_retry + 1
         return Vp, False, 1, 1 if depth == 0 else 0
 
-    if not used_grid_numba:
+    if not gear2_done and not used_grid_numba:
         for k in range(python_start_idx, N):
             h = tgrid[k] - tgrid[k - 1]
             if h <= 0.0:
@@ -860,15 +1097,17 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     for node, weight in plan.output_weights.items():
         out += weight * nodes[node]
     result = {"t": tgrid, "output": out, "vout": out, "nfail": nfail,
-              "nretry": nretry, "nsubsteps": nsubsteps, "nodes": nodes}
+              "nretry": nretry, "nsubsteps": nsubsteps, "nodes": nodes,
+              "transient_cap_mode": _CAP_MODE,
+              "transient_cap_mode_id": int(_CAP_MODE_ID)}
+    result["numba_grid_solver"] = bool(used_grid_numba or gear2_numba_used)
     if numba_newton_attempts:
         result["numba_newton_attempts"] = numba_newton_attempts
         result["numba_newton_success"] = numba_newton_success
         result["numba_newton_fallback"] = numba_newton_fallback
-        result["numba_grid_solver"] = used_grid_numba
     if profile:
         if profile_stats is None:
-            profile_stats = np.zeros(16, dtype=float)
+            profile_stats = np.zeros(24, dtype=float)
             profile_stats[0] = 0.0
             profile_stats[6] = 0.0
             profile_stats[7] = float(nsubsteps)
@@ -883,7 +1122,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         flat_time_est = profile_wall_s * flat_iters / iter_work if iter_work else 0.0
         result["transient_profile"] = {
             "enabled": True,
-            "numba_grid_solver": bool(used_grid_numba),
+            "numba_grid_solver": bool(used_grid_numba or gear2_numba_used),
             "numba_grid_partial": bool(partial_grid_numba),
             "numba_grid_error": numba_grid_error,
             "numba_grid_failed_index": numba_grid_failed_index,
@@ -915,6 +1154,27 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             "flat_newton_iters": int(profile_stats[9]),
             "failed_substeps": int(profile_stats[10]),
             "failed_intervals": int(profile_stats[13]),
+            "failed_edge_intervals": int(profile_stats[14]),
+            "failed_flat_intervals": int(profile_stats[15]),
+            "failed_interval_indices": (
+                [int(v) for v in numba_grid_failed_intervals
+                 if int(v) >= 0]
+                if numba_grid_failed_intervals is not None else []
+            ),
+            "failed_last_residual_inf": (
+                float(profile_stats[16]) if len(profile_stats) > 16 else 0.0),
+            "failed_max_residual_inf": (
+                float(profile_stats[17]) if len(profile_stats) > 17 else 0.0),
+            "failed_last_step_inf": (
+                float(profile_stats[18]) if len(profile_stats) > 18 else 0.0),
+            "failed_max_step_inf": (
+                float(profile_stats[19]) if len(profile_stats) > 19 else 0.0),
+            "failed_stamp_or_prev_count": (
+                int(profile_stats[20]) if len(profile_stats) > 20 else 0),
+            "failed_linear_solve_count": (
+                int(profile_stats[21]) if len(profile_stats) > 21 else 0),
+            "failed_maxit_count": (
+                int(profile_stats[22]) if len(profile_stats) > 22 else 0),
             "edge_time_s_est": float(edge_time_est),
             "flat_time_s_est": float(flat_time_est),
             "time_estimate_basis": "newton_iteration_weighted",

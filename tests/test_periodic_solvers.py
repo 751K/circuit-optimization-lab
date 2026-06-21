@@ -232,3 +232,37 @@ def test_generic_pnoise_sparse_and_iterative_solvers_match_dense():
                                rtol=1e-8, atol=1e-30)
     np.testing.assert_allclose(iterative["out_psd"], dense["out_psd"],
                                rtol=1e-8, atol=1e-30)
+
+
+def test_gear2_is_second_order_on_rc_lowpass():
+    # BDF2/gear2 transient must converge ~2nd order (error ~h^2) on a linear RC
+    # low-pass, vs backward-Euler's 1st order. This guards the gear2 integration
+    # path used to close the chopper PAC switch-edge error.
+    from core.transient_solver import transient
+    R, C = 1e6, 1e-9                       # RC = 1 ms
+    topo = Topology(solved=["OUT"], devices=[], rails={"VIN": "VIN", "GND": 0.0},
+                    outputs=("OUT",), resistors=[("R1", "VIN", "OUT", R)],
+                    capacitors=[("C1", "OUT", "GND", C)])
+    f = 100.0
+    w = 2 * np.pi * f
+    RC = R * C
+    Hmag = 1.0 / np.sqrt(1 + (w * RC) ** 2)
+    phi = -np.arctan(w * RC)
+
+    def max_err(method, ppp):
+        t = np.linspace(0.0, 6.0 / f, 6 * ppp + 1)
+        vin = np.sin(w * t)
+        out = transient({}, {"VIN": 0.0}, t, topo=topo, inputs={"vin": vin},
+                        node_inputs={"VIN": "vin"}, V0=np.array([0.0]),
+                        integration_method=method)["nodes"]["OUT"]
+        mask = t >= t[-1] - 1.0 / f
+        ana = Hmag * np.sin(w * t[mask] + phi)
+        return float(np.max(np.abs(out[mask] - ana)))
+
+    be_coarse, be_fine = max_err("be", 40), max_err("be", 80)
+    g2_coarse, g2_fine = max_err("gear2", 40), max_err("gear2", 80)
+    # backward-Euler ~1st order (error halves), gear2 ~2nd order (error quarters)
+    assert 1.7 < be_coarse / be_fine < 2.3
+    assert 3.3 < g2_coarse / g2_fine < 4.6
+    # gear2 is far more accurate at the same step
+    assert g2_fine < be_fine / 5.0

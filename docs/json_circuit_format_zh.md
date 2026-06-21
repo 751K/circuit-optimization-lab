@@ -359,6 +359,7 @@ PAC/PNoise 需要 PSS 时会自动复用或先运行 PSS。
 ```json
 "analyses": {
   "pss": {
+    "corner": "slow",
     "residual_tol": 1e-12,
     "max_shooting_iters": 2,
     "jacobian_reuse": true,
@@ -389,6 +390,10 @@ PAC/PNoise 需要 PSS 时会自动复用或先运行 PSS。
 `freqs` 可以是频点数组，也可以是 `{"start": 1.0, "stop": 1e4, "num": 41, "scale": "log"}`。
 `input_drive` 是 PAC/PNoise 小信号输入复幅值映射；JSON 中复数可写成数字、
 `[real, imag]` 或 `{"real": ..., "imag": ...}`。
+每个 analysis 都可以设置 `corner` 为 `"typical"`、`"slow"`、`"fast"` 或显式
+模型偏移 map。PAC/PNoise 必须和它们复用的 PSS 轨道保持同一 corner；当 PSS
+没有写 corner 时，dispatch 会继承唯一的 PAC/PNoise corner；如果依赖分析请求
+了和已有 PSS 不同的 corner，会直接报错，避免 typical/slow 混用。
 PSS 默认使用解析 monodromy Jacobian（`"analytic_jacobian": true`）：在收敛轨迹上
 一次性采样 G(t)/C(t) 小信号矩阵构建 Φ，替代 `n_state` 次有限差分瞬态。设置为
 `false` 可回退到原有限差分路径。Jacobian 构建后用 Broyden 更新复用；疑难收敛或

@@ -40,7 +40,7 @@ from threading import RLock
 import numpy as np
 
 try:
-    from .ac_solver import ac_solve, _dev_nf, _is_afe_topology
+    from .ac_solver import ac_solve, _dev_corner, _dev_nf, _is_afe_topology
     from .noise_solver import band_rms, noise_analysis
     from .pac_solver import pac_solve
     from .pmos_tft_model import PMOS_TFT
@@ -49,7 +49,7 @@ try:
     from .topology import AFE_TOPO, Topology
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_solver import ac_solve, _dev_nf, _is_afe_topology
+    from ac_solver import ac_solve, _dev_corner, _dev_nf, _is_afe_topology
     from noise_solver import band_rms, noise_analysis
     from pac_solver import pac_solve
     from pmos_tft_model import PMOS_TFT
@@ -85,6 +85,7 @@ class PMOSChopperBuild:
     output_nodes: tuple
     sense_output_nodes: tuple
     clock_nodes: tuple
+    split_input_pair: bool = False
 
 
 def square_chopper_harmonics(max_harmonic=31):
@@ -228,10 +229,10 @@ def spectre_pulse_clock_pair(tgrid, f_chop, *, v_low=0.0, v_high=40.0,
 
     ``delay=T/2 width=T/2 period=T rise=edge_time fall=edge_time``.
 
-    The source is periodic in local pulse time: at each period boundary it
-    returns to ``val0``.  With the verified netlist's width, the high interval
-    reaches the period boundary before the finite fall can complete, so the
-    reset edge is a period-boundary transition.
+    Spectre applies the finite rise before starting the high-width interval, so
+    the falling edge starts at ``T + edge_time`` for the first cycle.  This
+    helper intentionally follows that source semantics rather than the ideal
+    centered-edge periodic chopper waveform used by the frequency-domain helper.
     """
     tgrid = np.asarray(tgrid, float)
     f_chop = float(f_chop)
@@ -245,23 +246,22 @@ def spectre_pulse_clock_pair(tgrid, f_chop, *, v_low=0.0, v_high=40.0,
 
     def pulse(val0, val1):
         out = np.full_like(tgrid, float(val0), dtype=float)
-        tau = np.mod(tgrid, period)
-        if edge <= 0.0:
-            out[tau >= half] = float(val1)
+        active = tgrid >= half
+        if not np.any(active):
             return out
-        width = half
+        tau = np.mod(tgrid[active] - half, period)
         vals = np.full_like(tau, float(val0), dtype=float)
-        rise = (tau >= half) & (tau < half + edge)
-        high_stop = min(period, half + edge + width)
-        high_region = (tau >= half + edge) & (tau < high_stop)
-        fall_start = half + edge + width
-        fall = ((fall_start < period) & (tau >= fall_start) &
-                (tau < min(period, fall_start + edge)))
-        vals[rise] = val0 + (val1 - val0) * ((tau[rise] - half) / edge)
-        vals[high_region] = val1
-        if np.any(fall):
-            vals[fall] = val1 + (val0 - val1) * ((tau[fall] - fall_start) / edge)
-        return vals
+        if edge <= 0.0:
+            vals[tau < half] = float(val1)
+        else:
+            rise = tau < edge
+            high_region = (tau >= edge) & (tau < edge + half)
+            fall = (tau >= edge + half) & (tau < 2.0 * edge + half)
+            vals[rise] = val0 + (val1 - val0) * (tau[rise] / edge)
+            vals[high_region] = val1
+            vals[fall] = val1 + (val0 - val1) * ((tau[fall] - edge - half) / edge)
+        out[active] = vals
+        return out
 
     clk_a = pulse(low, high)
     clk_b = pulse(high, low)
@@ -304,7 +304,7 @@ def finite_edge_chopper_harmonics(max_harmonic=31, *, edge_fraction=0.0,
 
 def build_afe_pmos_chopper(*, switch_size=(20000.0, 80.0), switch_nf=1,
                            base_topo=AFE_TOPO, prefix="CH",
-                           output_filter=None):
+                           output_filter=None, split_input_pair=False):
     """Wrap the default AFE with eight PMOS_TFT pass switches.
 
     The wrapper creates external differential ports and internal amplifier ports:
@@ -352,6 +352,7 @@ def build_afe_pmos_chopper(*, switch_size=(20000.0, 80.0), switch_nf=1,
     def map_load_node(node):
         return external_output_map.get(node, node)
 
+    split_input_pair = bool(split_input_pair)
     devices = []
     for name, drain, gate, source in base_topo.devices:
         drain = map_core_node(drain)
@@ -362,7 +363,14 @@ def build_afe_pmos_chopper(*, switch_size=(20000.0, 80.0), switch_nf=1,
             gate = inn
         else:
             gate = map_core_node(gate)
-        devices.append((name, drain, gate, source))
+        if split_input_pair and name == "M7":
+            devices.append((name, drain, gate, source))
+            devices.append(("M16", drain, gate, source))
+        elif split_input_pair and name == "M8":
+            devices.append((name, drain, gate, source))
+            devices.append(("M17", drain, gate, source))
+        else:
+            devices.append((name, drain, gate, source))
 
     def switch(name, source, drain, gate):
         # PMOS_TFT tuples are (name, drain, gate, source).
@@ -490,6 +498,7 @@ def build_afe_pmos_chopper(*, switch_size=(20000.0, 80.0), switch_nf=1,
         output_nodes=(vop, von),
         sense_output_nodes=sense_outputs,
         clock_nodes=(clk_a, clk_b),
+        split_input_pair=split_input_pair,
     )
 
 
@@ -518,14 +527,33 @@ def pmos_chopper_phase_bias(bias, phase="A", *, input_common_mode=None,
 
 def _with_switch_maps(sizes, nf, build):
     sizes_out = dict(sizes)
+    if getattr(build, "split_input_pair", False):
+        for parent, child in (("M7", "M16"), ("M8", "M17")):
+            if parent in sizes_out:
+                W, L = sizes_out[parent]
+                half = (float(W) * 0.5, L)
+                sizes_out[parent] = half
+                sizes_out[child] = half
     sizes_out.update(build.switch_sizes)
     if nf is None:
         nf_out = dict(build.switch_nf)
     elif isinstance(nf, dict):
         nf_out = dict(nf)
+        if getattr(build, "split_input_pair", False):
+            for parent, child in (("M7", "M16"), ("M8", "M17")):
+                parent_nf = int(nf_out.get(parent, 1))
+                half_nf = max(1, int(round(parent_nf * 0.5)))
+                nf_out[parent] = half_nf
+                nf_out[child] = half_nf
         nf_out.update(build.switch_nf)
     else:
         nf_out = {name: int(nf) for name in sizes}
+        if getattr(build, "split_input_pair", False):
+            for parent, child in (("M7", "M16"), ("M8", "M17")):
+                parent_nf = int(nf_out.get(parent, int(nf)))
+                half_nf = max(1, int(round(parent_nf * 0.5)))
+                nf_out[parent] = half_nf
+                nf_out[child] = half_nf
         nf_out.update(build.switch_nf)
     return sizes_out, nf_out
 
@@ -654,9 +682,10 @@ def _pmos_chopper_auto_seed(sizes, bias, phase, build, *, nf=None, corner=None,
 
 def _pmos_chopper_one_phase(sizes, bias, freqs, phase, *, switch_size,
                             switch_nf, nf, corner, x0_guess, band, base_topo,
-                            output_filter):
+                            output_filter, split_input_pair=False):
     build = build_afe_pmos_chopper(switch_size=switch_size, switch_nf=switch_nf,
-                                   base_topo=base_topo, output_filter=output_filter)
+                                   base_topo=base_topo, output_filter=output_filter,
+                                   split_input_pair=split_input_pair)
     all_sizes, all_nf = _with_switch_maps(sizes, nf, build)
     pbias = pmos_chopper_phase_bias(bias, phase)
     seed = _pmos_chopper_auto_seed(
@@ -692,7 +721,8 @@ def _pmos_chopper_one_phase(sizes, bias, freqs, phase, *, switch_size,
 def pmos_chopper_analysis(sizes, bias, freqs, *, switch_size=(20000.0, 80.0),
                           switch_nf=1, nf=None, corner=None, x0_guess=None,
                           band=(0.05, 100.0), phases=("A", "B"),
-                          base_topo=AFE_TOPO, output_filter=None):
+                          base_topo=AFE_TOPO, output_filter=None,
+                          split_input_pair=False):
     """Static-phase gain/BW/noise of the AFE wrapped with eight PMOS switches.
 
     This is the PMOS-device counterpart to `chopper_analysis`, but it is an LTI
@@ -714,7 +744,8 @@ def pmos_chopper_analysis(sizes, bias, freqs, *, switch_size=(20000.0, 80.0),
         result, build = _pmos_chopper_one_phase(
             sizes, bias, freqs, phase, switch_size=switch_size,
             switch_nf=switch_nf, nf=nf, corner=corner, x0_guess=x0_guess,
-            band=band, base_topo=base_topo, output_filter=output_filter)
+            band=band, base_topo=base_topo, output_filter=output_filter,
+            split_input_pair=split_input_pair)
         if result is None:
             return None
         phase_results[phase] = result
@@ -736,6 +767,7 @@ def pmos_chopper_analysis(sizes, bias, freqs, *, switch_size=(20000.0, 80.0),
         "switch_sizes": build.switch_sizes,
         "switch_nf": build.switch_nf,
         "switch_names": build.switch_names,
+        "split_input_pair": bool(build.split_input_pair),
         "phases": phase_results,
         "response": response,
         "gains": gains,
@@ -854,28 +886,21 @@ def refine_pulse_clock_tgrid(tgrid, f_chop, *, edge_time=0.0,
     t1 = float(tgrid[-1])
     edge_points = max(3, int(edge_points))
     time_shift = float(time_shift)
-    finite_edges = []
-    hard_edges = []
+    starts = []
     k_min = int(np.floor((t0 - half - 2.0 * edge_window) / period)) - 1
     k_max = int(np.ceil((t1 - half + 2.0 * edge_window) / period)) + 1
     for k in range(k_min, k_max + 1):
-        finite_edges.append(half + k * period - time_shift)
-        hard_edges.append(k * period - time_shift)
+        starts.append(half + k * period - time_shift)
+        starts.append(half + edge_time + half + k * period - time_shift)
 
     points = [tgrid]
-    for start in finite_edges:
-        lo = start
-        hi = start + edge_time if edge_time > 0.0 else start
-        if edge_time <= 0.0:
+    for start in starts:
+        if edge_time > 0.0:
+            lo = start
+            hi = start + edge_time
+        else:
             lo = start - 0.5 * edge_window
             hi = start + 0.5 * edge_window
-        lo = max(t0, lo)
-        hi = min(t1, hi)
-        if hi >= lo:
-            points.append(np.linspace(lo, hi, edge_points))
-    for start in hard_edges:
-        lo = start - 0.5 * edge_window
-        hi = start + 0.5 * edge_window
         lo = max(t0, lo)
         hi = min(t1, hi)
         if hi >= lo:
@@ -885,7 +910,8 @@ def refine_pulse_clock_tgrid(tgrid, f_chop, *, edge_time=0.0,
 
 
 def _charge_injection_sources(build, all_sizes, all_nf, bias, tgrid, clk_a, clk_b,
-                              *, charge_scale=1.0, source_split=0.5):
+                              *, charge_scale=1.0, source_split=0.5,
+                              corner=None):
     """Build charge-injection current-source waveforms for PMOS turn-off edges."""
     if charge_scale == 0.0:
         return {}, []
@@ -898,9 +924,10 @@ def _charge_injection_sources(build, all_sizes, all_nf, bias, tgrid, clk_a, clk_
     for phase in ("A", "B"):
         pbias = pmos_chopper_phase_bias(bias, phase)
         seed = _pmos_chopper_auto_seed(
-            all_sizes, pbias, phase, build, nf=all_nf, base_topo=AFE_TOPO)
+            all_sizes, pbias, phase, build, nf=all_nf, corner=corner,
+            base_topo=AFE_TOPO)
         ac = ac_solve(all_sizes, pbias, np.array([1.0]), topo=topo,
-                      nf=all_nf, x0_guess=seed)
+                      nf=all_nf, corner=corner, x0_guess=seed)
         if ac is None:
             phase_dc[phase] = None
         else:
@@ -923,7 +950,7 @@ def _charge_injection_sources(build, all_sizes, all_nf, bias, tgrid, clk_a, clk_
         Vd = _node_bias_value(topo, pbias, dc, drain)
         Vg_on = pbias["CLK_A"] if phase == "A" else pbias["CLK_B"]
         dev = PMOS_TFT(W=all_sizes[name][0], L=all_sizes[name][1],
-                       NF=_dev_nf(all_nf, name))
+                       NF=_dev_nf(all_nf, name), **_dev_corner(corner, name))
         qch = float(charge_scale) * dev.estimate_channel_charge(Vs, Vd, Vg_on)
         if qch <= 0.0:
             continue
@@ -948,6 +975,7 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
                            clock_style="pulse",
                            clock_phase_offset=0.25,
                            switch_size=(20000.0, 80.0), switch_nf=1, nf=None,
+                           corner=None,
                            V0=None, charge_injection=True,
                            charge_scale=1.0, charge_source_split=0.5,
                            refine_edges=True, edge_points=9,
@@ -959,7 +987,8 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
                            fallback_full_jacobian=False,
                            fallback_least_squares=True, fallback_tol=1e-10,
                            base_topo=AFE_TOPO, output_filter=None,
-                           rail_margin=2.0, profile=False):
+                           rail_margin=2.0, profile=False,
+                           split_input_pair=False, integration_method="be"):
     """Transient of the eight-PMOS chopper with finite-edge clocks.
 
     Clock feedthrough is produced by the PMOS model's own Cgss/Cgdd displacement
@@ -979,7 +1008,8 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
     if pulse_clock and dead_time:
         raise ValueError("dead_time is only supported with clock_style='phase'")
     build = build_afe_pmos_chopper(switch_size=switch_size, switch_nf=switch_nf,
-                                   base_topo=base_topo, output_filter=output_filter)
+                                   base_topo=base_topo, output_filter=output_filter,
+                                   split_input_pair=split_input_pair)
     all_sizes, all_nf = _with_switch_maps(sizes, nf, build)
     vcm = bias["VCM"] if input_common_mode is None else float(input_common_mode)
     if vip is None or vin is None:
@@ -1039,7 +1069,8 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
     if charge_injection:
         qinj_waveforms, current_inputs = _charge_injection_sources(
             build, all_sizes, all_nf, bias, tgrid, clk_a, clk_b,
-            charge_scale=charge_scale, source_split=charge_source_split)
+            charge_scale=charge_scale, source_split=charge_source_split,
+            corner=corner)
         inputs.update(qinj_waveforms)
 
     if transient_max_step is None:
@@ -1051,10 +1082,11 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
     if V0 is None:
         start_phase = "A" if float(a_on[0]) >= float(b_on[0]) else "B"
         seed = _pmos_chopper_auto_seed(
-            sizes, tbias, start_phase, build, nf=nf, base_topo=base_topo)
+            sizes, tbias, start_phase, build, nf=nf, corner=corner,
+            base_topo=base_topo)
         if seed is not None:
             ac0 = ac_solve(all_sizes, tbias, np.array([1.0]), topo=build.topology,
-                           nf=all_nf, x0_guess=seed)
+                           nf=all_nf, corner=corner, x0_guess=seed)
             dc0 = ac0["dc_op"] if ac0 is not None else seed
             V0 = np.array(build.topology.guess_vector(
                 dc0, default=build.topology.default_guess_value(tbias)), dtype=float)
@@ -1067,7 +1099,8 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
 
     result = transient(all_sizes, tbias, tgrid, topo=build.topology, inputs=inputs,
                        node_inputs=node_inputs, current_inputs=current_inputs,
-                       nf=all_nf, V0=V0, max_step=transient_max_step,
+                       nf=all_nf, corner=corner, V0=V0,
+                       max_step=transient_max_step,
                        flat_max_step=transient_flat_max_step,
                        max_retry_subdivisions=max_retry_subdivisions,
                        newton_maxit=newton_maxit,
@@ -1078,7 +1111,8 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
                        fallback_tol=fallback_tol,
                        signed_devices=signed_devices,
                        rail_margin=rail_margin,
-                       profile=profile, edge_mask=transient_edge_mask)
+                       profile=profile, edge_mask=transient_edge_mask,
+                       integration_method=integration_method)
     requested_output = np.interp(requested_tgrid, result["t"], result["output"])
     requested_nodes = {
         name: np.interp(requested_tgrid, result["t"], vals)
@@ -1089,6 +1123,8 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
         "switch_names": build.switch_names,
         "switch_sizes": build.switch_sizes,
         "switch_nf": build.switch_nf,
+        "split_input_pair": bool(build.split_input_pair),
+        "all_sizes": all_sizes,
         "all_nf": all_nf,
         "requested_tgrid": requested_tgrid,
         "requested_output": requested_output,
@@ -1108,6 +1144,7 @@ def pmos_chopper_transient(sizes, bias, tgrid, f_chop, *, input_diff=0.0,
         "bias": tbias,
         "clock_style": "pulse" if pulse_clock else "phase",
         "signed_devices": signed_devices,
+        "corner": corner,
     })
     return result
 
@@ -1117,6 +1154,7 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
                      clock_style="pulse", clock_phase_offset=0.25,
                      pulse_time_shift=None,
                      switch_size=(20000.0, 80.0), switch_nf=1, nf=None,
+                     corner=None,
                      V0=None, charge_injection=True, charge_scale=1.0,
                      charge_source_split=0.5, refine_edges=True, edge_points=9,
                      signed_switches=True, tgrid=None, n_points=161,
@@ -1129,7 +1167,8 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
                      fallback_full_jacobian=False,
                      fallback_least_squares=False, fallback_tol=1e-10,
                      analytic_jacobian=True,
-                     base_topo=AFE_TOPO, output_filter=None, profile=False):
+                     base_topo=AFE_TOPO, output_filter=None, profile=False,
+                     split_input_pair=False, integration_method="gear2"):
     """Periodic steady state of the eight-PMOS chopper.
 
     This is a shooting PSS wrapper around the same hard-switched topology and
@@ -1159,7 +1198,8 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
         raise ValueError("dead_time is only supported with clock_style='phase'")
 
     build = build_afe_pmos_chopper(switch_size=switch_size, switch_nf=switch_nf,
-                                   base_topo=base_topo, output_filter=output_filter)
+                                   base_topo=base_topo, output_filter=output_filter,
+                                   split_input_pair=split_input_pair)
     all_sizes, all_nf = _with_switch_maps(sizes, nf, build)
     vcm = bias["VCM"] if input_common_mode is None else float(input_common_mode)
 
@@ -1225,7 +1265,8 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
     if charge_injection:
         qinj_waveforms, current_inputs = _charge_injection_sources(
             build, all_sizes, all_nf, bias, tgrid_work, clk_a, clk_b,
-            charge_scale=charge_scale, source_split=charge_source_split)
+            charge_scale=charge_scale, source_split=charge_source_split,
+            corner=corner)
         inputs.update(qinj_waveforms)
 
     if transient_max_step is None:
@@ -1237,7 +1278,8 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
     if V0 is None:
         start_phase = "A" if float(a_on[0]) >= float(b_on[0]) else "B"
         seed = _pmos_chopper_auto_seed(
-            sizes, tbias, start_phase, build, nf=nf, base_topo=base_topo)
+            sizes, tbias, start_phase, build, nf=nf, corner=corner,
+            base_topo=base_topo)
         if seed is not None:
             V0 = np.array(build.topology.guess_vector(
                 seed, default=build.topology.default_guess_value(tbias)), dtype=float)
@@ -1251,6 +1293,7 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
 
     result = pss_solve(
         all_sizes, tbias, period, topo=build.topology, nf=all_nf,
+        corner=corner,
         tgrid=tgrid_work, inputs=inputs, node_inputs=node_inputs,
         current_inputs=current_inputs, V0=V0, tstab_periods=tstab_periods,
         max_step=transient_max_step, flat_max_step=transient_flat_max_step,
@@ -1262,7 +1305,7 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
         max_shooting_iters=max_shooting_iters, fd_step=fd_step,
         analytic_jacobian=analytic_jacobian,
         rail_margin=rail_margin, check_periodic_inputs=False, profile=profile,
-        edge_mask=edge_mask,
+        edge_mask=edge_mask, integration_method=integration_method,
     )
     requested_output = np.interp(requested_tgrid, result["t"], result["output"])
     requested_nodes = {
@@ -1274,6 +1317,8 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
         "switch_names": build.switch_names,
         "switch_sizes": build.switch_sizes,
         "switch_nf": build.switch_nf,
+        "split_input_pair": bool(build.split_input_pair),
+        "all_sizes": all_sizes,
         "all_nf": all_nf,
         "requested_tgrid": requested_tgrid,
         "requested_output": requested_output,
@@ -1293,17 +1338,18 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
         "bias": tbias,
         "clock_style": "pulse" if pulse_clock else "phase",
         "signed_devices": signed_devices,
+        "corner": corner,
     })
     return result
 
 
 def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
-                     nf=None,
+                     nf=None, corner=None,
                      pacmag=1.0, fd_state_step=1e-4, fd_input_step=1e-4,
                      pss_kwargs=None, transient_kwargs=None,
                      cache_linearization=True, cache_forcing=True,
                      compute_condition=None, lti_fast_path=True,
-                     analytic=True, n_period_samples=384, max_sideband=32,
+                     analytic=True, n_period_samples=384, max_sideband=64,
                      profile=False, debug=False):
     """PSS-assisted small-signal PAC for the PMOS chopper.
 
@@ -1313,11 +1359,11 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
     small-signal matrices sampled on the PSS orbit); set ``analytic=False`` for
     the finite-difference shooting kernel.
 
-    ``max_sideband`` defaults to 32 here (vs. 10 for smooth orbits): the hard
+    ``max_sideband`` defaults to 64 here (vs. 10 for smooth orbits): the hard
     switch edges spread the input/output commutation across many sidebands, so
-    the baseband conversion gain only converges to Spectre PAC once ~30 sidebands
-    are kept. Against the Cadence design-#3 reference this moves the baseband gain
-    from -13% (K=10) to within ~-2.5% (K=32); the residual is model level.
+    the baseband conversion gain only converges to Spectre PAC once many
+    sidebands are kept. Against the Cadence slow-corner design-#3 reference this
+    moves baseband and 200 Hz gain to within 1%.
     """
     pss_kwargs = dict(pss_kwargs or {})
     transient_kwargs = dict(transient_kwargs or {})
@@ -1326,11 +1372,15 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
                             tstab_periods=1, fallback_least_squares=False)
         if nf is not None:
             pss_defaults["nf"] = nf
+        if corner is not None:
+            pss_defaults["corner"] = corner
         pss_defaults.update(pss_kwargs)
         pss_result = pmos_chopper_pss(sizes, bias, f_chop, **pss_defaults)
+    if corner is None:
+        corner = pss_result.get("corner")
     return pac_solve(
         sizes, bias, freqs, pss_result=pss_result,
-        input_drive={"vip": 0.5, "vin": -0.5}, nf=nf,
+        input_drive={"vip": 0.5, "vin": -0.5}, nf=nf, corner=corner,
         fd_state_step=fd_state_step, fd_input_step=fd_input_step,
         transient_kwargs=transient_kwargs, pacmag=pacmag,
         rail_margin=pss_kwargs.get("rail_margin", 2.0),
@@ -1345,6 +1395,7 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
 
 
 def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
+                        corner=None,
                         max_sideband=32, n_period_samples=384,
                         band=(0.05, 100.0), gains=None, pac_result=None,
                         noise_devices=None, switch_noise_conductance_gated=True,
@@ -1357,6 +1408,15 @@ def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
 
     This wrapper builds the chopper PSS orbit when needed, then delegates the
     harmonic-balance noise conversion matrix to :func:`core.pnoise_solver.pnoise_solve`.
+
+    ``max_sideband`` defaults to 32 (not 10) because the local HB noise-conversion
+    truncation converges more slowly in sidebands than Spectre's shooting PNoise:
+    matching ``maxsideband=10`` in the chopper netlist requires ~32 local
+    sidebands. Verified against the official chop_tb_d3 reference re-run at
+    ``maxsideband=40`` (converged) — local msb=32 lands the band IRN within ~1.4%
+    across slow/typical/fast, vs -6% on typical/fast at msb=10. The input-referred
+    IRN is robust to the residual orbit gain error because it cancels in the
+    noise/gain ratio.
     """
     f_chop = float(f_chop)
     if f_chop <= 0.0:
@@ -1368,13 +1428,26 @@ def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
                             fallback_least_squares=False)
         if nf is not None:
             pss_defaults["nf"] = nf
+        if corner is not None:
+            pss_defaults["corner"] = corner
         pss_defaults.update(pss_kwargs)
         pss_result = pmos_chopper_pss(sizes, bias, f_chop, base_topo=base_topo,
                                       **pss_defaults)
+    if corner is None:
+        corner = pss_result.get("corner")
     gds_noise_devices = pss_result.get("switch_names", ())
+    # Input-refer with the chopper's own PAC gain (analytic adjoint, default
+    # max_sideband=64). Otherwise pnoise_solve falls back to pac_solve's generic
+    # max_sideband=10, which under-resolves the hard-switch conversion gain and
+    # inflates the reported IRN.
+    if gains is None and pac_result is None:
+        pac_result = pmos_chopper_pac(
+            sizes, bias, freqs, f_chop, pss_result=pss_result, nf=nf,
+            corner=corner)
     return pnoise_solve(
         sizes, bias, freqs, pss_result=pss_result, fundamental=f_chop,
-        nf=nf, max_sideband=max_sideband, n_period_samples=n_period_samples,
+        nf=nf, corner=corner, max_sideband=max_sideband,
+        n_period_samples=n_period_samples,
         band=band, gains=gains, pac_result=pac_result,
         input_drive={"vip": 0.5, "vin": -0.5},
         noise_devices=noise_devices, gds_noise_devices=gds_noise_devices,

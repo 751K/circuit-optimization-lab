@@ -57,7 +57,7 @@ def _bw_from_gain(freqs, gains):
 
 
 def _merge_sizes_and_nf(sizes, nf, pss_result):
-    all_sizes = dict(sizes)
+    all_sizes = dict(pss_result.get("all_sizes", sizes))
     all_sizes.update(pss_result.get("switch_sizes", {}))
 
     if "all_nf" in pss_result and nf is None:
@@ -115,7 +115,21 @@ def _freeze_nf(nf):
 
 
 def _freeze_kwargs(kwargs):
+    if kwargs is None:
+        return ()
+    if not hasattr(kwargs, "items"):
+        return (("__value__", repr(kwargs)),)
     return tuple((str(k), repr(v)) for k, v in sorted((kwargs or {}).items()))
+
+
+def _charge_linearized_caps(pss_result):
+    """True when the PSS trajectory came from charge/Q-style transient stamping."""
+    mode_id = pss_result.get("transient_cap_mode_id")
+    if mode_id is not None:
+        return int(mode_id) in (0, 3)
+    mode = str(pss_result.get("transient_cap_mode", "charge")).lower()
+    return mode in {"charge", "q", "qstamp", "q-stamp",
+                    "branch", "self", "self-charge"}
 
 
 def _is_constant_wave(values, tol=1e-12):
@@ -210,6 +224,7 @@ def _stamp_pmos_dynamic_cap_terms(G, d, g, s, dev, Vs, Vd, Vg,
 
 
 def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
+                          corner=None,
                           compute_condition=False):
     """Use ordinary AC when the supplied PSS orbit is time invariant.
 
@@ -290,7 +305,7 @@ def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
         require_dc_in_box=topo.require_dc_in_box,
     )
     ac = ac_solve(
-        sizes, tbias, freqs, topo=fast_topo, nf=nf,
+        sizes, tbias, freqs, topo=fast_topo, nf=nf, corner=corner,
         x0_guess=dict(zip(topo.solved, np.asarray(pss_result["x0"], float))),
     )
     if ac is None:
@@ -419,11 +434,13 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             return ("n", ext_idx[node])
         return ("v", 0.0)
 
+    charge_caps = _charge_linearized_caps(pss_result)
     cache_store = pss_result.setdefault("_pac_analytic_cache", {}) if cache else {}
     lin_key = (
-        "pac_analytic_lin_v2", tuple(topo.solved), tuple(topo.devices),
+        "pac_analytic_lin_v3", tuple(topo.solved), tuple(topo.devices),
         tuple(topo.resistors), tuple(topo.cap_list()), float(period), int(N),
         _freeze_sizes(all_sizes), _freeze_nf(all_nf), _freeze_kwargs(corner or {}),
+        "charge_caps" if charge_caps else "veriloga_caps",
         tuple(sorted(drive_list)),
         _freeze_complex_map(dict(zip(drive_list, drive_amps))),
     )
@@ -454,11 +471,12 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
                                   nf=_nfval(all_nf, name), dev_inst=dev_inst[name])
                 _stamp_mos_lti(Gt[m], Ct[m], rg, rc, term(d), term(g), term(s),
                                p["gm"], p["gds"], p["Cgs"], p["Cgd"])
-                _stamp_pmos_dynamic_cap_terms(
-                    Gt[m], term(d), term(g), term(s), dev_inst[name],
-                    Vs, Vd, Vg,
-                    term_derivative(s, m), term_derivative(d, m),
-                    term_derivative(g, m))
+                if not charge_caps:
+                    _stamp_pmos_dynamic_cap_terms(
+                        Gt[m], term(d), term(g), term(s), dev_inst[name],
+                        Vs, Vd, Vg,
+                        term_derivative(s, m), term_derivative(d, m),
+                        term_derivative(g, m))
         Gf = np.fft.fft(Gt[:, :n, :n], axis=0) / N
         Cf = np.fft.fft(Ct[:, :n, :n], axis=0) / N
         Ginf = np.fft.fft(Gt[:, :n, n:] @ drive_amps, axis=0) / N      # (N, n)
@@ -472,9 +490,10 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         br = (kr + K) * n
         for kc in range(-K, K + 1):
             bc = (kc + K) * n
-            colom = 2j * np.pi * kc * fundamental
+            sideband = kr if charge_caps else kc
+            sideband_omega = 2j * np.pi * sideband * fundamental
             g = Gf[(kr - kc) % N]; c = Cf[(kr - kc) % N]
-            Y_base[br:br + n, bc:bc + n] = g + colom * c
+            Y_base[br:br + n, bc:bc + n] = g + sideband_omega * c
             C_block[br:br + n, bc:bc + n] = c
     e = np.zeros(nb * n, dtype=complex)
     base0 = K * n
@@ -497,8 +516,8 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         except np.linalg.LinAlgError:
             adj = np.linalg.lstsq(Y.T, e, rcond=None)[0]
         b = np.zeros(nb * n, dtype=complex)
-        input_om = 2j * np.pi * f
         for kr in range(-K, K + 1):
+            input_om = 2j * np.pi * (f + kr * fundamental) if charge_caps else 2j * np.pi * f
             b[(kr + K) * n:(kr + K + 1) * n] = -(
                 Ginf[kr % N] + input_om * Cinf[kr % N])
         response[fi] = adj @ b
@@ -536,6 +555,7 @@ def _resolve_compute_condition(compute_condition, profile=False, debug=False):
 
 
 def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
+              corner=None,
               fd_state_step=1e-4, fd_input_step=1e-4, transient_kwargs=None,
               pacmag=1.0, rail_margin=None, cache_linearization=True,
               cache_forcing=True, compute_condition=None, lti_fast_path=True,
@@ -565,6 +585,8 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
         raise ValueError("input_drive must contain at least one driven input key")
     input_drive = dict(input_drive)
     transient_kwargs = dict(transient_kwargs or {})
+    if corner is None:
+        corner = pss_result.get("corner")
     compute_condition = _resolve_compute_condition(
         compute_condition, profile=profile, debug=debug)
 
@@ -598,7 +620,7 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
         raise ValueError("finite-difference steps must be positive")
     if lti_fast_path:
         fast = _try_lti_ac_fast_path(all_sizes, tbias, freqs, pss_result,
-                                     input_drive, all_nf,
+                                     input_drive, all_nf, corner=corner,
                                      compute_condition=compute_condition)
         if fast is not None:
             fast["pacmag"] = float(pacmag)
@@ -607,7 +629,7 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
     if analytic:
         ana = _analytic_adjoint_pac(
             all_sizes, tbias, freqs, pss_result=pss_result,
-            input_drive=input_drive, all_nf=all_nf, corner=None,
+            input_drive=input_drive, all_nf=all_nf, corner=corner,
             n_period_samples=n_period_samples, max_sideband=max_sideband,
             cache=cache_linearization, pacmag=pacmag,
             compute_condition=compute_condition)
@@ -620,6 +642,7 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
         node_inputs=node_inputs,
         current_inputs=current_inputs,
         nf=all_nf,
+        corner=corner,
         V0=x0,
         max_step=pss_result.get("transient_max_step"),
         flat_max_step=pss_result.get("transient_flat_max_step"),

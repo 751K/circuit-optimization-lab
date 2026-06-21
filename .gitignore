@@ -68,3 +68,11 @@ spectre.ic
 *.swp
 *.swo
 
+# SLiCAP generated files
+cir/
+SLiCAP.ini
+lib/
+html/
+csv/
+img/
+tex/
