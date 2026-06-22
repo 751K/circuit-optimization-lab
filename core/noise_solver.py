@@ -24,14 +24,14 @@ Ground-truth check (Cadence Spectre, afe_gt/tb_noise.raw/noiseAnal.noise):
 """
 import numpy as np
 try:
-    from .device_model import create_device
+    from .device_model import create_device, get_default_model_type
     from .ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
                          _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
     from .ac_solver import ac_solve, _dev_corner, _dev_nf
     from .topology import AFE_TOPO
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
-    from device_model import create_device
+    from device_model import create_device, get_default_model_type
     from ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
                         _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
     from ac_solver import ac_solve, _dev_corner, _dev_nf
@@ -45,7 +45,7 @@ _TEMP = 300.15              # physical temperature for resistor thermal noise [K
 
 def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1):
     """Drain-current noise PSD A^2/Hz over freqs: S_th + S_fl_1Hz/f."""
-    t = create_device("pmos_tft", W=W, L=L, NF=nf, **(corner or {}))
+    t = create_device(get_default_model_type(), W=W, L=L, NF=nf, **(corner or {}))
     try:
         S_th, S_fl_1 = t.get_noise_psd(Vs, Vd, Vg, frequency=1.0)
     except Exception:

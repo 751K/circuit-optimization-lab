@@ -41,7 +41,7 @@ import numpy as np
 
 try:
     from .ac_solver import ac_solve, _dev_corner, _dev_nf, _is_afe_topology
-    from .device_model import create_device
+    from .device_model import create_device, get_default_model_type
     from .noise_solver import band_rms, noise_analysis
     from .pac_solver import pac_solve
     from .pnoise_solver import pnoise_solve
@@ -50,7 +50,7 @@ try:
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_solver import ac_solve, _dev_corner, _dev_nf, _is_afe_topology
-    from device_model import create_device
+    from device_model import create_device, get_default_model_type
     from noise_solver import band_rms, noise_analysis
     from pac_solver import pac_solve
     from pnoise_solver import pnoise_solve
@@ -59,13 +59,14 @@ except ImportError:  # pragma: no cover - legacy direct module import
     from transient_solver import transient
 
 
-# Spectre PSS/PAC/PNoise calibration for the AT_4000TG 8-PMOS chopper wrapper.
-# Reference case: UI locked AFE sizes, f_chop=225 Hz, switch W/L=5000/30,
-# rise/fall=20 us, typical corner.  The raw quasi-static complex sideband sum
-# underestimates PAC gain because it has no periodic operating-point phase
-# correction; PNoise also contains a small cyclostationary noise increment.
-_CADENCE_PMOS_CHOPPER_CONVERSION_PHASE_RAD = np.deg2rad(24.93)
-_CADENCE_PMOS_CHOPPER_PERIODIC_NOISE_PSD_SCALE = 1.0355281448906577
+# The quasi-static `pmos_chopper_lptv_analysis` below is a fast FIRST-ORDER
+# sideband-sum estimate; it underestimates PAC gain by ~10% because it omits the
+# higher-order LPTV conversion (and a small cyclostationary noise increment). For
+# Cadence-grade accuracy use the first-principles harmonic-balance path
+# (`pmos_chopper_pss` -> `pmos_chopper_pac`/`pmos_chopper_pnoise`), which carries
+# NO empirical constants and is what `core/calibration.py` validates. The old
+# Cadence-fit conversion-phase (24.93 deg) and noise-PSD-scale (1.0355) constants
+# were retired 2026-06-22 — they only patched this first-order approximation.
 _PMOS_CHOPPER_BARE_DC_SEED_CACHE_MAX = 64
 _PMOS_CHOPPER_BARE_DC_SEED_CACHE = OrderedDict()
 _PMOS_CHOPPER_BARE_DC_SEED_CACHE_LOCK = RLock()
@@ -949,7 +950,7 @@ def _charge_injection_sources(build, all_sizes, all_nf, bias, tgrid, clk_a, clk_
         Vs = _node_bias_value(topo, pbias, dc, source)
         Vd = _node_bias_value(topo, pbias, dc, drain)
         Vg_on = pbias["CLK_A"] if phase == "A" else pbias["CLK_B"]
-        dev = create_device("pmos_tft",
+        dev = create_device(get_default_model_type(),
             W=all_sizes[name][0], L=all_sizes[name][1],
             NF=_dev_nf(all_nf, name), **_dev_corner(corner, name))
         qch = float(charge_scale) * dev.estimate_channel_charge(Vs, Vd, Vg_on)
@@ -1470,9 +1471,8 @@ def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,
                                nf=None, corner=None, x0_guess=None,
                                band=(0.05, 100.0), max_harmonic=31,
                                edge_time=0.0, dead_time=0.0,
-                               cadence_calibrated=True,
-                               conversion_phase_rad=None,
-                               periodic_noise_psd_scale=None,
+                               conversion_phase_rad=0.0,
+                               periodic_noise_psd_scale=1.0,
                                harmonic_samples=4096, base_topo=AFE_TOPO,
                                output_filter=None):
     """PMOS-switch sideband folding with finite-edge clock weights.
@@ -1481,10 +1481,14 @@ def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,
     frequencies using the actual finite-edge modulation harmonics. It captures
     PMOS Ron/cap/noise plus finite-edge spectral weights.
 
-    By default the returned response is adjusted with a small Cadence-calibrated
-    conversion phase and periodic-noise PSD scale so the UI locked 225 Hz
-    chopper case tracks Spectre PSS/PAC/PNoise. Set ``cadence_calibrated=False``
-    to recover the raw quasi-static complex sideband sum.
+    This is a fast FIRST-ORDER estimate: it sums the frozen-phase sideband
+    responses with the chopper's finite-edge harmonic weights, so it omits the
+    higher-order LPTV conversion and underestimates the baseband gain by ~10%.
+    For Cadence-grade gain/noise use the first-principles harmonic-balance path
+    (``pmos_chopper_pss`` -> ``pmos_chopper_pac``/``pmos_chopper_pnoise``), which
+    carries no empirical constants. ``conversion_phase_rad`` and
+    ``periodic_noise_psd_scale`` remain as optional manual knobs (default 0 / 1,
+    i.e. the raw first-order sum); the old Cadence-fit defaults were retired.
     """
     freqs = np.asarray(freqs, float)
     if np.any(freqs < 0.0):
@@ -1520,17 +1524,8 @@ def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,
     if side.get("response") is None:
         raise RuntimeError("pmos_chopper_analysis did not return complex AC response")
 
-    if conversion_phase_rad is None:
-        conversion_phase_rad = (
-            _CADENCE_PMOS_CHOPPER_CONVERSION_PHASE_RAD
-            if cadence_calibrated else 0.0
-        )
+    # Optional manual knobs; default (0, 1) = the raw first-order sideband sum.
     conversion_phase_rad = float(conversion_phase_rad)
-    if periodic_noise_psd_scale is None:
-        periodic_noise_psd_scale = (
-            _CADENCE_PMOS_CHOPPER_PERIODIC_NOISE_PSD_SCALE
-            if cadence_calibrated else 1.0
-        )
     periodic_noise_psd_scale = float(periodic_noise_psd_scale)
     if periodic_noise_psd_scale <= 0.0:
         raise ValueError("periodic_noise_psd_scale must be positive")
@@ -1558,7 +1553,6 @@ def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,
         "harmonic_weight_sum": float(np.sum(weights)),
         "edge_time": float(edge_time),
         "dead_time": float(dead_time),
-        "cadence_calibrated": bool(cadence_calibrated),
         "conversion_phase_rad": conversion_phase_rad,
         "periodic_noise_psd_scale": periodic_noise_psd_scale,
         "sideband_freqs": sideband_freqs,
@@ -1581,11 +1575,10 @@ def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,
         ),
         "pmos_sideband": side,
         "analysis_note": (
-            "Cadence-calibrated quasi-static PMOS-switch sideband folding with "
-            "finite-edge harmonic weights; not a full correlated periodic-noise "
-            "solve." if cadence_calibrated else
-            "Raw quasi-static PMOS-switch sideband folding with finite-edge "
-            "harmonic weights; not a full correlated periodic-noise solve."
+            "First-order quasi-static PMOS-switch sideband folding with finite-edge "
+            "harmonic weights; underestimates gain ~10% (omits higher-order LPTV "
+            "conversion) and is not a correlated periodic-noise solve. Use the "
+            "harmonic-balance pmos_chopper_pac / pmos_chopper_pnoise for accuracy."
         ),
     }
 

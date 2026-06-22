@@ -326,7 +326,7 @@ def test_calibration_chopper_corners(corner):
 - **`tools/calibrate_switch.py`**：保留。`gen`/`parse` workflow 仍可用于单管快速检查。`core/psf.py` 提取其解析逻辑为通用模块，此工具可以改为 import `core.psf`，也可以保持独立。
 - **`benchmarks/`**：互补，不做改动。benchmark 测量性能，calibration 测量精度。
 - **`core/corners.py` line 17**：明确声明「Cadence/Spectre comparison should live in dedicated verification scripts」——`core/calibration.py` 就是这个 dedicated script。
-- **`core/chopper.py` 中的 `cadence_calibrated=True`**：暂不删除。等到 calibration 彻底稳定后，这些 fudge factor 可以转为 `metadata.json` 中的容差参考，而不是硬编码在求解器里。
+- **`core/chopper.py` 的两个经验常数(换向相位 24.93°、噪声 PSD scale 1.0355)**：已于 2026-06-22 **retire**。它们只是给快速 `pmos_chopper_lptv_analysis`(一阶 quasi-static 近似)打的补丁;真正无常数的一等公民是谐波平衡路径 `pmos_chopper_pss`→`pmos_chopper_pac`/`pmos_chopper_pnoise`(`core/calibration.py` 校验的就是它)。`lptv_analysis` 现诚实返回一阶估计(增益偏低约 10%)。
 
 ## 工作量估计
 

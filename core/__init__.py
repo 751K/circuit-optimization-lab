@@ -15,11 +15,13 @@ try:
     from .ac_solver import ac_solve
     from .analysis_dispatch import run_analysis_suite, run_json_analyses
     from .circuit_loader import CircuitSpec, load_circuit_json
-    from .device_model import (TransistorModel, NumbaParams, create_device,
-                               register_model, get_default_model_type)
+    from .device_model import (TransistorModel, NumbaParams, PDK, create_device,
+                               create_transistor, register_model, register_pdk,
+                               get_default_model_type, get_default_pdk, get_pdk,
+                               list_pdks, transistor_type)
     from .noise_solver import band_rms, noise_analysis
     from .pac_solver import pac_solve
-    from . import pmos_tft_model  # noqa: F401 — triggers register_model("pmos_tft")
+    from . import pmos_tft_model  # noqa: F401 — triggers register_pdk("at4000tg", …)
     from .pnoise_solver import pnoise_solve
     from .pss_solver import pss_solve
     from .topology import Topology
@@ -28,8 +30,10 @@ except ImportError:  # pragma: no cover - legacy direct module import
     from ac_solver import ac_solve
     from analysis_dispatch import run_analysis_suite, run_json_analyses
     from circuit_loader import CircuitSpec, load_circuit_json
-    from device_model import (TransistorModel, NumbaParams, create_device,
-                              register_model, get_default_model_type)
+    from device_model import (TransistorModel, NumbaParams, PDK, create_device,
+                              create_transistor, register_model, register_pdk,
+                              get_default_model_type, get_default_pdk, get_pdk,
+                              list_pdks, transistor_type)
     from noise_solver import band_rms, noise_analysis
     from pac_solver import pac_solve
     import pmos_tft_model  # noqa: F401
@@ -47,9 +51,16 @@ __all__ = [
     # device model abstraction
     "TransistorModel",
     "NumbaParams",
+    "PDK",
     "create_device",
+    "create_transistor",
     "register_model",
+    "register_pdk",
     "get_default_model_type",
+    "get_default_pdk",
+    "get_pdk",
+    "list_pdks",
+    "transistor_type",
     # circuit loading
     "load_circuit_json",
     "CircuitSpec",

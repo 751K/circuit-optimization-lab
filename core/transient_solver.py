@@ -43,7 +43,7 @@ import time
 
 import numpy as np
 try:
-    from .device_model import create_device
+    from .device_model import create_device, get_default_model_type
     from .topology import AFE_TOPO
     from .ac_solver import ac_solve, _dev_corner, _dev_nf
     from .numba_kernels import (
@@ -54,7 +54,7 @@ try:
     )
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
-    from device_model import create_device
+    from device_model import create_device, get_default_model_type
     from topology import AFE_TOPO
     from ac_solver import ac_solve, _dev_corner, _dev_nf
     from compiled_topology import CompiledTopology
@@ -141,7 +141,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     fields are included when those nodes exist.
     """
     devs = topo.devices
-    tft = {name: create_device("pmos_tft", W=sizes[name][0], L=sizes[name][1],
+    tft = {name: create_device(get_default_model_type(), W=sizes[name][0], L=sizes[name][1],
                                NF=_dev_nf(nf, name), **_dev_corner(corner, name))
            for name, *_ in devs}
     tgrid = np.asarray(tgrid, float)

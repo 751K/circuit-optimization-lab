@@ -36,11 +36,13 @@ _PSS_KWARGS = {
     "residual_tol", "max_shooting_iters", "fd_step", "min_damping",
     "jacobian_reuse", "jacobian_rebuild_interval", "rail_margin",
     "check_periodic_inputs", "input_periodic_tol", "profile", "corner",
+    "integration_method",
 }
 _TRANSIENT_KWARGS = {
     "max_step", "flat_max_step", "max_retry_subdivisions", "newton_maxit",
     "newton_step_limit", "newton_vtol", "fallback_full_jacobian",
     "fallback_least_squares", "fallback_tol", "profile", "rail_margin", "corner",
+    "integration_method",
 }
 
 

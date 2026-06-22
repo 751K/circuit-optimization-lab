@@ -173,6 +173,28 @@ def test_dispatch_resolves_and_keeps_process_corner_consistent(monkeypatch):
     ]
 
 
+def test_dispatch_forwards_integration_method(monkeypatch):
+    """analyses.pss.integration_method must reach pss_solve — and hence the
+    shared orbit that PAC/PNoise linearize around.  When unset, the dispatch
+    injects nothing and pss_solve's own default (gear2) governs."""
+    spec = load_circuit_json("examples/periodic_rc.json")
+    seen = {}
+
+    def fake_pss_solve(*args, **kwargs):
+        seen["method"] = kwargs.get("integration_method")
+        return {"converged": True, "period": args[2], "corner": kwargs.get("corner")}
+
+    monkeypatch.setattr(dispatch_mod, "pss_solve", fake_pss_solve)
+
+    run_analysis_suite(spec, analyses={"pss": {"integration_method": "be",
+                                               "max_shooting_iters": 0}})
+    assert seen["method"] == "be"
+
+    seen.clear()
+    run_analysis_suite(spec, analyses={"pss": {"max_shooting_iters": 0}})
+    assert seen.get("method") is None  # not forwarded -> pss_solve default applies
+
+
 def test_dispatch_rejects_mixed_pss_and_pac_corners(monkeypatch):
     spec = load_circuit_json("examples/periodic_rc.json")
 

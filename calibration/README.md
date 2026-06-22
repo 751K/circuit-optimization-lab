@@ -60,16 +60,23 @@ HEADER by `core.psf.provenance` and copied into `metadata.json`.
 | chopper_design3_typical | PAC gain / IRN | 11.96 / 9.83 µV | 11.83 / 9.81 µV | **+1.11% / +0.18%** |
 | chopper_design3_slow | PAC gain / IRN | 8.95 / 9.50 µV | 9.03 / 9.32 µV | **−0.88% / +1.92%** |
 | chopper_design3_fast | PAC gain / IRN | 12.00 / 10.81 µV | 11.87 / 10.84 µV | **+1.07% / −0.26%** |
-| sc_lpf | PAC gain / BW / out-noise | 0.988 / 16.97 Hz / 3.53 µV | 1.003 / 16.82 Hz / 3.48 µV | **−1.4% / +0.9% / +1.4%** |
+| sc_lpf | PAC gain / BW / out-noise | 1.006 / 16.65 Hz / 3.53 µV | 1.003 / 16.82 Hz / 3.48 µV | **+0.3% / −1.0% / +1.4%** |
 
 The amp (DC/AC/noise) matches Cadence to ~machine precision; the chopper PAC baseband gain
 and integrated IRN match within ~1–2% across all three corners; the SC-LPF PAC DC gain,
-−3 dB bandwidth, and integrated output noise all match within ~1.4%. The local chopper run must
+−3 dB bandwidth, and integrated output noise all match within ~1.4%. The SC-LPF PAC is computed by
+the analytic-adjoint harmonic balance (the small-signal drive on the `V_IN` ideal source couples
+into the bordered HB branch row), so it is **integration-method independent** — gear2 and BE give
+the same ~1.006 gain. (The finite-difference shooting fallback was x0-sensitive: on this stiff τ≫T
+circuit a 0.003 V gear2-vs-BE orbit difference fed a near-singular (I−Φ)⁻¹ and produced a spurious
+24× baseband gain — fixed 2026-06-22.) The local chopper run must
 use the validated solver configuration (gear2 PSS orbit, `switch_size`, `edge_time`,
 `output_filter`, settling) — captured per case in `metadata.json`'s `circuit`/`solver`
 blocks — otherwise a bare-default call mis-reports the gain by >10%.
 
-The chopper still relies on the empirical constants in `core/chopper.py`
-(`_CADENCE_PMOS_CHOPPER_CONVERSION_PHASE_RAD`, `_CADENCE_PMOS_CHOPPER_PERIODIC_NOISE_PSD_SCALE`);
-replacing them with a first-principles correction is tracked in `docs/futureplan.md` — the
-closed loop is now the guard that keeps any such change within tolerance.
+The HB chopper path (`pmos_chopper_pss` → `pmos_chopper_pac`/`pmos_chopper_pnoise`,
+what this loop validates) carries **no empirical constants**. The two old Cadence-fit
+constants (`_CADENCE_PMOS_CHOPPER_CONVERSION_PHASE_RAD`=24.93°,
+`_CADENCE_PMOS_CHOPPER_PERIODIC_NOISE_PSD_SCALE`=1.0355) were **retired 2026-06-22** —
+they only patched the fast first-order `pmos_chopper_lptv_analysis` quasi-static estimate,
+which now honestly reports its ~10% gain underestimate rather than fudging it.

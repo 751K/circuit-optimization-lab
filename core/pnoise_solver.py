@@ -34,7 +34,7 @@ try:
         _is_constant_wave,
         pac_solve,
     )
-    from .device_model import create_device
+    from .device_model import create_device, get_default_model_type
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from ac_solver import _dev_corner, get_ss_params
@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - legacy direct module import
         _is_constant_wave,
         pac_solve,
     )
-    from device_model import create_device
+    from device_model import create_device, get_default_model_type
 
 
 _KB = 1.380649e-23
@@ -562,7 +562,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         all_noise_sources = lin["noise_sources"]
     else:
         dev_inst = {
-            name: create_device("pmos_tft",
+            name: create_device(get_default_model_type(),
                 W=all_sizes[name][0], L=all_sizes[name][1],
                 NF=_nfval(all_nf, name), **_dev_corner(corner, name),
             )

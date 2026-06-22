@@ -11,13 +11,13 @@ import numpy as np
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from .ac_solver import _dev_corner, ac_solve, get_ss_params
-    from .device_model import create_device
+    from .device_model import create_device, get_default_model_type
     from .topology import Topology
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from ac_solver import _dev_corner, ac_solve, get_ss_params
-    from device_model import create_device
+    from device_model import create_device, get_default_model_type
     from topology import Topology
     from transient_solver import transient
 
@@ -398,7 +398,20 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             gate = dev_by_name[dev][1]
             if gate in topo.rails and gate not in idx:
                 drive_nodes[gate] = drive_nodes.get(gate, 0j) + complex(input_drive[key])
-    if not drive_nodes:
+    # Small-signal drive on a true-MNA voltage source: the input key matches a
+    # vsource whose value is that waveform key.  Unlike a rail drive (which couples
+    # through the periodic G_in/C_in node columns), this enters the bordered HB as a
+    # baseband forcing on the source's branch-constraint row (V_p - V_q = drive).
+    # It is what makes stiff tau>>T switched-cap PAC robust: the conversion matrix is
+    # built from the continuous small-signal G(t)/C(t) along the orbit (integration-
+    # method independent), instead of the x0-sensitive finite-difference shooting
+    # whose (I-Phi)^-1 amplifies the tiny be-vs-gear2 orbit difference into a 24x gain.
+    drive_branches = []  # (branch index within topo.vsources, complex amplitude)
+    for k, vs in enumerate(topo.vsources):
+        val = vs[3] if len(vs) > 3 else None
+        if isinstance(val, str) and val in input_drive:
+            drive_branches.append((k, complex(input_drive[val])))
+    if not drive_nodes and not drive_branches:
         return None
     drive_list = list(drive_nodes)
     ext_idx = {node: n + i for i, node in enumerate(drive_list)}
@@ -454,7 +467,7 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         Gf, Cf, Ginf, Cinf = lin["Gf"], lin["Cf"], lin["Ginf"], lin["Cinf"]
     else:
         dev_inst = {
-            name: create_device("pmos_tft",
+            name: create_device(get_default_model_type(),
                 W=all_sizes[name][0], L=all_sizes[name][1],
                 NF=_nfval(all_nf, name), **_dev_corner(corner, name))
             for name, *_ in topo.devices
@@ -548,6 +561,9 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             input_om = 2j * np.pi * (f + kr * fundamental) if charge_caps else 2j * np.pi * f
             b[(kr + K) * n:(kr + K + 1) * n] = -(
                 Ginf[kr % N] + input_om * Cinf[kr % N])
+        # Driven true-MNA voltage source: baseband (kr=0) forcing on its branch row.
+        for br_idx, amp in drive_branches:
+            b[nb * n + K * nbr + br_idx] = amp
         response[fi] = adj @ b
 
     gains = np.abs(response)

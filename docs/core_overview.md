@@ -29,7 +29,7 @@ core/
   topology.py          Circuit topology source of truth.
   compiled_topology.py Runtime-compiled topology/index/stamp metadata.
   circuit_loader.py    JSON circuit description loader.
-  device_model.py      TransistorModel ABC + NumbaParams + model factory/registry.
+  device_model.py      TransistorModel ABC + NumbaParams + model factory/registry + PDK/polarity layer.
   pmos_tft_model.py    AT4000TG PMOS-OTFT compact-model implementation.
   numba_kernels.py     Optional Numba-accelerated scalar kernels.
   ac_mna.py            MNA stamping primitives.
@@ -96,7 +96,7 @@ Defines the abstract device‑model interface that decouples solvers from concre
 
 - **`TransistorModel` (ABC)** — seven abstract methods (`get_Idc`, `get_op`, `get_capacitances`, `get_capacitance_charges_from_op`, `get_capacitance_branch_terms_from_op`, `get_noise_psd`, `get_numba_params`); `get_ss_params` provides a finite‑difference default that subclasses can override.
 - **`NumbaParams` (frozen dataclass)** — the 16 scalar parameters extracted once per device and passed to numba‑accelerated transient kernels.
-- **`register_model()` / `create_device()`** — factory + registry. Solver files call `create_device("pmos_tft", W=…, L=…)` instead of importing `PMOS_TFT` directly. Adding a new transistor model only requires a new subclass and one `register_model` call.
+- **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged.
 
 ### `topology.py`
 
@@ -204,10 +204,12 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
 - `finite_edge_clock_pair(...)` and `finite_edge_chopper_harmonics(...)` model
   finite clock edge time and break-before-make dead time in the chopper waveform.
 - `pmos_chopper_lptv_analysis(...)` folds the PMOS-switch sideband response/noise
-  with those finite-edge harmonic weights. By default it applies the Spectre
-  PSS/PAC/PNoise calibration for the UI locked 225 Hz / 5000/30 switch case:
-  a small conversion-phase correction and a small periodic-noise PSD scale. Set
-  `cadence_calibrated=False` to inspect the raw quasi-static sideband sum.
+  with those finite-edge harmonic weights. It is a fast **first-order** quasi-static
+  estimate and underestimates the baseband gain by ~10% (it omits the higher-order
+  LPTV conversion). For Cadence-grade gain/noise use the constant-free harmonic-
+  balance path (`pmos_chopper_pss` → `pmos_chopper_pac`/`pmos_chopper_pnoise`). The
+  old Cadence-fit conversion-phase / noise-PSD-scale constants were retired; the
+  `conversion_phase_rad` / `periodic_noise_psd_scale` args remain as manual knobs.
 - `pmos_chopper_transient(...)` drives the eight-PMOS topology with finite-edge
   clocks. The default clock follows Spectre `type=pulse` timing (`delay=T/2`,
   `width=T/2`, finite `rise/fall`), while the older centered phase waveform is

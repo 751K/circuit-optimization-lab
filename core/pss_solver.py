@@ -17,13 +17,13 @@ import numpy as np
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from .ac_solver import ac_solve, _dev_corner, get_ss_params
-    from .device_model import create_device
+    from .device_model import create_device, get_default_model_type
     from .topology import AFE_TOPO
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from ac_solver import ac_solve, _dev_corner, get_ss_params
-    from device_model import create_device
+    from device_model import create_device, get_default_model_type
     from topology import AFE_TOPO
     from transient_solver import transient
 
@@ -502,7 +502,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                     try:
                         if mono_dev_inst is None:
                             mono_dev_inst = {
-                                name: create_device("pmos_tft",
+                                name: create_device(get_default_model_type(),
                                     W=sizes[name][0], L=sizes[name][1],
                                     NF=_nfval(nf, name),
                                     **_dev_corner(corner, name))

@@ -22,7 +22,7 @@ Usage::
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Tuple, Type
 
 # ──────────────────────────────────────────────────────────────────────
@@ -252,6 +252,122 @@ def create_device(model_type: str, **kwargs) -> TransistorModel:
     return cls(**kwargs)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 4.  PDK / polarity layer  (over the flat model registry)
+# ──────────────────────────────────────────────────────────────────────
+#
+# A *PDK* (process design kit) groups the transistor polarities that share a
+# fabrication process — e.g. the AT4000TG process provides a ``pmos`` device
+# (``pmos_TFT`` in ``PDK/veriloga.va``) and may later add an ``nmos``.  Each
+# (pdk, polarity) pair is registered into the flat ``_model_registry`` above
+# under a structured key ``"<pdk>.<polarity>"`` so :func:`create_device`
+# resolves it for free; the PDK registry here just records the grouping and
+# which PDK is the default.
+#
+# Generic elements — resistors, capacitors, ideal V/I sources, controlled
+# sources — are process-independent and live in the topology / MNA layer, NOT
+# here.  A PDK owns transistors only, so a new process reuses every source
+# primitive unchanged.
+
+@dataclass(frozen=True)
+class PDK:
+    """A named process: maps a device *polarity* to its compact-model class.
+
+    Args:
+        name: Process identifier (e.g. ``"at4000tg"``).
+        devices: ``{polarity: TransistorModel subclass}`` — e.g.
+            ``{"pmos": PMOS_TFT}``.  A future process adds ``"nmos"`` here.
+        corners: Optional process-shift presets ``{name: {param: value}}``.
+            The corner authority currently lives in :mod:`core.corners`, so
+            this stays empty unless a PDK ships its own.
+    """
+    name: str
+    devices: Dict[str, Type[TransistorModel]]
+    corners: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
+    def model_type(self, polarity: str) -> str:
+        """Structured registry key for one polarity, e.g. ``"at4000tg.pmos"``."""
+        if polarity not in self.devices:
+            raise ValueError(
+                f"PDK {self.name!r} has no {polarity!r} device; "
+                f"available: {sorted(self.devices)}"
+            )
+        return f"{self.name}.{polarity}"
+
+
+_pdk_registry: Dict[str, PDK] = {}
+_default_pdk: str = ""        # name of the default PDK; "" until first register_pdk
+
+
+def register_pdk(name, devices, *, corners=None, default=False, aliases=None) -> PDK:
+    """Register a PDK and its polarities.
+
+    Each ``polarity -> cls`` is also registered into the flat model registry
+    under the structured key ``"<name>.<polarity>"`` (so
+    :func:`create_device` resolves it), plus any back-compat *aliases*
+    (``{alias: polarity}``, e.g. ``{"pmos_tft": "pmos"}``).  The first PDK
+    registered — or any registered with ``default=True`` — becomes the default
+    consulted by :func:`get_default_model_type` / :func:`transistor_type`.
+    """
+    global _default_pdk
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"PDK name must be a non-empty string, got {name!r}")
+    pdk = PDK(name, dict(devices), dict(corners or {}))
+    _pdk_registry[name] = pdk
+    for polarity, cls in pdk.devices.items():
+        register_model(pdk.model_type(polarity), cls)
+    for alias, polarity in (aliases or {}).items():
+        register_model(alias, pdk.devices[polarity])
+    if default or not _default_pdk:
+        _default_pdk = name
+    return pdk
+
+
+def get_default_pdk() -> str:
+    """Name of the default PDK (the one consulted for unannotated devices)."""
+    if not _default_pdk:
+        raise RuntimeError("no PDK registered")
+    return _default_pdk
+
+
+def list_pdks():
+    """Sorted names of all registered PDKs."""
+    return sorted(_pdk_registry)
+
+
+def get_pdk(name=None) -> PDK:
+    """Return a PDK by name, or the default PDK when *name* is None."""
+    key = name if name is not None else get_default_pdk()
+    pdk = _pdk_registry.get(key)
+    if pdk is None:
+        raise ValueError(f"Unknown PDK {key!r}; registered: {list_pdks()}")
+    return pdk
+
+
+def transistor_type(polarity: str = "pmos", pdk=None) -> str:
+    """Resolve a ``(pdk, polarity)`` pair to a model-registry key.
+
+    Defaults to the default PDK's ``pmos`` — the single switch point every
+    solver consults via :func:`get_default_model_type` instead of hardcoding a
+    model name.  Pass ``pdk=`` / ``polarity=`` to target another process or an
+    ``nmos`` once registered.
+    """
+    return get_pdk(pdk).model_type(polarity)
+
+
+def create_transistor(polarity: str = "pmos", pdk=None, **kwargs) -> TransistorModel:
+    """Create a transistor for a ``(pdk, polarity)`` pair (default PDK's pmos)."""
+    return create_device(transistor_type(polarity, pdk), **kwargs)
+
+
 def get_default_model_type() -> str:
-    """Return the model type used when none is specified (``"pmos_tft"``)."""
+    """Model-registry key used when a device declares no model.
+
+    Resolves to the default PDK's ``pmos`` (``"at4000tg.pmos"`` once that PDK
+    is registered).  Solvers call this instead of naming a model literally, so
+    adding or flipping the default PDK reroutes every unannotated device.
+    Falls back to the legacy ``"pmos_tft"`` alias before any PDK loads.
+    """
+    if _default_pdk and "pmos" in _pdk_registry[_default_pdk].devices:
+        return transistor_type("pmos")
     return "pmos_tft"

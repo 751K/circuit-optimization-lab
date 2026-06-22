@@ -47,12 +47,12 @@ import numpy as np
 
 try:
     from .ac_solver import ac_solve
-    from .device_model import create_device
+    from .device_model import create_device, get_default_model_type
     from .noise_solver import band_rms, noise_analysis
     from .circuit_loader import circuit_from_dict
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_solver import ac_solve
-    from device_model import create_device
+    from device_model import create_device, get_default_model_type
     from noise_solver import band_rms, noise_analysis
     from circuit_loader import circuit_from_dict
 
@@ -245,7 +245,7 @@ def _area(topo, sizes, nf):
             n = int(nf.get(name, 1))
         elif nf:
             n = int(nf)
-        total += create_device("pmos_tft", W=W, L=L, NF=n).g_area
+        total += create_device(get_default_model_type(), W=W, L=L, NF=n).g_area
     return float(total)
 
 

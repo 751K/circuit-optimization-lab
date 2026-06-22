@@ -144,6 +144,13 @@ PSS 的 tstab + shooting 会把自启动那一步的小不一致吸收掉。
 
 ### 3.4 PAC / PNoise
 - **不改**。确认 HB 用连续时间 jωC，只是吃到更准的轨道。加一条断言/注释固化这个边界。
+  - **⚠️ 修正（2026-06-22）**：这个"与积分阶数无关"只对 **rail-drive**（节点输入驱动，chopper）成立。
+    对 **true-MNA vsource drive**（如 SC-LPF 的 `V_IN`），解析伴随 PAC 旧版会 bail（`not drive_nodes`）
+    退回 **FD shooting**（`V0=x0`）——它对刚性 τ≫T 电路的轨道边界点 `x0` 病态敏感：gear2 与 BE 仅差
+    0.003 V 的 `x0` 经近奇异 (I−Φ)⁻¹ 放大成 **24× 增益**（且全频段恒定 24×，非低频奇点；收紧 PSS 到 1e-5
+    无效）。已修：`_analytic_adjoint_pac` 把 vsource 小信号驱动耦合进 bordered HB 的支路约束行（baseband
+    kr=0），SC-LPF PAC 现在走解析伴随、真正与积分阶数无关（gear2==BE==~1.006，比旧 FD-BE 的 0.988 更准）。
+    chopper 走 rail-drive 路径，逐字节不变。守卫 `test_sc_lpf_pac_is_integration_method_independent`。
 
 ---
 

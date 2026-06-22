@@ -269,3 +269,35 @@ def test_sc_lpf_pss_converges_to_physical_orbit():
         if g[i] < thr:
             bw = float(np.interp(thr, [g[i], g[i - 1]], [pf[i], pf[i - 1]])); break
     assert abs(bw - 16.96) / 16.96 < 0.12, f"PAC BW {bw:.2f} Hz vs Cadence 16.96 (>12%)"
+
+
+@pytest.mark.skipif(not os.environ.get("RUN_SLOW_CHOPPER"),
+                    reason="slow SC-LPF PSS/PAC; set RUN_SLOW_CHOPPER=1")
+def test_sc_lpf_pac_is_integration_method_independent():
+    # Stiff tau>>T switched-cap PAC must come from the analytic-adjoint HB (built from
+    # the continuous small-signal G(t)/C(t) along the orbit), NOT the x0-sensitive
+    # finite-difference shooting whose near-singular (I-Phi)^-1 turned a 0.003 V
+    # be-vs-gear2 orbit difference into a 24x baseband gain. gear2 and be must agree,
+    # both ~1, via the analytic adjoint (the vsource small-signal drive is coupled into
+    # the bordered HB branch row, so the path no longer bails to FD shooting).
+    import examples.sc_lpf as L
+    topo = L.build_sc_topo()
+    sizes = {"M1": (L.W_SW, L.L_SW), "M2": (L.W_SW, L.L_SW)}
+    n_points = 201
+    t = np.linspace(0.0, L.PERIOD, n_points + 1)[:-1]
+    inputs = L.build_inputs(t)
+    pf = np.logspace(-1, 3, 41)
+    g0 = {}
+    for method in ("be", "gear2"):
+        pss = pss_solve(sizes, {}, L.PERIOD, topo=topo, n_points=n_points, inputs=inputs,
+                        tstab_periods=60, residual_tol=2e-2, max_shooting_iters=20,
+                        min_damping=1.0 / 256.0, integration_method=method)
+        pac = pac_solve(sizes, {}, pf, pss_result=pss, input_drive={"vin": 1.0})
+        assert pac["method"] == "pss_analytic_adjoint", (
+            f"{method}: PAC used {pac['method']!r}, not the robust analytic adjoint "
+            "(x0-sensitive FD shooting is unsafe for stiff tau>>T switched-cap)")
+        g0[method] = float(np.abs(np.asarray(pac["gains"], float))[0])
+    assert abs(g0["be"] - 1.0) < 0.05 and abs(g0["gear2"] - 1.0) < 0.05, g0
+    assert abs(g0["gear2"] - g0["be"]) < 1e-2, (
+        f"PAC baseband gain depends on the integration method: "
+        f"be={g0['be']:.4f} gear2={g0['gear2']:.4f} (the 24x gear2 blowup is back)")

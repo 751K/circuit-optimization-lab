@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover - optional acceleration only
         capacitance_charges_numba = None
         terminal_derivatives_numba = None
 
-from .device_model import TransistorModel, NumbaParams, register_model
+from .device_model import TransistorModel, NumbaParams, register_pdk
 
 class PMOS_TFT(TransistorModel):
     """
@@ -37,6 +37,12 @@ class PMOS_TFT(TransistorModel):
     Implements :class:`~device_model.TransistorModel` — the abstract interface
     consumed by all solvers in the stack.
     """
+
+    # Process/polarity identity — this model is the AT4000TG PMOS device
+    # (``pmos_TFT`` in PDK/veriloga.va).  Carried for registry/introspection so
+    # multiple PDKs and PMOS/NMOS polarities stay distinguishable.
+    PDK = "at4000tg"
+    POLARITY = "pmos"
     def __init__(self, W=1000, L=20, VT=-3.03, Roff=1, NF=1, Reg=1,
                  C1=37.5, C2=50, C3=35, C4=35, Ci=2.4, kv=1, kh=1,
                  temperature=300.15, pvt0=0, mvt0=0, pbeta0=0, mbeta0=0):
@@ -786,6 +792,10 @@ if __name__ == "__main__":
     print(f"Flicker Noise PSD @ 100Hz: {S_fl:.4e} A^2/Hz")
 
 
-# Register in the device model factory so solvers can create instances via
-# ``create_device("pmos_tft", W=…, L=…)``.
-register_model("pmos_tft", PMOS_TFT)
+# Register the AT4000TG process as the (currently only, hence default) PDK.
+# This exposes the PMOS under the structured key ``"at4000tg.pmos"`` and keeps
+# the legacy alias ``"pmos_tft"`` working, so solvers resolve the default via
+# ``create_device(get_default_model_type(), …)`` and a future process or an
+# NMOS polarity slots in with another ``register_pdk`` call — no solver edits.
+register_pdk("at4000tg", {"pmos": PMOS_TFT}, default=True,
+             aliases={"pmos_tft": "pmos"})

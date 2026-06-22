@@ -271,38 +271,28 @@ def test_pmos_chopper_lptv_auto_seed_handles_changed_ui_sizes():
     assert result["pmos_sideband"]["phases"]["A"]["dc"]["CH_VOP"] > 0.0
 
 
-def test_pmos_chopper_lptv_ui_matches_spectre_pss_scale():
+def test_pmos_chopper_lptv_is_first_order_underestimate():
+    # The empirical Cadence-fit constants (conversion phase 24.93 deg, noise scale
+    # 1.0355) were retired 2026-06-22: lptv_analysis is now an honest FIRST-ORDER
+    # quasi-static estimate. It underestimates the Spectre PSS/PAC gain (21.369 dB)
+    # by ~1 dB because it omits the higher-order LPTV conversion. Cadence-grade
+    # gain/noise come from the constant-free HB path (pmos_chopper_pac/pnoise),
+    # asserted by test_pmos_chopper_pac_matches_cadence_baseband_gain + calibration.
     freqs = _spectre_dec_grid(0.05, 10000.0, points_per_dec=20)
     result = pmos_chopper_lptv_analysis(
-        CHOPPER_UI_SIZES,
-        CHOPPER_UI_BIAS,
-        freqs,
-        f_chop=225.0,
-        switch_size=(5000.0, 30.0),
-        max_harmonic=31,
-        edge_time=20e-6,
-        band=(0.05, 100.0),
-    )
-    raw = pmos_chopper_lptv_analysis(
-        CHOPPER_UI_SIZES,
-        CHOPPER_UI_BIAS,
-        freqs,
-        f_chop=225.0,
-        switch_size=(5000.0, 30.0),
-        max_harmonic=31,
-        edge_time=20e-6,
-        band=(0.05, 100.0),
-        cadence_calibrated=False,
-    )
-
-    assert result["cadence_calibrated"] is True
-    # Spectre PSS/PAC/PNoise reference, typical corner, same netlist:
-    # gain=21.369 dB, BW=721.9 Hz, IRN=12.59 uVrms.
-    assert abs(result["Av_dc_dB"] - 21.369) < 0.08
-    assert abs(result["bw_Hz"] - 721.9) / 721.9 < 0.04
-    assert abs(result["irn_uV_band"] - 12.59) / 12.59 < 0.03
-    assert raw["Av_dc_dB"] < result["Av_dc_dB"] - 0.5
-    assert raw["cadence_calibrated"] is False
+        CHOPPER_UI_SIZES, CHOPPER_UI_BIAS, freqs, f_chop=225.0,
+        switch_size=(5000.0, 30.0), max_harmonic=31, edge_time=20e-6,
+        band=(0.05, 100.0))
+    assert "cadence_calibrated" not in result          # constant retired
+    assert np.isfinite(result["gains"]).all()
+    assert result["gains"][0] > 1.0
+    # First-order: a bit BELOW Spectre's 21.369 dB (no phase fudge), but in the
+    # right ballpark — not the old constant-matched value.
+    assert 19.5 < result["Av_dc_dB"] < 21.369
+    assert result["bw_Hz"] > 100.0
+    assert result["irn_uV_band"] > 0.0
+    # The raw response equals the returned one now (no built-in correction).
+    np.testing.assert_allclose(result["raw_quasi_gains"], result["gains"], rtol=1e-12)
 
 
 def test_pmos_chopper_transient_refines_edges_and_converges():

@@ -5,11 +5,11 @@ Includes ALL transistors + load capacitors.
 """
 import numpy as np
 try:
-    from .device_model import create_device
+    from .device_model import create_device, get_default_model_type
     from .topology import AFE_TOPO
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
-    from device_model import create_device
+    from device_model import create_device, get_default_model_type
     from topology import AFE_TOPO
     from compiled_topology import CompiledTopology
 
@@ -237,7 +237,7 @@ def get_ss_params(W, L, Vs, Vd, Vg, corner=None, nf=1, dev_inst=None):
     Thin adapter — delegates to :meth:`TransistorModel.get_ss_params`.
     """
     t = dev_inst if dev_inst is not None else create_device(
-        "pmos_tft", W=W, L=L, NF=nf, **(corner or {}))
+        get_default_model_type(), W=W, L=L, NF=nf, **(corner or {}))
     return t.get_ss_params(Vs, Vd, Vg)
 
 
@@ -264,7 +264,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     # ── pre-build device instances so the warm-start Newton cache survives
     #     across fsolve iterations instead of being reset on every Id() call.
     _dev_inst = {
-        name: create_device("pmos_tft", W=sizes[name][0], L=sizes[name][1],
+        name: create_device(get_default_model_type(), W=sizes[name][0], L=sizes[name][1],
                             NF=_dev_nf(nf, name), **_dev_corner(corner, name))
         for name, *_ in topo.devices
     }
