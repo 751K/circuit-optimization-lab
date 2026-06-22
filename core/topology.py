@@ -20,7 +20,7 @@ class Topology:
     def __init__(self, solved, devices, rails, outputs=None, input_drives=None,
                  load_caps=None, dc_guesses=None, aliases=None, transient_inputs=None,
                  resistors=None, capacitors=None, isources=None, vccs=None,
-                 vsources=None, ac_drives=None,
+                 vsources=None, vcvs=None, cccs=None, ccvs=None, ac_drives=None,
                  dc_tol=None, require_dc_in_box=False):
         self.solved = list(solved)                 # MNA node order (index = position)
         self.idx = {n: i for i, n in enumerate(self.solved)}
@@ -42,10 +42,24 @@ class Topology:
         # DC/AC the waveform-keyed source uses E=0 (pure stimulus). Branch current k has
         # global index n + k.
         self.vsources = list(vsources or [])       # (name, p, q, value)
-        self.n_branches = len(self.vsources)
+        # Controlled sources — three remaining dependent-source types.
+        # VCVS: (name, p, q, cp, cn, mu) — V_p - V_q = mu*(V_cp - V_cn), adds branch current.
+        self.vcvs = list(vcvs or [])
+        # CCCS: (name, p, q, ctrl_name, beta) — I_out = beta*I_ctrl, no branch current.
+        self.cccs = list(cccs or [])
+        # CCVS: (name, p, q, ctrl_name, gamma) — V_p - V_q = gamma*I_ctrl, adds branch current.
+        self.ccvs = list(ccvs or [])
+        self.n_branches = len(self.vsources) + len(self.vcvs) + len(self.ccvs)
         self.n_aug = self.n + self.n_branches
-        self.vsource_index = {name: self.n + k
-                              for k, (name, *_rest) in enumerate(self.vsources)}
+        # Branch-current index for all voltage-source types (vsource / VCVS / CCVS).
+        # Order: vsources first, then VCVS, then CCVS.
+        self.vsource_index = {}
+        for k, (name, *_rest) in enumerate(self.vsources):
+            self.vsource_index[name] = self.n + k
+        for k, (name, *_rest) in enumerate(self.vcvs):
+            self.vsource_index[name] = self.n + len(self.vsources) + k
+        for k, (name, *_rest) in enumerate(self.ccvs):
+            self.vsource_index[name] = self.n + len(self.vsources) + len(self.vcvs) + k
         # Analysis metadata. These keep the solvers topology-driven instead of
         # hard-coding AFE node/device names.
         self.outputs = tuple(outputs or ())
@@ -112,6 +126,37 @@ class Topology:
                 res[self.idx[q]] += i              # and enters q
             E = float(value) if isinstance(value, (int, float)) else 0.0
             res[bi] = self.node_v(p, nv, bias) - self.node_v(q, nv, bias) - E
+        for k, (name, p, q, cp, cn, mu) in enumerate(self.vcvs):
+            bi = self.vsource_index[name]
+            i = x[bi]
+            if p in self.idx:
+                res[self.idx[p]] -= i              # current leaves p
+            if q in self.idx:
+                res[self.idx[q]] += i              # and enters q
+            res[bi] = (self.node_v(p, nv, bias) - self.node_v(q, nv, bias)
+                       - mu * (self.node_v(cp, nv, bias) - self.node_v(cn, nv, bias)))
+        for name, p, q, ctrl_name, beta in self.cccs:
+            ctrl_bi = self.vsource_index.get(ctrl_name)
+            if ctrl_bi is None:
+                raise ValueError(f"CCCS {name!r} references unknown branch source {ctrl_name!r}")
+            I_out = beta * x[ctrl_bi]
+            if p in self.idx:
+                res[self.idx[p]] += I_out          # injects into p
+            if q in self.idx:
+                res[self.idx[q]] -= I_out          # extracts from q
+        for k, (name, p, q, ctrl_name, gamma) in enumerate(self.ccvs):
+            bi = self.vsource_index[name]
+            ctrl_bi = self.vsource_index.get(ctrl_name)
+            if ctrl_bi is None:
+                raise ValueError(f"CCVS {name!r} references unknown branch source {ctrl_name!r}")
+            i = x[bi]
+            I_ctrl = x[ctrl_bi]
+            if p in self.idx:
+                res[self.idx[p]] -= i              # current leaves p
+            if q in self.idx:
+                res[self.idx[q]] += i              # and enters q
+            res[bi] = (self.node_v(p, nv, bias) - self.node_v(q, nv, bias)
+                       - gamma * I_ctrl)
         for k in range(self.n):
             res[k] -= x[k] * gmin
         return res

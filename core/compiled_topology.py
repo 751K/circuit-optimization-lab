@@ -102,6 +102,61 @@ class VsourcePlan:
     e_input_idx: int
 
 
+@dataclass(frozen=True)
+class VcvsPlan:
+    """VCVS (voltage-controlled voltage source): V_p - V_q = mu*(V_cp - V_cn).
+    Adds a branch-current unknown ``bi``; control nodes cp/cn are compiled to terminal
+    tokens."""
+    name: str
+    p_node: str
+    q_node: str
+    cp_node: str
+    cn_node: str
+    p: tuple
+    q: tuple
+    cp: tuple
+    cn: tuple
+    pi: int | None
+    qi: int | None
+    cpi: int | None
+    cni: int | None
+    bi: int
+    mu: float
+
+
+@dataclass(frozen=True)
+class CccsPlan:
+    """CCCS (current-controlled current source): I_out = beta * I_ctrl.
+    Controls on branch current of a voltage source / VCVS / CCVS. No new branch current."""
+    name: str
+    p_node: str
+    q_node: str
+    ctrl_name: str
+    p: tuple
+    q: tuple
+    pi: int | None
+    qi: int | None
+    ctrl_bi: int
+    beta: float
+
+
+@dataclass(frozen=True)
+class CcvsPlan:
+    """CCVS (current-controlled voltage source): V_p - V_q = gamma * I_ctrl.
+    Adds a branch-current unknown ``bi``; controls on branch current of another source."""
+    name: str
+    p_node: str
+    q_node: str
+    ctrl_name: str
+    p: tuple
+    q: tuple
+    pi: int | None
+    qi: int | None
+    ctrl_bi: int
+    bi: int
+    gamma: float
+
+
 class CompiledTopology:
     """Bias/input-specific compiled view of a `Topology`.
 
@@ -147,6 +202,9 @@ class CompiledTopology:
         self.isources = self._compile_isources()
         self.vccs = self._compile_vccs()
         self.vsources = self._compile_vsources()
+        self.vcvs = self._compile_vcvs()
+        self.cccs = self._compile_cccs()
+        self.ccvs = self._compile_ccvs()
 
     # -- scalar terminal tokens -------------------------------------------------
     def _transient_gate_node(self, name, gate):
@@ -277,6 +335,54 @@ class CompiledTopology:
                 bi=self.n + k, e_const=e_const, e_input_idx=e_input_idx))
         return tuple(out)
 
+    def _compile_vcvs(self):
+        """Compile VCVS elements into VcvsPlan tuples."""
+        out = []
+        offset = len(self.topo.vsources)
+        for k, (name, p, q, cp, cn, mu) in enumerate(self.topo.vcvs):
+            pt = self.compile_term(p)
+            qt = self.compile_term(q)
+            cpt = self.compile_term(cp)
+            cnt = self.compile_term(cn)
+            out.append(VcvsPlan(
+                name=name, p_node=p, q_node=q, cp_node=cp, cn_node=cn,
+                p=pt, q=qt, cp=cpt, cn=cnt,
+                pi=self.solved_index(pt), qi=self.solved_index(qt),
+                cpi=self.solved_index(cpt), cni=self.solved_index(cnt),
+                bi=self.n + offset + k, mu=float(mu)))
+        return tuple(out)
+
+    def _compile_cccs(self):
+        """Compile CCCS elements into CccsPlan tuples."""
+        out = []
+        for name, p, q, ctrl_name, beta in self.topo.cccs:
+            pt = self.compile_term(p)
+            qt = self.compile_term(q)
+            ctrl_bi = self.topo.vsource_index.get(ctrl_name)
+            if ctrl_bi is None:
+                raise ValueError(f"CCCS {name!r} references unknown branch source {ctrl_name!r}")
+            out.append(CccsPlan(
+                name=name, p_node=p, q_node=q, ctrl_name=ctrl_name,
+                p=pt, q=qt, pi=self.solved_index(pt), qi=self.solved_index(qt),
+                ctrl_bi=ctrl_bi, beta=float(beta)))
+        return tuple(out)
+
+    def _compile_ccvs(self):
+        """Compile CCVS elements into CcvsPlan tuples."""
+        out = []
+        offset = len(self.topo.vsources) + len(self.topo.vcvs)
+        for k, (name, p, q, ctrl_name, gamma) in enumerate(self.topo.ccvs):
+            pt = self.compile_term(p)
+            qt = self.compile_term(q)
+            ctrl_bi = self.topo.vsource_index.get(ctrl_name)
+            if ctrl_bi is None:
+                raise ValueError(f"CCVS {name!r} references unknown branch source {ctrl_name!r}")
+            out.append(CcvsPlan(
+                name=name, p_node=p, q_node=q, ctrl_name=ctrl_name,
+                p=pt, q=qt, pi=self.solved_index(pt), qi=self.solved_index(qt),
+                ctrl_bi=ctrl_bi, bi=self.n + offset + k, gamma=float(gamma)))
+        return tuple(out)
+
     def dc_residuals(self, x, Idfun, gmin):
         """KCL residual using compiled terminal tokens (length n_aug; gmin on node rows)."""
         res = np.zeros(self.n_aug)
@@ -316,6 +422,29 @@ class CompiledTopology:
                 res[item.qi] += ibr                 # and enters q
             res[item.bi] = (self.term_value(item.p, x)
                             - self.term_value(item.q, x) - item.e_const)
+        for item in self.vcvs:                       # VCVS: V_p - V_q = mu*(V_cp - V_cn)
+            ibr = x[item.bi]
+            if item.pi is not None:
+                res[item.pi] -= ibr
+            if item.qi is not None:
+                res[item.qi] += ibr
+            res[item.bi] = (self.term_value(item.p, x) - self.term_value(item.q, x)
+                            - item.mu * (self.term_value(item.cp, x)
+                                         - self.term_value(item.cn, x)))
+        for item in self.cccs:                       # CCCS: I_out = beta * I_ctrl
+            I_out = item.beta * x[item.ctrl_bi]
+            if item.pi is not None:
+                res[item.pi] += I_out
+            if item.qi is not None:
+                res[item.qi] -= I_out
+        for item in self.ccvs:                       # CCVS: V_p - V_q = gamma * I_ctrl
+            ibr = x[item.bi]
+            if item.pi is not None:
+                res[item.pi] -= ibr
+            if item.qi is not None:
+                res[item.qi] += ibr
+            res[item.bi] = (self.term_value(item.p, x) - self.term_value(item.q, x)
+                            - item.gamma * x[item.ctrl_bi])
         for k in range(self.n):
             res[k] -= x[k] * gmin
         return res
@@ -390,6 +519,38 @@ class CompiledTopology:
             e_ac = complex(drives[item.name]) if (drives and item.name in drives) else 0.0
             out.append((self.ac_term(item.p_node, drives),
                         self.ac_term(item.q_node, drives), item.bi, e_ac))
+        return tuple(out)
+
+    def ac_vcvs(self, drives=None):
+        """Small-signal tokens for VCVS: (p_term, q_term, cp_term, cn_term, bi, mu).
+        Constraint row enforces V_p - V_q = mu*(V_cp - V_cn)."""
+        out = []
+        for item in self.vcvs:
+            out.append((self.ac_term(item.p_node, drives),
+                        self.ac_term(item.q_node, drives),
+                        self.ac_term(item.cp_node, drives),
+                        self.ac_term(item.cn_node, drives),
+                        item.bi, item.mu))
+        return tuple(out)
+
+    def ac_cccs(self, drives=None):
+        """Small-signal tokens for CCCS: (p_term, q_term, ctrl_bi, beta).
+        I_out = beta * I_ctrl injected p→q."""
+        out = []
+        for item in self.cccs:
+            out.append((self.ac_term(item.p_node, drives),
+                        self.ac_term(item.q_node, drives),
+                        item.ctrl_bi, item.beta))
+        return tuple(out)
+
+    def ac_ccvs(self, drives=None):
+        """Small-signal tokens for CCVS: (p_term, q_term, ctrl_bi, bi, gamma).
+        Constraint row enforces V_p - V_q = gamma * I_ctrl."""
+        out = []
+        for item in self.ccvs:
+            out.append((self.ac_term(item.p_node, drives),
+                        self.ac_term(item.q_node, drives),
+                        item.ctrl_bi, item.bi, item.gamma))
         return tuple(out)
 
     def output_sense(self, dtype=complex):

@@ -266,3 +266,40 @@ def test_gear2_is_second_order_on_rc_lowpass():
     assert 3.3 < g2_coarse / g2_fine < 4.6
     # gear2 is far more accurate at the same step
     assert g2_fine < be_fine / 5.0
+
+
+def test_reverse_biased_pass_switch_restores_not_pumps():
+    # A pass-gate switch whose drain is driven ABOVE its source must DISCHARGE the
+    # drain back toward the source. The signed Verilog-A drain current does this;
+    # the old abs(Idc) flipped a reverse-biased switch into an anti-restoring pump
+    # (the SC-LPF runaway: VMID ran 20 -> 333 V). Start the cap node above the
+    # source and require it to relax back, never run away.
+    from core.transient_solver import transient
+    topo = Topology(
+        solved=["MID"],
+        devices=[("M1", "MID", "VG", "VIN")],          # (name, drain, gate, source)
+        rails={"VIN": 20.0, "VG": 0.0, "GND": 0.0},    # source 20, gate 0 -> PMOS on
+        capacitors=[("C1", "MID", "GND", 1e-9)],
+        outputs=("MID",),
+    )
+    t = np.linspace(0.0, 5e-3, 2001)
+    tr = transient({"M1": (5000.0, 30.0)}, {}, t, topo=topo,
+                   V0=np.array([25.0]), integration_method="be")
+    mid = tr["nodes"]["MID"]
+    assert mid.max() < 25.6, f"reverse switch pumped MID up to {mid.max():.2f}"
+    assert abs(mid[-1] - 20.0) < 1.0, f"MID did not restore to source (got {mid[-1]:.2f})"
+
+
+def test_pss_reports_stiffness_and_honest_status():
+    # The solver now reports a Floquet-multiplier stiffness diagnostic and an
+    # honest status, and never flags an out-of-bounds orbit as converged.
+    period = 1e-3
+    t = np.linspace(0.0, period, 201)
+    topo = _rc_lowpass_topology()
+    pss = pss_solve({}, {"VIN": 5.0}, period, topo=topo, tgrid=t,
+                    inputs={"vin": np.full_like(t, 5.0)}, node_inputs={"VIN": "vin"},
+                    V0=np.array([0.0]), residual_tol=1e-9, max_shooting_iters=12)
+    assert pss["converged"] and not pss["diverged"]
+    assert pss["pss_status"] in ("converged_shooting", "converged_stabilization")
+    # Stable RC (tau = RC = 0.1*period): dominant multiplier well inside the unit circle.
+    assert 0.0 <= pss["dominant_multiplier"] < 1.0

@@ -373,9 +373,16 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
                 return None  # DC didn't converge even with continuation
 
         nv = topo.node_vals(sol)                  # {node_name: voltage}, full asymmetric op
-        if topo.n_branches:                       # ideal voltage-source branch currents
-            branch_currents = {name: float(sol[topo.n + k])
-                               for k, (name, *_r) in enumerate(topo.vsources)}
+        if topo.n_branches:                       # voltage-source branch currents
+            branch_currents = {}
+            for k, (name, *_r) in enumerate(topo.vsources):
+                branch_currents[name] = float(sol[topo.n + k])
+            offset = len(topo.vsources)
+            for k, (name, *_r) in enumerate(topo.vcvs):
+                branch_currents[name] = float(sol[topo.n + offset + k])
+            offset += len(topo.vcvs)
+            for k, (name, *_r) in enumerate(topo.ccvs):
+                branch_currents[name] = float(sol[topo.n + offset + k])
 
     if getattr(topo, "require_dc_in_box", False) and not topo.in_voltage_box(nv, bias):
         sbox = _bounded_least_squares_dc(residuals, guesses, topo, bias, tol=dc_tol)
@@ -436,9 +443,11 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
 
     # ── 3. Build & solve the small-signal MNA (terminals from the topology) ──
     try:
-        from .ac_mna import _stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource
+        from .ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
+                              _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
     except ImportError:  # pragma: no cover - legacy direct module import
-        from ac_mna import _stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource
+        from ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
+                            _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
     NN = plan.n_aug
     drive = topo.input_drives
     # Normalize the gain by the differential input magnitude. The stimulus is either
@@ -473,6 +482,12 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
         _stamp_vccs(G, RHS_G, p, cp, cn, gm)
     for p, q, bi, e_ac in plan.ac_vsources(ac_drives):  # voltage source: short (E_ac=0)
         _stamp_vsource(G, RHS_G, p, q, bi, e_ac)
+    for p, q, cp, cn, bi, mu in plan.ac_vcvs(ac_drives):   # VCVS: noiseless
+        _stamp_vcvs(G, RHS_G, p, q, cp, cn, bi, mu)
+    for p, q, ctrl_bi, beta in plan.ac_cccs(ac_drives):    # CCCS: noiseless
+        _stamp_cccs(G, RHS_G, p, q, ctrl_bi, beta)
+    for p, q, ctrl_bi, bi, gamma in plan.ac_ccvs(ac_drives): # CCVS: noiseless
+        _stamp_ccvs(G, RHS_G, p, q, ctrl_bi, bi, gamma)
     # ideal current sources are open-circuit in the small-signal AC system.
     jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
     Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]

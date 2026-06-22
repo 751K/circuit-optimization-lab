@@ -180,6 +180,87 @@ def _load_vsources(raw_items):
     return out
 
 
+def _load_vcvs(raw_items):
+    """Parse VCVS elements into (name, p, q, cp, cn, mu) tuples.
+
+    Object form: {"name": "E1", "p": "OUT", "q": "GND",
+                   "cp": "INP", "cn": "INN", "mu": 10.0}
+    Tuple form:  ["E1", "OUT", "GND", "INP", "INN", 10.0]
+    """
+    out = []
+    for i, item in enumerate(raw_items or []):
+        where = f"vcvs[{i}]"
+        if isinstance(item, dict):
+            try:
+                name = item["name"]
+                p = item["p"]; q = item["q"]
+                cp = item["cp"]; cn = item["cn"]
+                mu = item["mu"]
+            except KeyError as exc:
+                raise ValueError(f"{where} missing {exc.args[0]!r}") from exc
+        elif isinstance(item, (list, tuple)) and len(item) == 6:
+            name, p, q, cp, cn, mu = item
+        else:
+            raise ValueError(f"{where} must be an object or [name, p, q, cp, cn, mu]")
+        out.append((str(name), str(p), str(q), str(cp), str(cn),
+                    _as_number(mu, f"{where}.mu")))
+    return out
+
+
+def _load_cccs(raw_items):
+    """Parse CCCS elements into (name, p, q, ctrl_name, beta) tuples.
+
+    Object form: {"name": "F1", "p": "OUT", "q": "GND",
+                   "ctrl_name": "V1", "beta": 2.0}
+    Tuple form:  ["F1", "OUT", "GND", "V1", 2.0]
+    """
+    out = []
+    for i, item in enumerate(raw_items or []):
+        where = f"cccs[{i}]"
+        if isinstance(item, dict):
+            try:
+                name = item["name"]
+                p = item["p"]; q = item["q"]
+                ctrl_name = item["ctrl_name"]
+                beta = item["beta"]
+            except KeyError as exc:
+                raise ValueError(f"{where} missing {exc.args[0]!r}") from exc
+        elif isinstance(item, (list, tuple)) and len(item) == 5:
+            name, p, q, ctrl_name, beta = item
+        else:
+            raise ValueError(f"{where} must be an object or [name, p, q, ctrl_name, beta]")
+        out.append((str(name), str(p), str(q), str(ctrl_name),
+                    _as_number(beta, f"{where}.beta")))
+    return out
+
+
+def _load_ccvs(raw_items):
+    """Parse CCVS elements into (name, p, q, ctrl_name, gamma) tuples.
+
+    Object form: {"name": "H1", "p": "OUT", "q": "GND",
+                   "ctrl_name": "V1", "gamma": 100.0}
+    Tuple form:  ["H1", "OUT", "GND", "V1", 100.0]
+    """
+    out = []
+    for i, item in enumerate(raw_items or []):
+        where = f"ccvs[{i}]"
+        if isinstance(item, dict):
+            try:
+                name = item["name"]
+                p = item["p"]; q = item["q"]
+                ctrl_name = item["ctrl_name"]
+                gamma = item["gamma"]
+            except KeyError as exc:
+                raise ValueError(f"{where} missing {exc.args[0]!r}") from exc
+        elif isinstance(item, (list, tuple)) and len(item) == 5:
+            name, p, q, ctrl_name, gamma = item
+        else:
+            raise ValueError(f"{where} must be an object or [name, p, q, ctrl_name, gamma]")
+        out.append((str(name), str(p), str(q), str(ctrl_name),
+                    _as_number(gamma, f"{where}.gamma")))
+    return out
+
+
 def _validate_nodes(topo):
     known = set(topo.solved) | set(topo.rails)
     for name, d, g, s in topo.devices:
@@ -210,6 +291,32 @@ def _validate_nodes(topo):
         if p not in topo.idx and q not in topo.idx:
             raise ValueError(f"Voltage source {name} must connect at least one solved node "
                              f"(both {p!r} and {q!r} are rails)")
+    for name, p, q, cp, cn, _ in topo.vcvs:
+        for node in (p, q, cp, cn):
+            if node not in known:
+                raise ValueError(f"VCVS {name} references unknown node {node!r}")
+        if p == q:
+            raise ValueError(f"VCVS {name} has identical output terminals {p!r}")
+        if p not in topo.idx and q not in topo.idx:
+            raise ValueError(f"VCVS {name} must connect at least one solved node "
+                             f"(both {p!r} and {q!r} are rails)")
+    for name, p, q, ctrl_name, _ in topo.cccs:
+        for node in (p, q):
+            if node not in known:
+                raise ValueError(f"CCCS {name} references unknown node {node!r}")
+        if ctrl_name not in topo.vsource_index:
+            raise ValueError(f"CCCS {name} references unknown branch source {ctrl_name!r}")
+    for name, p, q, ctrl_name, _ in topo.ccvs:
+        for node in (p, q):
+            if node not in known:
+                raise ValueError(f"CCVS {name} references unknown node {node!r}")
+        if p == q:
+            raise ValueError(f"CCVS {name} has identical output terminals {p!r}")
+        if p not in topo.idx and q not in topo.idx:
+            raise ValueError(f"CCVS {name} must connect at least one solved node "
+                             f"(both {p!r} and {q!r} are rails)")
+        if ctrl_name not in topo.vsource_index:
+            raise ValueError(f"CCVS {name} references unknown branch source {ctrl_name!r}")
     for node in topo.outputs:
         if node not in topo.idx:
             raise ValueError(f"Output node {node!r} must be a solved node")
@@ -218,8 +325,8 @@ def _validate_nodes(topo):
         if name not in names:
             raise ValueError(f"input_drives references unknown device {name!r}")
     for node in topo.ac_drives:
-        if node not in known:
-            raise ValueError(f"ac_drives references unknown node {node!r}")
+        if node not in known and node not in topo.vsource_index:
+            raise ValueError(f"ac_drives references unknown node or source {node!r}")
     for name in topo.transient_inputs:
         if name not in names:
             raise ValueError(f"transient_inputs references unknown device {name!r}")
@@ -275,6 +382,9 @@ def circuit_from_dict(data):
                                 ("nplus", "nminus"), "I"),
         vccs=_load_vccs(data.get("vccs")),
         vsources=_load_vsources(data.get("vsources")),
+        vcvs=_load_vcvs(data.get("vcvs")),
+        cccs=_load_cccs(data.get("cccs")),
+        ccvs=_load_ccvs(data.get("ccvs")),
     )
     _validate_nodes(topo)
     bias = {str(k): float(v) for k, v in data.get("bias", {}).items()}

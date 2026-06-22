@@ -169,8 +169,14 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     idx, n = plan.idx, plan.n
     n_aug = plan.n_aug                 # n nodes + m ideal-voltage-source branch currents
     termv = plan.term_value
+    # Every device uses its signed Verilog-A drain current. abs(Idc) was only
+    # correct for never-reversing devices (forward PMOS: I_d1_d>0 so signed==abs)
+    # but turned a *reverse*-biased pass-gate switch into an anti-restoring pump
+    # (the SC-LPF runaway). signed==abs in forward, so the AFE amp/chopper are
+    # unchanged; the chopper already listed its commutators in signed_devices.
+    # `signed_devices` is retained (no-op now) for back-compat with callers.
     signed_devices = set(signed_devices or ())
-    dev_meta = [(tft[item.name], item.name in signed_devices,
+    dev_meta = [(tft[item.name], True,
                  item.d, item.g, item.s, item.di, item.gi, item.si)
                 for item in plan.devices]
     load_meta = [(item.a, item.b, item.ai, item.bi, item.value)
@@ -185,6 +191,14 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     # bi pins V_p - V_q = E. Vsource circuits force the pure-Python step path below.
     vs_meta = [(item.p, item.q, item.pi, item.qi, item.bi, item.e_const, item.e_input_idx)
                for item in plan.vsources]
+    vcvs_meta = [(item.p, item.q, item.cp, item.cn, item.pi, item.qi,
+                  item.cpi, item.cni, item.bi, item.mu)
+                 for item in plan.vcvs]
+    cccs_meta = [(item.pi, item.qi, item.ctrl_bi, item.beta)
+                 for item in plan.cccs]
+    ccvs_meta = [(item.p, item.q, item.pi, item.qi, item.bi,
+                  item.ctrl_bi, item.gamma)
+                 for item in plan.ccvs]
     dyn_isrc_meta = []
     for pos, item in enumerate(current_inputs or ()):
         if isinstance(item, dict):
@@ -306,7 +320,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 _, _, I_d1_d, _, _ = dev._eval_currents(Vs, Vd, Vg, Vs1, Vd1)
                 Idc = -I_d1_d
                 Cgs, Cgd = dev._capacitances_from_op(Vs, Vd, Vg, Vs1, Vd1)
-                I = I_d1_d if signed else abs(Idc)       # signed for bidirectional switches
+                I = I_d1_d if signed else abs(Idc)   # signed (always; see dev_meta)
             except Exception:
                 I = Cgs = Cgd = 0.0
                 Vs1 = Vd1 = 0.0
@@ -396,6 +410,28 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 R[qi] += ibr                             # and enters q
             E = e_const if e_idx < 0 else input_now[e_idx]
             R[bi] = termv(aterm, V, input_now) - termv(bterm, V, input_now) - E
+        for aterm, bterm, cpterm, cnterm, pi, qi, cpi, cni, bi, mu in vcvs_meta:
+            ibr = V[bi]                                  # VCVS: V_p - V_q = mu*(V_cp - V_cn)
+            if pi is not None:
+                R[pi] -= ibr
+            if qi is not None:
+                R[qi] += ibr
+            R[bi] = (termv(aterm, V, input_now) - termv(bterm, V, input_now)
+                     - mu * (termv(cpterm, V, input_now) - termv(cnterm, V, input_now)))
+        for pi, qi, ctrl_bi, beta in cccs_meta:         # CCCS: I_out = beta * I_ctrl
+            I_out = beta * V[ctrl_bi]
+            if pi is not None:
+                R[pi] += I_out
+            if qi is not None:
+                R[qi] -= I_out
+        for aterm, bterm, pi, qi, bi, ctrl_bi, gamma in ccvs_meta:
+            ibr = V[bi]                                  # CCVS: V_p - V_q = gamma * I_ctrl
+            if pi is not None:
+                R[pi] -= ibr
+            if qi is not None:
+                R[qi] += ibr
+            R[bi] = (termv(aterm, V, input_now) - termv(bterm, V, input_now)
+                     - gamma * V[ctrl_bi])
         for k in range(n):
             R[k] -= V[k] * gmin
         # Default PMOS dynamic caps mirror the Verilog-A source:
@@ -651,6 +687,33 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             if qi is not None:
                 J[qi, bi] += 1.0          # dR[q]/d(ibr)
                 J[bi, qi] -= 1.0          # d(constraint)/dV_q
+        # VCVS: V_p - V_q = mu*(V_cp - V_cn)
+        for aterm, bterm, cpterm, cnterm, pi, qi, cpi, cni, bi, mu in vcvs_meta:
+            if pi is not None:
+                J[pi, bi] -= 1.0          # dR[p]/d(ibr)
+                J[bi, pi] += 1.0          # d(constraint)/dV_p
+            if qi is not None:
+                J[qi, bi] += 1.0          # dR[q]/d(ibr)
+                J[bi, qi] -= 1.0          # d(constraint)/dV_q
+            if cpi is not None:
+                J[bi, cpi] -= mu          # d(constraint)/dV_cp = -mu
+            if cni is not None:
+                J[bi, cni] += mu          # d(constraint)/dV_cn = +mu
+        # CCCS: I_out = beta * I_ctrl
+        for pi, qi, ctrl_bi, beta in cccs_meta:
+            if pi is not None:
+                J[pi, ctrl_bi] += beta    # dR[p]/d(I_ctrl) = +beta
+            if qi is not None:
+                J[qi, ctrl_bi] -= beta    # dR[q]/d(I_ctrl) = -beta
+        # CCVS: V_p - V_q = gamma * I_ctrl
+        for aterm, bterm, pi, qi, bi, ctrl_bi, gamma in ccvs_meta:
+            if pi is not None:
+                J[pi, bi] -= 1.0          # dR[p]/d(ibr)
+                J[bi, pi] += 1.0          # d(constraint)/dV_p
+            if qi is not None:
+                J[qi, bi] += 1.0          # dR[q]/d(ibr)
+                J[bi, qi] -= 1.0          # d(constraint)/dV_q
+            J[bi, ctrl_bi] -= gamma       # d(constraint)/d(I_ctrl) = -gamma
         return J
 
     def newton(seed, Vp, input_now, input_prev, h, maxit=None, vtol=1e-8):

@@ -186,12 +186,14 @@ def test_pnoise_numba_kernels_match_reference_when_enabled():
     p_indices = np.array([[0, 2, 4, 6, 8], [-1, -1, -1, -1, -1]], dtype=np.int64)
     q_indices = np.array([[1, 3, 5, 7, 9], [0, 2, 4, 6, 8]], dtype=np.int64)
     sth = rng.normal(size=(2, nb, nb)) + 1j * rng.normal(size=(2, nb, nb))
-    sfl = rng.normal(size=(2, nb, nb)) + 1j * rng.normal(size=(2, nb, nb))
+    # flicker is now the sqrt(PWR) modulation harmonics M_{-2K..2K} (length 4K+1),
+    # not an nb x nb matrix; the fold builds S_kl=sum_a M_{k-a}M*_{l-a}/nu_a from it.
+    mfl = rng.normal(size=(2, 4 * K + 1)) + 1j * rng.normal(size=(2, 4 * K + 1))
 
     got_out, got_dev = pnoise_fold_psd_numba(
-        adjs, freqs, K, 225.0, p_indices, q_indices, sth, sfl)
+        adjs, freqs, K, 225.0, p_indices, q_indices, sth, mfl)
     ref_out, ref_dev = _pnoise_fold_psd_impl.py_func(
-        adjs, freqs, K, 225.0, p_indices, q_indices, sth, sfl)
+        adjs, freqs, K, 225.0, p_indices, q_indices, sth, mfl)
     np.testing.assert_allclose(got_out, ref_out, rtol=1e-14, atol=1e-12)
     np.testing.assert_allclose(got_dev, ref_dev, rtol=1e-14, atol=1e-12)
 

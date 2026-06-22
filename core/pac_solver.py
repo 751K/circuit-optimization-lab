@@ -303,6 +303,9 @@ def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
         isources=topo.isources,
         vccs=topo.vccs,
         vsources=topo.vsources,
+        vcvs=topo.vcvs,
+        cccs=topo.cccs,
+        ccvs=topo.ccvs,
         dc_tol=topo.dc_tol,
         require_dc_in_box=topo.require_dc_in_box,
     )
@@ -510,7 +513,8 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     # (no stimulus -> b stays 0 there).
     nbr = topo.n_branches
     if nbr:
-        Binc = _branch_incidence(topo.vsources, idx, n)
+        all_branch_sources = list(topo.vsources) + list(topo.vcvs) + list(topo.ccvs)
+        Binc = _branch_incidence(all_branch_sources, idx, n)
         nt = nb * (n + nbr)
         Ya = np.zeros((nt, nt), dtype=complex)
         Ca = np.zeros((nt, nt), dtype=complex)

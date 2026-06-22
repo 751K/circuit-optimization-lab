@@ -54,7 +54,8 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
     nbr = topo.n_branches                       # ideal voltage-source branch unknowns
     idx = topo.idx
     rails = topo.rail_values(bias)
-    Binc = _branch_incidence(topo.vsources, idx, n) if nbr else None
+    all_branch_sources = list(topo.vsources) + list(topo.vcvs) + list(topo.ccvs)
+    Binc = _branch_incidence(all_branch_sources, idx, n) if nbr else None
 
     def term(node):
         return ("n", idx[node]) if node in idx else ("v", 0.0)
@@ -238,6 +239,41 @@ def _residual_score(norm, nfail):
     return float(norm) * (1.0 + 100.0 * max(0, int(nfail)))
 
 
+def _physical_span(topo, bias, factor):
+    """Return (lo, hi) physical bounds for node voltages: the rail range expanded
+    by ``factor`` x its span on each side. A converged PSS orbit must stay inside;
+    an orbit that leaves it is a numerical runaway, not a steady state. Returns
+    None when the topology has no constant rails to anchor against."""
+    rails = [v for v in topo.rail_values(bias).values()
+             if isinstance(v, (int, float))]
+    if not rails:
+        return None
+    lo, hi = min(rails), max(rails)
+    span = max(hi - lo, 1.0)
+    return lo - factor * span, hi + factor * span
+
+
+def _within(vector, bounds, topo):
+    """True if all node voltages (the first ``topo.n`` entries — branch currents
+    are unbounded) lie within ``bounds``."""
+    if bounds is None:
+        return True
+    lo, hi = bounds
+    nodes = np.asarray(vector, float)[:topo.n]
+    return bool(np.all(np.isfinite(nodes)) and np.all(nodes >= lo)
+                and np.all(nodes <= hi))
+
+
+def _dominant_multiplier(phi):
+    """Largest |Floquet multiplier| of the node-space monodromy ``phi`` — the
+    stiffness/stability diagnostic. |lambda|>~1 means the implemented one-period
+    map is (near-)unstable at this orbit; tau>>T circuits sit near 1."""
+    try:
+        return float(np.max(np.abs(np.linalg.eigvals(np.asarray(phi, float)))))
+    except Exception:
+        return float("nan")
+
+
 def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               n_points=161, inputs=None, node_inputs=None, current_inputs=None,
               corner=None,
@@ -251,7 +287,9 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               analytic_jacobian=True,
               rail_margin=0.5, check_periodic_inputs=True,
               input_periodic_tol=1e-9, profile=False, edge_mask=None,
-              integration_method="gear2"):
+              integration_method="gear2",
+              physical_factor=2.0, max_stabilization_periods=200,
+              levenberg_marquardt=True):
     """Solve periodic steady state with transient shooting.
 
     Parameters are intentionally close to :func:`transient` so the same topology,
@@ -306,23 +344,54 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     period_runs = 0
     shooting_jacobian_evals = 0
     shooting_jacobian_reuses = 0
-    converged_stabilization = None
-    for _ in range(max(0, int(tstab_periods))):
-        x_start = x.copy()
-        period_runs += 1
-        tr_stab = transient(sizes, bias, tgrid, V0=x, profile=False,
-                            **transient_kwargs)
-        x_end_stab = _end_vector(tr_stab, topo)
-        residual_stab = x_end_stab - x_start
-        norm_stab = float(np.linalg.norm(residual_stab, ord=np.inf))
-        nfail_stab = int(tr_stab.get("nfail", 0))
-        if nfail_stab == 0 and norm_stab <= float(residual_tol):
-            converged_stabilization = (
-                tr_stab, x_start.copy(), x_end_stab.copy(), residual_stab.copy(),
-                norm_stab, nfail_stab,
-            )
-            break
-        x = _rail_clip(x_end_stab, topo, bias, rail_margin)
+    phys_bounds = _physical_span(topo, bias, float(physical_factor))
+    stab_runaway = False
+
+    def _stabilize(x0, max_periods):
+        """Pseudo-transient stabilization: advance period-by-period, tracking the
+        best *physically bounded* min-residual orbit, and bail on a runaway (a step
+        that leaves the physical box). Returns (converged_tuple_or_None,
+        best_physical_or_None, last_x, hit_runaway, periods_run)."""
+        nonlocal period_runs
+        x = x0.copy()
+        best_phys = None       # (norm, x0, x_end, residual, nfail, tr)
+        for _ in range(max(0, int(max_periods))):
+            x_start = x.copy()
+            period_runs += 1
+            tr_s = transient(sizes, bias, tgrid, V0=x, profile=False,
+                             **transient_kwargs)
+            x_end_s = _end_vector(tr_s, topo)
+            residual_s = x_end_s - x_start
+            norm_s = float(np.linalg.norm(residual_s, ord=np.inf))
+            nfail_s = int(tr_s.get("nfail", 0))
+            bounded = (_within(x_start, phys_bounds, topo)
+                       and _within(x_end_s, phys_bounds, topo))
+            if nfail_s == 0 and bounded and (best_phys is None or norm_s < best_phys[0]):
+                best_phys = (norm_s, x_start.copy(), x_end_s.copy(),
+                             residual_s.copy(), nfail_s, tr_s)
+            if nfail_s == 0 and norm_s <= float(residual_tol) and bounded:
+                conv = (tr_s, x_start.copy(), x_end_s.copy(),
+                        residual_s.copy(), norm_s, nfail_s)
+                return conv, best_phys, x_start, False, _ + 1
+            # Runaway detection: a step out of the physical box, or the period
+            # residual turning back UP past a good minimum (the orbit is drifting
+            # off a thin basin toward a spurious fixed point). Bail to best_phys.
+            diverging = (best_phys is not None and best_phys[0] < 0.5
+                         and norm_s > max(3.0 * best_phys[0], 5.0 * float(residual_tol)))
+            if (not bounded) or diverging:
+                return None, best_phys, x_start, True, _ + 1
+            # Advance WITHOUT rail-clipping: clipping a runaway to the rail forges a
+            # deceptive in-bounds zero-residual fixed point that fools best_phys;
+            # letting the true trajectory run makes the runaway detectable instead.
+            x = x_end_s
+        return None, best_phys, x, False, max(0, int(max_periods))
+
+    converged_stabilization, stab_best, x, stab_runaway, _ = _stabilize(
+        x, tstab_periods)
+    # If the chase drifted out of bounds, roll back to the best physical orbit
+    # instead of carrying the runaway state into shooting.
+    if converged_stabilization is None and stab_runaway and stab_best is not None:
+        x = stab_best[1].copy()
 
     history = []
 
@@ -364,6 +433,12 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     mono_dev_inst = None
     jacobian_reuse = bool(jacobian_reuse)
     jacobian_rebuild_interval = max(0, int(jacobian_rebuild_interval))
+    # Levenberg–Marquardt damping state, carried across shooting iterations.
+    # lm_mu == 0 reproduces the plain Newton step exactly (well-conditioned
+    # circuits unchanged); it grows only when a step is rejected.
+    lm_mu = 0.0
+    lm_mu0, lm_up, lm_down, lm_mu_max, lm_max_tries = 1e-3, 8.0, 1.0 / 3.0, 1e8, 15
+    dominant_multiplier = float("nan")   # max |Floquet multiplier| (stiffness)
 
     def build_shooting_jacobian(x_base, residual_base):
         nonlocal shooting_jacobian_evals, jac_age
@@ -438,6 +513,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                                                   integration_method=integration_method)
                         jac = phi - np.eye(topo.n)
                         jacobian_kind = "analytic_monodromy"
+                        dominant_multiplier = _dominant_multiplier(phi)
                         shooting_jacobian_evals += 1
                         jac_age = 0
                     except Exception:
@@ -450,32 +526,84 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                 used_reused_jac = True
                 jacobian_kind = "broyden"
 
-            try:
-                dx = np.linalg.solve(jac, -residual)
-            except np.linalg.LinAlgError:
-                dx = np.linalg.lstsq(jac, -residual, rcond=None)[0]
-
-            alpha = 1.0
             current_score = _residual_score(norm, nfail)
-            while alpha >= float(min_damping):
-                xt = _rail_clip(x + alpha * dx, topo, bias, rail_margin)
-                tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt)
-                score_t = _residual_score(norm_t, nfail_t)
-                if score_t < current_score or norm_t <= float(residual_tol):
-                    accepted = (alpha, xt, tr_t, x_end_t, residual_t, norm_t,
-                                nfail_t, score_t)
-                    break
-                if score_t < best["score"]:
-                    best = {
-                        "x0": xt.copy(),
-                        "x_end": x_end_t.copy(),
-                        "residual": residual_t.copy(),
-                        "residual_norm": norm_t,
-                        "nfail": nfail_t,
-                        "transient": tr_t,
-                        "score": score_t,
-                    }
-                alpha *= 0.5
+            # A non-finite Jacobian (a diverged trial orbit polluted a Broyden update,
+            # or the monodromy of a failed period) can't yield a usable step — force a
+            # rebuild next attempt instead of forming a NaN J^T J.
+            if levenberg_marquardt and not np.all(np.isfinite(jac)):
+                jac = None
+                jac_age = 0
+                if used_reused_jac and jac_attempt == 0:
+                    rebuilt_after_reuse_failure = True
+                    continue
+                break
+            if levenberg_marquardt:
+                # LM trust region: mu=0 -> the exact Newton step (well-conditioned
+                # circuits, e.g. the chopper, are byte-identical); mu grows only on
+                # rejection, regularizing near-singular (I-M) so a stiff (tau>>T)
+                # orbit's step cannot overshoot the basin into a runaway.
+                H = jac.T @ jac
+                grad = jac.T @ residual
+                diagH = np.maximum(np.abs(np.diag(H)), 1e-30)
+                mu = lm_mu
+                for _lm in range(lm_max_tries):
+                    if mu == 0.0:
+                        try:
+                            dx = np.linalg.solve(jac, -residual)
+                        except np.linalg.LinAlgError:
+                            dx = np.linalg.lstsq(jac, -residual, rcond=None)[0]
+                    else:
+                        A = H + mu * np.diag(diagH)
+                        try:
+                            dx = np.linalg.solve(A, -grad)
+                        except np.linalg.LinAlgError:
+                            dx = np.linalg.lstsq(A, -grad, rcond=None)[0]
+                    xt = x + dx
+                    if not _within(xt, phys_bounds, topo):
+                        mu = mu * lm_up if mu > 0.0 else lm_mu0
+                        if mu > lm_mu_max:
+                            break
+                        continue
+                    xt = _rail_clip(xt, topo, bias, rail_margin)
+                    tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt)
+                    score_t = _residual_score(norm_t, nfail_t)
+                    bounded_t = _within(x_end_t, phys_bounds, topo)
+                    if bounded_t and (score_t < current_score or
+                                      norm_t <= float(residual_tol)):
+                        accepted = (mu, xt, tr_t, x_end_t, residual_t, norm_t,
+                                    nfail_t, score_t)
+                        lm_mu = mu * lm_down
+                        break
+                    if bounded_t and nfail_t == 0 and score_t < best["score"]:
+                        best = {
+                            "x0": xt.copy(), "x_end": x_end_t.copy(),
+                            "residual": residual_t.copy(), "residual_norm": norm_t,
+                            "nfail": nfail_t, "transient": tr_t, "score": score_t,
+                        }
+                    mu = mu * lm_up if mu > 0.0 else lm_mu0
+                    if mu > lm_mu_max:
+                        break
+            else:
+                try:
+                    dx = np.linalg.solve(jac, -residual)
+                except np.linalg.LinAlgError:
+                    dx = np.linalg.lstsq(jac, -residual, rcond=None)[0]
+                alpha = 1.0
+                while alpha >= float(min_damping):
+                    xt = _rail_clip(x + alpha * dx, topo, bias, rail_margin)
+                    tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt)
+                    score_t = _residual_score(norm_t, nfail_t)
+                    if score_t < current_score or norm_t <= float(residual_tol):
+                        accepted = (alpha, xt, tr_t, x_end_t, residual_t, norm_t,
+                                    nfail_t, score_t)
+                        break
+                    if score_t < best["score"]:
+                        best = {
+                            "x0": xt.copy(), "x_end": x_end_t.copy(),
+                            "residual": residual_t.copy(), "residual_norm": norm_t,
+                            "nfail": nfail_t, "transient": tr_t, "score": score_t,
+                        }
+                    alpha *= 0.5
 
             if accepted is not None:
                 break
@@ -523,6 +651,26 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         })
         converged = (nfail == 0 and norm <= float(residual_tol))
 
+    # A2: adaptive-stabilization fallback. If shooting did not converge but the
+    # best orbit is physical (no runaway), extend pseudo-transient stabilization
+    # from it up to the budget. Well-conditioned circuits (e.g. the chopper)
+    # converge during shooting and never reach here, so their path is unchanged.
+    if (not converged and int(max_stabilization_periods) > 0 and not stab_runaway
+            and _within(best["x0"], phys_bounds, topo)):
+        extra = int(max_stabilization_periods) - period_runs
+        if extra > 0:
+            conv2, best2, _, runaway2, _ = _stabilize(best["x0"], extra)
+            if conv2 is not None:
+                tr, x, x_end, residual, norm, nfail = conv2
+                converged = True
+                converged_stabilization = conv2
+            elif best2 is not None and best2[0] < best["residual_norm"]:
+                norm2, x0_2, xend2, res2, nfail2, tr2 = best2
+                best = {"x0": x0_2, "x_end": xend2, "residual": res2,
+                        "residual_norm": norm2, "nfail": nfail2, "transient": tr2,
+                        "score": _residual_score(norm2, nfail2)}
+            stab_runaway = stab_runaway or runaway2
+
     if not converged:
         x = best["x0"]
         tr = best["transient"]
@@ -541,9 +689,26 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         nfail = int(tr.get("nfail", 0))
         converged = (nfail == 0 and norm <= float(residual_tol))
 
+    # A4: honest status. A physically-out-of-bounds final orbit is a numerical
+    # runaway, never a steady state — report it as diverged, not converged.
+    diverged = not _within(x, phys_bounds, topo)
+    if diverged:
+        converged = False
+        pss_status = "diverged"
+    elif converged and converged_stabilization is not None:
+        pss_status = "converged_stabilization"
+    elif converged:
+        pss_status = "converged_shooting"
+    else:
+        pss_status = "best_physical"
+
     result = dict(tr)
     result.update({
         "converged": bool(converged),
+        "pss_status": pss_status,
+        "diverged": bool(diverged),
+        "dominant_multiplier": float(dominant_multiplier),
+        "stabilization_runaway": bool(stab_runaway),
         "period": period,
         "x0": np.asarray(x, float),
         "x_end": np.asarray(x_end, float),

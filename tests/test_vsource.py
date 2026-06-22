@@ -6,6 +6,8 @@ divider (exact node voltages and branch current), a floating source (V_p - V_q =
 AC short / AC-stimulus paths, a time-varying transient source (RC step + sine), the JSON
 round-trip + loader validation, the "no thermal noise" property, and the PSS guard.
 """
+import os
+
 import numpy as np
 import pytest
 
@@ -233,3 +235,37 @@ def test_vsource_pnoise_resistor_noise_through_short():
                           input_drive={"vin": 1.0}, lti_fast_path=lti)
         np.testing.assert_allclose(nz["out_psd"], expected, rtol=1e-6)
         assert "R1" in nz["dev_psd"] and "V1" not in nz["dev_psd"]
+
+
+@pytest.mark.skipif(not os.environ.get("RUN_SLOW_CHOPPER"),
+                    reason="slow SC-LPF PSS/PAC; set RUN_SLOW_CHOPPER=1")
+def test_sc_lpf_pss_converges_to_physical_orbit():
+    # Switched-capacitor LPF (2-phase PMOS switches, vsource clocks): the reverse-
+    # biased switch used to pump VMID/VOUT off a thin basin to a spurious ~40 V
+    # (rail-clipped) orbit. With the signed drain current + robust shooting it must
+    # converge to the physical ~20 V orbit and never report a runaway as converged.
+    import examples.sc_lpf as L
+    topo = L.build_sc_topo()
+    sizes = {"M1": (L.W_SW, L.L_SW), "M2": (L.W_SW, L.L_SW)}
+    n_points = 201
+    t = np.linspace(0.0, L.PERIOD, n_points + 1)[:-1]
+    inputs = L.build_inputs(t)
+    # A generous tstab used to drift into the runaway; it must not anymore.
+    pss = pss_solve(sizes, {}, L.PERIOD, topo=topo, n_points=n_points, inputs=inputs,
+                    tstab_periods=60, residual_tol=2e-2, max_shooting_iters=20,
+                    min_damping=1.0 / 256.0, integration_method="be")
+    assert not pss["diverged"], f"PSS reported a runaway orbit: {pss['pss_status']}"
+    vout = float(np.mean(pss["nodes"]["VOUT"]))
+    assert 19.0 < vout < 21.0, f"VOUT settled to {vout:.2f} V, not the physical ~20 V"
+    # PAC baseband transfer ~0 dB and -3 dB BW within ~10% of Cadence (16.96 Hz).
+    pf = np.logspace(-1, 3, 41)
+    pac = pac_solve(sizes, {}, pf, pss_result=pss, input_drive={"vin": 1.0},
+                    fd_state_step=1e-4, fd_input_step=1e-4)
+    g = np.asarray(pac["gains"], float)
+    assert abs(g[0] - 1.0) < 0.05, f"PAC DC gain {g[0]:.3f} (expected ~1.0)"
+    thr = g[0] / np.sqrt(2)
+    bw = float(pf[-1])
+    for i in range(1, len(g)):
+        if g[i] < thr:
+            bw = float(np.interp(thr, [g[i], g[i - 1]], [pf[i], pf[i - 1]])); break
+    assert abs(bw - 16.96) / 16.96 < 0.12, f"PAC BW {bw:.2f} Hz vs Cadence 16.96 (>12%)"

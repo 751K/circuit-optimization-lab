@@ -307,6 +307,56 @@ Array form: `["V1", "IN", "GND", 2.0]`. At least one of `p`, `q` must be a solve
   matrices are bordered with the branch‑current unknowns (PNoise forces its dense path when
   a source is present).
 
+### `vcvs`
+
+Optional. Voltage‑controlled voltage sources. Output voltage ``V_p − V_q = mu * (V_cp − V_cn)``.
+Each VCVS adds a branch‑current unknown (like an ideal voltage source) and a constraint
+row with entries for the control nodes. Ideal / noiseless.
+
+```json
+"vcvs": [
+  {"name": "E1", "p": "OUT", "q": "GND",
+   "cp": "INP", "cn": "INN", "mu": 100.0}
+]
+```
+
+Array form: `["E1", "OUT", "GND", "INP", "INN", 100.0]`. At least one of `p`, `q` must
+be a solved node.
+
+### `cccs`
+
+Optional. Current‑controlled current sources. Output current ``I_out = beta * I_ctrl``
+flows ``p → q``. The control current ``I_ctrl`` is the branch current of a voltage source
+(vsource / VCVS / CCVS) named by `ctrl_name`. Ideal / noiseless. Does NOT add a new
+branch‑current unknown — it references an existing one.
+
+```json
+"cccs": [
+  {"name": "F1", "p": "OUT", "q": "GND",
+   "ctrl_name": "V1", "beta": 2.0}
+]
+```
+
+Array form: `["F1", "OUT", "GND", "V1", 2.0]`. `ctrl_name` must reference a vsource,
+VCVS, or CCVS in the same topology.
+
+### `ccvs`
+
+Optional. Current‑controlled voltage sources. Output voltage ``V_p − V_q = gamma * I_ctrl``.
+The control current ``I_ctrl`` is the branch current of a voltage source named by
+`ctrl_name`. Each CCVS adds a branch‑current unknown. Ideal / noiseless.
+
+```json
+"ccvs": [
+  {"name": "H1", "p": "OUT", "q": "GND",
+   "ctrl_name": "V1", "gamma": 100.0}
+]
+```
+
+Array form: `["H1", "OUT", "GND", "V1", 100.0]`. At least one of `p`, `q` must be a
+solved node. `ctrl_name` must reference a vsource, VCVS, or CCVS (which has a branch
+current). CCCS and CCVS can cascade: a CCCS can control on a CCVS's branch current.
+
 ### `dc_guesses`
 
 Optional. DC initial guesses. Each entry can specify some or all solved nodes.
@@ -493,6 +543,7 @@ feasibility constraints (gain, BW, IRN, power, area), and optimization objective
 examples/single_stage.json        # Single-transistor common-source (PMOS_TFT)
 examples/resistor_load_stage.json # PMOS + resistive load + output cap + current source
 examples/voltage_divider.json     # Ideal voltage source (true MNA) — resistor divider
+examples/vcvs_amplifier.json      # VCVS amplifier — linear gain 100×
 examples/afe_explore.json         # 10-transistor AFE with explore config
 examples/periodic_rc.json         # Passive RC with PSS/PAC/PNoise dispatch
 ```
@@ -538,8 +589,8 @@ The JSON format is a local-solver circuit description, not a full SPICE netlist.
 Supported:
 
 - Three-terminal transistor devices (PMOS_TFT via ``TransistorModel`` interface).
-- Resistors, capacitors, ideal DC current sources, VCCS (voltage‑controlled current sources), ideal voltage sources (true MNA).
-- DC/AC/noise/transient shared topology (resistors include thermal noise; VCCS and ideal voltage sources are ideal/noiseless).
+- Resistors, capacitors, ideal DC current sources, VCCS (voltage‑controlled current sources), VCVS (voltage‑controlled voltage sources), CCCS (current‑controlled current sources), CCVS (current‑controlled voltage sources), ideal voltage sources (true MNA).
+- DC/AC/noise/transient shared topology (resistors include thermal noise; controlled sources and ideal voltage sources are ideal/noiseless).
 - Single-ended or differential outputs.
 - Fixed load capacitance.
 - AC gate drive and node drive.
@@ -555,7 +606,7 @@ Supported (model abstraction):
 Not yet supported:
 
 - NMOS or other compact model implementations (interface is ready, implementations pending).
-- Other controlled sources (CCCS, CCVS, VCVS), switched/time-varying elements.
+- Switched / time‑varying elements.
 - Multi-output simultaneous analysis.
 - Hierarchical subcircuits.
 - SPICE syntax parsing.

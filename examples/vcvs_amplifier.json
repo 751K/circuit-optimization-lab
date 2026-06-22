@@ -1,0 +1,32 @@
+{
+  "name": "VCVS amplifier example",
+  "description": "Simple linear amplifier using a VCVS: V_OUT = mu * (V_INP - V_INN) with mu=100",
+  "solved": ["INP", "INN", "OUT"],
+  "rails": {"GND": 0.0},
+  "devices": [],
+  "bias": {},
+  "sizes": {},
+  "outputs": ["OUT"],
+  "resistors": [
+    {"name": "R1", "a": "INP", "b": "GND", "R": 10000},
+    {"name": "R2", "a": "INN", "b": "GND", "R": 10000},
+    {"name": "RL", "a": "OUT", "b": "GND", "R": 10000}
+  ],
+  "vsources": [
+    {"name": "VINP", "p": "INP", "q": "GND", "value": 0.5},
+    {"name": "VINN", "p": "INN", "q": "GND", "value": -0.5}
+  ],
+  "vcvs": [
+    {"name": "E1", "p": "OUT", "q": "GND", "cp": "INP", "cn": "INN", "mu": 100.0}
+  ],
+  "ac_drives": {"VINP": 0.5, "VINN": -0.5},
+  "analyses": {
+    "ac": {
+      "freqs": {"start": 0.1, "stop": 10000, "num": 61, "scale": "log"}
+    },
+    "noise": {
+      "freqs": {"start": 0.1, "stop": 10000, "num": 31, "scale": "log"},
+      "band": [0.1, 100.0]
+    }
+  }
+}

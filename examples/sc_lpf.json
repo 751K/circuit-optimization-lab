@@ -1,0 +1,58 @@
+{
+  "name": "sc_lpf_2phase",
+  "description": "Two-phase switched-capacitor low-pass filter with PMOS switches. f_clk=1kHz, C_fly=1nF, C_hold=10nF → R_eq=1MΩ, f_c≈15.9Hz.",
+  "solved": ["CLK1", "CLK2", "VIN", "VMID", "VOUT"],
+  "rails": {
+    "GND": 0.0,
+    "VDD": 40.0
+  },
+  "devices": [
+    {"name": "M1", "drain": "VMID", "gate": "CLK1", "source": "VIN", "W": 5000, "L": 30},
+    {"name": "M2", "drain": "VOUT", "gate": "CLK2", "source": "VMID", "W": 5000, "L": 30}
+  ],
+  "vsources": [
+    {"name": "V_CLK1", "p": "CLK1", "q": "GND", "value": "clk1"},
+    {"name": "V_CLK2", "p": "CLK2", "q": "GND", "value": "clk2"},
+    {"name": "V_IN",   "p": "VIN",  "q": "GND", "value": "vin"}
+  ],
+  "capacitors": [
+    {"name": "C_FLY",  "a": "VMID", "b": "GND", "C": 1e-9},
+    {"name": "C_HOLD", "a": "VOUT", "b": "GND", "C": 10e-9}
+  ],
+  "bias": {},
+  "outputs": ["VOUT"],
+  "dc_guesses": [
+    {"VIN": 20.0, "VMID": 20.0, "VOUT": 20.0, "CLK1": 0.0, "CLK2": 0.0},
+    {"VIN": 20.0, "VMID": 20.0, "VOUT": 20.0, "CLK1": 40.0, "CLK2": 0.0}
+  ],
+  "periodic": {
+    "frequency": 1000.0,
+    "n_points": 201,
+    "inputs": {
+      "clk1": {"type": "square", "low": 0, "high": 40, "duty": 0.45, "delay": 0},
+      "clk2": {"type": "square", "low": 0, "high": 40, "duty": 0.45, "delay": 0.0005},
+      "vin":  {"type": "constant", "value": 20.0}
+    }
+  },
+  "analyses": {
+    "pss": {
+      "residual_tol": 2e-2,
+      "max_shooting_iters": 25,
+      "tstab_periods": 30,
+      "min_damping": 0.00390625,
+      "jacobian_reuse": true
+    },
+    "pac": {
+      "freqs": {"start": 1.0, "stop": 1000, "num": 41, "scale": "log"},
+      "input_drive": {"vin": 1.0},
+      "lti_fast_path": false
+    },
+    "pnoise": {
+      "freqs": {"start": 1.0, "stop": 200, "num": 41, "scale": "log"},
+      "input_drive": {"vin": 1.0},
+      "max_sideband": 10,
+      "n_period_samples": 64,
+      "band": [1.0, 100.0]
+    }
+  }
+}

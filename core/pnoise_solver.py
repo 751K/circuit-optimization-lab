@@ -623,11 +623,19 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         Gf = np.fft.fft(Gt, axis=0) / N
         Cf = np.fft.fft(Ct, axis=0) / N
         Sthf = np.fft.fft(Sth, axis=1) / N
-        Sflf = np.fft.fft(Sfl, axis=1) / N
+        # Flicker is a MODULATED stationary 1/f source i(t)=m(t)*n(t) with the
+        # modulation amplitude m(t)=sqrt(PWR(t)); its cyclostationary harmonic
+        # matrix must be built from the harmonics of m(t)=sqrt(PWR), NOT of the
+        # power PWR(t).  (Thermal is white, so FFT(power) is correct for it.)
+        # Using FFT(PWR) + a separable 1/sqrt(nu_k nu_l) weight over-counts a
+        # strongly-modulated 1/f source by <PWR>/<sqrt(PWR)>^2 -- ~1 for a
+        # constant-bias device (saturated amp), but several-fold for a hard
+        # switch whose PWR ∝ Ich(t)^2 spikes during conduction.
+        Mflf = np.fft.fft(np.sqrt(Sfl), axis=1) / N
 
         all_noise_sources = []
         for j, (name, d, _g, s) in enumerate(devices):
-            all_noise_sources.append((name, idx.get(d), idx.get(s), Sthf[j], Sflf[j]))
+            all_noise_sources.append((name, idx.get(d), idx.get(s), Sthf[j], Mflf[j]))
         for name, a, b, R in topo.resistors:
             sth = np.zeros(N, dtype=complex)
             sfl = np.zeros(N, dtype=complex)
@@ -726,13 +734,17 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     hb_assembly_time_s = time.perf_counter() - t_hb0
 
     harm_offsets = np.arange(nb, dtype=int) * n
+    # thermal: Toeplitz of the power harmonics (white -> correct).
+    # flicker: the sqrt(PWR) modulation harmonics M_{-2K..2K}; the fold builds the
+    # cyclostationary matrix S_kl = sum_a M_{k-a} M*_{l-a} / nu_a from them.
+    mvec_idx = np.arange(-2 * K, 2 * K + 1)
     source_grids = [
         (
             name,
             None if pi is None else harm_offsets + int(pi),
             None if qi is None else harm_offsets + int(qi),
             coeff(sth_coeff, m_grid),
-            coeff(sfl_coeff, m_grid),
+            coeff(sfl_coeff, mvec_idx),
         )
         for name, pi, qi, sth_coeff, sfl_coeff in noise_sources
     ]
@@ -775,7 +787,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         if Y_base is None or C_block is None:
             Y_base, C_block, _ = _hb_blocks(Gf, Cf, K, N, n, fundamental,
                                             charge_caps=charge_caps)
-        Binc = _branch_incidence(topo.vsources, idx, n)
+        all_branch_sources = list(topo.vsources) + list(topo.vcvs) + list(topo.ccvs)
+        Binc = _branch_incidence(all_branch_sources, idx, n)
         nt = nb * (n + nbr)
         Ya = np.zeros((nt, nt), dtype=complex)
         Ca = np.zeros((nt, nt), dtype=complex)
@@ -839,14 +852,14 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         p_indices = np.full((ns, nb), -1, dtype=np.int64)
         q_indices = np.full((ns, nb), -1, dtype=np.int64)
         sth_stack = np.empty((ns, nb, nb), dtype=np.complex128)
-        sfl_stack = np.empty((ns, nb, nb), dtype=np.complex128)
-        for si, (_name, p_idx, q_idx, sth_grid, sfl_grid) in enumerate(source_grids):
+        mfl_stack = np.empty((ns, 4 * K + 1), dtype=np.complex128)
+        for si, (_name, p_idx, q_idx, sth_grid, mfl_vec) in enumerate(source_grids):
             if p_idx is not None:
                 p_indices[si] = np.asarray(p_idx, dtype=np.int64)
             if q_idx is not None:
                 q_indices[si] = np.asarray(q_idx, dtype=np.int64)
             sth_stack[si] = np.asarray(sth_grid, dtype=np.complex128)
-            sfl_stack[si] = np.asarray(sfl_grid, dtype=np.complex128)
+            mfl_stack[si] = np.asarray(mfl_vec, dtype=np.complex128)
         out_psd, dev_stack = pnoise_fold_psd_numba(
             np.asarray(adjs, dtype=np.complex128),
             np.asarray(freqs, dtype=np.float64),
@@ -855,7 +868,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
             p_indices,
             q_indices,
             sth_stack,
-            sfl_stack,
+            mfl_stack,
         )
         dev_psd = {
             name: np.asarray(dev_stack[si], dtype=float)
@@ -864,23 +877,28 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     else:
         out_psd = np.zeros(len(freqs))
         dev_psd = {name: np.zeros(len(freqs)) for name in source_names}
+        two_k = 2 * K
         for fi, freq in enumerate(freqs):
             freq = float(freq)
             adj = adjs[fi]
-            nu = np.abs(freq + ks * fundamental)
+            nu = np.abs(freq + ks * fundamental)        # nu_a per sideband
             nu[nu < 1e-9] = 1e-9
-            inv_sqrt_nu = 1.0 / np.sqrt(nu)
-            flick_freq = np.outer(inv_sqrt_nu, inv_sqrt_nu)
+            inv_nu = 1.0 / nu
 
-            for name, p_idx, q_idx, sth_grid, sfl_grid in source_grids:
+            for name, p_idx, q_idx, sth_grid, mfl_vec in source_grids:
                 if p_idx is None:
                     Z = np.zeros(nb, dtype=complex)
                 else:
                     Z = adj[p_idx].copy()
                 if q_idx is not None:
                     Z -= adj[q_idx]
-                Smat = sth_grid + sfl_grid * flick_freq
-                contrib = float(np.real(Z @ (Smat @ np.conj(Z))))
+                # thermal (white): Toeplitz quadratic form Z^H S_th Z.
+                contrib = float(np.real(Z @ (sth_grid @ np.conj(Z))))
+                # flicker (1/f, cyclostationary): sum_a |sum_r Z_r M_{r-a}|^2 / nu_a,
+                # with M_{r-a}=mfl_vec[(r-a)+2K] -> for sideband a, slice [2K-a:2K-a+nb].
+                U = np.array([Z @ mfl_vec[two_k - a: two_k - a + nb]
+                              for a in range(nb)])
+                contrib += float(np.sum((U.real ** 2 + U.imag ** 2) * inv_nu))
                 contrib = max(contrib, 0.0)
                 dev_psd[name][fi] += contrib
                 out_psd[fi] += contrib

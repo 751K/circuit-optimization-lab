@@ -60,7 +60,8 @@ def _branch_incidence(vsources, idx, n):
     ``[[Y, B], [B^T, 0]]``: column k has +1 at the source's p node and -1 at its q node
     (solved nodes only; rail terminals drop out). Used by the periodic solvers (PSS
     monodromy, PAC/PNoise harmonic balance) to carry the branch-current unknowns.
-    Each ``vsources`` entry is ``(name, p, q, value)``."""
+    Each entry is ``(name, p, q, ...)`` — compatible with vsource, VCVS, and CCVS
+    tuples (name always index 0, p=index 1, q=index 2)."""
     import numpy as np
     B = np.zeros((n, len(vsources)))
     for k, vs in enumerate(vsources):
@@ -92,6 +93,72 @@ def _stamp_vsource(Y, RHS, P, Q, bi, E):
         Y[bi, Q[1]] -= 1.0          # constraint: -V_Q
     else:
         rhs_b += Q[1]               # known V_Q -> RHS
+    RHS[bi] += rhs_b
+
+
+def _stamp_vcvs(Y, RHS, P, Q, CP, CN, bi, mu):
+    """VCVS (voltage-controlled voltage source): V_P - V_Q = mu*(V_CP - V_CN).
+    Same branch-current KCL as vsource; constraint row has extra entries for
+    control nodes. ``bi`` is the row index of the branch-current unknown.
+
+        KCL_P:   Y[P,bi] += 1        KCL_Q:   Y[Q,bi] -= 1
+        BR_bi:   Y[bi,P] += 1, Y[bi,Q] -= 1, Y[bi,CP] -= mu, Y[bi,CN] += mu
+    """
+    rhs_b = 0.0
+    if P[0] == "n":
+        Y[P[1], bi] += 1.0
+        Y[bi, P[1]] += 1.0
+    else:
+        rhs_b -= P[1]
+    if Q[0] == "n":
+        Y[Q[1], bi] -= 1.0
+        Y[bi, Q[1]] -= 1.0
+    else:
+        rhs_b += Q[1]
+    if CP[0] == "n":
+        Y[bi, CP[1]] -= mu           # -mu * V_CP
+    else:
+        rhs_b += mu * CP[1]
+    if CN[0] == "n":
+        Y[bi, CN[1]] += mu           # +mu * V_CN
+    else:
+        rhs_b -= mu * CN[1]
+    RHS[bi] += rhs_b
+
+
+def _stamp_cccs(Y, RHS, P, Q, ctrl_bi, beta):
+    """CCCS (current-controlled current source): I_out = beta * I_ctrl.
+    The control current ``I_ctrl`` is the branch current at index ``ctrl_bi``.
+    No new branch current — just stamps the output current into the KCL of P and Q.
+
+        KCL_P += beta * I_ctrl       KCL_Q -= beta * I_ctrl
+    """
+    if P[0] == "n":
+        Y[P[1], ctrl_bi] += beta
+    if Q[0] == "n":
+        Y[Q[1], ctrl_bi] -= beta
+
+
+def _stamp_ccvs(Y, RHS, P, Q, ctrl_bi, bi, gamma):
+    """CCVS (current-controlled voltage source): V_P - V_Q = gamma * I_ctrl.
+    Same branch-current KCL as vsource; constraint row enforces
+    V_P - V_Q - gamma*I_ctrl = 0.
+
+        KCL_P:   Y[P,bi] += 1        KCL_Q:   Y[Q,bi] -= 1
+        BR_bi:   Y[bi,P] += 1, Y[bi,Q] -= 1, Y[bi,ctrl_bi] -= gamma
+    """
+    rhs_b = 0.0
+    if P[0] == "n":
+        Y[P[1], bi] += 1.0
+        Y[bi, P[1]] += 1.0
+    else:
+        rhs_b -= P[1]
+    if Q[0] == "n":
+        Y[Q[1], bi] -= 1.0
+        Y[bi, Q[1]] -= 1.0
+    else:
+        rhs_b += Q[1]
+    Y[bi, ctrl_bi] -= gamma          # -gamma * I_ctrl
     RHS[bi] += rhs_b
 
 

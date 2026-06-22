@@ -1694,24 +1694,29 @@ def _pnoise_hb_blocks_impl(Gf, Cf, K, fundamental, charge_caps):
 
 
 def _pnoise_fold_psd_impl(adjs, freqs, K, fundamental,
-                          p_indices, q_indices, sth_grids, sfl_grids):
+                          p_indices, q_indices, sth_grids, mfl_grids):
+    # sth_grids[si] is the Toeplitz power-harmonic matrix of the (white) thermal
+    # source -> Z^H S_th Z.  mfl_grids[si] is the sqrt(PWR) modulation-amplitude
+    # harmonic vector M_{-2K..2K} of the 1/f source; the cyclostationary flicker
+    # output is sum_a |sum_r Z_r M_{r-a}|^2 / nu_a (M_{r-a}=mfl_grids[si, (r-a)+2K]).
     nfreq = freqs.shape[0]
     nsrc = p_indices.shape[0]
     nb = 2 * K + 1
+    two_k = 2 * K
     out_psd = np.zeros(nfreq, dtype=np.float64)
     dev_psd = np.zeros((nsrc, nfreq), dtype=np.float64)
-    inv_sqrt_nu = np.empty(nb, dtype=np.float64)
+    inv_nu = np.empty(nb, dtype=np.float64)
+    Z = np.empty(nb, dtype=np.complex128)
     for fi in range(nfreq):
         freq = freqs[fi]
-        for r in range(nb):
-            nu = abs(freq + (r - K) * fundamental)
+        for a in range(nb):
+            nu = abs(freq + (a - K) * fundamental)
             if nu < 1e-9:
                 nu = 1e-9
-            inv_sqrt_nu[r] = 1.0 / math.sqrt(nu)
+            inv_nu[a] = 1.0 / nu
 
         adj = adjs[fi]
         for si in range(nsrc):
-            contrib = 0.0
             for r in range(nb):
                 pr = p_indices[si, r]
                 qr = q_indices[si, r]
@@ -1720,17 +1725,21 @@ def _pnoise_fold_psd_impl(adjs, freqs, K, fundamental,
                     zr += adj[pr]
                 if qr >= 0:
                     zr -= adj[qr]
+                Z[r] = zr
+            contrib = 0.0
+            # thermal (white): Z^H S_th Z with the Toeplitz power-harmonic matrix.
+            for r in range(nb):
+                acc = 0.0j
                 for c in range(nb):
-                    pc = p_indices[si, c]
-                    qc = q_indices[si, c]
-                    zc = 0.0j
-                    if pc >= 0:
-                        zc += adj[pc]
-                    if qc >= 0:
-                        zc -= adj[qc]
-                    smat = (sth_grids[si, r, c] +
-                            sfl_grids[si, r, c] * inv_sqrt_nu[r] * inv_sqrt_nu[c])
-                    contrib += (zr * smat * zc.conjugate()).real
+                    acc += sth_grids[si, r, c] * Z[c].conjugate()
+                contrib += (Z[r] * acc).real
+            # flicker (1/f): sum_a |sum_r Z_r M_{r-a}|^2 / nu_a.
+            for a in range(nb):
+                base = two_k - a
+                u = 0.0j
+                for r in range(nb):
+                    u += Z[r] * mfl_grids[si, base + r]
+                contrib += (u.real * u.real + u.imag * u.imag) * inv_nu[a]
             if contrib < 0.0:
                 contrib = 0.0
             dev_psd[si, fi] = contrib

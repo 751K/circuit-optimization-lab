@@ -37,6 +37,7 @@ htmlcov/
 # Generated data and reports
 outputs/
 results/
+!results/README.md
 runs/
 tmp/
 temp/
@@ -64,6 +65,10 @@ spectre.ic
 *.ahdlSimDB/
 *.ahdlcmi/
 *.cdslck*
+
+# Cadence calibration reference data is committed WITH provenance (it is the source of
+# truth for the closed-loop check), so exempt it from the Cadence-artifact ignores above.
+!calibration/**
 
 # Editor files
 .vscode/

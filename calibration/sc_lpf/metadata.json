@@ -1,0 +1,34 @@
+{
+  "case": "sc_lpf",
+  "description": "Two-phase switched-capacitor low-pass filter: PMOS switches (5000/30) toggle C_fly=1nF between VIN and C_hold=10nF, clocked by ideal vsources at f_clk=1kHz. R_eq=1/(f_clk*C_fly)=1MOhm, f_c=1/(2*pi*R_eq*C_hold)~15.9Hz. Single-ended LPTV; the second periodic calibration case beside the AFE chopper. Exercises the reverse-biased switch / signed-current path and the cyclostationary-flicker folding (the SC-LPF runaway + noise over-count were both fixed 2026-06-22).",
+  "testbench": "sc_lpf",
+  "corner": "typical",
+  "circuit": {
+    "sizes": {"M1": [5000, 30], "M2": [5000, 30]},
+    "bias": {},
+    "vdd": 40.0,
+    "vin_dc": 20.0,
+    "f_clk": 1000.0,
+    "duty": 0.45,
+    "edge_time": 2e-6,
+    "devices": [["M1", "VMID", "CLK1", "VIN"], ["M2", "VOUT", "CLK2", "VMID"]],
+    "vsources": [["V_CLK1", "CLK1", "GND", "clk1"], ["V_CLK2", "CLK2", "GND", "clk2"], ["V_IN", "VIN", "GND", "vin"]],
+    "capacitors": [["C_FLY", "VMID", "GND", 1e-9], ["C_HOLD", "VOUT", "GND", 10e-9]],
+    "solved": ["VIN", "CLK1", "CLK2", "VMID", "VOUT"],
+    "outputs": ["VOUT"],
+    "output": "VOUT",
+    "input": "VIN",
+    "noise_band": [0.1, 100.0]
+  },
+  "solver": {
+    "n_points": 201,
+    "tstab_periods": 60,
+    "residual_tol": 0.02,
+    "max_shooting_iters": 20,
+    "integration_method": "be"
+  },
+  "analyses": ["pac", "pnoise"],
+  "reference_files": {"pac": "pac.0.pac", "pnoise": "pnoise.pnoise"},
+  "tolerances": {"pac_gain_rtol": 0.05, "pac_bw_rtol": 0.08, "pnoise_out_rtol": 0.06},
+  "provenance_note": "Spectre 24.1.0.078 on flex (daraina.ele.tue.nl), 2026-06-21. pss fund=1k harms=20 tstab=50m + pac sideband-0 (pac.0.pac, VIN->VOUT) + pnoise(VOUT). Netlist generated faithful to examples/sc_lpf.py incl. ~10% clock conduction overlap. pss.td.pss kept for the steady-state VOUT level."
+}

@@ -25,13 +25,15 @@ Ground-truth check (Cadence Spectre, afe_gt/tb_noise.raw/noiseAnal.noise):
 import numpy as np
 try:
     from .device_model import create_device
-    from .ac_mna import _stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource
+    from .ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
+                         _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
     from .ac_solver import ac_solve, _dev_corner, _dev_nf
     from .topology import AFE_TOPO
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
     from device_model import create_device
-    from ac_mna import _stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource
+    from ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
+                        _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
     from ac_solver import ac_solve, _dev_corner, _dev_nf
     from topology import AFE_TOPO
     from compiled_topology import CompiledTopology
@@ -113,6 +115,12 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
         _stamp_vccs(G, RHS_G, p, cp, cn, gm)
     for p, q, bi, e_ac in plan.ac_vsources():        # short; ideal source carries NO noise
         _stamp_vsource(G, RHS_G, p, q, bi, e_ac)
+    for p, q, cp, cn, bi, mu in plan.ac_vcvs():     # VCVS: noiseless
+        _stamp_vcvs(G, RHS_G, p, q, cp, cn, bi, mu)
+    for p, q, ctrl_bi, beta in plan.ac_cccs():      # CCCS: noiseless
+        _stamp_cccs(G, RHS_G, p, q, ctrl_bi, beta)
+    for p, q, ctrl_bi, bi, gamma in plan.ac_ccvs(): # CCVS: noiseless
+        _stamp_ccvs(G, RHS_G, p, q, ctrl_bi, bi, gamma)
 
     jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
     Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]

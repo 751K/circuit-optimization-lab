@@ -102,7 +102,7 @@ Defines the abstract device‑model interface that decouples solvers from concre
 
 Defines the circuit topology as the single source of truth. The topology contains the transistor list, solved node list, rail/bias nodes, outputs, AC input drives, load capacitors, transient input mapping, DC guesses, and DC aliases. Solver runtime metadata is derived from this topology instead of being hand-written separately in each solver.
 
-Alongside the transistors it also carries passive/source elements — `resistors` (a-b, R in ohms), `capacitors` (a-b, C in farads), `isources` (ideal DC current sources, I from nplus to nminus), `vccs` (voltage-controlled current sources: p, q, ctrl_p, ctrl_n, gm), and `vsources` (ideal voltage sources, true MNA: p, q, value). Each voltage source adds one branch-current unknown and a constraint row ``V_p − V_q = value``, growing the system from `n` to `n_aug = n + m`. These flow through all analyses: resistor branch currents and current-source injections enter the DC KCL; resistors stamp as `1/R`, capacitors as `jωC`, VCCS as ``gm*(Vcp-Vcn)``, and voltage sources as a bordered ``[[Y,B],[B^T,0]]`` block in AC/noise; resistors add `4kT/R` thermal noise (VCCS, current sources, and ideal voltage sources are noiseless); transient adds resistor conductances, capacitor companions, constant/VCCS source currents, and voltage-source branch-current unknowns with ``E(t)`` constraint. Current sources are open-circuit in the small-signal AC system. None of these touch the transistor model machinery.
+Alongside the transistors it also carries passive/source elements — `resistors` (a-b, R in ohms), `capacitors` (a-b, C in farads), `isources` (ideal DC current sources, I from nplus to nminus), `vccs` (voltage-controlled current sources: p, q, ctrl_p, ctrl_n, gm), `vcvs` (voltage-controlled voltage sources: p, q, cp, cn, mu → Vp−Vq=μ(Vcp−Vcn)), `cccs` (current-controlled current sources: p, q, ctrl_name, beta → Iout=β·Ictrl), `ccvs` (current-controlled voltage sources: p, q, ctrl_name, gamma → Vp−Vq=γ·Ictrl), and `vsources` (ideal voltage sources, true MNA: p, q, value). Each vsource/VCVS/CCVS adds one branch-current unknown and a constraint row, growing the system from `n` to `n_aug = n + m`. These flow through all analyses: resistor branch currents and current-source injections enter the DC KCL; resistors stamp as `1/R`, capacitors as `jωC`, VCCS as ``gm*(Vcp-Vcn)``, VCVS/CCVS/vsource as a bordered ``[[Y,B],[B^T,0]]`` block with the respective constraint rows, and CCCS as a coupling into the KCL rows; resistors add `4kT/R` thermal noise (all controlled sources and ideal voltage sources are noiseless); transient adds resistor conductances, capacitor companions, constant/VCCS/CCCS source currents, and VCVS/CCVS/vsource branch-current unknowns with their constraint equations. Current sources are open-circuit in the small-signal AC system. CCCS and CCVS can cascade: they control on the branch current of any vsource/VCVS/CCVS. None of these touch the transistor model machinery.
 
 The default topology is `AFE_TOPO`, a 10-transistor fully differential AFE core with tail current device, input pair, output stage, and cross-coupled positive-feedback level shifting devices.
 
@@ -112,7 +112,7 @@ Builds a runtime plan from a declarative `Topology` and a bias/input context. It
 
 - solved-node indices and rail values;
 - per-device drain/gate/source terminal tokens;
-- resistor, capacitor, current-source, and VCCS stamp metadata;
+- resistor, capacitor, current-source, VCCS, VCVS, CCCS, and CCVS stamp metadata;
 - AC/noise `("n", idx)` / `("v", value)` terminal tables;
 - transient input and `node_inputs` mappings.
 
@@ -165,7 +165,8 @@ the original Python Newton / full-Jacobian / least-squares path.
 Provides the low-level MNA stamping primitives used by the small-signal solvers:
 
 - Admittance stamping.
-- VCCS stamping.
+- VCCS, VCVS, CCCS, and CCVS stamping.
+- Ideal voltage source stamping (bordered MNA).
 - MOS small-signal stamping.
 
 ### `ac_solver.py`

@@ -1,0 +1,105 @@
+{
+  "case": "chopper_design3_fast",
+  "description": "8-PMOS AFE chopper (fast) \u2014 PSS/PAC/PNoise vs Spectre, f_chop=225",
+  "testbench": "chopper",
+  "corner": "fast",
+  "cadence": {
+    "spectre_version": "24.1.0.078",
+    "date": "10:40:07 PM, Sun Jun 21, 2026",
+    "server": "flex",
+    "section": "fast",
+    "fundamental": null,
+    "netlist": "core.cadence_netlist.gen_chopper_netlist"
+  },
+  "circuit": {
+    "sizes": {
+      "M6": [
+        4820,
+        78
+      ],
+      "M7": [
+        65426,
+        42
+      ],
+      "M8": [
+        65426,
+        42
+      ],
+      "M9": [
+        2876,
+        333
+      ],
+      "M10": [
+        2876,
+        333
+      ],
+      "M11": [
+        339,
+        155
+      ],
+      "M12": [
+        505,
+        134
+      ],
+      "M13": [
+        505,
+        134
+      ],
+      "M14": [
+        4533,
+        48
+      ],
+      "M15": [
+        4533,
+        48
+      ]
+    },
+    "bias": {
+      "VDD": 40.0,
+      "VCM": 32.0,
+      "VB": 7.5,
+      "VC": 16.0
+    },
+    "nf": 1,
+    "f_chop": 225.0,
+    "switch_size": [
+      5000,
+      30
+    ],
+    "outputs": [
+      "voutp_f",
+      "voutn_f"
+    ],
+    "inputs": [
+      "vinp",
+      "vinn"
+    ],
+    "switch_nf": 1,
+    "edge_time": 2e-05,
+    "input_common_mode": 32.0,
+    "output_filter": [
+      1000000.0,
+      6.8e-10
+    ],
+    "charge_injection": false
+  },
+  "analyses": [
+    "pac",
+    "pnoise"
+  ],
+  "reference_files": {
+    "pac": "pac.0.pac",
+    "pnoise": "pnoise.pnoise"
+  },
+  "tolerances": {
+    "pac_gain_rtol": 0.02,
+    "pnoise_irn_rtol": 0.03
+  },
+  "solver": {
+    "integration_method": "gear2",
+    "analytic_jacobian": false,
+    "n_points": 321,
+    "tstab_periods": 2,
+    "max_shooting_iters": 5
+  }
+}

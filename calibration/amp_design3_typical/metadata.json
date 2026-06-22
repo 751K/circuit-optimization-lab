@@ -1,0 +1,88 @@
+{
+  "case": "amp_design3_typical",
+  "description": "Design #3 AFE amplifier (non-chopper) \u2014 DC / AC / noise vs Spectre",
+  "testbench": "amp",
+  "corner": "typical",
+  "cadence": {
+    "spectre_version": "24.1.0.078",
+    "date": "10:32:02 PM, Sun Jun 21, 2026",
+    "server": "flex (daraina.ele.tue.nl)",
+    "section": "typical",
+    "netlist": "core.cadence_netlist.gen_amp_netlist"
+  },
+  "circuit": {
+    "sizes": {
+      "M6": [
+        2264,
+        78
+      ],
+      "M7": [
+        61365,
+        61
+      ],
+      "M8": [
+        61365,
+        61
+      ],
+      "M9": [
+        3175,
+        468
+      ],
+      "M10": [
+        3175,
+        468
+      ],
+      "M11": [
+        465,
+        66
+      ],
+      "M12": [
+        894,
+        85
+      ],
+      "M13": [
+        894,
+        85
+      ],
+      "M14": [
+        5224,
+        46
+      ],
+      "M15": [
+        5224,
+        46
+      ]
+    },
+    "bias": {
+      "VDD": 40.0,
+      "VCM": 30.65,
+      "VB": 9.84,
+      "VC": 16.0
+    },
+    "nf": 1,
+    "outputs": [
+      "VOP",
+      "VON"
+    ],
+    "inputs": [
+      "vip",
+      "vin"
+    ]
+  },
+  "analyses": [
+    "dc",
+    "ac",
+    "noise"
+  ],
+  "reference_files": {
+    "dc": "dcOp.dc",
+    "ac": "ac.ac",
+    "noise": "noiseAnal.noise"
+  },
+  "tolerances": {
+    "dc_v_atol": 0.001,
+    "ac_gain_rtol": 0.01,
+    "ac_bw_rtol": 0.05,
+    "noise_irn_rtol": 0.03
+  }
+}
