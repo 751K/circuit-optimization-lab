@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 
 import numpy as np
+from scipy.linalg import lu_factor, lu_solve
 
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
@@ -772,6 +773,181 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     }
 
 
+def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
+                     all_nf, corner=None, n_period_samples=768,
+                     integration="gear2", cache=True, pacmag=1.0):
+    """Time-domain (shooting) PAC — the formulation Spectre uses, ~10-20x cheaper
+    than the harmonic-balance kernel and truncation-free.
+
+    The small-signal response to a baseband input ``exp(j*w*t)`` is, by Floquet,
+    ``x(t) = exp(j*w*t)*p(t)`` with ``p`` T-periodic, i.e. the NON-enveloped state
+    satisfies the quasi-periodic boundary ``x(T) = exp(j*w*T)*x(0)``.  Integrating
+    the linearized orbit one period gives the *frequency-independent* monodromy
+    ``Psi`` (built once); per frequency we only integrate the forced response and
+    solve the ``(exp(j*w*T)*I - Psi) x0 = g`` boundary system (n×n for backward
+    Euler, 2n×2n for gear2/BDF2) — no ``(2K+1)n`` HB matrix and no sideband
+    truncation, so it converges to the all-harmonic limit the HB approaches only
+    as ``K->inf``.  Sideband-0 output = ``w . <exp(-j*w*t) x(t)>``.
+
+    Scope: the rail-driven chopper (well-conditioned ``I-Psi`` since |Floquet|<1).
+    Returns ``None`` — so the caller falls back to the HB adjoint — for true-MNA
+    vsource drives, bordered (``n_branches>0``) systems, the stiff tau>>T case,
+    or when the numba linearization is unavailable.
+    """
+    freqs = np.asarray(freqs, float)
+    topo = pss_result["topology"]
+    n = topo.n
+    idx = topo.idx
+    t_orbit = np.asarray(pss_result["t"], float)
+    period = float(pss_result.get("period", t_orbit[-1] - t_orbit[0]))
+    if period <= 0.0:
+        return None
+    N = int(n_period_samples)
+    node_inputs = dict(pss_result.get("node_inputs", {}) or {})
+
+    # Driven input NODES (rails) — identical detection to the HB adjoint path.
+    drive_nodes = {}
+    for node, key in node_inputs.items():
+        if key in input_drive and node in topo.rails and node not in idx:
+            drive_nodes[node] = drive_nodes.get(node, 0j) + complex(input_drive[key])
+    dev_by_name = {name: (d, g, s) for name, d, g, s in topo.devices}
+    for dev, key in (getattr(topo, "transient_inputs", {}) or {}).items():
+        if key in input_drive and dev in dev_by_name:
+            gate = dev_by_name[dev][1]
+            if gate in topo.rails and gate not in idx:
+                drive_nodes[gate] = drive_nodes.get(gate, 0j) + complex(input_drive[key])
+    # Hand vsource/branch drives and bordered systems back to the HB adjoint (it
+    # couples them through the branch-constraint row and is robust on stiff tau>>T).
+    has_vsource_drive = any(
+        len(vs) > 3 and isinstance(vs[3], str) and vs[3] in input_drive
+        for vs in topo.vsources)
+    if has_vsource_drive or getattr(topo, "n_branches", 0) or not drive_nodes:
+        return None
+    drive_list = list(drive_nodes)
+    drive_amps = np.array([drive_nodes[node] for node in drive_list], dtype=complex)
+
+    t_uniform = np.linspace(0.0, period, N, endpoint=False)
+    node_wave = {
+        node: np.interp(t_uniform, t_orbit,
+                        np.asarray(pss_result["nodes"][node], float), period=period)
+        for node in topo.solved}
+    input_wave = {
+        key: np.interp(t_uniform, t_orbit, np.asarray(val, float), period=period)
+        for key, val in pss_result.get("inputs", {}).items()}
+
+    charge_caps = _charge_linearized_caps(pss_result)
+    cache_store = pss_result.setdefault("_pac_td_cache", {}) if cache else {}
+    lin_key = (
+        "pac_td_lin_v1", tuple(topo.solved), tuple(topo.devices),
+        tuple(topo.resistors), tuple(topo.cap_list()), float(period), int(N),
+        _freeze_sizes(all_sizes), _freeze_nf(all_nf), _freeze_kwargs(corner or {}),
+        "charge_caps" if charge_caps else "veriloga_caps",
+        tuple(sorted(drive_list)),
+        _freeze_complex_map(dict(zip(drive_list, drive_amps))))
+    if cache and lin_key in cache_store:
+        Gt, Ct, Gin, Cin = cache_store[lin_key]
+    else:
+        fast_lin = _try_numba_pac_linearization(
+            all_sizes, all_nf, corner, topo, tbias, t_uniform,
+            node_wave, input_wave, node_inputs, drive_list, drive_amps,
+            charge_caps=charge_caps)
+        if fast_lin is None:
+            return None     # TD needs the numba linearization; HB handles the rest
+        Gf, Cf, Ginf, Cinf = fast_lin
+        # The HB FFTs these harmonics; we keep the time samples (uniform grid).
+        Gt = np.fft.ifft(Gf * N, axis=0)
+        Ct = np.fft.ifft(Cf * N, axis=0)
+        Gin = np.fft.ifft(Ginf * N, axis=0)
+        Cin = np.fft.ifft(Cinf * N, axis=0)
+        if cache:
+            cache_store[lin_key] = (Gt, Ct, Gin, Cin)
+
+    w = np.zeros(n, dtype=complex)
+    for node, weight in topo.output_weights().items():
+        if node in idx:
+            w[idx[node]] = weight
+    h = period / N
+    tm = np.arange(N) * h
+    I_n = np.eye(n, dtype=complex)
+
+    # Frequency-INDEPENDENT one-period propagators + monodromy (built once).
+    t_setup0 = time.perf_counter()
+    Cin1 = np.roll(Cin, 1, axis=0)
+    if integration == "be":
+        A = Ct / h + Gt
+        Cprev = np.roll(Ct, 1, axis=0)
+        luA = [lu_factor(A[m]) for m in range(N)]
+        P = np.array([lu_solve(luA[m], Cprev[m] / h) for m in range(N)])
+        Psi = I_n.copy()
+        for m in range(1, N + 1):
+            Psi = P[m % N] @ Psi
+        sysdim = n
+    else:  # gear2 / BDF2 on the uniform grid: (a0,a1,a2) = (3/2,-2,1/2)
+        a0, a1, a2 = 1.5, -2.0, 0.5
+        A = a0 * Ct / h + Gt
+        C1 = np.roll(Ct, 1, axis=0); C2 = np.roll(Ct, 2, axis=0)
+        Cin2 = np.roll(Cin, 2, axis=0)
+        luA = [lu_factor(A[m]) for m in range(N)]
+        Zn = np.zeros((n, n), dtype=complex)
+        M = np.empty((N, 2 * n, 2 * n), dtype=complex)
+        for m in range(N):
+            B1 = lu_solve(luA[m], a1 * C1[m] / h)
+            B2 = lu_solve(luA[m], a2 * C2[m] / h)
+            M[m] = np.block([[-B1, -B2], [I_n, Zn]])
+        Psi = np.eye(2 * n, dtype=complex)
+        for m in range(1, N + 1):
+            Psi = M[m % N] @ Psi
+        sysdim = 2 * n
+    setup_time = time.perf_counter() - t_setup0
+    Imat = np.eye(sysdim, dtype=complex)
+
+    response = np.empty(len(freqs), dtype=complex)
+    for fi, f in enumerate(freqs):
+        wf = 2.0 * np.pi * float(f)
+        ph = np.exp(1j * wf * tm)
+        if integration == "be":
+            php = np.exp(1j * wf * (tm - h))
+            fm = -((Cin * ph[:, None] - Cin1 * php[:, None]) / h + Gin * ph[:, None])
+            r = np.array([lu_solve(luA[m], fm[m]) for m in range(N)])
+            g = np.zeros(n, dtype=complex)
+            for m in range(1, N + 1):
+                g = P[m % N] @ g + r[m % N]
+            x0 = np.linalg.solve(np.exp(1j * wf * period) * Imat - Psi, g)
+            x = np.empty((N, n), dtype=complex); x[0] = x0
+            for m in range(1, N):
+                x[m] = P[m] @ x[m - 1] + r[m]
+        else:
+            p1 = np.exp(1j * wf * (tm - h)); p2 = np.exp(1j * wf * (tm - 2 * h))
+            fm = -((a0 * Cin * ph[:, None] + a1 * Cin1 * p1[:, None]
+                    + a2 * Cin2 * p2[:, None]) / h + Gin * ph[:, None])
+            s = np.zeros((N, 2 * n), dtype=complex)
+            for m in range(N):
+                s[m, :n] = lu_solve(luA[m], fm[m])
+            g = np.zeros(2 * n, dtype=complex)
+            for m in range(1, N + 1):
+                g = M[m % N] @ g + s[m % N]
+            z0 = np.linalg.solve(np.exp(1j * wf * period) * Imat - Psi, g)
+            x = np.empty((N, n), dtype=complex); zprev = z0; x[0] = z0[:n]
+            for m in range(1, N):
+                zi = M[m] @ zprev + s[m]; x[m] = zi[:n]; zprev = zi
+        X0 = (np.exp(-1j * wf * tm)[:, None] * x).mean(axis=0)
+        response[fi] = w @ X0
+
+    gains = np.abs(response)
+    return {
+        "freqs": freqs, "response": response, "gains": gains, "Hmag": gains,
+        "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300)) if len(gains) else np.nan,
+        "bw_Hz": _bw_from_gain(freqs, gains) if len(gains) else np.nan,
+        "pss": pss_result, "input_drive": input_drive, "pacmag": float(pacmag),
+        "pac_residual": np.zeros(len(freqs)), "pac_condition": np.ones(len(freqs)),
+        "pac_period_runs": 0, "pac_cache_enabled": bool(cache),
+        "pac_td_setup_time_s": float(setup_time),
+        "pac_td_integration": str(integration), "pac_td_samples": int(N),
+        "nfail": np.zeros(len(freqs), dtype=int),
+        "method": "pss_time_domain",
+    }
+
+
 def _resolve_compute_condition(compute_condition, profile=False, debug=False):
     if compute_condition is None:
         return bool(profile or debug)
@@ -784,6 +960,7 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
               pacmag=1.0, rail_margin=None, cache_linearization=True,
               cache_forcing=True, compute_condition=None, lti_fast_path=True,
               analytic=True, n_period_samples=384, max_sideband=10,
+              time_domain=False, td_integration="gear2", td_n_period_samples=768,
               profile=False, debug=False):
     """Solve sideband-0 PAC around a PSS orbit.
 
@@ -849,6 +1026,15 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
         if fast is not None:
             fast["pacmag"] = float(pacmag)
             return fast
+
+    if time_domain:
+        td = _time_domain_pac(
+            all_sizes, tbias, freqs, pss_result=pss_result,
+            input_drive=input_drive, all_nf=all_nf, corner=corner,
+            n_period_samples=td_n_period_samples, integration=td_integration,
+            cache=cache_linearization, pacmag=pacmag)
+        if td is not None:
+            return td
 
     if analytic:
         ana = _analytic_adjoint_pac(

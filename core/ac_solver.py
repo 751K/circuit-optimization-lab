@@ -544,12 +544,11 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     Av_dc = gains[0]
     Av_dc_dB = 20 * np.log10(max(Av_dc, 1e-9))
     peak = gains.max()
-    a3 = peak / np.sqrt(2)
-    ipk = int(np.argmax(gains))
-    bw_Hz = freqs[-1]
-    for i in range(ipk, len(gains)):
-        if gains[i] < a3:
-            bw_Hz = freqs[i]; break
+    # -3 dB BW via log-space interpolation between the bracketing grid points.
+    # The raw "first grid point below peak/√2" pick is biased high and grid-
+    # dependent (e.g. +6.8% on a 20 pt/decade sweep); _bw_from_gain matches the
+    # interpolated Cadence reference and the pac_solver/chopper BW paths.
+    bw_Hz = _bw_from_gain(freqs, gains)
 
     dc_op = topo.dc_op_with_aliases(nv)
     return {

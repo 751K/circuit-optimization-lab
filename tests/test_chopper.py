@@ -601,3 +601,32 @@ def test_pmos_chopper_pac_gear2_matches_cadence_within_1pct():
         _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
         nf=_CHOP_D3_NF, corner="typical")
     assert abs(pac["gains"][0] - 13.921) / 13.921 < 0.01
+
+
+@pytest.mark.skipif(not os.environ.get("RUN_SLOW_CHOPPER"),
+                    reason="slow time-domain PAC verification; set RUN_SLOW_CHOPPER=1")
+def test_pmos_chopper_pac_time_domain_matches_hb_and_cadence():
+    # The opt-in time-domain (shooting) PAC integrates the linearized orbit with
+    # the Floquet BC x(T)=e^{jwT}x(0): a frequency-independent monodromy + a small
+    # boundary solve per frequency, truncation-free.  It must (a) be selected only
+    # when asked (HB stays the default), and (b) agree with the HB baseband gain to
+    # within the harmonic-truncation gap and stay within ~3% of Cadence (13.921).
+    freqs = np.array([0.05, 200.0])
+    pss = pmos_chopper_pss(
+        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
+        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
+        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
+        fallback_least_squares=False, n_points=321, max_shooting_iters=5,
+        output_filter=(1e6, 680e-12), corner="typical",
+        integration_method="gear2", analytic_jacobian=False)
+    hb = pmos_chopper_pac(
+        _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
+        nf=_CHOP_D3_NF, corner="typical")
+    td = pmos_chopper_pac(
+        _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
+        nf=_CHOP_D3_NF, corner="typical", time_domain=True)
+    assert hb["method"] == "pss_analytic_adjoint"          # default unchanged
+    assert td["method"] == "pss_time_domain"               # opt-in path taken
+    assert td["pac_td_integration"] == "gear2"
+    assert abs(td["gains"][0] - hb["gains"][0]) / hb["gains"][0] < 0.03
+    assert abs(td["gains"][0] - 13.921) / 13.921 < 0.03

@@ -1329,6 +1329,8 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
                      cache_linearization=True, cache_forcing=True,
                      compute_condition=None, lti_fast_path=True,
                      analytic=True, n_period_samples=384, max_sideband=64,
+                     time_domain=False, td_integration="gear2",
+                     td_n_period_samples=768,
                      profile=False, debug=False):
     """PSS-assisted small-signal PAC for the PMOS chopper.
 
@@ -1381,6 +1383,8 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
         lti_fast_path=lti_fast_path,
         analytic=analytic, n_period_samples=n_period_samples,
         max_sideband=max_sideband,
+        time_domain=time_domain, td_integration=td_integration,
+        td_n_period_samples=td_n_period_samples,
         profile=profile, debug=debug,
     )
 
