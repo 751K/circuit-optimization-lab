@@ -1,5 +1,6 @@
 import numpy as np
 
+from core.numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_numba
 from core.pac_solver import pac_solve
 from core.pnoise_solver import pnoise_solve
 from core.pss_solver import pss_solve
@@ -80,17 +81,21 @@ def test_generic_analytic_pac_matches_rc_transfer():
     freqs = np.array([100.0, 500.0, 1000.0])
     pac = pac_solve(
         {}, {"VIN": 0.0}, freqs, pss_result=pss, input_drive={"vin": 1.0},
-        lti_fast_path=False, analytic=True, max_sideband=2, n_period_samples=32,
+        lti_fast_path=False, analytic=True, max_sideband=8, n_period_samples=40,
     )
     expected = 1.0 / (1.0 + 2j * np.pi * freqs * R * C)
     assert pac["method"] == "pss_analytic_adjoint"
     assert pac["pac_period_runs"] == 0
     assert pac["pac_condition_computed"] is False
+    if pac_linearize_orbit_numba is not None:
+        assert pac["pac_numba_linearization_used"] is True
+    if pac_hb_blocks_numba is not None:
+        assert pac["pac_numba_hb_used"] is True
     np.testing.assert_allclose(pac["response"], expected, rtol=1e-6)
 
     with_condition = pac_solve(
         {}, {"VIN": 0.0}, freqs, pss_result=pss, input_drive={"vin": 1.0},
-        lti_fast_path=False, analytic=True, max_sideband=2, n_period_samples=32,
+        lti_fast_path=False, analytic=True, max_sideband=8, n_period_samples=40,
         compute_condition=True,
     )
     assert with_condition["pac_condition_computed"] is True
@@ -99,7 +104,7 @@ def test_generic_analytic_pac_matches_rc_transfer():
 
     profiled = pac_solve(
         {}, {"VIN": 0.0}, freqs, pss_result=pss, input_drive={"vin": 1.0},
-        lti_fast_path=False, analytic=True, max_sideband=2, n_period_samples=32,
+        lti_fast_path=False, analytic=True, max_sideband=8, n_period_samples=40,
         profile=True,
     )
     assert profiled["pac_condition_computed"] is True

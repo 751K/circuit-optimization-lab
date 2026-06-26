@@ -80,3 +80,36 @@ constants (`_CADENCE_PMOS_CHOPPER_CONVERSION_PHASE_RAD`=24.93°,
 `_CADENCE_PMOS_CHOPPER_PERIODIC_NOISE_PSD_SCALE`=1.0355) were **retired 2026-06-22** —
 they only patched the fast first-order `pmos_chopper_lptv_analysis` quasi-static estimate,
 which now honestly reports its ~10% gain underestimate rather than fudging it.
+
+## Why the chopper PAC uses `max_sideband=64` — do **not** reduce it ⚠️
+
+The per-frequency PAC cost is ~`((2K+1)·n)³` (one dense solve of the harmonic-balance
+conversion matrix), so a smaller `K = max_sideband` looks like easy speedup. It is not
+safe. A 3-corner K-sweep run through this calibration engine (2026-06-26, only `K`
+changed — same PSS orbit / gain extraction / tolerances) measured the **PAC baseband-gain
+Δ vs Cadence** (tol **±2%**) and the resulting margin (`tol − |Δ|`):
+
+| corner | K=64 (default) | K=48 | K=32 |
+|--------|---------------:|-----:|-----:|
+| typical | +1.17% (margin +0.83) ✅ | **+2.03% (−0.03) ❌** | +2.71% (−0.71) ❌ |
+| slow    | −0.76% (margin +1.24) ✅ | +0.74% (+1.26) ✅ | **+3.51% (−1.51) ❌** |
+| fast    | +1.10% (margin +0.90) ✅ | +1.25% (+0.75) ✅ | +0.55% (+1.45) ✅ |
+
+`PNoise` IRN (tol ±3%) stays PASS at **every** K (worst −2.39% at slow/K32) — the gain
+error cancels in the noise/gain ratio. So only the **PAC gain** constrains K, and:
+
+```
+K=64  typical:PASS  slow:PASS  fast:PASS   ← only K that passes all three
+K=48  typical:FAIL  slow:PASS  fast:PASS
+K=32  typical:FAIL  slow:FAIL  fast:PASS
+```
+
+Why it can't be lowered: the baseband gain **drifts monotonically with K** (typical
+12.15 → 12.07 → 11.97 for K=32/48/64) because the 20 µs switch edges leave a *flat*
+~0.3% harmonic tail — so `K=64` is an **empirical Cadence-match point, not a convergence
+plateau**, and reducing K moves *away* from Cadence (Cadence's own shooting PAC is
+truncation-free; its netlist `maxsideband=10` is unrelated to the local HB truncation
+rate). `typical` (the nominal corner) has only **0.83%** margin at K=64, so there is no
+headroom. **The PAC per-frequency loop is already at the LAPACK solve floor** — the only
+safe speedups are *not* passing `profile=True` (it adds a per-frequency `np.linalg.cond`
+SVD ≈ 13× the solve) and, for a genuine win, a structural block-Toeplitz solver.

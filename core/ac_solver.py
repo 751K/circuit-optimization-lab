@@ -58,6 +58,53 @@ def _dev_nf(nf, name):
     return int(nf)
 
 
+def build_devices(sizes, *, nf=None, corner=None, topo):
+    """Create ``{name: TransistorModel}`` for every transistor in *topo*.
+
+    Shared factory used by all solvers instead of repeating the same
+    device-creation dict comprehension in each file.  Resolves NF per-device
+    via :func:`_dev_nf` and applies corner shifts via :func:`_dev_corner`.
+    """
+    return {
+        name: create_device(
+            get_default_model_type(),
+            W=sizes[name][0], L=sizes[name][1],
+            NF=_dev_nf(nf, name), **_dev_corner(corner, name),
+        )
+        for name, *_ in topo.devices
+    }
+
+
+def _bw_from_gain(freqs, gains):
+    """-3 dB bandwidth from a gain-vs-frequency curve.
+
+    Uses log-space interpolation between the two frequency points that bracket
+    the -3 dB crossing for smooth results on logarithmic sweeps.
+    """
+    freqs = np.asarray(freqs, float)
+    gains = np.asarray(gains, float)
+    if len(freqs) == 0 or len(gains) == 0:
+        return np.nan
+    peak = float(np.max(gains))
+    a3 = peak / np.sqrt(2.0)
+    ipk = int(np.argmax(gains))
+    bw = float(freqs[-1])
+    for i in range(ipk + 1, len(gains)):
+        if gains[i] <= a3:
+            f0, f1 = float(freqs[i - 1]), float(freqs[i])
+            g0, g1 = float(gains[i - 1]), float(gains[i])
+            if g1 == g0:
+                bw = f1
+            elif f0 > 0.0 and f1 > 0.0:
+                x0, x1 = np.log10(f0), np.log10(f1)
+                x = x0 + (a3 - g0) * (x1 - x0) / (g1 - g0)
+                bw = float(10.0 ** np.clip(x, min(x0, x1), max(x0, x1)))
+            else:
+                bw = float(f0 + (a3 - g0) * (f1 - f0) / (g1 - g0))
+            break
+    return bw
+
+
 _AFE_SYMMETRIC_PAIRS = (("M7", "M8"), ("M9", "M10"), ("M12", "M13"), ("M14", "M15"))
 _DC_FALLBACK_TOL = 1e-10
 
@@ -263,11 +310,7 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
 
     # ── pre-build device instances so the warm-start Newton cache survives
     #     across fsolve iterations instead of being reset on every Id() call.
-    _dev_inst = {
-        name: create_device(get_default_model_type(), W=sizes[name][0], L=sizes[name][1],
-                            NF=_dev_nf(nf, name), **_dev_corner(corner, name))
-        for name, *_ in topo.devices
-    }
+    _dev_inst = build_devices(sizes, nf=nf, corner=corner, topo=topo)
 
     def Id(name, Vs, Vd, Vg):
         try:

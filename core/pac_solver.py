@@ -6,18 +6,20 @@ definition; the finite-difference shooting PAC kernel is topology independent.
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-    from .ac_solver import _dev_corner, ac_solve, get_ss_params
-    from .device_model import create_device, get_default_model_type
+    from .ac_solver import _bw_from_gain, _dev_corner, _dev_nf, ac_solve, build_devices, get_ss_params
+    from .numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_numba
     from .topology import Topology
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-    from ac_solver import _dev_corner, ac_solve, get_ss_params
-    from device_model import create_device, get_default_model_type
+    from ac_solver import _bw_from_gain, _dev_corner, _dev_nf, ac_solve, build_devices, get_ss_params
+    from numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_numba
     from topology import Topology
     from transient_solver import transient
 
@@ -29,31 +31,6 @@ def _periodic_average(t, values):
     if period <= 0.0:
         return np.mean(values, axis=0)
     return np.trapezoid(values, t, axis=0) / period
-
-
-def _bw_from_gain(freqs, gains):
-    freqs = np.asarray(freqs, float)
-    gains = np.asarray(gains, float)
-    if len(freqs) == 0 or len(gains) == 0:
-        return np.nan
-    peak = float(np.max(gains))
-    a3 = peak / np.sqrt(2.0)
-    ipk = int(np.argmax(gains))
-    bw = float(freqs[-1])
-    for i in range(ipk + 1, len(gains)):
-        if gains[i] <= a3:
-            f0, f1 = float(freqs[i - 1]), float(freqs[i])
-            g0, g1 = float(gains[i - 1]), float(gains[i])
-            if g1 == g0:
-                bw = f1
-            elif f0 > 0.0 and f1 > 0.0:
-                x0, x1 = np.log10(f0), np.log10(f1)
-                x = x0 + (a3 - g0) * (x1 - x0) / (g1 - g0)
-                bw = float(10.0 ** np.clip(x, min(x0, x1), max(x0, x1)))
-            else:
-                bw = float(f0 + (a3 - g0) * (f1 - f0) / (g1 - g0))
-            break
-    return bw
 
 
 def _merge_sizes_and_nf(sizes, nf, pss_result):
@@ -223,6 +200,191 @@ def _stamp_pmos_dynamic_cap_terms(G, d, g, s, dev, Vs, Vd, Vg,
             _stamp_branch_control(G, g, d, ctrl, -dCgd * vdot_gd)
 
 
+def _pac_hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
+    use_numba = (
+        pac_hb_blocks_numba is not None and
+        (2 * int(K) + 1) * int(n) >= 16
+    )
+    if use_numba:
+        return pac_hb_blocks_numba(
+            np.asarray(Gf, dtype=np.complex128),
+            np.asarray(Cf, dtype=np.complex128),
+            int(K),
+            float(fundamental),
+            bool(charge_caps),
+        ) + (True,)
+
+    nb = 2 * K + 1
+    Y_base = np.zeros((nb * n, nb * n), dtype=complex)
+    C_block = np.zeros_like(Y_base)
+    for kr in range(-K, K + 1):
+        br = (kr + K) * n
+        for kc in range(-K, K + 1):
+            bc = (kc + K) * n
+            sideband = kr if charge_caps else kc
+            sideband_omega = 2j * np.pi * sideband * fundamental
+            g = Gf[(kr - kc) % N]
+            c = Cf[(kr - kc) % N]
+            Y_base[br:br + n, bc:bc + n] = g + sideband_omega * c
+            C_block[br:br + n, bc:bc + n] = c
+    return Y_base, C_block, False
+
+
+def _term_arrays(terms):
+    kind = np.empty(len(terms), dtype=np.int64)
+    ref = np.empty(len(terms), dtype=np.int64)
+    value = np.empty(len(terms), dtype=float)
+    for pos, term in enumerate(terms):
+        kind[pos] = int(term[0])
+        if term[0] in (0, 1):
+            ref[pos] = int(term[1])
+            value[pos] = 0.0
+        else:
+            ref[pos] = 0
+            value[pos] = float(term[1])
+    return kind, ref, value
+
+
+def _stamp_arrays(terms):
+    kind = np.empty(len(terms), dtype=np.int64)
+    ref = np.empty(len(terms), dtype=np.int64)
+    for pos, term in enumerate(terms):
+        kind[pos] = int(term[0])
+        ref[pos] = int(term[1])
+    return kind, ref
+
+
+def _try_numba_pac_linearization(
+        all_sizes, all_nf, corner, topo, tbias, t_uniform, node_wave,
+        input_wave, node_inputs, drive_list, drive_amps, *, charge_caps):
+    if pac_linearize_orbit_numba is None or not charge_caps:
+        return None
+    if (
+        getattr(topo, "vccs", ()) or
+        getattr(topo, "vcvs", ()) or
+        getattr(topo, "cccs", ()) or
+        getattr(topo, "ccvs", ())
+    ):
+        return None
+
+    try:
+        N = len(t_uniform)
+        n = topo.n
+        idx = topo.idx
+        rails = topo.rail_values(tbias)
+        input_keys = tuple(input_wave)
+        input_index = {key: i for i, key in enumerate(input_keys)}
+        drive_index = {node: i for i, node in enumerate(drive_list)}
+
+        missing_input = [
+            key for key in node_inputs.values()
+            if key not in input_index
+        ]
+        if missing_input:
+            return None
+
+        def value_term(node):
+            if node in idx:
+                return (0, idx[node])
+            if node in node_inputs:
+                return (1, input_index[node_inputs[node]])
+            return (2, float(rails[node]))
+
+        def stamp_term(node):
+            if node in idx:
+                return (0, idx[node])
+            if node in drive_index:
+                return (1, drive_index[node])
+            return (2, 0)
+
+        node_wave_arr = np.vstack([
+            np.asarray(node_wave[node], float) for node in topo.solved
+        ]).T
+        if input_keys:
+            input_wave_arr = np.vstack([
+                np.asarray(input_wave[key], float) for key in input_keys
+            ])
+        else:
+            input_wave_arr = np.empty((0, N), dtype=float)
+
+        dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
+        params = [dev_inst[name].get_numba_params() for name, *_ in topo.devices]
+        p_Vfb = np.array([p.Vfb for p in params], dtype=float)
+        p_Vss = np.array([p.Vss for p in params], dtype=float)
+        p_Lc = np.array([p.Lc for p in params], dtype=float)
+        p_lambda = np.array([p.lambda_ for p in params], dtype=float)
+        p_contact_scale = np.array([p.contact_scale for p in params], dtype=float)
+        p_exponent = np.array([p.channel_exponent for p in params], dtype=float)
+        p_current_scale = np.array([p.current_scale for p in params], dtype=float)
+        p_inv_Rleak = np.array([p.inv_Rleak for p in params], dtype=float)
+        p_two_over_pi = np.array([p.two_over_pi for p in params], dtype=float)
+        p_cap_cgs1 = np.array([p.cap_cgs1 for p in params], dtype=float)
+        p_cap_cgd1 = np.array([p.cap_cgd1 for p in params], dtype=float)
+        p_cap_half_wl_ci = np.array([p.cap_half_wl_ci for p in params], dtype=float)
+        p_cap_cgs3_base = np.array([p.cap_cgs3_base for p in params], dtype=float)
+        p_cap_cgd3_base = np.array([p.cap_cgd3_base for p in params], dtype=float)
+        p_k1 = np.array([p.k1 for p in params], dtype=float)
+
+        dev_value_d_kind, dev_value_d_ref, dev_value_d_val = _term_arrays(
+            [value_term(d) for _name, d, _g, _s in topo.devices])
+        dev_value_g_kind, dev_value_g_ref, dev_value_g_val = _term_arrays(
+            [value_term(g) for _name, _d, g, _s in topo.devices])
+        dev_value_s_kind, dev_value_s_ref, dev_value_s_val = _term_arrays(
+            [value_term(s) for _name, _d, _g, s in topo.devices])
+        dev_stamp_d_kind, dev_stamp_d_ref = _stamp_arrays(
+            [stamp_term(d) for _name, d, _g, _s in topo.devices])
+        dev_stamp_g_kind, dev_stamp_g_ref = _stamp_arrays(
+            [stamp_term(g) for _name, _d, g, _s in topo.devices])
+        dev_stamp_s_kind, dev_stamp_s_ref = _stamp_arrays(
+            [stamp_term(s) for _name, _d, _g, s in topo.devices])
+
+        res_a_kind, res_a_ref = _stamp_arrays(
+            [stamp_term(a) for _name, a, _b, _R in topo.resistors])
+        res_b_kind, res_b_ref = _stamp_arrays(
+            [stamp_term(b) for _name, _a, b, _R in topo.resistors])
+        res_g = np.array([1.0 / float(R) for _name, _a, _b, R in topo.resistors],
+                         dtype=float)
+        caps = topo.cap_list()
+        cap_a_kind, cap_a_ref = _stamp_arrays([stamp_term(a) for a, _b, _c in caps])
+        cap_b_kind, cap_b_ref = _stamp_arrays([stamp_term(b) for _a, b, _c in caps])
+        cap_value = np.array([float(c) for _a, _b, c in caps], dtype=float)
+
+        ok, Gt, Ct, Gin, Cin = pac_linearize_orbit_numba(
+            np.asarray(node_wave_arr, float),
+            np.asarray(input_wave_arr, float),
+            dev_value_d_kind, dev_value_d_ref, dev_value_d_val,
+            dev_value_g_kind, dev_value_g_ref, dev_value_g_val,
+            dev_value_s_kind, dev_value_s_ref, dev_value_s_val,
+            dev_stamp_d_kind, dev_stamp_d_ref,
+            dev_stamp_g_kind, dev_stamp_g_ref,
+            dev_stamp_s_kind, dev_stamp_s_ref,
+            p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+            p_current_scale, p_inv_Rleak,
+            p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+            p_cap_cgs3_base, p_cap_cgd3_base, p_k1,
+            res_a_kind, res_a_ref, res_b_kind, res_b_ref, res_g,
+            cap_a_kind, cap_a_ref, cap_b_kind, cap_b_ref, cap_value,
+            len(drive_list),
+        )
+        if not ok:
+            return None
+        Gf = np.fft.fft(Gt, axis=0) / N
+        Cf = np.fft.fft(Ct, axis=0) / N
+        if len(drive_list):
+            gdrive = np.tensordot(Gin, np.asarray(drive_amps, complex),
+                                  axes=([2], [0]))
+            cdrive = np.tensordot(Cin, np.asarray(drive_amps, complex),
+                                  axes=([2], [0]))
+        else:
+            gdrive = np.zeros((N, n), dtype=complex)
+            cdrive = np.zeros((N, n), dtype=complex)
+        Ginf = np.fft.fft(gdrive, axis=0) / N
+        Cinf = np.fft.fft(cdrive, axis=0) / N
+        return Gf, Cf, Ginf, Cinf
+    except Exception:
+        return None
+
+
 def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
                           corner=None,
                           compute_condition=False):
@@ -344,12 +506,6 @@ def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
     }
 
 
-def _nfval(all_nf, name):
-    if isinstance(all_nf, dict):
-        return int(all_nf.get(name, 1))
-    return int(all_nf) if all_nf else 1
-
-
 def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
                           all_nf, corner=None, n_period_samples=384,
                           max_sideband=10, cache=True, pacmag=1.0,
@@ -455,65 +611,73 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     charge_caps = _charge_linearized_caps(pss_result)
     cache_store = pss_result.setdefault("_pac_analytic_cache", {}) if cache else {}
     lin_key = (
-        "pac_analytic_lin_v3", tuple(topo.solved), tuple(topo.devices),
+        "pac_analytic_lin_v4", tuple(topo.solved), tuple(topo.devices),
         tuple(topo.resistors), tuple(topo.cap_list()), float(period), int(N),
         _freeze_sizes(all_sizes), _freeze_nf(all_nf), _freeze_kwargs(corner or {}),
         "charge_caps" if charge_caps else "veriloga_caps",
         tuple(sorted(drive_list)),
         _freeze_complex_map(dict(zip(drive_list, drive_amps))),
     )
-    if cache and lin_key in cache_store:
+    lin_cache_hit = bool(cache and lin_key in cache_store)
+    lin_numba_used = False
+    t_linear0 = time.perf_counter()
+    if lin_cache_hit:
         lin = cache_store[lin_key]
         Gf, Cf, Ginf, Cinf = lin["Gf"], lin["Cf"], lin["Ginf"], lin["Cinf"]
+        lin_numba_used = bool(lin.get("numba_used", False))
     else:
-        dev_inst = {
-            name: create_device(get_default_model_type(),
-                W=all_sizes[name][0], L=all_sizes[name][1],
-                NF=_nfval(all_nf, name), **_dev_corner(corner, name))
-            for name, *_ in topo.devices
-        }
-        G_const = np.zeros((n_ext, n_ext)); C_const = np.zeros((n_ext, n_ext))
-        rg = np.zeros(n_ext); rc = np.zeros(n_ext)
-        for a, b, cap in topo.cap_list():
-            _stamp_adm(C_const, rc, term(a), term(b), cap)
-        for _, a, b, R in topo.resistors:
-            _stamp_adm(G_const, rg, term(a), term(b), 1.0 / R)
-        for k in range(n):
-            G_const[k, k] += 1e-12
-        Gt = np.zeros((N, n_ext, n_ext)); Ct = np.zeros((N, n_ext, n_ext))
-        for m in range(N):
-            Gt[m] += G_const; Ct[m] += C_const
-            for name, d, g, s in topo.devices:
-                Vs = term_value(s, m); Vd = term_value(d, m); Vg = term_value(g, m)
-                p = get_ss_params(all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
-                                  corner=_dev_corner(corner, name),
-                                  nf=_nfval(all_nf, name), dev_inst=dev_inst[name])
-                _stamp_mos_lti(Gt[m], Ct[m], rg, rc, term(d), term(g), term(s),
-                               p["gm"], p["gds"], p["Cgs"], p["Cgd"])
-                if not charge_caps:
-                    _stamp_pmos_dynamic_cap_terms(
-                        Gt[m], term(d), term(g), term(s), dev_inst[name],
-                        Vs, Vd, Vg,
-                        term_derivative(s, m), term_derivative(d, m),
-                        term_derivative(g, m))
-        Gf = np.fft.fft(Gt[:, :n, :n], axis=0) / N
-        Cf = np.fft.fft(Ct[:, :n, :n], axis=0) / N
-        Ginf = np.fft.fft(Gt[:, :n, n:] @ drive_amps, axis=0) / N      # (N, n)
-        Cinf = np.fft.fft(Ct[:, :n, n:] @ drive_amps, axis=0) / N
+        fast_lin = _try_numba_pac_linearization(
+            all_sizes, all_nf, corner, topo, tbias, t_uniform,
+            node_wave, input_wave, node_inputs, drive_list, drive_amps,
+            charge_caps=charge_caps,
+        )
+        if fast_lin is not None:
+            Gf, Cf, Ginf, Cinf = fast_lin
+            lin_numba_used = True
+        else:
+            dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
+            G_const = np.zeros((n_ext, n_ext)); C_const = np.zeros((n_ext, n_ext))
+            rg = np.zeros(n_ext); rc = np.zeros(n_ext)
+            for a, b, cap in topo.cap_list():
+                _stamp_adm(C_const, rc, term(a), term(b), cap)
+            for _, a, b, R in topo.resistors:
+                _stamp_adm(G_const, rg, term(a), term(b), 1.0 / R)
+            for k in range(n):
+                G_const[k, k] += 1e-12
+            Gt = np.zeros((N, n_ext, n_ext)); Ct = np.zeros((N, n_ext, n_ext))
+            for m in range(N):
+                Gt[m] += G_const; Ct[m] += C_const
+                for name, d, g, s in topo.devices:
+                    Vs = term_value(s, m); Vd = term_value(d, m); Vg = term_value(g, m)
+                    p = get_ss_params(all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
+                                      corner=_dev_corner(corner, name),
+                                      nf=_dev_nf(all_nf, name), dev_inst=dev_inst[name])
+                    _stamp_mos_lti(Gt[m], Ct[m], rg, rc, term(d), term(g), term(s),
+                                   p["gm"], p["gds"], p["Cgs"], p["Cgd"])
+                    if not charge_caps:
+                        _stamp_pmos_dynamic_cap_terms(
+                            Gt[m], term(d), term(g), term(s), dev_inst[name],
+                            Vs, Vd, Vg,
+                            term_derivative(s, m), term_derivative(d, m),
+                            term_derivative(g, m))
+            Gf = np.fft.fft(Gt[:, :n, :n], axis=0) / N
+            Cf = np.fft.fft(Ct[:, :n, :n], axis=0) / N
+            Ginf = np.fft.fft(Gt[:, :n, n:] @ drive_amps, axis=0) / N      # (N, n)
+            Cinf = np.fft.fft(Ct[:, :n, n:] @ drive_amps, axis=0) / N
         if cache:
-            cache_store[lin_key] = {"Gf": Gf, "Cf": Cf, "Ginf": Ginf, "Cinf": Cinf}
+            cache_store[lin_key] = {
+                "Gf": Gf,
+                "Cf": Cf,
+                "Ginf": Ginf,
+                "Cinf": Cinf,
+                "numba_used": bool(lin_numba_used),
+            }
+    linearization_time_s = time.perf_counter() - t_linear0
 
-    Y_base = np.zeros((nb * n, nb * n), dtype=complex)
-    C_block = np.zeros_like(Y_base)
-    for kr in range(-K, K + 1):
-        br = (kr + K) * n
-        for kc in range(-K, K + 1):
-            bc = (kc + K) * n
-            sideband = kr if charge_caps else kc
-            sideband_omega = 2j * np.pi * sideband * fundamental
-            g = Gf[(kr - kc) % N]; c = Cf[(kr - kc) % N]
-            Y_base[br:br + n, bc:bc + n] = g + sideband_omega * c
-            C_block[br:br + n, bc:bc + n] = c
+    t_hb0 = time.perf_counter()
+    Y_base, C_block, hb_numba_used = _pac_hb_blocks(
+        Gf, Cf, K, N, n, fundamental, charge_caps=charge_caps)
+    hb_assembly_time_s = time.perf_counter() - t_hb0
     e = np.zeros(nb * n, dtype=complex)
     base0 = K * n
     for node, w in topo.output_weights().items():
@@ -541,29 +705,41 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         Y_base, C_block = Ya, Ca
         e = np.concatenate([e, np.zeros(nb * nbr, dtype=complex)])
 
+    # Pre-stack the frequency-independent input-coupling harmonics so the per-
+    # frequency RHS is one vectorized expression rather than a (2K+1) Python loop.
+    # ``om_offset`` carries the per-block kr*f0 term used by the charge-cap form;
+    # for the veriloga form the input sees only the baseband 2*pi*f (offset 0).
+    kr_arr = np.arange(-K, K + 1)
+    Ginf_stacked = Ginf[kr_arr % N].reshape(nb * n)
+    Cinf_stacked = Cinf[kr_arr % N].reshape(nb * n)
+    om_offset = np.repeat(kr_arr * fundamental, n) if charge_caps else 0.0
+    # ``b`` is rebuilt per frequency only in its node block; the branch rows are
+    # frequency-independent (AC short -> 0, plus any driven true-MNA vsource
+    # forcing), so set them once and reuse the buffer.
+    b = np.zeros(e.shape[0], dtype=complex)
+    for br_idx, amp in drive_branches:
+        b[nb * n + K * nbr + br_idx] = amp
+    # Reuse one conversion-matrix buffer instead of allocating Y_base + s*C_block
+    # (a full (2K+1)n square complex matrix) every frequency.
+    Ybuf = np.empty_like(Y_base)
+
     response = np.empty(len(freqs), dtype=complex)
     residuals = np.zeros(len(freqs))
     conditions = np.ones(len(freqs))
     for fi, f in enumerate(freqs):
         f = float(f)
-        Y = Y_base + (2j * np.pi * f) * C_block
+        np.multiply(C_block, 2j * np.pi * f, out=Ybuf)   # Ybuf = (2j*pi*f) * C_block
+        Ybuf += Y_base                                    # Ybuf = Y_base + (2j*pi*f) C
         if compute_condition:
             try:
-                conditions[fi] = float(np.linalg.cond(Y))
+                conditions[fi] = float(np.linalg.cond(Ybuf))
             except Exception:
                 conditions[fi] = np.inf
         try:
-            adj = np.linalg.solve(Y.T, e)
+            adj = np.linalg.solve(Ybuf.T, e)
         except np.linalg.LinAlgError:
-            adj = np.linalg.lstsq(Y.T, e, rcond=None)[0]
-        b = np.zeros(e.shape[0], dtype=complex)      # branch entries stay 0 (short)
-        for kr in range(-K, K + 1):
-            input_om = 2j * np.pi * (f + kr * fundamental) if charge_caps else 2j * np.pi * f
-            b[(kr + K) * n:(kr + K + 1) * n] = -(
-                Ginf[kr % N] + input_om * Cinf[kr % N])
-        # Driven true-MNA voltage source: baseband (kr=0) forcing on its branch row.
-        for br_idx, amp in drive_branches:
-            b[nb * n + K * nbr + br_idx] = amp
+            adj = np.linalg.lstsq(Ybuf.T, e, rcond=None)[0]
+        b[:nb * n] = -(Ginf_stacked + (2j * np.pi * (f + om_offset)) * Cinf_stacked)
         response[fi] = adj @ b
 
     gains = np.abs(response)
@@ -582,11 +758,15 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         "pac_state_period_runs": 0,
         "pac_input_period_runs": 0,
         "pac_period_runs": 0,
-        "pac_state_cache_hit": bool(cache and lin_key in cache_store),
+        "pac_state_cache_hit": bool(lin_cache_hit),
         "pac_input_cache_hits": 0,
         "pac_cache_enabled": bool(cache),
         "pac_condition_computed": bool(compute_condition),
         "pac_hb_size": int(nb * n),
+        "pac_numba_linearization_used": bool(lin_numba_used),
+        "pac_numba_hb_used": bool(hb_numba_used),
+        "pac_linearization_time_s": float(linearization_time_s),
+        "pac_hb_assembly_time_s": float(hb_assembly_time_s),
         "nfail": np.zeros(len(freqs), dtype=int),
         "method": "pss_analytic_adjoint",
     }

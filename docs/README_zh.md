@@ -150,8 +150,9 @@ tran_gear2 = transient(spec.sizes, spec.bias, t, vip, vin,
                        integration_method="gear2")
 ```
 Gear2（变步长 BDF2）将 PAC baseband 误差从 BE 的约 −2.5% 降到三 corner 全部 <1%。
-在刚性电路（如 chopper）上，`integration_method="gear2"` 在失败步数过多时自动回退
-到 BE——该设置始终安全。PSS/PAC/PNoise 管线默认使用 gear2 以保证精度；
+在刚性电路（如 chopper）上，`integration_method="gear2"` 如果同时请求
+`max_retry_subdivisions` / `max_step`，会走 Python gear2 solve_chunk，维护两步历史并递归二分；
+PSS/PAC/PNoise 管线默认使用快速 Numba gear2 grid 以保证精度；
 裸 `transient()` 默认使用 BE。
 
 ### 3. Chopper 分析（三种精度层级）

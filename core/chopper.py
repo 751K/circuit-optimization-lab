@@ -40,7 +40,7 @@ from threading import RLock
 import numpy as np
 
 try:
-    from .ac_solver import ac_solve, _dev_corner, _dev_nf, _is_afe_topology
+    from .ac_solver import _bw_from_gain, ac_solve, _dev_corner, _dev_nf, _is_afe_topology
     from .device_model import create_device, get_default_model_type
     from .noise_solver import band_rms, noise_analysis
     from .pac_solver import pac_solve
@@ -49,7 +49,7 @@ try:
     from .topology import AFE_TOPO, Topology
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_solver import ac_solve, _dev_corner, _dev_nf, _is_afe_topology
+    from ac_solver import _bw_from_gain, ac_solve, _dev_corner, _dev_nf, _is_afe_topology
     from device_model import create_device, get_default_model_type
     from noise_solver import band_rms, noise_analysis
     from pac_solver import pac_solve
@@ -118,29 +118,6 @@ def _interp_complex_response(query_signed, table_freqs, table_response):
 
 def _interp_psd(query_signed, table_freqs, table_psd):
     return np.interp(np.abs(query_signed), table_freqs, table_psd)
-
-
-def _bw_from_gain(freqs, gains):
-    freqs = np.asarray(freqs, float)
-    gains = np.asarray(gains, float)
-    peak = float(np.max(gains))
-    a3 = peak / np.sqrt(2)
-    ipk = int(np.argmax(gains))
-    bw = float(freqs[-1])
-    for i in range(ipk + 1, len(gains)):
-        if gains[i] <= a3:
-            f0, f1 = float(freqs[i - 1]), float(freqs[i])
-            g0, g1 = float(gains[i - 1]), float(gains[i])
-            if g1 == g0:
-                bw = f1
-            elif f0 > 0.0 and f1 > 0.0:
-                x0, x1 = np.log10(f0), np.log10(f1)
-                x = x0 + (a3 - g0) * (x1 - x0) / (g1 - g0)
-                bw = float(10.0 ** np.clip(x, min(x0, x1), max(x0, x1)))
-            else:
-                bw = float(f0 + (a3 - g0) * (f1 - f0) / (g1 - g0))
-            break
-    return bw
 
 
 def _dedup(seq):
@@ -1366,6 +1343,18 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
     the baseband conversion gain only converges to Spectre PAC once many
     sidebands are kept. Against the Cadence slow-corner design-#3 reference this
     moves baseband and 200 Hz gain to within 1%.
+
+    DO NOT lower this default to "speed up" PAC. The per-frequency cost is
+    ~((2K+1)*n)^3 so a smaller K is tempting, but a 3-corner calibration K-sweep
+    (2026-06-26) shows K=64 is load-bearing: the baseband gain drifts monotonically
+    with K (a flat ~0.3% harmonic tail from the 20 us edges -> 64 is an empirical
+    Cadence-match point, not a convergence plateau), so reducing K moves *away*
+    from Cadence. K=48 already pushes the typical corner to +2.03% (>2% tol) and
+    K=32 fails typical+slow; only the fast corner tolerates K=32. PNoise IRN stays
+    in tol at every K (the gain error cancels in the noise/gain ratio). Full table
+    in calibration/README.md. If you need faster PAC, the loop is already at the
+    LAPACK floor -- the only safe wins are not passing profile=True (avoids a
+    per-frequency SVD) and, for a real speedup, a structural (block-Toeplitz) solve.
     """
     pss_kwargs = dict(pss_kwargs or {})
     transient_kwargs = dict(transient_kwargs or {})

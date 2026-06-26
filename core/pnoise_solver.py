@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover - scipy is a project dependency
 
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-    from .ac_solver import _dev_corner, get_ss_params
+    from .ac_solver import _dev_corner, _dev_nf, build_devices, get_ss_params
     from .noise_solver import band_rms, noise_analysis
     from .numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
     from .pac_solver import (
@@ -34,10 +34,9 @@ try:
         _is_constant_wave,
         pac_solve,
     )
-    from .device_model import create_device, get_default_model_type
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-    from ac_solver import _dev_corner, get_ss_params
+    from ac_solver import _dev_corner, _dev_nf, build_devices, get_ss_params
     from noise_solver import band_rms, noise_analysis
     from numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
     from pac_solver import (
@@ -49,7 +48,6 @@ except ImportError:  # pragma: no cover - legacy direct module import
         _is_constant_wave,
         pac_solve,
     )
-    from device_model import create_device, get_default_model_type
 
 
 _KB = 1.380649e-23
@@ -78,11 +76,6 @@ def _merge_sizes_and_nf(sizes, nf, pss_result):
         all_nf = None
     return all_sizes, all_nf
 
-
-def _nfval(all_nf, name):
-    if isinstance(all_nf, dict):
-        return int(all_nf.get(name, 1))
-    return int(all_nf) if all_nf else 1
 
 
 def _periodic_interp(t_src, y_src, t_dst, period):
@@ -561,13 +554,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         Cf = lin["Cf"]
         all_noise_sources = lin["noise_sources"]
     else:
-        dev_inst = {
-            name: create_device(get_default_model_type(),
-                W=all_sizes[name][0], L=all_sizes[name][1],
-                NF=_nfval(all_nf, name), **_dev_corner(corner, name),
-            )
-            for name, *_ in devices
-        }
+        dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
         G_const = np.zeros((n, n))
         C_const = np.zeros((n, n))
         rhs_g = np.zeros(n)
@@ -594,7 +581,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 Vg = term_value(g, m)
                 p = get_ss_params(
                     all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
-                    corner=_dev_corner(corner, name), nf=_nfval(all_nf, name),
+                    corner=_dev_corner(corner, name), nf=_dev_nf(all_nf, name),
                     dev_inst=dev_inst[name],
                 )
                 _stamp_mos_lti(

@@ -387,15 +387,18 @@ also supports variable-step BDF2 (second-order, stiffly stable). Key properties:
 - Step-ratio clamp ρ≤2 guarantees zero-stability on non-uniform grids.
 - BE self-start on the first step of every interval.
 - A compiled Numba gear2 grid solver (`_transient_solve_grid_gear2_impl`) handles
-  single-step intervals; the analytic gear2 monodromy (augmented 2n-state) feeds
-  the PSS shooting Jacobian.
+  single-step intervals for PSS/PAC/PNoise; the analytic gear2 monodromy
+  (augmented 2n-state) feeds the PSS shooting Jacobian.
+- Raw `transient(integration_method="gear2")` keeps the BE default opt-in
+  boundary, but when `max_retry_subdivisions` or `max_step` asks for robustness
+  it skips the single-step Numba grid and uses a Python gear2 `solve_chunk`
+  path. That path maintains rolling two-step BDF2 history through max-step
+  pieces and recursive bisection, with full-Jacobian / least-squares recovery at
+  the leaf retry depth.
 - Chopper PSS/PAC/PNoise default to gear2 — PAC baseband errors drop from BE's
   −2.5% (typ/fast) to <1% across all three corners.
-- Raw `transient()` defaults to BE. The gear2 grid currently lacks the
-  subdivision/retry machinery that BE's grid has (pieces + rolling 2-step
-  history); an attempted rewrite introduced a −3.5% PAC regression (converged
-  to a different valid periodic orbit) and was reverted. This hardening is the
-  remaining step before gear2 can become the raw-transient default.
+- Raw `transient()` still defaults to BE because the robust gear2 path is Python
+  level and slower than the BE Numba grid on hard switching waveforms.
 
 ### Front-end stimulus (`ac_drives`)
 

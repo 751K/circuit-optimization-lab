@@ -343,14 +343,17 @@ Spectre `tran` 对齐。对 D3 / `chop_tb_d3` 官方 `slow` corner PSS/PAC/PNois
   α2·Q_{n-2})/h_n`，与 BE 的 `(Q_n − Q_{n-1})/h` 相同形式但使用两步历史。
 - 步长比限制 ρ≤2 保证非均匀网格上的零稳定性。
 - 每个 interval 第一步用 BE 自启动。
-- 编译版 Numba gear2 grid 求解器（`_transient_solve_grid_gear2_impl`）处理单步
-  interval；解析 gear2 monodromy（增广 2n 态）供给 PSS shooting Jacobian。
+- 编译版 Numba gear2 grid 求解器（`_transient_solve_grid_gear2_impl`）处理
+  PSS/PAC/PNoise 的单步 interval；解析 gear2 monodromy（增广 2n 态）供给
+  PSS shooting Jacobian。
+- 裸 `transient(integration_method="gear2")` 仍是显式 opt-in；当调用方请求
+  `max_retry_subdivisions` 或 `max_step` 的 robust 行为时，会跳过单步 Numba grid，
+  使用 Python gear2 `solve_chunk` 路径。该路径在 max-step pieces 和递归二分中维护
+  rolling 两步 BDF2 历史，并在最深 retry 处使用完整有限差分 Jacobian / least-squares 恢复。
 - Chopper PSS/PAC/PNoise 默认使用 gear2——PAC baseband 误差从 BE 的 −2.5%
   （typ/fast）改善到三 corner 全部 <1%。
-- 裸 `transient()` 默认保留 BE。gear2 grid 目前缺少 BE grid 已有的
-  subdivision/retry 机制（pieces + rolling 两步历史）；曾尝试重构但引入了 −3.5%
-  PAC 回归（收敛到了另一个有效周期解），已回退到可靠的单步版。这个硬化是 gear2
-  成为裸 transient 默认值之前的最后一步。
+- 裸 `transient()` 默认仍保留 BE，因为 robust gear2 目前是 Python 层路径，
+  在硬开关波形上比 BE Numba grid 慢。
 
 ### 前端激励（`ac_drives`）
 

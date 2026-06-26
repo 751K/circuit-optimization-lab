@@ -370,10 +370,11 @@ def test_pmos_chopper_transient_ui_finite_edge_matches_cadence_scale():
     assert -3.5 < np.mean(core_cm[mask]) < -0.5
 
 
-def test_pmos_chopper_transient_gear2_falls_back_to_be_when_stiff():
-    # gear2 on stiff chopper edges: either handles them directly (improved gear2)
-    # or gracefully falls back to BE.  Both paths must reproduce the BE waveform
-    # (no drift / blown-up nfail).
+def test_pmos_chopper_transient_gear2_retry_handles_stiff_edges():
+    # gear2 on stiff chopper edges should stay in the numba grid path even when
+    # raw transient maxstep/retry subdivision is requested.  The waveform should
+    # still stay close to the BE reference because both paths resolve the same
+    # finite-edge transient.
     period = 1.0 / 225.0
     t = np.linspace(0.0, 2.0 * period, 161)
     common = dict(
@@ -383,20 +384,20 @@ def test_pmos_chopper_transient_gear2_falls_back_to_be_when_stiff():
         charge_injection=False,
         switch_size=(5000.0, 30.0),
         edge_points=5,
+        profile=True,
     )
     be = pmos_chopper_transient(
         CHOPPER_UI_SIZES, CHOPPER_UI_BIAS, t, integration_method="be", **common)
     g2 = pmos_chopper_transient(
         CHOPPER_UI_SIZES, CHOPPER_UI_BIAS, t, integration_method="gear2", **common)
 
-    # If gear2 fell back, the fallback must reproduce BE exactly.
-    # If gear2 succeeded directly, the result must still agree with BE.
-    if g2.get("gear2_be_fallback_used"):
-        assert g2["nfail"] == be["nfail"]
-        np.testing.assert_allclose(g2["output"], be["output"], rtol=0.0, atol=1e-9)
-    else:
-        # gear2 handled it directly — waveform must match BE within tolerance
-        np.testing.assert_allclose(g2["output"], be["output"], rtol=1e-3, atol=3e-3)
+    assert not g2.get("gear2_be_fallback_used", False)
+    assert not g2.get("gear2_python_retry_solver", False)
+    assert g2.get("numba_grid_solver", False)
+    assert g2.get("transient_profile", {}).get("numba_grid_solver", False)
+    assert g2.get("transient_profile", {}).get("failed_intervals", 0) == 0
+    assert g2["nfail"] <= be["nfail"]
+    np.testing.assert_allclose(g2["output"], be["output"], rtol=1e-3, atol=3e-3)
 
 
 def test_pmos_chopper_pss_shooting_smoke_converges():
@@ -440,7 +441,11 @@ def test_pmos_chopper_transient_flat_step_profile_reduces_work():
     fast = pmos_chopper_transient(**common)
 
     assert strict["nfail"] <= 1
-    assert fast["nfail"] <= 1
+    assert fast["nfail"] == 0
+    assert fast["numba_grid_solver"] is True
+    assert fast["transient_profile"]["numba_grid_partial"] is False
+    assert fast["transient_profile"]["failed_substeps"] == 0
+    assert fast["transient_profile"]["failed_intervals"] == 0
     assert fast["nsubsteps"] < strict["nsubsteps"]
     assert fast["transient_profile"]["flat_substeps"] < strict["transient_profile"]["flat_substeps"]
     assert fast["transient_profile"]["internal_fd_jac_fallbacks"] == 0

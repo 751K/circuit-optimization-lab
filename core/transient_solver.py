@@ -43,9 +43,8 @@ import time
 
 import numpy as np
 try:
-    from .device_model import create_device, get_default_model_type
     from .topology import AFE_TOPO
-    from .ac_solver import ac_solve, _dev_corner, _dev_nf
+    from .ac_solver import ac_solve, build_devices, _dev_corner, _dev_nf
     from .numba_kernels import (
         terminal_derivatives_numba,
         transient_newton_numba,
@@ -54,9 +53,8 @@ try:
     )
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
-    from device_model import create_device, get_default_model_type
     from topology import AFE_TOPO
-    from ac_solver import ac_solve, _dev_corner, _dev_nf
+    from ac_solver import ac_solve, build_devices, _dev_corner, _dev_nf
     from compiled_topology import CompiledTopology
     try:
         from numba_kernels import (
@@ -78,8 +76,8 @@ _USE_AVERAGE_CAPS = _CAP_MODE in {"average", "avg", "trapezoid", "trap"}
 _USE_BRANCH_CAPS = _CAP_MODE in {"branch", "self", "self-charge"}
 _CAP_MODE_ID = 3 if _USE_BRANCH_CAPS else (1 if _USE_AVERAGE_CAPS else (0 if _USE_CHARGE_CAPS else 2))
 
-# Use the numba gear2 grid for the periodic/PSS path (fast).  Set
-# CIRCUIT_GEAR2_NUMBA=0 to fall back to the verified pure-Python gear2 loop.
+# Use the numba gear2 grid for periodic/PSS and raw maxstep/retry transients.
+# Set CIRCUIT_GEAR2_NUMBA=0 to fall back to the verified pure-Python gear2 loop.
 _GEAR2_NUMBA_GRID = os.environ.get("CIRCUIT_GEAR2_NUMBA", "1").lower() in {"1", "true", "on"}
 
 
@@ -99,8 +97,8 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
       integration_method : "be" (backward-Euler, 1st order; the default for the
                raw transient because its numba grid keeps substep subdivision +
                retry, which hard standalone transients rely on) or "gear2"
-               (variable-step BDF2, 2nd order, numba-accelerated, single-step per
-               interval with step-ratio limiting). The PSS/chopper periodic path
+               (variable-step BDF2, 2nd order, numba-accelerated, with maxstep
+               subdivision/retry support and step-ratio limiting). The PSS/chopper periodic path
                defaults to gear2 (it closes the chopper PAC switch-edge error to
                <1% and its grid is well-conditioned); raw transient callers can
                opt in on uniform/well-conditioned grids.
@@ -140,10 +138,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
     fields are included when those nodes exist.
     """
-    devs = topo.devices
-    tft = {name: create_device(get_default_model_type(), W=sizes[name][0], L=sizes[name][1],
-                               NF=_dev_nf(nf, name), **_dev_corner(corner, name))
-           for name, *_ in devs}
+    tft = build_devices(sizes, nf=nf, corner=corner, topo=topo)
     tgrid = np.asarray(tgrid, float)
     N = len(tgrid)
     if inputs is None:
@@ -931,23 +926,28 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
 
     gear2_done = False
     gear2_numba_used = False
+    gear2_python_retry_used = False
+    gear2_retry_requested = (
+        integration_method == "gear2" and gear2_be_fallback and
+        (max_retry_subdivisions > 0 or
+         (max_step is not None and max_step > 0.0) or
+         (flat_max_step is not None and flat_max_step > 0.0))
+    )
     if (integration_method == "gear2" and _GEAR2_NUMBA_GRID and
             transient_solve_grid_gear2_numba is not None and n_aug == n):
         try:
+            max_step_arg = -1.0 if max_step is None else float(max_step)
+            flat_max_step_arg = -1.0 if flat_max_step is None else float(flat_max_step)
             t_profile0 = time.perf_counter()
-            # Run the single-step gear2 grid on the requested tgrid directly.
-            # NOTE: do NOT pre-refine the grid here.  The single-step gear2 grid
-            # has no in-solver retry, so refining a periodic grid (e.g. the chopper
-            # PSS, which passes a small max_step) into many fine pieces does not
-            # help the hard switch-edge steps -- it just multiplies the steps that
-            # fail and corrupts the orbit.  The coarse periodic grid is well
-            # conditioned for BE-self-start + BDF2 (matches the Python loop).  A
-            # correct raw-transient gear2 with subdivision needs in-solver retry
-            # (future work); raw transient stays on the BE grid for now.
+            # Numba gear2 now owns both paths: periodic single-step grids
+            # (max_step<=0) and raw transient maxstep/retry subdivision.  If it
+            # rejects a robust step, the old Python solve_chunk path remains as
+            # a correctness fallback below.
             g2_orig_idx = None
             g2 = transient_solve_grid_gear2_numba(
                 np.asarray(V0, float), np.asarray(tgrid, float),
-                np.asarray(input_values, float), profile,
+                np.asarray(input_values, float), edge_mask_arr, profile,
+                max_step_arg, flat_max_step_arg, int(max_retry_subdivisions),
                 int(n), int(newton_maxit), float(newton_step_limit),
                 float(newton_vtol), float(gmin),
                 bool(fallback_full_jacobian or fallback_least_squares),
@@ -977,13 +977,179 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 else:
                     Vhist = Vfast
                 nsubsteps = int(fast_substeps)
-                nfail = int(np.asarray(raw_profile, float)[13])
+                raw_profile_arr = np.asarray(raw_profile, float)
+                nretry = int(raw_profile_arr[10])
+                nfail = int(raw_profile_arr[13])
                 gear2_done = True
                 gear2_numba_used = True
+                profile_stats = raw_profile_arr
+            elif gear2_retry_requested:
+                numba_grid_failed_index = int(fail_index)
+                numba_grid_failed_substeps = int(fast_substeps)
+                numba_grid_failed_profile = np.asarray(raw_profile, float)
+                if _rfi is None:
+                    numba_grid_failed_intervals = None
+                else:
+                    numba_grid_failed_intervals = np.asarray(_rfi, int)
         except Exception as exc:
             numba_grid_error = f"gear2: {type(exc).__name__}: {exc}"
 
+    def input_at_between(input_a, input_b, frac):
+        return input_a + (input_b - input_a) * frac
+
+    def gear2_terms(Vp, Vp2, input_prev, input_prev2, h_n, h_prev):
+        if (Vp2 is None or h_prev is None or h_prev <= 0.0 or
+                h_n / h_prev > 2.0):                     # BE self-start / large ratio
+            coeffs = (1.0, -1.0, 0.0)
+            prev2_terms = None
+            load_prev2 = None
+        else:
+            rho = h_n / h_prev
+            coeffs = (
+                (1.0 + 2.0 * rho) / (1.0 + rho),
+                -(1.0 + rho),
+                (rho * rho) / (1.0 + rho),
+            )
+            prev2_terms = device_prev_cap_terms(Vp2, input_prev2)
+            load_prev2 = load_cap_dv_values(Vp2, input_prev2)
+        prev_terms = device_prev_cap_terms(Vp, input_prev)
+        load_prev = load_cap_dv_values(Vp, input_prev)
+        return coeffs, prev_terms, load_prev, prev2_terms, load_prev2
+
+    def gear2_full_jac(seed, Vp, Vp2, input_now, input_prev, input_prev2,
+                       h_n, h_prev, maxit=6, residual_tol=1e-8, vtol=1e-8):
+        V = np.array(seed, float)
+        coeffs, prev_terms, load_prev, prev2_terms, load_prev2 = gear2_terms(
+            Vp, Vp2, input_prev, input_prev2, h_n, h_prev)
+        step_limit = float(newton_step_limit)
+
+        def residual_at(z):
+            states = device_states(z, input_now)
+            return step_residual(z, input_now, states, prev_terms, load_prev, h_n,
+                                 cap_coeffs=coeffs, prev2_dev_terms=prev2_terms,
+                                 load_prev2_dv=load_prev2)
+
+        for _ in range(int(maxit)):
+            R = residual_at(V)
+            norm = np.linalg.norm(R, ord=np.inf)
+            if norm < residual_tol:
+                return V, True
+            J = np.zeros((n_aug, n_aug))
+            for col in range(n_aug):
+                eps = 1e-5 * max(1.0, abs(V[col]))
+                zp = V.copy()
+                zp[col] += eps
+                J[:, col] = (residual_at(zp) - R) / eps
+            try:
+                dV = np.linalg.solve(J, -R)
+            except np.linalg.LinAlgError:
+                dV = np.linalg.lstsq(J, -R, rcond=None)[0]
+            mx = np.max(np.abs(dV))
+            if mx > step_limit:
+                dV *= step_limit / mx
+                mx = step_limit
+            accepted = False
+            for lam in (1.0, 0.5, 0.25, 0.125, 0.0625):
+                trial = V + lam * dV
+                trial_norm = np.linalg.norm(residual_at(trial), ord=np.inf)
+                if trial_norm < norm or trial_norm < residual_tol:
+                    V = trial
+                    accepted = True
+                    if trial_norm < residual_tol:
+                        return V, True
+                    if lam * mx < vtol:
+                        return V, False
+                    break
+            if not accepted:
+                return V, False
+        return V, np.linalg.norm(residual_at(V), ord=np.inf) < residual_tol
+
+    def gear2_try_step(Vp, Vp2, input_prev, input_prev2, input_now,
+                       h_n, h_prev, use_fallback=True):
+        raised = False
+        try:
+            V, _, ok = gear2_step(Vp, Vp, Vp2, input_now, input_prev,
+                                  input_prev2, h_n, h_prev, newton_maxit,
+                                  newton_step_limit, float(newton_vtol))
+        except Exception:
+            V, ok, raised = Vp, False, True
+        if ok:
+            return V, True, raised
+        if not use_fallback:
+            return V, False, raised
+        if fallback_full_jacobian:
+            for seed in (V, Vp):
+                try:
+                    Vn, okn = gear2_full_jac(
+                        seed, Vp, Vp2, input_now, input_prev, input_prev2,
+                        h_n, h_prev, residual_tol=float(fallback_tol),
+                        vtol=float(newton_vtol))
+                    if okn:
+                        return Vn, True, raised
+                except Exception:
+                    raised = True
+        if not fallback_least_squares:
+            return V, False, raised
+        try:
+            from scipy.optimize import least_squares
+            rails = [v for v in plan.rails.values() if isinstance(v, (int, float))]
+            if not rails:
+                return V, False, raised
+            lo = min(rails) - 0.5
+            hi = max(rails) + 0.5
+            if n_aug > n:
+                lo = np.concatenate([np.full(n, lo), np.full(n_aug - n, -np.inf)])
+                hi = np.concatenate([np.full(n, hi), np.full(n_aug - n, np.inf)])
+            coeffs, prev_terms, load_prev, prev2_terms, load_prev2 = gear2_terms(
+                Vp, Vp2, input_prev, input_prev2, h_n, h_prev)
+
+            def residual(z):
+                states = device_states(z, input_now)
+                return step_residual(z, input_now, states, prev_terms, load_prev, h_n,
+                                     cap_coeffs=coeffs, prev2_dev_terms=prev2_terms,
+                                     load_prev2_dv=load_prev2)
+
+            seed = np.clip(V, lo, hi)
+            sol = least_squares(residual, seed, bounds=(lo, hi), x_scale="jac",
+                                xtol=1e-11, ftol=1e-11, gtol=1e-11,
+                                max_nfev=80)
+            norm = np.linalg.norm(residual(sol.x), ord=np.inf)
+            if norm < fallback_tol:
+                return sol.x, True, raised
+            return Vp, False, raised
+        except Exception:
+            return Vp, False, True
+
+    def solve_gear2_chunk(Vp, Vp2, input_prev, input_prev2,
+                          h_n, h_prev, input_now, depth=0):
+        use_fallback = depth >= max_retry_subdivisions
+        V, ok, _ = gear2_try_step(Vp, Vp2, input_prev, input_prev2,
+                                  input_now, h_n, h_prev,
+                                  use_fallback=use_fallback)
+        if ok:
+            return V, Vp, input_prev, h_n, True, 1, 0
+        if depth < max_retry_subdivisions and h_n > 0.0:
+            mid_input = input_at_between(input_prev, input_now, 0.5)
+            left_v, left_prev2, left_input_prev2, left_hprev, left_ok, left_steps, left_retry = (
+                solve_gear2_chunk(Vp, Vp2, input_prev, input_prev2,
+                                  0.5 * h_n, h_prev, mid_input, depth + 1)
+            )
+            if not left_ok:
+                return Vp, Vp2, input_prev2, h_prev, False, left_steps, (
+                    left_retry + (1 if depth == 0 else 0))
+            right_v, right_prev2, right_input_prev2, right_hprev, right_ok, right_steps, right_retry = (
+                solve_gear2_chunk(left_v, left_prev2, mid_input, left_input_prev2,
+                                  0.5 * h_n, left_hprev, input_now, depth + 1)
+            )
+            if right_ok:
+                return (right_v, right_prev2, right_input_prev2, right_hprev,
+                        True, left_steps + right_steps, left_retry + right_retry + 1)
+            return Vp, Vp2, input_prev2, h_prev, False, (
+                left_steps + right_steps), left_retry + right_retry + (1 if depth == 0 else 0)
+        return Vp, Vp2, input_prev2, h_prev, False, 1, 1 if depth == 0 else 0
+
     if integration_method == "gear2" and not gear2_done:
+        gear2_python_retry_used = bool(gear2_retry_requested)
         for k in range(1, N):
             h_n = tgrid[k] - tgrid[k - 1]
             if h_n <= 0.0:
@@ -997,16 +1163,36 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 h_prev = tgrid[k - 1] - tgrid[k - 2]
             else:
                 Vp2 = input_prev2 = h_prev = None
-            try:
-                V, _, ok = gear2_step(Vp, Vp, Vp2, input_now, input_prev,
-                                      input_prev2, h_n, h_prev, newton_maxit,
-                                      newton_step_limit, float(newton_vtol))
-            except Exception:
-                V, ok = Vp, False
-            if not ok:
+            interval_edge = (len(edge_mask_arr) == N and
+                             bool(edge_mask_arr[k] or edge_mask_arr[k - 1]))
+            local_max_step = max_step
+            if flat_max_step is not None and flat_max_step > 0.0 and not interval_edge:
+                local_max_step = flat_max_step
+            pieces = 1 if local_max_step is None else max(1, int(np.ceil(h_n / local_max_step)))
+            Vcur = Vp
+            Vcur2 = Vp2
+            input_cur = input_prev
+            input_cur2 = input_prev2
+            h_prev_cur = h_prev
+            interval_ok = True
+            interval_retries = 0
+            for j in range(pieces):
+                f1 = (j + 1) / pieces
+                input_next = input_at_between(input_prev, input_now, f1)
+                (Vcur, Vcur2, input_cur2, h_prev_cur, ok, steps, retries) = (
+                    solve_gear2_chunk(Vcur, Vcur2, input_cur, input_cur2,
+                                      h_n / pieces, h_prev_cur, input_next)
+                )
+                input_cur = input_next
+                nsubsteps += steps
+                interval_retries += retries
+                if not ok:
+                    interval_ok = False
+                    break
+            if not interval_ok:
                 nfail += 1
-            Vhist[k] = V
-            nsubsteps += 1
+            Vhist[k] = Vcur
+            nretry += interval_retries
         gear2_done = True
 
     # Graceful fallback: gear2's single-step Newton stalls on stiff transients
@@ -1104,9 +1290,6 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         except Exception as exc:
             numba_grid_error = f"{type(exc).__name__}: {exc}"
             used_grid_numba = False
-
-    def input_at_between(input_a, input_b, frac):
-        return input_a + (input_b - input_a) * frac
 
     def try_step(Vp, input_prev, input_now, h, use_fallback=True):
         V = Vp
@@ -1221,6 +1404,8 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
               "transient_cap_mode": _CAP_MODE,
               "transient_cap_mode_id": int(_CAP_MODE_ID)}
     result["numba_grid_solver"] = bool(used_grid_numba or gear2_numba_used)
+    if integration_method == "gear2":
+        result["gear2_python_retry_solver"] = bool(gear2_python_retry_used)
     if numba_newton_attempts:
         result["numba_newton_attempts"] = numba_newton_attempts
         result["numba_newton_success"] = numba_newton_success
@@ -1256,6 +1441,34 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             "numba_grid_failed_interval_failures": (
                 int(numba_grid_failed_profile[13])
                 if numba_grid_failed_profile is not None else 0),
+            "numba_grid_failed_last_residual_inf": (
+                float(numba_grid_failed_profile[16])
+                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 16
+                else 0.0),
+            "numba_grid_failed_max_residual_inf": (
+                float(numba_grid_failed_profile[17])
+                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 17
+                else 0.0),
+            "numba_grid_failed_last_step_inf": (
+                float(numba_grid_failed_profile[18])
+                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 18
+                else 0.0),
+            "numba_grid_failed_max_step_inf": (
+                float(numba_grid_failed_profile[19])
+                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 19
+                else 0.0),
+            "numba_grid_failed_stamp_or_prev_count": (
+                int(numba_grid_failed_profile[20])
+                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 20
+                else 0),
+            "numba_grid_failed_linear_solve_count": (
+                int(numba_grid_failed_profile[21])
+                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 21
+                else 0),
+            "numba_grid_failed_maxit_count": (
+                int(numba_grid_failed_profile[22])
+                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 22
+                else 0),
             "wall_time_s": float(profile_wall_s),
             "nsubsteps": int(nsubsteps),
             "intervals": int(profile_stats[11]),
@@ -1295,6 +1508,8 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 int(profile_stats[21]) if len(profile_stats) > 21 else 0),
             "failed_maxit_count": (
                 int(profile_stats[22]) if len(profile_stats) > 22 else 0),
+            "stalled_residual_accepts": (
+                int(profile_stats[23]) if len(profile_stats) > 23 else 0),
             "edge_time_s_est": float(edge_time_est),
             "flat_time_s_est": float(flat_time_est),
             "time_estimate_basis": "newton_iteration_weighted",

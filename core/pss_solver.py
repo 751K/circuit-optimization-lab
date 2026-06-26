@@ -16,22 +16,14 @@ import numpy as np
 
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-    from .ac_solver import ac_solve, _dev_corner, get_ss_params
-    from .device_model import create_device, get_default_model_type
+    from .ac_solver import ac_solve, _dev_corner, _dev_nf, build_devices, get_ss_params
     from .topology import AFE_TOPO
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-    from ac_solver import ac_solve, _dev_corner, get_ss_params
-    from device_model import create_device, get_default_model_type
+    from ac_solver import ac_solve, _dev_corner, _dev_nf, build_devices, get_ss_params
     from topology import AFE_TOPO
     from transient_solver import transient
-
-
-def _nfval(nf, name):
-    if isinstance(nf, dict):
-        return int(nf.get(name, 1))
-    return int(nf) if nf else 1
 
 
 def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
@@ -81,7 +73,7 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
         for name, d, g, s in topo.devices:
             Vs = term_value(s, m); Vd = term_value(d, m); Vg = term_value(g, m)
             p = get_ss_params(sizes[name][0], sizes[name][1], Vs, Vd, Vg,
-                              nf=_nfval(nf, name), dev_inst=dev_inst[name])
+                              nf=_dev_nf(nf, name), dev_inst=dev_inst[name])
             _stamp_mos_lti(G, C, rg, rc, term(d), term(g), term(s),
                            p["gm"], p["gds"], p["Cgs"], p["Cgd"])
         return G, C
@@ -501,13 +493,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                 if analytic_jacobian:
                     try:
                         if mono_dev_inst is None:
-                            mono_dev_inst = {
-                                name: create_device(get_default_model_type(),
-                                    W=sizes[name][0], L=sizes[name][1],
-                                    NF=_nfval(nf, name),
-                                    **_dev_corner(corner, name))
-                                for name, *_ in topo.devices
-                            }
+                            mono_dev_inst = build_devices(sizes, nf=nf, corner=corner, topo=topo)
                         phi = _shooting_monodromy(tr, topo, sizes, nf, bias, inputs,
                                                   node_inputs or {}, mono_dev_inst,
                                                   integration_method=integration_method)

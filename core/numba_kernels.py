@@ -1260,7 +1260,7 @@ def _transient_newton_reuse_impl(
                     profile_stats[19] = last_mx
             return it + 1, False, False
 
-        if profile_enabled:
+        if profile_enabled or fallback_accept:
             last_rmax = 0.0
             for i in range(n):
                 val = abs(R[i])
@@ -1302,15 +1302,30 @@ def _transient_newton_reuse_impl(
                     V[i] = clip_hi
         if mx < vtol:
             if fallback_accept:
+                relaxed_tol = fallback_tol
+                if relaxed_tol < 1e-6:
+                    relaxed_tol = 1e-6
+                if last_rmax < relaxed_tol:
+                    if profile_enabled:
+                        profile_stats[23] += 1.0
+                    return it + 1, True, True
                 prev = mx
                 continue
             return it + 1, True, True
         if it >= 4 and mx >= prev and mx < 1e-5:
             if fallback_accept:
+                relaxed_tol = fallback_tol
+                if relaxed_tol < 1e-6:
+                    relaxed_tol = 1e-6
+                if last_rmax < relaxed_tol:
+                    if profile_enabled:
+                        profile_stats[23] += 1.0
+                    return it + 1, True, True
                 prev = mx
                 continue
             return it + 1, True, True
         prev = mx
+
     if profile_enabled:
         profile_stats[22] += 1.0
         profile_stats[16] = last_rmax
@@ -1536,8 +1551,84 @@ def _transient_solve_grid_impl(
     return True, Vhist, nsubsteps, -1, profile_stats, failed_interval_indices
 
 
+def _gear2_substep_newton_reuse_impl(
+        seed, Vp, Vp2, input_now, input_prev, input_prev2, h_n, h_prev,
+        n, maxit, step_limit, vtol,
+        gmin, fallback_accept, fallback_tol, HH,
+        dev_d_kind, dev_d_ref, dev_d_val,
+        dev_g_kind, dev_g_ref, dev_g_val,
+        dev_s_kind, dev_s_ref, dev_s_val,
+        dev_di, dev_gi, dev_si, dev_use_abs,
+        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+        p_current_scale, p_inv_Rleak,
+        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+        p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+        op_cache_valid, op_cache_vs1, op_cache_vd1,
+        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+        res_b_val, res_ai, res_bi, res_g,
+        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+        cap_b_val, cap_ai, cap_bi, cap_value,
+        isrc_pi, isrc_qi, isrc_value,
+        dyn_pi, dyn_qi, dyn_input_idx,
+        cap_mode, clip_lo, clip_hi,
+        Vwork, R, J, prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd,
+        cap_prev_dv, p2_vs, p2_vd, p2_vg, prev2_cgs, prev2_cgd,
+        cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
+        profile_enabled, profile_stats):
+    if h_prev <= 0.0 or h_n / h_prev > 2.0:
+        a0 = 1.0
+        a1 = -1.0
+        a2 = 0.0
+    else:
+        rho = h_n / h_prev
+        a0 = (1.0 + 2.0 * rho) / (1.0 + rho)
+        a1 = -(1.0 + rho)
+        a2 = (rho * rho) / (1.0 + rho)
+    ok2 = _fill_prev_terms_impl(
+        Vp2, input_prev2,
+        dev_d_kind, dev_d_ref, dev_d_val,
+        dev_g_kind, dev_g_ref, dev_g_val,
+        dev_s_kind, dev_s_ref, dev_s_val,
+        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+        p_current_scale, p_inv_Rleak,
+        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+        p_cap_cgs3_base, p_cap_cgd3_base, p_k1,
+        op2_valid, op2_vs1, op2_vd1,
+        cap_a_kind, cap_a_ref, cap_a_val,
+        cap_b_kind, cap_b_ref, cap_b_val,
+        cap_mode,
+        p2_vs, p2_vd, p2_vg, prev2_cgs, prev2_cgd, cap_prev2_dv)
+    if not ok2:
+        if profile_enabled:
+            profile_stats[20] += 1.0
+        return 0, False, False
+    return _transient_newton_reuse_impl(
+        seed, Vp, input_now, input_prev, h_n, n, maxit, step_limit, vtol,
+        gmin, fallback_accept, fallback_tol, HH,
+        dev_d_kind, dev_d_ref, dev_d_val,
+        dev_g_kind, dev_g_ref, dev_g_val,
+        dev_s_kind, dev_s_ref, dev_s_val,
+        dev_di, dev_gi, dev_si, dev_use_abs,
+        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+        p_current_scale, p_inv_Rleak,
+        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+        p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+        op_cache_valid, op_cache_vs1, op_cache_vd1,
+        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+        res_b_val, res_ai, res_bi, res_g,
+        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+        cap_b_val, cap_ai, cap_bi, cap_value,
+        isrc_pi, isrc_qi, isrc_value,
+        dyn_pi, dyn_qi, dyn_input_idx,
+        cap_mode, clip_lo, clip_hi,
+        Vwork, R, J, prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd,
+        cap_prev_dv, profile_enabled, profile_stats,
+        a0, a1, a2, prev2_cgs, prev2_cgd, cap_prev2_dv)
+
+
 def _transient_solve_grid_gear2_impl(
-        V0, tgrid, input_values, profile_enabled,
+        V0, tgrid, input_values, edge_mask, profile_enabled,
+        max_step, flat_max_step, max_retry_subdivisions,
         n, maxit, step_limit, vtol,
         gmin, fallback_accept, fallback_tol, HH,
         dev_d_kind, dev_d_ref, dev_d_val,
@@ -1556,10 +1647,12 @@ def _transient_solve_grid_gear2_impl(
         isrc_pi, isrc_qi, isrc_value,
         dyn_pi, dyn_qi, dyn_input_idx,
         cap_mode, clip_lo, clip_hi):
-    """Variable-step BDF2/gear2 grid solver: one full BDF2 step per interval
-    (single-step, no maxstep subdivision), backward-Euler self-start + step-ratio
-    limiting (rho>2 -> BE step for zero-stability).  Edge resolution comes from the
-    (refined/fine) tgrid the PSS supplies."""
+    """Variable-step BDF2/gear2 grid solver with maxstep slicing and retry.
+
+    Each accepted internal substep updates the BDF2 history tuple
+    (x[n-1], x[n-2], h[n-1]), so subdivided raw transients keep the same history
+    semantics as the Python gear2 solve_chunk path.
+    """
     N = tgrid.shape[0]
     ninputs = input_values.shape[0]
     ndev = dev_di.shape[0]
@@ -1583,87 +1676,195 @@ def _transient_solve_grid_gear2_impl(
     # the reuse internal solve land on the wrong multistable branch).
     op2_valid = np.zeros(ndev, dtype=np.bool_)
     op2_vs1 = np.empty(ndev); op2_vd1 = np.empty(ndev)
-    input_now = np.empty(ninputs)
-    input_prev = np.empty(ninputs)
-    input_prev2 = np.empty(ninputs)
+    input_start = np.empty(ninputs)
+    input_end = np.empty(ninputs)
+    input_cur = np.empty(ninputs)
+    input_cur2 = np.empty(ninputs)
+    input_next = np.empty(ninputs)
+    piece_in0 = np.empty(ninputs)
+    piece_in1 = np.empty(ninputs)
     profile_stats = np.zeros(24)
     failed = np.full(N, -1, dtype=np.int64)
+    failed_interval_count = 0
     nsubsteps = 0
-    nfail = 0
     for k in range(1, N):
+        nsubsteps_before_interval = nsubsteps
         h_n = tgrid[k] - tgrid[k - 1]
         if h_n <= 0.0:
             return False, Vhist, nsubsteps, k, profile_stats, failed
         for ii in range(ninputs):
-            input_now[ii] = input_values[ii, k]
-            input_prev[ii] = input_values[ii, k - 1]
+            input_start[ii] = input_values[ii, k - 1]
+            input_end[ii] = input_values[ii, k]
+            input_cur[ii] = input_start[ii]
         for i in range(n):
             Vp[i] = Vhist[k - 1, i]
         if k >= 2:
-            rho = h_n / (tgrid[k - 1] - tgrid[k - 2])
-            if rho > 2.0:
-                # BE step: prev2 is unused (a2=0). Seed prev2/op_cache from the
-                # nearest point (k-1), NOT Vhist[0] -- _fill_prev_terms shares the
-                # internal-node op_cache, and a far V0 seed makes the following
-                # reuse solve the wrong internal branch (corrupts the orbit).
-                a0 = 1.0; a1 = -1.0; a2 = 0.0
-                kp2 = k - 1
-            else:
-                a0 = (1.0 + 2.0 * rho) / (1.0 + rho)
-                a1 = -(1.0 + rho)
-                a2 = (rho * rho) / (1.0 + rho)
-                kp2 = k - 2
+            h_prev_cur = tgrid[k - 1] - tgrid[k - 2]
+            for ii in range(ninputs):
+                input_cur2[ii] = input_values[ii, k - 2]
+            for i in range(n):
+                Vp2[i] = Vhist[k - 2, i]
         else:
-            a0 = 1.0; a1 = -1.0; a2 = 0.0
-            kp2 = k - 1
-        for ii in range(ninputs):
-            input_prev2[ii] = input_values[ii, kp2]
+            h_prev_cur = 0.0
+            for ii in range(ninputs):
+                input_cur2[ii] = input_start[ii]
+            for i in range(n):
+                Vp2[i] = Vp[i]
+        interval_edge = False
+        if edge_mask.shape[0] == N:
+            interval_edge = bool(edge_mask[k] or edge_mask[k - 1])
+        if max_step > 0.0:
+            local_max_step = max_step
+            if flat_max_step > 0.0 and not interval_edge:
+                local_max_step = flat_max_step
+            pieces = int(math.ceil(h_n / local_max_step))
+            if pieces < 1:
+                pieces = 1
+        else:
+            pieces = 1
+        hpiece = h_n / pieces
+        interval_failed = False
+        for j in range(pieces):
+            frac = (j + 1.0) / pieces
+            for ii in range(ninputs):
+                piece_in0[ii] = input_cur[ii]
+                piece_in1[ii] = input_start[ii] + (input_end[ii] - input_start[ii]) * frac
+            iters, ok, usable = _gear2_substep_newton_reuse_impl(
+                Vp, Vp, Vp2, piece_in1, input_cur, input_cur2,
+                hpiece, h_prev_cur,
+                n, maxit, step_limit, vtol, gmin, fallback_accept,
+                fallback_tol, HH,
+                dev_d_kind, dev_d_ref, dev_d_val,
+                dev_g_kind, dev_g_ref, dev_g_val,
+                dev_s_kind, dev_s_ref, dev_s_val,
+                dev_di, dev_gi, dev_si, dev_use_abs,
+                p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale,
+                p_exponent, p_current_scale, p_inv_Rleak,
+                p_two_over_pi, p_cap_cgs1, p_cap_cgd1,
+                p_cap_half_wl_ci, p_cap_cgs3_base, p_cap_cgd3_base,
+                p_k1, p_gate_leak_g,
+                op_cache_valid, op_cache_vs1, op_cache_vd1,
+                res_a_kind, res_a_ref, res_a_val,
+                res_b_kind, res_b_ref, res_b_val, res_ai, res_bi,
+                res_g,
+                cap_a_kind, cap_a_ref, cap_a_val,
+                cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi,
+                cap_value,
+                isrc_pi, isrc_qi, isrc_value,
+                dyn_pi, dyn_qi, dyn_input_idx,
+                cap_mode, clip_lo, clip_hi,
+                Vwork, R, J, prev_vs, prev_vd, prev_vg,
+                prev_cgs, prev_cgd, cap_prev_dv,
+                p2_vs, p2_vd, p2_vg, prev2_cgs, prev2_cgd,
+                cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
+                profile_enabled, profile_stats)
+            if profile_enabled:
+                profile_stats[0] += iters
+            if ok:
+                nsubsteps += 1
+                if profile_enabled:
+                    if interval_edge:
+                        profile_stats[6] += 1.0
+                        profile_stats[8] += iters
+                    else:
+                        profile_stats[7] += 1.0
+                        profile_stats[9] += iters
+                for i in range(n):
+                    Vp2[i] = Vp[i]
+                    Vp[i] = Vwork[i]
+                for ii in range(ninputs):
+                    input_cur2[ii] = input_cur[ii]
+                    input_cur[ii] = piece_in1[ii]
+                h_prev_cur = hpiece
+                continue
+
+            profile_stats[10] += 1.0
+            retry_count = 1
+            for _retry_pow in range(max_retry_subdivisions):
+                retry_count *= 2
+            if retry_count <= 1:
+                if fallback_accept:
+                    return False, Vhist, nsubsteps_before_interval, k, profile_stats, failed
+                interval_failed = True
+                break
+            retry_ok = True
+            hretry = hpiece / retry_count
+            for rr in range(retry_count):
+                retry_frac = (rr + 1.0) / retry_count
+                for ii in range(ninputs):
+                    input_next[ii] = (
+                        piece_in0[ii] +
+                        (piece_in1[ii] - piece_in0[ii]) * retry_frac
+                    )
+                iters_r, ok_r, usable_r = _gear2_substep_newton_reuse_impl(
+                    Vp, Vp, Vp2, input_next, input_cur, input_cur2,
+                    hretry, h_prev_cur,
+                    n, maxit, step_limit, vtol, gmin, fallback_accept,
+                    fallback_tol, HH,
+                    dev_d_kind, dev_d_ref, dev_d_val,
+                    dev_g_kind, dev_g_ref, dev_g_val,
+                    dev_s_kind, dev_s_ref, dev_s_val,
+                    dev_di, dev_gi, dev_si, dev_use_abs,
+                    p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale,
+                    p_exponent, p_current_scale, p_inv_Rleak,
+                    p_two_over_pi, p_cap_cgs1, p_cap_cgd1,
+                    p_cap_half_wl_ci, p_cap_cgs3_base, p_cap_cgd3_base,
+                    p_k1, p_gate_leak_g,
+                    op_cache_valid, op_cache_vs1, op_cache_vd1,
+                    res_a_kind, res_a_ref, res_a_val,
+                    res_b_kind, res_b_ref, res_b_val, res_ai, res_bi,
+                    res_g,
+                    cap_a_kind, cap_a_ref, cap_a_val,
+                    cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi,
+                    cap_value,
+                    isrc_pi, isrc_qi, isrc_value,
+                    dyn_pi, dyn_qi, dyn_input_idx,
+                    cap_mode, clip_lo, clip_hi,
+                    Vwork, R, J, prev_vs, prev_vd, prev_vg,
+                    prev_cgs, prev_cgd, cap_prev_dv,
+                    p2_vs, p2_vd, p2_vg, prev2_cgs, prev2_cgd,
+                    cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
+                    profile_enabled, profile_stats)
+                if profile_enabled:
+                    profile_stats[0] += iters_r
+                if not ok_r:
+                    retry_ok = False
+                    profile_stats[10] += 1.0
+                    break
+                nsubsteps += 1
+                if profile_enabled:
+                    if interval_edge:
+                        profile_stats[6] += 1.0
+                        profile_stats[8] += iters_r
+                    else:
+                        profile_stats[7] += 1.0
+                        profile_stats[9] += iters_r
+                for i in range(n):
+                    Vp2[i] = Vp[i]
+                    Vp[i] = Vwork[i]
+                for ii in range(ninputs):
+                    input_cur2[ii] = input_cur[ii]
+                    input_cur[ii] = input_next[ii]
+                h_prev_cur = hretry
+            if not retry_ok:
+                if fallback_accept:
+                    return False, Vhist, nsubsteps_before_interval, k, profile_stats, failed
+                interval_failed = True
+                break
+        if interval_failed:
+            profile_stats[13] += 1.0
+            if interval_edge:
+                profile_stats[14] += 1.0
+            else:
+                profile_stats[15] += 1.0
+            if profile_enabled and failed_interval_count < N:
+                failed[failed_interval_count] = k
+                failed_interval_count += 1
         for i in range(n):
-            Vp2[i] = Vhist[kp2, i]
-        ok2 = _fill_prev_terms_impl(
-            Vp2, input_prev2,
-            dev_d_kind, dev_d_ref, dev_d_val,
-            dev_g_kind, dev_g_ref, dev_g_val,
-            dev_s_kind, dev_s_ref, dev_s_val,
-            p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
-            p_current_scale, p_inv_Rleak,
-            p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
-            p_cap_cgs3_base, p_cap_cgd3_base, p_k1,
-            op2_valid, op2_vs1, op2_vd1,
-            cap_a_kind, cap_a_ref, cap_a_val,
-            cap_b_kind, cap_b_ref, cap_b_val,
-            cap_mode,
-            p2_vs, p2_vd, p2_vg, prev2_cgs, prev2_cgd, cap_prev2_dv)
-        if not ok2:
-            return False, Vhist, nsubsteps, k, profile_stats, failed
-        iters, ok, usable = _transient_newton_reuse_impl(
-            Vp, Vp, input_now, input_prev, h_n, n, maxit, step_limit, vtol,
-            gmin, fallback_accept, fallback_tol, HH,
-            dev_d_kind, dev_d_ref, dev_d_val,
-            dev_g_kind, dev_g_ref, dev_g_val,
-            dev_s_kind, dev_s_ref, dev_s_val,
-            dev_di, dev_gi, dev_si, dev_use_abs,
-            p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
-            p_current_scale, p_inv_Rleak,
-            p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
-            p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
-            op_cache_valid, op_cache_vs1, op_cache_vd1,
-            res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
-            res_b_val, res_ai, res_bi, res_g,
-            cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
-            cap_b_val, cap_ai, cap_bi, cap_value,
-            isrc_pi, isrc_qi, isrc_value,
-            dyn_pi, dyn_qi, dyn_input_idx,
-            cap_mode, clip_lo, clip_hi,
-            Vwork, R, J, prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd,
-            cap_prev_dv, profile_enabled, profile_stats,
-            a0, a1, a2, prev2_cgs, prev2_cgd, cap_prev2_dv)
-        if not ok:
-            nfail += 1
-        for i in range(n):
-            Vhist[k, i] = Vwork[i]
-        nsubsteps += 1
-    profile_stats[13] = nfail
+            Vhist[k, i] = Vp[i]
+    if profile_enabled:
+        profile_stats[11] = N - 1
+        profile_stats[12] = nsubsteps
     return True, Vhist, nsubsteps, -1, profile_stats, failed
 
 
@@ -1691,6 +1892,196 @@ def _pnoise_hb_blocks_impl(Gf, Cf, K, fundamental, charge_caps):
                     Y_base[rr, cc] = Gf[coeff_idx, r, c] + sideband_omega * c_coeff
                     C_block[rr, cc] = c_coeff
     return Y_base, C_block
+
+
+def _pac_term_value_impl(kind, ref, value, node_wave, input_wave, m):
+    if kind == 0:      # solved node
+        return node_wave[m, ref]
+    if kind == 1:      # periodic large-signal input
+        return input_wave[ref, m]
+    return value       # rail / constant
+
+
+def _pac_stamp_coeff_impl(M, Min, row_kind, row_ref, col_kind, col_ref, coeff):
+    if row_kind != 0 or coeff == 0.0:
+        return
+    if col_kind == 0:
+        M[row_ref, col_ref] += coeff
+    elif col_kind == 1:
+        Min[row_ref, col_ref] += coeff
+
+
+def _pac_stamp_adm_impl(M, Min, p_kind, p_ref, q_kind, q_ref, y):
+    if y == 0.0:
+        return
+    if p_kind == 0:
+        M[p_ref, p_ref] += y
+        _pac_stamp_coeff_impl(M, Min, p_kind, p_ref, q_kind, q_ref, -y)
+    if q_kind == 0:
+        M[q_ref, q_ref] += y
+        _pac_stamp_coeff_impl(M, Min, q_kind, q_ref, p_kind, p_ref, -y)
+
+
+def _pac_stamp_vccs_impl(M, Min, d_kind, d_ref, g_kind, g_ref,
+                         s_kind, s_ref, gm):
+    _pac_stamp_coeff_impl(M, Min, d_kind, d_ref, g_kind, g_ref, gm)
+    _pac_stamp_coeff_impl(M, Min, d_kind, d_ref, s_kind, s_ref, -gm)
+    _pac_stamp_coeff_impl(M, Min, s_kind, s_ref, g_kind, g_ref, -gm)
+    _pac_stamp_coeff_impl(M, Min, s_kind, s_ref, s_kind, s_ref, gm)
+
+
+def _pac_idc_solved_impl(Vs, Vd, Vg, cache_valid, cache_vs1, cache_vd1,
+                         Vfb, Vss, Lc, lambda_, contact_scale, exponent,
+                         current_scale, inv_Rleak):
+    ok, Vs1, Vd1, _, _, _ = _solve_internal_with_guesses_impl(
+        Vs, Vd, Vg, cache_valid, cache_vs1, cache_vd1, 1e-12, 40,
+        Vfb, Vss, Lc, lambda_, contact_scale, exponent, current_scale,
+        inv_Rleak)
+    if not ok:
+        return False, 0.0
+    F0a, F0b, _, _, _, _ = _residual_pair_jac_internal_impl(
+        Vs, Vd, Vg, Vs1, Vd1, Vfb, Vss, Lc, lambda_, contact_scale,
+        exponent, current_scale, inv_Rleak)
+    return True, F0b - (Vs1 - Vd1) / 0.1
+
+
+def _pac_linearize_orbit_impl(
+        node_wave, input_wave,
+        dev_value_d_kind, dev_value_d_ref, dev_value_d_val,
+        dev_value_g_kind, dev_value_g_ref, dev_value_g_val,
+        dev_value_s_kind, dev_value_s_ref, dev_value_s_val,
+        dev_stamp_d_kind, dev_stamp_d_ref,
+        dev_stamp_g_kind, dev_stamp_g_ref,
+        dev_stamp_s_kind, dev_stamp_s_ref,
+        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+        p_current_scale, p_inv_Rleak,
+        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+        p_cap_cgs3_base, p_cap_cgd3_base, p_k1,
+        res_a_kind, res_a_ref, res_b_kind, res_b_ref, res_g,
+        cap_a_kind, cap_a_ref, cap_b_kind, cap_b_ref, cap_value,
+        ndrive):
+    N = node_wave.shape[0]
+    n = node_wave.shape[1]
+    Gt = np.zeros((N, n, n), dtype=np.float64)
+    Ct = np.zeros((N, n, n), dtype=np.float64)
+    Gin = np.zeros((N, n, ndrive), dtype=np.float64)
+    Cin = np.zeros((N, n, ndrive), dtype=np.float64)
+    op_cache_valid = np.zeros(p_Vfb.shape[0], dtype=np.bool_)
+    op_cache_vs1 = np.zeros(p_Vfb.shape[0], dtype=np.float64)
+    op_cache_vd1 = np.zeros(p_Vfb.shape[0], dtype=np.float64)
+
+    for m in range(N):
+        Gm = Gt[m]
+        Cm = Ct[m]
+        Gim = Gin[m]
+        Cim = Cin[m]
+        for k in range(n):
+            Gm[k, k] += 1e-12
+
+        for pos in range(res_g.shape[0]):
+            _pac_stamp_adm_impl(
+                Gm, Gim,
+                res_a_kind[pos], res_a_ref[pos],
+                res_b_kind[pos], res_b_ref[pos],
+                res_g[pos])
+
+        for pos in range(cap_value.shape[0]):
+            _pac_stamp_adm_impl(
+                Cm, Cim,
+                cap_a_kind[pos], cap_a_ref[pos],
+                cap_b_kind[pos], cap_b_ref[pos],
+                cap_value[pos])
+
+        for pos in range(p_Vfb.shape[0]):
+            Vs = _pac_term_value_impl(
+                dev_value_s_kind[pos], dev_value_s_ref[pos],
+                dev_value_s_val[pos], node_wave, input_wave, m)
+            Vd = _pac_term_value_impl(
+                dev_value_d_kind[pos], dev_value_d_ref[pos],
+                dev_value_d_val[pos], node_wave, input_wave, m)
+            Vg = _pac_term_value_impl(
+                dev_value_g_kind[pos], dev_value_g_ref[pos],
+                dev_value_g_val[pos], node_wave, input_wave, m)
+
+            ok, Vs1, Vd1, _, _, _ = _solve_internal_with_guesses_impl(
+                Vs, Vd, Vg, op_cache_valid[pos], op_cache_vs1[pos],
+                op_cache_vd1[pos], 1e-12, 40, p_Vfb[pos], p_Vss[pos],
+                p_Lc[pos], p_lambda[pos], p_contact_scale[pos],
+                p_exponent[pos], p_current_scale[pos], p_inv_Rleak[pos])
+            if not ok:
+                return False, Gt, Ct, Gin, Cin
+            op_cache_valid[pos] = True
+            op_cache_vs1[pos] = Vs1
+            op_cache_vd1[pos] = Vd1
+
+            F0a, F0b, j00, j01, j10, j11 = _residual_pair_jac_internal_impl(
+                Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_Vss[pos], p_Lc[pos],
+                p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
+                p_current_scale[pos], p_inv_Rleak[pos])
+            Idc0 = F0b - (Vs1 - Vd1) / 0.1
+            use_fd = abs(Idc0) < 1e-10
+            gm = 0.0
+            gds = 1e-12
+            if not use_fd:
+                okd, gm_neg, gds_neg = _terminal_derivatives_from_jac_impl(
+                    Vs, Vd, Vg, Vs1, Vd1, F0a, F0b, Idc0, j00, j01, j10, j11,
+                    True, True, False, 1e-3, p_Vfb[pos], p_Vss[pos], p_Lc[pos],
+                    p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                if okd and math.isfinite(gm_neg) and math.isfinite(gds_neg):
+                    gm = -gm_neg
+                    gds = -gds_neg
+                else:
+                    use_fd = True
+            if use_fd:
+                h = 1e-3
+                okp, idp = _pac_idc_solved_impl(
+                    Vs, Vd, Vg + h, True, Vs1, Vd1,
+                    p_Vfb[pos], p_Vss[pos], p_Lc[pos], p_lambda[pos],
+                    p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                okm, idm = _pac_idc_solved_impl(
+                    Vs, Vd, Vg - h, True, Vs1, Vd1,
+                    p_Vfb[pos], p_Vss[pos], p_Lc[pos], p_lambda[pos],
+                    p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                okdp, iddp = _pac_idc_solved_impl(
+                    Vs, Vd + h, Vg, True, Vs1, Vd1,
+                    p_Vfb[pos], p_Vss[pos], p_Lc[pos], p_lambda[pos],
+                    p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                okdm, iddm = _pac_idc_solved_impl(
+                    Vs, Vd - h, Vg, True, Vs1, Vd1,
+                    p_Vfb[pos], p_Vss[pos], p_Lc[pos], p_lambda[pos],
+                    p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                if not (okp and okm and okdp and okdm):
+                    return False, Gt, Ct, Gin, Cin
+                gm = (idp - idm) / (2.0 * h)
+                gds = (iddp - iddm) / (2.0 * h)
+                if not math.isfinite(gm) or not math.isfinite(gds):
+                    return False, Gt, Ct, Gin, Cin
+                if gm < 0.0:
+                    gm = 0.0
+                if gds < 1e-12:
+                    gds = 1e-12
+            Cgs, Cgd = _capacitances_impl(
+                Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_two_over_pi[pos],
+                p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
+                p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
+
+            dk = dev_stamp_d_kind[pos]
+            dr = dev_stamp_d_ref[pos]
+            gk = dev_stamp_g_kind[pos]
+            gr = dev_stamp_g_ref[pos]
+            sk = dev_stamp_s_kind[pos]
+            sr = dev_stamp_s_ref[pos]
+            _pac_stamp_adm_impl(Gm, Gim, dk, dr, sk, sr, gds)
+            _pac_stamp_adm_impl(Cm, Cim, gk, gr, sk, sr, Cgs)
+            _pac_stamp_adm_impl(Cm, Cim, gk, gr, dk, dr, Cgd)
+            _pac_stamp_vccs_impl(Gm, Gim, dk, dr, gk, gr, sk, sr, gm)
+
+    return True, Gt, Ct, Gin, Cin
 
 
 def _pnoise_fold_psd_impl(adjs, freqs, K, fundamental,
@@ -1780,8 +2171,15 @@ if NUMBA_AVAILABLE:
     _transient_newton_impl = njit(cache=NUMBA_CACHE)(_transient_newton_impl)
     _transient_newton_reuse_impl = njit(cache=NUMBA_CACHE)(_transient_newton_reuse_impl)
     _transient_solve_grid_impl = njit(cache=NUMBA_CACHE)(_transient_solve_grid_impl)
+    _gear2_substep_newton_reuse_impl = njit(cache=NUMBA_CACHE)(_gear2_substep_newton_reuse_impl)
     _transient_solve_grid_gear2_impl = njit(cache=NUMBA_CACHE)(_transient_solve_grid_gear2_impl)
     _pnoise_hb_blocks_impl = njit(cache=NUMBA_CACHE)(_pnoise_hb_blocks_impl)
+    _pac_term_value_impl = njit(cache=NUMBA_CACHE)(_pac_term_value_impl)
+    _pac_stamp_coeff_impl = njit(cache=NUMBA_CACHE)(_pac_stamp_coeff_impl)
+    _pac_stamp_adm_impl = njit(cache=NUMBA_CACHE)(_pac_stamp_adm_impl)
+    _pac_stamp_vccs_impl = njit(cache=NUMBA_CACHE)(_pac_stamp_vccs_impl)
+    _pac_idc_solved_impl = njit(cache=NUMBA_CACHE)(_pac_idc_solved_impl)
+    _pac_linearize_orbit_impl = njit(cache=NUMBA_CACHE)(_pac_linearize_orbit_impl)
     _pnoise_fold_psd_impl = njit(cache=NUMBA_CACHE)(_pnoise_fold_psd_impl)
     eval_currents_numba = _eval_currents_impl
     newton_internal_numba = _newton_internal_impl
@@ -1792,6 +2190,8 @@ if NUMBA_AVAILABLE:
     transient_solve_grid_numba = _transient_solve_grid_impl
     transient_solve_grid_gear2_numba = _transient_solve_grid_gear2_impl
     pnoise_hb_blocks_numba = _pnoise_hb_blocks_impl
+    pac_hb_blocks_numba = _pnoise_hb_blocks_impl
+    pac_linearize_orbit_numba = _pac_linearize_orbit_impl
     pnoise_fold_psd_numba = _pnoise_fold_psd_impl
 else:
     eval_currents_numba = None
@@ -1803,4 +2203,6 @@ else:
     transient_solve_grid_numba = None
     transient_solve_grid_gear2_numba = None
     pnoise_hb_blocks_numba = None
+    pac_hb_blocks_numba = None
+    pac_linearize_orbit_numba = None
     pnoise_fold_psd_numba = None
