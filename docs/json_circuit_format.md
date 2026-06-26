@@ -469,6 +469,9 @@ automatically reuse or create the required PSS result.
     "analytic": true,
     "max_sideband": 10,
     "n_period_samples": 384,
+    "time_domain": false,
+    "td_integration": "gear2",
+    "td_n_period_samples": 768,
     "lti_fast_path": true,
     "cache_linearization": true,
     "cache_forcing": true
@@ -503,7 +506,11 @@ with `"jacobian_rebuild_interval": 2`.
 PAC uses analytic-adjoint harmonic balance by default (`"analytic": true`): one
 adjoint linear solve per frequency on the orbit conversion matrix, with zero extra
 transient runs. `"max_sideband"` and `"n_period_samples"` control the HB resolution.
-Set `"analytic": false` for the original finite-difference shooting path.
+For rail-driven chopper-like circuits, set `"time_domain": true` to try the
+accelerated time-domain Floquet PAC path first; `"td_integration"` and
+`"td_n_period_samples"` control that path's BDF/grid settings. Unsupported
+topologies fall back to HB when `"analytic": true`. Set `"analytic": false` only
+for the original finite-difference shooting path.
 PAC and PNoise enable the static-orbit LTI fast path and PSS-attached caches by default.
 Set `"lti_fast_path": false`, `"cache_linearization": false`, or
 `"cache_forcing": false` to force fresh finite-difference or harmonic-balance

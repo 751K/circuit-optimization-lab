@@ -1,12 +1,15 @@
 # Gear2/BDF2 积分器升级 — 完成报告
 
-> **状态：✅ 已完成（2026-06-21）**
+> **状态：✅ 已完成（2026-06-21）；2026-06-26 补齐 raw gear2 Numba retry/subdivision**
 > 
 > 所有 5 个里程碑（M1–M5）均已交付，chopper PSS/PAC/PNoise 默认使用 gear2，
 > 三 corner PAC baseband 全部 <1%。裸 `transient()` 保留 BE 默认，
-> `integration_method="gear2"` 在请求 retry/subdivision 时走 Python gear2 solve_chunk，
+> `integration_method="gear2"` 在请求 maxstep/retry/subdivision 时现在也走 Numba gear2 grid，
+> 按 accepted substep 维护 rolling 两步历史；Python solve_chunk 只保留为异常兜底，
 > 不再依赖 BE clean rerun。
-> 回归测试 93 passed（含 RUN_SLOW_CHOPPER）。
+> 2026-06-26 之后 PAC 又新增了可选 `time_domain=True` 的 Floquet/time-domain
+> 加速路径；默认通用 HB 路径仍保留，用于 bordered/vsource-driven 等更广拓扑。
+> 最新回归：146 passed, 9 skipped。
 > 
 > 此文档保留原始任务计划作为历史参考。
 
@@ -43,8 +46,7 @@
     （numba grid / monodromy / Python loop 三处）。修后所有细化网格 robust（nfail 4–11，PAC +0.4~0.6%）。
   - **默认值**：PSS / PAC / PNoise / chopper 全部默认 **gear2**（对齐关键路径，robust + 快）；
     裸 `transient()` 保留 **BE** 默认。请求 `max_retry_subdivisions` / `max_step` 的裸 gear2
-    transient 会跳过单步 Numba grid，走 Python gear2 solve_chunk，以正确维护 pieces / retry
-    中的 rolling 两步历史。
+    transient 现在由 Numba grid 直接处理，以正确维护 pieces / retry 中的 rolling 两步历史。
   - **细分/retry 硬化尝试（失败）→ 连带弄坏 numba grid → 已定位并修复**：
     - 试过把 gear2 grid 改成 pieces + retry + rolling 两步历史 → PSS 跑偏 −3.5%；又加了一个
       grid 预细分 helper `_refine_grid_for_gear2`（按 `max_step` 把区间切成均匀 substep 再跑 gear2，
@@ -59,7 +61,7 @@
       去掉 `g2_orig_idx` 降采样路径）。修后 numba grid 轨道与 Python loop **逐点一致**（max|d|≈1e-6，
       nfail=1）；warm **0.58s vs Python 10.9s（~19×）**，三 corner PAC 不变（slow +0.61/typ +0.49/
       fast +0.12%）。门控 `_GEAR2_NUMBA_GRID` 默认**开**（`CIRCUIT_GEAR2_NUMBA=0` 可退回 Python loop）。
-  - **裸 transient 的 gear2：从 graceful BE 回退升级为 Python gear2 solve_chunk（2026-06-26）**：
+  - **裸 transient 的 gear2：从 graceful BE 回退升级为 gear2 retry/subdivision（2026-06-26）**：
     - **现象**：裸 chopper transient 用 gear2 跑偏（nfail≈1855，波形 −13mV vs BE 的 −27mV）。
     - **根因（逐步打 print 定位）**：每一步 Newton 都 `iters=maxit, ok=False, usable=True`——
       收敛到松 tol 但到不了紧 vtol=1e-8，且 maxit 加到 300 也没用（是 stall 不是慢收敛）。
@@ -68,22 +70,36 @@
       回退到 **Python `solve_chunk`（递归二分 + scipy least_squares）**这条 robust 路；gear2 没有这条路，
       且 gear2 每步都 stall，复刻 LS-per-step 会慢到不可用（~1200 步都要 LS）。干净网格（无退化步）也一样，
       所以不是网格、不是 `_fill`/prev2（prev2 置零测过，nfail 不变）。
-    - **2026-06-26 修复**：新增 Python gear2 `solve_chunk`。当裸 transient 以
+    - **2026-06-26 第一阶段修复**：新增 Python gear2 `solve_chunk`。当裸 transient 以
       `integration_method="gear2"` 请求 `max_retry_subdivisions` 或 `max_step` 时，求解器跳过单步
       Numba gear2 grid，进入 Python retry 路径。该路径在 max-step pieces 和递归二分中维护
       `V_{n-1}/V_{n-2}`、输入历史和上一子步 `h_prev`，在叶子层可用 full-Jacobian /
       least-squares 做恢复。
-    - **结果**：stiff chopper transient 不再触发 `gear2_be_fallback_used`，而是返回
-      `gear2_python_retry_solver=True`、`nfail=0`；波形仍与 BE 参考在小容差内一致。
+    - **2026-06-26 第二阶段修复**：raw gear2 的 maxstep/retry/subdivision 移入
+      `_transient_solve_grid_gear2_impl`。Numba grid 现在接收 `edge_mask/max_step/flat_max_step/max_retry_subdivisions`，
+      每个 accepted internal substep 后更新 `V_{n-1}/V_{n-2}`、输入历史和 `h_prev`；
+      失败时按固定 `2**max_retry_subdivisions` 二分重试。Python solve_chunk 仍保留为 Numba
+      拒绝 robust step 时的兜底。
+    - **结果**：stiff chopper transient 不再触发 `gear2_be_fallback_used`，默认返回
+      `numba_grid_solver=True`、`gear2_python_retry_solver=False`、`nfail=0`；波形仍与 BE 参考在小容差内一致。
       回归测试 `test_pmos_chopper_transient_gear2_retry_handles_stiff_edges`。
-    - **边界**：PSS/PAC/PNoise 仍使用快速单步 Numba gear2 grid 和解析 monodromy，不进入
-      Python retry 路径；这样避免历史上 grid 预细分导致的 PAC 轨道回归。
-    - **默认值**：裸 `transient()` 仍默认 **BE**，因为 robust gear2 当前是 Python 层，
-      在硬开关波形上比 BE Numba grid 慢。需要二阶裸 transient 时显式传
+    - **边界**：PSS/PAC/PNoise 仍不做外部预细分；如果传入 `max_step`，由同一个
+      Numba gear2 grid 在求解器内部维护历史，避免历史上预细分/降采样导致的 PAC 轨道回归。
+    - **默认值**：裸 `transient()` 仍默认 **BE**。这不是因为 gear2 还在 Python 层，而是为了
+      保持既有 raw transient 回归和一阶阻尼语义；需要二阶裸 transient 时显式传
       `integration_method="gear2"`。
+  - **默认 BE transient 的 Numba tail 修复（2026-06-26）**：
+    - **现象**：UI chopper 默认 BE 路径会在后段从 Numba grid 掉到 Python tail，并触发 1 次
+      `least_squares`。
+    - **根因**：Newton 步长已到数值地板，KCL 残差约 `7e-7 A`，旧逻辑仍按 `1e-10`
+      强行判失败。
+    - **修复**：Numba Newton 在 stall 且残差小于 `1e-6` 时受控接受，并计入
+      `stalled_residual_accepts` profile counter。
+    - **结果**：默认 BE chopper transient 变成全 Numba，`nfail=0`、`least_squares_calls=0`，
+      warm 约 `0.15 s`；相对 Python/LS reference 输出 max diff ≈ `1.6e-7 V`。
   - **三 corner 最终对标（gear2 默认）**：PAC baseband 全部 <1% —— slow +0.61%、typical +0.49%、
     fast +0.12%（BE 时是 −0.5/−2.6/−2.4%）；PAC@200Hz 全 <1%；IRN slow +2.8/typ +2.0/fast −0.8%。
-  - 全套 **93 passed**（含 RUN_SLOW_CHOPPER）；smoke/pnoise 两个测试按 gear2 重新 baseline。
+  - 最新全套回归 **146 passed, 9 skipped**；smoke/pnoise 两个测试按 gear2 重新 baseline。
 
 ---
 

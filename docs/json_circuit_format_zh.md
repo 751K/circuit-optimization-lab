@@ -442,6 +442,9 @@ PAC/PNoise 需要 PSS 时会自动复用或先运行 PSS。
     "analytic": true,
     "max_sideband": 10,
     "n_period_samples": 384,
+    "time_domain": false,
+    "td_integration": "gear2",
+    "td_n_period_samples": 768,
     "lti_fast_path": true,
     "cache_linearization": true,
     "cache_forcing": true
@@ -472,7 +475,10 @@ PSS 默认使用解析 monodromy Jacobian（`"analytic_jacobian": true`）：在
 周期性重建。
 PAC 默认使用解析伴随谐波平衡（`"analytic": true`）：在 PSS 轨道转换矩阵上每频率
 一次伴随线性求解，零额外瞬态运行。`"max_sideband"` 和 `"n_period_samples"` 控制
-HB 分辨率。设置 `"analytic": false` 可回退到原有限差分 shooting 路径。
+HB 分辨率。对 rail-driven chopper 类电路，可设置 `"time_domain": true` 优先尝试
+加速的 time-domain Floquet PAC；`"td_integration"` 和 `"td_n_period_samples"` 控制
+这条路径的 BDF/grid 设置。不支持的拓扑会在 `"analytic": true` 时回退到 HB。
+只有需要原有限差分 shooting 时才设置 `"analytic": false`。
 PAC/PNoise 默认启用静态轨道 LTI fast path 和 PSS 结果缓存；如需逐次强制重算，
 可设置 `"lti_fast_path": false`、`"cache_linearization": false`、
 `"cache_forcing": false`。PNoise 会复用 `pss_result` 上的采样 `G(t)/C(t)`、

@@ -13,14 +13,16 @@ The current solver stack covers:
 - Noise analysis, including flicker noise and thermal noise.
 - Transient response simulation.
 - Periodic steady-state (PSS) shooting for periodic transient orbits.
-- PSS-assisted PAC (periodic AC) via analytic-adjoint harmonic balance (default)
-  or finite-difference shooting.
+- PSS-assisted PAC (periodic AC) via analytic-adjoint harmonic balance (default),
+  opt-in time-domain Floquet shooting, or finite-difference shooting.
 - Harmonic-balance PNoise (periodic noise) with cyclostationary noise folding.
 - Process-corner and per-device mismatch perturbations.
 - Cadence/Spectre-oriented validation for operating point, AC, noise, transient,
   PSS, PAC, and PNoise behavior.
 
-The implementation is intentionally small and self-contained. It currently consists of eighteen Python source files under `core/` (plus `__init__.py` and `__main__.py` for CLI entry).
+The implementation is intentionally small and self-contained. It currently has
+22 Python files under `core/`, including `__init__.py`, the CLI entry
+`__main__.py`, calibration/PSF/Cadence-netlist helpers, and the main solver stack.
 
 ## File Structure
 
@@ -40,6 +42,9 @@ core/
   pac_solver.py        Generic PSS-assisted PAC solver.
   pnoise_solver.py     Generic harmonic-balance PNoise solver.
   analysis_dispatch.py JSON analysis-configuration dispatch entry point.
+  psf.py               PSFASCII parser for Spectre reference data.
+  calibration.py       Local-vs-Cadence calibration comparison helpers.
+  cadence_netlist.py   Spectre netlist generation helpers for validation runs.
   chopper.py           Ideal and PMOS-switch differential chopper analyses.
   explore.py           Design-space exploration / optimization driver.
   corners.py           Process corners, mismatch MC, and latch detection.
@@ -62,6 +67,9 @@ pss_solver.py        <- ac_solver, ac_mna, device_model, topology, transient_sol
 pac_solver.py        <- ac_mna, ac_solver, device_model, transient_solver
 pnoise_solver.py     <- ac_solver, noise_solver, pac_solver, device_model, ac_mna
 analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader
+psf.py               <- no internal dependency
+calibration.py       <- ac_solver, noise_solver, chopper, psf, circuit_loader
+cadence_netlist.py   <- circuit_loader, topology
 chopper.py           <- noise_solver, pss_solver, pac_solver, pnoise_solver, device_model, topology
 explore.py           <- ac_solver, noise_solver, device_model, topology, circuit_loader
 corners.py           <- ac_solver, noise_solver, topology
@@ -231,7 +239,13 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   one adjoint linear system per frequency for sideband-0 gain — O(1) solves
   with no extra transient runs. Set `analytic=False` for the original
   finite-difference shooting path (one `n_state`-period state linearization
-  plus two input-quadrature period runs per frequency). Static PSS orbits
+  plus two input-quadrature period runs per frequency). Set `time_domain=True`
+  for the rail-driven chopper fast path: it builds the one-period Floquet
+  monodromy once in time domain, then solves a small quasi-periodic boundary
+  system per frequency (`method="pss_time_domain"`). Unsupported bordered or
+  vsource-driven cases fall back to HB when `analytic=True`. This fast path is
+  still opt-in: the 2026-06-26 check versus stored Cadence chopper references is
+  typical −0.44%, slow −1.89%, fast −0.27% at baseband. Static PSS orbits
   automatically reduce to ordinary `ac_solve`, avoiding PAC transient runs.
 - `pmos_chopper_pnoise(...)` is a compatibility wrapper over the generic
   `core.pnoise_solver.pnoise_solve(...)`. The generic PNoise kernel uses
@@ -247,8 +261,8 @@ native `pmos_chopper_pac` and `pmos_chopper_pnoise` now replace those
 calibration-dependent paths with first-principles periodic small-signal and
 noise solves. The finite-edge transient path has been checked against Spectre
 `tran`. For the D3 `chop_tb_d3` slow-corner PSS/PAC/PNoise reference, native
-PAC is within 1% at baseband and 200 Hz, and native PNoise IRN is within 1%
-when run on the same dec=10 noise grid and `maxsideband=10`.
+default-HB PAC is within 1% at baseband and 200 Hz, and native PNoise IRN is
+within 1% when run on the same dec=10 noise grid and `maxsideband=10`.
 
 ### `pss_solver.py`
 
@@ -297,25 +311,32 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
 - `input_drive` maps small-signal complex amplitudes to transient input keys,
   e.g. `{"vip": 0.5, "vin": -0.5}` for differential input or `{"vin": 1.0}`
   for single-ended input.
-- Three performance paths, tried in order:
+- Four performance paths, tried in order:
   1. **LTI fast path** — static PSS orbits reduce to ordinary `ac_solve`.
-  2. **Analytic-adjoint** (default, `analytic=True`) — samples periodic G(t)/C(t)
+  2. **Time-domain Floquet PAC** (opt-in, `time_domain=True`) — samples
+     periodic G(t)/C(t) and input coupling on a uniform orbit grid, builds the
+     frequency-independent monodromy once, then solves
+     `(exp(jωT)I - Ψ)x0 = g` per frequency. This avoids HB sideband truncation
+     and the large `(2K+1)n` conversion matrix, but currently requires a
+     rail-driven, unbordered topology with Numba linearization available.
+     Unsupported cases return `None` and continue to the next path.
+  3. **Analytic-adjoint** (default, `analytic=True`) — samples periodic G(t)/C(t)
      and input-coupling columns G_in(t)/C_in(t) on the PSS orbit, FFTs to
      harmonic coefficients G_k/C_k, builds the harmonic-balance conversion
      matrix Y_HB(f), and reads sideband-0 gain from a single adjoint linear
      solve per frequency. Cost is O(1) per frequency with zero extra transient
      runs. Controlled by `n_period_samples` (time resolution) and `max_sideband`
      (sideband count).
-  3. **Finite-difference shooting** (`analytic=False`) — finite-differences the
+  4. **Finite-difference shooting** (`analytic=False`) — finite-differences the
      state transition matrix Φ and the complex input forcing around the PSS
      orbit, then solves `(Φ-γI)dx0=-b`. Costs `n_state+2` transient runs per
      frequency. Cached on `pss_result` for repeated PAC/PNoise calls.
 - Results include counters such as `pac_period_runs`, `pac_state_cache_hit`,
-  `pac_input_cache_hits`, and `method` (`"pss_analytic_adjoint"` or
-  `"pss_fd_shooting"`). PAC condition diagnostics are off by default and are
-  enabled only by `profile=True`, `debug=True`, or explicit
-  `compute_condition=True`; the diagnostic does an SVD per frequency and does
-  not affect gain/BW/noise.
+  `pac_input_cache_hits`, `pac_td_setup_time_s`, and `method`
+  (`"pss_time_domain"`, `"pss_analytic_adjoint"`, or `"pss_fd_shooting"`).
+  PAC condition diagnostics are off by default and are enabled only by
+  `profile=True`, `debug=True`, or explicit `compute_condition=True`; the
+  diagnostic does an SVD per frequency and does not affect gain/BW/noise.
 
 ### `pnoise_solver.py`
 
@@ -387,18 +408,22 @@ also supports variable-step BDF2 (second-order, stiffly stable). Key properties:
 - Step-ratio clamp ρ≤2 guarantees zero-stability on non-uniform grids.
 - BE self-start on the first step of every interval.
 - A compiled Numba gear2 grid solver (`_transient_solve_grid_gear2_impl`) handles
-  single-step intervals for PSS/PAC/PNoise; the analytic gear2 monodromy
+  periodic PSS/PAC/PNoise orbits and raw-transient `max_step`,
+  `flat_max_step`, and `max_retry_subdivisions`; the analytic gear2 monodromy
   (augmented 2n-state) feeds the PSS shooting Jacobian.
 - Raw `transient(integration_method="gear2")` keeps the BE default opt-in
   boundary, but when `max_retry_subdivisions` or `max_step` asks for robustness
-  it skips the single-step Numba grid and uses a Python gear2 `solve_chunk`
-  path. That path maintains rolling two-step BDF2 history through max-step
-  pieces and recursive bisection, with full-Jacobian / least-squares recovery at
-  the leaf retry depth.
+  it stays in the Numba gear2 grid. The grid updates rolling two-step BDF2
+  history after every accepted internal substep and retries failed substeps with
+  fixed `2**max_retry_subdivisions` bisection. The Python gear2 `solve_chunk`
+  path remains only as a last-resort fallback if the compiled robust step is
+  rejected.
 - Chopper PSS/PAC/PNoise default to gear2 — PAC baseband errors drop from BE's
   −2.5% (typ/fast) to <1% across all three corners.
-- Raw `transient()` still defaults to BE because the robust gear2 path is Python
-  level and slower than the BE Numba grid on hard switching waveforms.
+- Raw `transient()` still defaults to BE to preserve the established raw
+  transient regression surface and first-order damping behavior. The default BE
+  hard-switched chopper transient hot path is also fully Numba now; normal runs
+  no longer enter a Python tail or SciPy `least_squares`.
 
 ### Front-end stimulus (`ac_drives`)
 
@@ -559,6 +584,15 @@ candidates, simulating the explore layer's per-candidate workload.  The
 default run uses Numba when available; `CIRCUIT_USE_NUMBA=0` is useful for
 pure-Python comparison.
 
+The old UI chopper full-flow bottleneck was the portable HB PAC frequency solve:
+`PSS+PAC(HB)+PNoise` takes about 25.6 s for 61 frequency points
+(PSS≈0.35 s, PAC≈24.7 s, PNoise≈0.55 s) and about 48.9 s for 121 points
+(PSS≈0.44 s, PAC≈47.6 s, PNoise≈0.93 s). With the opt-in time-domain PAC path,
+PAC on the same PSS orbit is about 1.3 s for 61 points and 1.9 s for 121 points.
+It is not the default yet because the slow-corner baseband gain error is still
+about −1.9% against Cadence. A non-chopper AFE `DC+AC+Noise` 121-point run is
+about 1.8 ms when noise reuses the AC result.
+
 ## Calibration Status
 
 The current core was calibrated against Cadence Spectre 24.1 for the AT4000TG AFE use case. The observed agreement in the original project included:
@@ -579,8 +613,9 @@ The current core was calibrated against Cadence Spectre 24.1 for the AT4000TG AF
   `12.591 uVrms`.
 - Native `pmos_chopper_pac` and `pmos_chopper_pnoise` (first-principles,
   no calibration constants) match the D3 `chop_tb_d3` slow-corner Spectre
-  PSS/PAC/PNoise reference at `f_chop=200 Hz`: PAC baseband and 200 Hz gain
-  are within 1%, and PNoise IRN is within 1% on the same dec=10 noise grid.
+  PSS/PAC/PNoise reference at `f_chop=200 Hz`: default-HB PAC baseband and
+  200 Hz gain are within 1%, and PNoise IRN is within 1% on the same dec=10
+  noise grid.
 - Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms
   input-referred noise.
 

@@ -139,7 +139,7 @@ print(f"IRN (0.05–100 Hz): {irn_uv:.2f} µVrms")
 ```python
 from core.transient_solver import transient
 
-# 40 ms simulation, 0.5 mV step at t=0.5 ms
+# 4 ms simulation, 0.5 mV step at t=0.5 ms
 t = np.linspace(0, 4e-3, 400)
 vip = np.where(t >= 0.5e-3, 30.65 + 0.5e-3, 30.65)
 vin = np.where(t >= 0.5e-3, 30.65 - 0.5e-3, 30.65)
@@ -157,8 +157,10 @@ tran_gear2 = transient(spec.sizes, spec.bias, t, vip, vin,
 ```
 Gear2 (variable-step BDF2) reduces PAC baseband error from BE's ~−2.5% to <1%
 across all corners. On stiff circuits (e.g. chopper), `integration_method="gear2"`
-automatically falls back to BE if too many steps fail — the setting is always safe.
-PSS/PAC/PNoise pipelines default to gear2 for accuracy; bare `transient()` defaults to BE.
+stays in the Numba gear2 grid when `max_step` / `max_retry_subdivisions` request
+subdivision/retry; the grid maintains rolling two-step history through accepted
+substeps. PSS/PAC/PNoise pipelines default to gear2 for accuracy; bare
+`transient()` defaults to BE.
 
 ### 3. Chopper Analysis (Three Levels)
 
@@ -216,15 +218,27 @@ print(f"PNoise IRN: {pnoise['irn_uV_band']:.2f} µVrms")
 ```
 
 The PSS→PAC→PNoise pipeline is the local equivalent of Cadence Spectre
-`pss` + `pac` + `pnoise`. PAC uses an analytic-adjoint harmonic-balance kernel by
-default: one adjoint linear solve per frequency on the PSS-orbit conversion
-matrix, with zero extra transient runs. Set `analytic=False` for the original
-finite-difference shooting path (accurate but costs `n_state+2` transient runs
-per frequency). PNoise uses harmonic balance on the PSS orbit — it's a
-first-principles LPTV noise solve with no calibration fudge factors.
+`pss` + `pac` + `pnoise`. PAC has two first-class kernels:
+
+- Default: analytic-adjoint harmonic balance (`method="pss_analytic_adjoint"`).
+  It is the most general path and supports bordered MNA cases.
+- Fast path: time-domain Floquet PAC (`time_domain=True`,
+  `method="pss_time_domain"`). It builds the one-period monodromy once and then
+  solves a small quasi-periodic boundary system per frequency, avoiding the large
+  `(2K+1)n` HB matrix. Unsupported topologies fall back to HB when
+  `analytic=True`. This path remains opt-in: the 2026-06-26 three-corner check
+  against the stored Cadence references gives typical −0.44%, fast −0.27%, but
+  slow −1.89% baseband gain error, so it is not yet the default.
+
+Set `analytic=False` only for the original finite-difference shooting path
+(accurate but costs `n_state+2` transient runs per frequency). PNoise uses
+harmonic balance on the PSS orbit — it's a first-principles LPTV noise solve with
+no calibration fudge factors.
 For the D3 `chop_tb_d3` slow-corner Spectre reference at `f_chop=200 Hz`,
-the native PAC gain and PNoise IRN are within 1% when run with the matching
-PNoise `maxsideband=10` and dec=10 noise grid.
+the default HB PAC gain and PNoise IRN are within 1% when run with the matching
+PNoise `maxsideband=10` and dec=10 noise grid. Keep the time-domain PAC path
+under the same Cadence regression before promoting it to a default for new
+chopper cases.
 `pmos_chopper_pac` / `pmos_chopper_pnoise` are chopper compatibility wrappers;
 generic periodic topologies can call `core.pac_solver.pac_solve` and
 `core.pnoise_solver.pnoise_solve` directly using the orbit returned by
@@ -241,6 +255,9 @@ spec = load_circuit_json("examples/periodic_rc.json")
 results = run_analysis_suite(spec)
 # results["pss"], results["pac"], results["pnoise"] — all ready
 ```
+
+JSON dispatch supports the same opt-in PAC switch:
+`"analyses": {"pac": {"time_domain": true, "td_integration": "gear2"}}`.
 
 ### 4. Design-Space Exploration / Optimization
 
@@ -388,12 +405,21 @@ timings on a modern Mac (Numba enabled):
 | Benchmark | Time |
 |-----------|------|
 | AC 121 points | ~1.5 ms |
-| Noise 121 points | ~1.7 ms |
+| Noise 121 points (standalone) | ~1.7 ms |
+| DC+AC+Noise 121 points (AC reused) | ~1.8 ms |
 | Transient 200 steps | ~5 ms |
 | Ideal chopper (31 harmonics) | ~5 ms |
 | PMOS chopper LPTV | ~22 ms |
-| Chopper transient (8-PMOS, 225 Hz, 8 cycles) | ~0.6 s |
+| Chopper transient (8-PMOS, 225 Hz, 2 cycles, UI sizes) | ~0.15–0.19 s |
+| Chopper PSS+PAC(HB)+PNoise (61 points, UI sizes) | ~25.6 s |
+| Chopper PSS+PAC(HB)+PNoise (121 points, UI sizes) | ~48.9 s |
+| Chopper PAC time-domain only (61 points, same PSS orbit) | ~1.3 s |
+| Chopper PAC time-domain only (121 points, same PSS orbit) | ~1.9 s |
 | Batch sweep (200 candidates, AC+noise) | ~0.5 s |
+
+Those 25.6 s / 48.9 s full-flow numbers are for the portable HB PAC path. On
+rail-driven choppers, `time_domain=True` removes PAC as the dominant bottleneck,
+but it remains an opt-in speed path until the slow-corner gain gap is closed.
 
 ---
 
@@ -423,8 +449,10 @@ Some Newton steps failed. Try: (a) more time points (`np.linspace(0, T, more_ste
 (b) tighter `newton_vtol` (default `1e-8`), or (c) enable
 `fallback_least_squares=True`. For switched circuits, make sure `max_step` is
 smaller than the fastest edge. If using `integration_method="gear2"` on a stiff
-circuit, the solver automatically falls back to BE when `nfail` exceeds the
-threshold — check `gear2_be_fallback_used` in the result.
+circuit with `max_step` / `max_retry_subdivisions`, the hot path stays in the
+Numba gear2 grid. Python fallback is only a last resort if the compiled robust
+step is rejected. Check `numba_grid_solver`, `gear2_python_retry_solver`, and
+`transient_profile.failed_intervals`.
 
 **PSS doesn't converge (`converged=False`).**
 Increase `tstab_periods` (extra stabilization cycles before shooting starts)
@@ -439,6 +467,8 @@ or `n_period_samples` (trade time-domain resolution for speed). Reuse the same
 caches LPTV linearization, HB blocks, and identical-frequency adjoint solves.
 With Numba installed, large HB block assembly, noise folding, and gm/gds
 linearization also use compiled kernels.
+For the current UI chopper case, PNoise is not the full-flow bottleneck: about
+0.55 s for 61 points and 0.93 s for 121 points.
 
 **PSS / periodic transient is slow.**
 For chopper PSS, first ensure `analytic_jacobian=True` (the default), which builds
@@ -455,6 +485,12 @@ Leave `compute_condition` unset for normal runs. PAC condition diagnostics are
 computed only for `profile=True`, `debug=True`, or explicit
 `compute_condition=True`, because the diagnostic runs an SVD of the HB matrix at
 every frequency and does not affect gain/BW/noise.
+For rail-driven choppers, `time_domain=True` (or JSON `"time_domain": true`) uses
+the accelerated time-domain Floquet PAC path, but keep it as a speed/diagnostic
+option for now: the current slow-corner Cadence check is about −1.9% at
+baseband. If you stay on the default HB path, PAC frequency solves are the
+dominant cost: about 24–25 s for 61 points and 47–48 s for 121 points. Further
+HB-only speed work should target factorization reuse or batched linear solves.
 
 ---
 

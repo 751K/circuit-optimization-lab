@@ -195,6 +195,46 @@ def test_dispatch_forwards_integration_method(monkeypatch):
     assert seen.get("method") is None  # not forwarded -> pss_solve default applies
 
 
+def test_dispatch_forwards_pac_algorithm_options(monkeypatch):
+    spec = load_circuit_json("examples/periodic_rc.json")
+    seen = {}
+
+    def fake_pss_solve(*args, **kwargs):
+        return {"converged": True, "period": args[2], "corner": kwargs.get("corner")}
+
+    def fake_pac_solve(*_args, **kwargs):
+        seen.update(kwargs)
+        return {"gains": np.ones(1), "response": np.ones(1, dtype=complex)}
+
+    monkeypatch.setattr(dispatch_mod, "pss_solve", fake_pss_solve)
+    monkeypatch.setattr(dispatch_mod, "pac_solve", fake_pac_solve)
+
+    run_analysis_suite(
+        spec,
+        analyses={
+            "pac": {
+                "freqs": [100.0],
+                "input_drive": {"vin": 1.0},
+                "analytic": False,
+                "max_sideband": 7,
+                "n_period_samples": 96,
+                "time_domain": True,
+                "td_integration": "be",
+                "td_n_period_samples": 128,
+                "pacmag": 2.0,
+            }
+        },
+    )
+
+    assert seen["analytic"] is False
+    assert seen["max_sideband"] == 7
+    assert seen["n_period_samples"] == 96
+    assert seen["time_domain"] is True
+    assert seen["td_integration"] == "be"
+    assert seen["td_n_period_samples"] == 128
+    assert seen["pacmag"] == 2.0
+
+
 def test_dispatch_rejects_mixed_pss_and_pac_corners(monkeypatch):
     spec = load_circuit_json("examples/periodic_rc.json")
 
