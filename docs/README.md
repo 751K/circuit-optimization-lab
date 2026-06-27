@@ -220,25 +220,26 @@ print(f"PNoise IRN: {pnoise['irn_uV_band']:.2f} µVrms")
 The PSS→PAC→PNoise pipeline is the local equivalent of Cadence Spectre
 `pss` + `pac` + `pnoise`. PAC has two first-class kernels:
 
-- Default: analytic-adjoint harmonic balance (`method="pss_analytic_adjoint"`).
-  It is the most general path and supports bordered MNA cases.
-- Fast path: time-domain Floquet PAC (`time_domain=True`,
-  `method="pss_time_domain"`). It builds the one-period monodromy once and then
-  solves a small quasi-periodic boundary system per frequency, avoiding the large
-  `(2K+1)n` HB matrix. Unsupported topologies fall back to HB when
-  `analytic=True`. This path remains opt-in: the 2026-06-26 three-corner check
-  against the stored Cadence references gives typical −0.44%, fast −0.27%, but
-  slow −1.89% baseband gain error, so it is not yet the default.
+- Generic default: analytic-adjoint harmonic balance
+  (`method="pss_analytic_adjoint"`). It is the most general path and supports
+  bordered MNA cases.
+- Chopper default: time-domain Floquet PAC (`method="pss_time_domain"`). It
+  builds the one-period monodromy once and then solves a small quasi-periodic
+  boundary system per frequency, avoiding the large `(2K+1)n` HB matrix. For
+  PMOS_TFT periodic conversion it retains each device's internal `gate1`
+  small-signal state (`R_cap`, `R_cap2`, `Cgs`, `Cgd`) instead of collapsing the
+  device to terminal `{gm,gds,Cgs,Cgd}` at every orbit sample. This fixes the
+  former slow-corner −1.89% chopper PAC error; the D3 slow guard is now within
+  1% of Cadence.
 
 Set `analytic=False` only for the original finite-difference shooting path
 (accurate but costs `n_state+2` transient runs per frequency). PNoise uses
 harmonic balance on the PSS orbit — it's a first-principles LPTV noise solve with
 no calibration fudge factors.
 For the D3 `chop_tb_d3` slow-corner Spectre reference at `f_chop=200 Hz`,
-the default HB PAC gain and PNoise IRN are within 1% when run with the matching
-PNoise `maxsideband=10` and dec=10 noise grid. Keep the time-domain PAC path
-under the same Cadence regression before promoting it to a default for new
-chopper cases.
+the default chopper PAC gain is within 1% at baseband and 200 Hz. PNoise also
+uses the expanded PMOS `gate1` HB conversion matrix on the same PSS orbit, with
+no calibration constants.
 `pmos_chopper_pac` / `pmos_chopper_pnoise` are chopper compatibility wrappers;
 generic periodic topologies can call `core.pac_solver.pac_solve` and
 `core.pnoise_solver.pnoise_solve` directly using the orbit returned by
@@ -256,7 +257,7 @@ results = run_analysis_suite(spec)
 # results["pss"], results["pac"], results["pnoise"] — all ready
 ```
 
-JSON dispatch supports the same opt-in PAC switch:
+JSON dispatch supports the same PAC switch for generic periodic circuits:
 `"analyses": {"pac": {"time_domain": true, "td_integration": "gear2"}}`.
 
 ### 4. Design-Space Exploration / Optimization
@@ -411,15 +412,16 @@ timings on a modern Mac (Numba enabled):
 | Ideal chopper (31 harmonics) | ~5 ms |
 | PMOS chopper LPTV | ~22 ms |
 | Chopper transient (8-PMOS, 225 Hz, 2 cycles, UI sizes) | ~0.15–0.19 s |
-| Chopper PSS+PAC(HB)+PNoise (61 points, UI sizes) | ~25.6 s |
-| Chopper PSS+PAC(HB)+PNoise (121 points, UI sizes) | ~48.9 s |
-| Chopper PAC time-domain only (61 points, same PSS orbit) | ~1.3 s |
-| Chopper PAC time-domain only (121 points, same PSS orbit) | ~1.9 s |
+| Chopper PSS+PAC(HB)+PNoise (61 points, UI sizes, `time_domain=False`) | ~25.6 s |
+| Chopper PSS+PAC(HB)+PNoise (121 points, UI sizes, `time_domain=False`) | ~48.9 s |
+| Chopper PAC time-domain only (61 points, same PSS orbit, gate1 states) | ~1.4 s |
+| Chopper PAC time-domain only (121 points, same PSS orbit, gate1 states) | ~1.9 s |
 | Batch sweep (200 candidates, AC+noise) | ~0.5 s |
 
 Those 25.6 s / 48.9 s full-flow numbers are for the portable HB PAC path. On
-rail-driven choppers, `time_domain=True` removes PAC as the dominant bottleneck,
-but it remains an opt-in speed path until the slow-corner gain gap is closed.
+rail-driven choppers, `pmos_chopper_pac` now defaults to the time-domain path,
+so PAC is no longer the dominant bottleneck. Use `time_domain=False` only when
+you explicitly need the HB comparison path.
 
 ---
 
@@ -485,12 +487,12 @@ Leave `compute_condition` unset for normal runs. PAC condition diagnostics are
 computed only for `profile=True`, `debug=True`, or explicit
 `compute_condition=True`, because the diagnostic runs an SVD of the HB matrix at
 every frequency and does not affect gain/BW/noise.
-For rail-driven choppers, `time_domain=True` (or JSON `"time_domain": true`) uses
-the accelerated time-domain Floquet PAC path, but keep it as a speed/diagnostic
-option for now: the current slow-corner Cadence check is about −1.9% at
-baseband. If you stay on the default HB path, PAC frequency solves are the
-dominant cost: about 24–25 s for 61 points and 47–48 s for 121 points. Further
-HB-only speed work should target factorization reuse or batched linear solves.
+For rail-driven choppers, the wrapper already defaults to the accelerated
+time-domain Floquet PAC path. Generic JSON circuits can opt in with
+`"time_domain": true`. If you force the HB path with `time_domain=false`, PAC
+frequency solves are the dominant cost: about 24–25 s for 61 points and
+47–48 s for 121 points. Further HB-only speed work should target factorization
+reuse or batched linear solves.
 
 ---
 

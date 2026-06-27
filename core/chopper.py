@@ -1329,34 +1329,29 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
                      cache_linearization=True, cache_forcing=True,
                      compute_condition=None, lti_fast_path=True,
                      analytic=True, n_period_samples=384, max_sideband=64,
-                     time_domain=False, td_integration="gear2",
+                     time_domain=True, td_integration="gear2",
                      td_n_period_samples=768,
                      profile=False, debug=False):
     """PSS-assisted small-signal PAC for the PMOS chopper.
 
     Builds the chopper PSS orbit when needed, then delegates to
-    :func:`core.pac_solver.pac_solve`. By default this uses the analytic-adjoint
-    conversion-matrix kernel (O(1) linear solve per frequency, built from the
-    small-signal matrices sampled on the PSS orbit); set ``analytic=False`` for
-    the finite-difference shooting kernel.
+    :func:`core.pac_solver.pac_solve`. By default this uses the time-domain
+    shooting PAC kernel, which keeps the PMOS_TFT internal gate1 small-signal
+    states and avoids HB sideband truncation. Set ``time_domain=False`` to use
+    the analytic-adjoint HB conversion matrix as an explicit comparison path, or
+    ``analytic=False`` for the finite-difference shooting kernel.
 
-    ``max_sideband`` defaults to 64 here (vs. 10 for smooth orbits): the hard
-    switch edges spread the input/output commutation across many sidebands, so
-    the baseband conversion gain only converges to Spectre PAC once many
-    sidebands are kept. Against the Cadence slow-corner design-#3 reference this
-    moves baseband and 200 Hz gain to within 1%.
+    ``max_sideband`` defaults to 64 here (vs. 10 for smooth orbits) for the
+    optional HB path: the hard switch edges spread the input/output commutation
+    across many sidebands, so the baseband conversion gain only converges to
+    Spectre PAC once many sidebands are kept.
 
-    DO NOT lower this default to "speed up" PAC. The per-frequency cost is
+    Do not lower the HB ``max_sideband`` default when using
+    ``time_domain=False`` as a Cadence comparison path. The per-frequency cost is
     ~((2K+1)*n)^3 so a smaller K is tempting, but a 3-corner calibration K-sweep
-    (2026-06-26) shows K=64 is load-bearing: the baseband gain drifts monotonically
-    with K (a flat ~0.3% harmonic tail from the 20 us edges -> 64 is an empirical
-    Cadence-match point, not a convergence plateau), so reducing K moves *away*
-    from Cadence. K=48 already pushes the typical corner to +2.03% (>2% tol) and
-    K=32 fails typical+slow; only the fast corner tolerates K=32. PNoise IRN stays
-    in tol at every K (the gain error cancels in the noise/gain ratio). Full table
-    in calibration/README.md. If you need faster PAC, the loop is already at the
-    LAPACK floor -- the only safe wins are not passing profile=True (avoids a
-    per-frequency SVD) and, for a real speedup, a structural (block-Toeplitz) solve.
+    (2026-06-26) showed K=64 was load-bearing for the old collapsed HB model.
+    The production default no longer pays that cost because it uses the
+    truncation-free time-domain PAC path.
     """
     pss_kwargs = dict(pss_kwargs or {})
     transient_kwargs = dict(transient_kwargs or {})
@@ -1431,10 +1426,9 @@ def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
     if corner is None:
         corner = pss_result.get("corner")
     gds_noise_devices = pss_result.get("switch_names", ())
-    # Input-refer with the chopper's own PAC gain (analytic adjoint, default
-    # max_sideband=64). Otherwise pnoise_solve falls back to pac_solve's generic
-    # max_sideband=10, which under-resolves the hard-switch conversion gain and
-    # inflates the reported IRN.
+    # Input-refer with the chopper's own PAC gain (default time-domain PAC with
+    # PMOS gate1 states). Otherwise pnoise_solve falls back to pac_solve's
+    # generic HB defaults, which are not tuned for hard-switch chopper gain.
     if gains is None and pac_result is None:
         pac_result = pmos_chopper_pac(
             sizes, bias, freqs, f_chop, pss_result=pss_result, nf=nf,

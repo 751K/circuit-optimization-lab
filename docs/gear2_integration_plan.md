@@ -224,6 +224,8 @@ PSS 的 tstab + shooting 会把自启动那一步的小不一致吸收掉。
 
 ## 8. 不在本次范围
 
-- gate1 内部节点的忠实建模（C·dV/dt + 100Ω 串阻）——只有在 gear2 仍不达标时才考虑。
+- gate1 内部节点的忠实建模（C·dV/dt + 100Ω 串阻）——后续 PAC slow-corner
+  误差排查证实这里确实是 LPTV conversion 残差来源；现已在 time-domain PAC
+  和 PNoise HB 中用 PMOS `gate1` 小信号状态扩维修复。
 - veriloga cap 模式（已证伪，保留代码但不作为路径）。
 - PAC/PNoise 的 HB 公式（与积分阶数解耦，不动）。

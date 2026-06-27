@@ -9,7 +9,9 @@ from __future__ import annotations
 import time
 
 import numpy as np
+from scipy import sparse as _sp
 from scipy.linalg import lu_factor, lu_solve
+from scipy.sparse import linalg as _spla
 
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
@@ -32,6 +34,135 @@ def _periodic_average(t, values):
     if period <= 0.0:
         return np.mean(values, axis=0)
     return np.trapezoid(values, t, axis=0) / period
+
+
+_PAC_TD_GROWTH_LIMIT = 1e120
+
+
+def _max_abs_finite(x):
+    if x.size == 0:
+        return 0.0
+    value = float(np.max(np.abs(x)))
+    return value if np.isfinite(value) else np.inf
+
+
+def _gear2_step_sequence(n_steps):
+    return list(range(1, int(n_steps))) + [0]
+
+
+def _build_gear2_chunk_maps(M, *, chunk_steps=16, growth_limit=_PAC_TD_GROWTH_LIMIT):
+    """Condense gear2 one-step maps into short multiple-shooting chunks.
+
+    Directly multiplying all companion matrices can overflow even when the
+    quasi-periodic boundary solve is well behaved.  Short chunks keep each
+    condensed map finite; the cyclic boundary condition is solved as a sparse
+    block system per PAC frequency.
+    """
+    n_steps = int(M.shape[0])
+    sysdim = int(M.shape[1])
+    sequence = _gear2_step_sequence(n_steps)
+    step = max(1, min(int(chunk_steps), max(1, n_steps)))
+    while step >= 1:
+        chunks = [sequence[i:i + step] for i in range(0, len(sequence), step)]
+        A_chunks = []
+        ok = True
+        for chunk in chunks:
+            A = np.eye(sysdim, dtype=complex)
+            for k in chunk:
+                with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                    A = M[k] @ A
+                if (not np.all(np.isfinite(A))) or _max_abs_finite(A) > growth_limit:
+                    ok = False
+                    break
+            if not ok:
+                break
+            A_chunks.append(A)
+        if ok:
+            return chunks, A_chunks, step
+        if step == 1:
+            break
+        step = max(1, step // 2)
+    raise FloatingPointError("gear2 PAC chunk map overflow")
+
+
+def _gear2_chunk_forcing(M, s, chunks, *, growth_limit=_PAC_TD_GROWTH_LIMIT):
+    sysdim = int(M.shape[1])
+    b_chunks = []
+    for chunk in chunks:
+        b = np.zeros(sysdim, dtype=complex)
+        for k in chunk:
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                b = M[k] @ b + s[k]
+            if (not np.all(np.isfinite(b))) or _max_abs_finite(b) > growth_limit:
+                raise FloatingPointError("gear2 PAC chunk forcing overflow")
+        b_chunks.append(b)
+    return b_chunks
+
+
+def _gear2_boundary_template(A_chunks):
+    count = len(A_chunks)
+    if count <= 1:
+        return None
+    sysdim = int(A_chunks[0].shape[0])
+    eye = np.eye(sysdim, dtype=complex)
+    data = []
+    indices = []
+    indptr = [0]
+    corner_pos = -1
+    for c, A in enumerate(A_chunks):
+        if c + 1 < count:
+            indices.extend([c, c + 1])
+            data.extend([-np.asarray(A, complex), eye])
+        else:
+            indices.extend([0, c])
+            corner_pos = len(data)
+            data.extend([eye, -np.asarray(A, complex)])
+        indptr.append(len(indices))
+    return {
+        "data": np.asarray(data, dtype=complex),
+        "indices": np.asarray(indices, dtype=np.int32),
+        "indptr": np.asarray(indptr, dtype=np.int32),
+        "corner_pos": int(corner_pos),
+        "eye": eye,
+        "shape": (count * sysdim, count * sysdim),
+    }
+
+
+def _solve_gear2_chunk_boundary(M, s, gamma, chunks, A_chunks,
+                                boundary_template=None):
+    """Solve ``z(T)=gamma*z(0)`` without forming the full monodromy product."""
+    count = len(chunks)
+    sysdim = int(M.shape[1])
+    b_chunks = _gear2_chunk_forcing(M, s, chunks)
+    rhs = np.concatenate(b_chunks)
+    if count == 1:
+        mat = complex(gamma) * np.eye(sysdim, dtype=complex) - A_chunks[0]
+        sol = np.linalg.solve(mat, rhs)
+    elif boundary_template is not None:
+        data = boundary_template["data"].copy()
+        data[boundary_template["corner_pos"]] = complex(gamma) * boundary_template["eye"]
+        mat = _sp.bsr_matrix(
+            (data, boundary_template["indices"], boundary_template["indptr"]),
+            shape=boundary_template["shape"],
+        ).tocsc()
+        sol = _spla.spsolve(mat, rhs)
+    else:
+        eye = np.eye(sysdim, dtype=complex)
+        rows = []
+        for c, A in enumerate(A_chunks):
+            row = [None] * count
+            row[c] = -A
+            if c + 1 < count:
+                row[c + 1] = eye
+            else:
+                row[0] = complex(gamma) * eye
+            rows.append(row)
+        mat = _sp.bmat(rows, format="csc", dtype=complex)
+        sol = _spla.spsolve(mat, rhs)
+    if not np.all(np.isfinite(sol)):
+        dense_mat = mat.toarray() if hasattr(mat, "toarray") else mat
+        sol = np.linalg.lstsq(dense_mat, rhs, rcond=None)[0]
+    return np.asarray(sol[:sysdim], dtype=complex)
 
 
 def _merge_sizes_and_nf(sizes, nf, pss_result):
@@ -199,6 +330,182 @@ def _stamp_pmos_dynamic_cap_terms(G, d, g, s, dev, Vs, Vd, Vg,
             _stamp_branch_control(G, g, s, ctrl, -dCgs * vdot_gs)
         if vdot_gd != 0.0:
             _stamp_branch_control(G, g, d, ctrl, -dCgd * vdot_gd)
+
+
+def _has_gate1_dynamics(dev):
+    return (
+        hasattr(dev, "R_cap") and hasattr(dev, "R_cap2") and
+        callable(getattr(dev, "_gate1_dc", None)) and
+        float(getattr(dev, "R_cap", 0.0)) > 0.0 and
+        float(getattr(dev, "R_cap2", 0.0)) > 0.0
+    )
+
+
+def _resolve_gate1_instances(all_sizes, all_nf, corner, topo):
+    dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
+    internal_gate_states = any(
+        _has_gate1_dynamics(dev_inst.get(name))
+        for name, *_ in topo.devices
+    )
+    return internal_gate_states, dev_inst
+
+
+def _stamp_pmos_gate1_lti(G, C, RHS_G, RHS_C, d, g, s, g1,
+                          gm, gds, Cgs, Cgd, dev):
+    """Stamp the PMOS_TFT small-signal network without collapsing gate1.
+
+    The channel current still uses the external gate (as in the Verilog-A
+    ``Ich`` expression), but the displacement-current branches are between
+    ``source/drain`` and the internal ``gate1`` node.  Keeping this hidden state
+    lets periodic conversion retain the switch-edge charge memory that a static
+    terminal {gm,gds,Cgs,Cgd} collapse loses.
+    """
+    _stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s, gm, gds, 0.0, 0.0)
+    _stamp_adm(G, RHS_G, g1, g, 1.0 / float(dev.R_cap))
+    leak_g = 1.0 / float(dev.R_cap2)
+    if leak_g != 0.0:
+        _stamp_adm(G, RHS_G, s, g1, leak_g)
+        _stamp_adm(G, RHS_G, d, g1, leak_g)
+    _stamp_adm(C, RHS_C, s, g1, Cgs)
+    _stamp_adm(C, RHS_C, d, g1, Cgd)
+
+
+def _stamp_pmos_gate1_dynamic_cap_terms(
+        G, d, g, s, g1, dev, Vs, Vd, Vg,
+        dVs_dt, dVd_dt, dVg1_dt, *, fd_step=1e-4):
+    """Conductance-like PAC terms for C(V)*ddt(V(source/drain,gate1))."""
+    vdot_sg1 = float(dVs_dt) - float(dVg1_dt)
+    vdot_dg1 = float(dVd_dt) - float(dVg1_dt)
+    if abs(vdot_sg1) < 1e-30 and abs(vdot_dg1) < 1e-30:
+        return
+    try:
+        derivs = _cap_derivatives_fd(dev, Vs, Vd, Vg, step=fd_step)
+    except Exception:
+        return
+    controls = (s, d, g)
+    for ctrl, (dCgs, dCgd) in zip(controls, derivs):
+        if vdot_sg1 != 0.0:
+            _stamp_branch_control(G, s, g1, ctrl, dCgs * vdot_sg1)
+        if vdot_dg1 != 0.0:
+            _stamp_branch_control(G, d, g1, ctrl, dCgd * vdot_dg1)
+
+
+def _assemble_pac_linearization_python(
+        all_sizes, all_nf, corner, topo, tbias, t_uniform,
+        node_wave, input_wave, node_inputs, drive_list, drive_amps, *,
+        charge_caps, internal_gate_states=True, dev_inst=None):
+    """Build time-sampled PAC G/C matrices, optionally retaining PMOS gate1."""
+    N = len(t_uniform)
+    n = topo.n
+    idx = topo.idx
+    rails = topo.rail_values(tbias)
+    if dev_inst is None:
+        dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
+
+    gate1_idx = {}
+    if internal_gate_states:
+        for name, *_ in topo.devices:
+            dev = dev_inst.get(name)
+            if dev is not None and _has_gate1_dynamics(dev):
+                gate1_idx[name] = n + len(gate1_idx)
+    n_state = n + len(gate1_idx)
+
+    ext_idx = {node: n_state + i for i, node in enumerate(drive_list)}
+    n_ext = n_state + len(drive_list)
+
+    period = float(t_uniform[1] - t_uniform[0]) * float(N) if N > 1 else 0.0
+    node_dot = _periodic_wave_derivatives(node_wave, period)
+    input_dot = _periodic_wave_derivatives(input_wave, period)
+
+    def term_value(node, m):
+        if node in idx:
+            return node_wave[node][m]
+        if node in node_inputs:
+            return input_wave[node_inputs[node]][m]
+        return rails[node]
+
+    def term_derivative(node, m):
+        if node in idx:
+            return node_dot[node][m]
+        if node in node_inputs:
+            return input_dot[node_inputs[node]][m]
+        return 0.0
+
+    def term(node):
+        if node in idx:
+            return ("n", idx[node])
+        if node in ext_idx:
+            return ("n", ext_idx[node])
+        return ("v", 0.0)
+
+    G_const = np.zeros((n_ext, n_ext))
+    C_const = np.zeros((n_ext, n_ext))
+    rg = np.zeros(n_ext)
+    rc = np.zeros(n_ext)
+    for a, b, cap in topo.cap_list():
+        _stamp_adm(C_const, rc, term(a), term(b), cap)
+    for _, a, b, R in topo.resistors:
+        _stamp_adm(G_const, rg, term(a), term(b), 1.0 / R)
+    for k in range(n):
+        G_const[k, k] += 1e-12
+
+    Gt_full = np.zeros((N, n_ext, n_ext))
+    Ct_full = np.zeros((N, n_ext, n_ext))
+    gate1_dc_dot = {}
+    if gate1_idx and not charge_caps:
+        for name, d, g, s in topo.devices:
+            if name not in gate1_idx:
+                continue
+            dev = dev_inst[name]
+            vals = np.empty(N, dtype=float)
+            for m in range(N):
+                vals[m] = dev._gate1_dc(
+                    term_value(s, m), term_value(d, m), term_value(g, m))
+            gate1_dc_dot[name] = _periodic_wave_derivatives(
+                {name: vals}, period)[name]
+
+    for m in range(N):
+        Gt_full[m] += G_const
+        Ct_full[m] += C_const
+        for name, d, g, s in topo.devices:
+            Vs = term_value(s, m)
+            Vd = term_value(d, m)
+            Vg = term_value(g, m)
+            p = get_ss_params(
+                all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
+                corner=_dev_corner(corner, name),
+                nf=_dev_nf(all_nf, name), dev_inst=dev_inst[name])
+            if name in gate1_idx:
+                g1 = ("n", gate1_idx[name])
+                _stamp_pmos_gate1_lti(
+                    Gt_full[m], Ct_full[m], rg, rc, term(d), term(g), term(s), g1,
+                    p["gm"], p["gds"], p["Cgs"], p["Cgd"], dev_inst[name])
+                if not charge_caps:
+                    _stamp_pmos_gate1_dynamic_cap_terms(
+                        Gt_full[m], term(d), term(g), term(s), g1, dev_inst[name],
+                        Vs, Vd, Vg,
+                        term_derivative(s, m), term_derivative(d, m),
+                        gate1_dc_dot[name][m])
+            else:
+                _stamp_mos_lti(
+                    Gt_full[m], Ct_full[m], rg, rc, term(d), term(g), term(s),
+                    p["gm"], p["gds"], p["Cgs"], p["Cgd"])
+                if not charge_caps:
+                    _stamp_pmos_dynamic_cap_terms(
+                        Gt_full[m], term(d), term(g), term(s), dev_inst[name],
+                        Vs, Vd, Vg,
+                        term_derivative(s, m), term_derivative(d, m),
+                        term_derivative(g, m))
+
+    Gt = Gt_full[:, :n_state, :n_state]
+    Ct = Ct_full[:, :n_state, :n_state]
+    if len(drive_list):
+        gdrive = Gt_full[:, :n_state, n_state:] @ np.asarray(drive_amps, complex)
+        cdrive = Ct_full[:, :n_state, n_state:] @ np.asarray(drive_amps, complex)
+    else:
+        gdrive = np.zeros((N, n_state), dtype=complex)
+        cdrive = np.zeros((N, n_state), dtype=complex)
+    return Gt, Ct, gdrive, cdrive, len(gate1_idx)
 
 
 def _pac_hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
@@ -541,7 +848,6 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     # keep the period sampling above the Nyquist limit for the bands we read.
     N = max(int(n_period_samples), 4 * K + 2)
     nb = 2 * K + 1
-    rails = topo.rail_values(tbias)
     node_inputs = dict(pss_result.get("node_inputs", {}) or {})
 
     # driven input NODES (rails) carrying the small-signal drive
@@ -571,8 +877,6 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     if not drive_nodes and not drive_branches:
         return None
     drive_list = list(drive_nodes)
-    ext_idx = {node: n + i for i, node in enumerate(drive_list)}
-    n_ext = n + len(drive_list)
     drive_amps = np.array([drive_nodes[node] for node in drive_list], dtype=complex)
 
     t_uniform = np.linspace(0.0, period, N, endpoint=False)
@@ -585,37 +889,17 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         key: np.interp(t_uniform, t_orbit, np.asarray(val, float), period=period)
         for key, val in pss_result.get("inputs", {}).items()
     }
-    node_dot = _periodic_wave_derivatives(node_wave, period)
-    input_dot = _periodic_wave_derivatives(input_wave, period)
-
-    def term_value(node, m):
-        if node in idx:
-            return node_wave[node][m]
-        if node in node_inputs:
-            return input_wave[node_inputs[node]][m]
-        return rails[node]
-
-    def term_derivative(node, m):
-        if node in idx:
-            return node_dot[node][m]
-        if node in node_inputs:
-            return input_dot[node_inputs[node]][m]
-        return 0.0
-
-    def term(node):
-        if node in idx:
-            return ("n", idx[node])
-        if node in ext_idx:
-            return ("n", ext_idx[node])
-        return ("v", 0.0)
 
     charge_caps = _charge_linearized_caps(pss_result)
     cache_store = pss_result.setdefault("_pac_analytic_cache", {}) if cache else {}
+    internal_gate_states, lin_dev_inst = _resolve_gate1_instances(
+        all_sizes, all_nf, corner, topo)
     lin_key = (
-        "pac_analytic_lin_v4", tuple(topo.solved), tuple(topo.devices),
+        "pac_analytic_lin_gate1_v1", tuple(topo.solved), tuple(topo.devices),
         tuple(topo.resistors), tuple(topo.cap_list()), float(period), int(N),
         _freeze_sizes(all_sizes), _freeze_nf(all_nf), _freeze_kwargs(corner or {}),
         "charge_caps" if charge_caps else "veriloga_caps",
+        bool(internal_gate_states),
         tuple(sorted(drive_list)),
         _freeze_complex_map(dict(zip(drive_list, drive_amps))),
     )
@@ -625,62 +909,53 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     if lin_cache_hit:
         lin = cache_store[lin_key]
         Gf, Cf, Ginf, Cinf = lin["Gf"], lin["Cf"], lin["Ginf"], lin["Cinf"]
+        n_state = int(lin.get("n_state", Gf.shape[1]))
+        n_gate1 = int(lin.get("n_gate1", max(0, n_state - n)))
         lin_numba_used = bool(lin.get("numba_used", False))
     else:
-        fast_lin = _try_numba_pac_linearization(
-            all_sizes, all_nf, corner, topo, tbias, t_uniform,
-            node_wave, input_wave, node_inputs, drive_list, drive_amps,
-            charge_caps=charge_caps,
-        )
+        fast_lin = None
+        if not internal_gate_states:
+            fast_lin = _try_numba_pac_linearization(
+                all_sizes, all_nf, corner, topo, tbias, t_uniform,
+                node_wave, input_wave, node_inputs, drive_list, drive_amps,
+                charge_caps=charge_caps,
+            )
         if fast_lin is not None:
             Gf, Cf, Ginf, Cinf = fast_lin
+            n_state = n
+            n_gate1 = 0
             lin_numba_used = True
         else:
-            dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
-            G_const = np.zeros((n_ext, n_ext)); C_const = np.zeros((n_ext, n_ext))
-            rg = np.zeros(n_ext); rc = np.zeros(n_ext)
-            for a, b, cap in topo.cap_list():
-                _stamp_adm(C_const, rc, term(a), term(b), cap)
-            for _, a, b, R in topo.resistors:
-                _stamp_adm(G_const, rg, term(a), term(b), 1.0 / R)
-            for k in range(n):
-                G_const[k, k] += 1e-12
-            Gt = np.zeros((N, n_ext, n_ext)); Ct = np.zeros((N, n_ext, n_ext))
-            for m in range(N):
-                Gt[m] += G_const; Ct[m] += C_const
-                for name, d, g, s in topo.devices:
-                    Vs = term_value(s, m); Vd = term_value(d, m); Vg = term_value(g, m)
-                    p = get_ss_params(all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
-                                      corner=_dev_corner(corner, name),
-                                      nf=_dev_nf(all_nf, name), dev_inst=dev_inst[name])
-                    _stamp_mos_lti(Gt[m], Ct[m], rg, rc, term(d), term(g), term(s),
-                                   p["gm"], p["gds"], p["Cgs"], p["Cgd"])
-                    if not charge_caps:
-                        _stamp_pmos_dynamic_cap_terms(
-                            Gt[m], term(d), term(g), term(s), dev_inst[name],
-                            Vs, Vd, Vg,
-                            term_derivative(s, m), term_derivative(d, m),
-                            term_derivative(g, m))
-            Gf = np.fft.fft(Gt[:, :n, :n], axis=0) / N
-            Cf = np.fft.fft(Ct[:, :n, :n], axis=0) / N
-            Ginf = np.fft.fft(Gt[:, :n, n:] @ drive_amps, axis=0) / N      # (N, n)
-            Cinf = np.fft.fft(Ct[:, :n, n:] @ drive_amps, axis=0) / N
+            Gt, Ct, gdrive, cdrive, n_gate1 = _assemble_pac_linearization_python(
+                all_sizes, all_nf, corner, topo, tbias, t_uniform,
+                node_wave, input_wave, node_inputs, drive_list, drive_amps,
+                charge_caps=charge_caps,
+                internal_gate_states=internal_gate_states,
+                dev_inst=lin_dev_inst,
+            )
+            n_state = Gt.shape[1]
+            Gf = np.fft.fft(Gt, axis=0) / N
+            Cf = np.fft.fft(Ct, axis=0) / N
+            Ginf = np.fft.fft(gdrive, axis=0) / N
+            Cinf = np.fft.fft(cdrive, axis=0) / N
         if cache:
             cache_store[lin_key] = {
                 "Gf": Gf,
                 "Cf": Cf,
                 "Ginf": Ginf,
                 "Cinf": Cinf,
+                "n_state": int(n_state),
+                "n_gate1": int(n_gate1),
                 "numba_used": bool(lin_numba_used),
             }
     linearization_time_s = time.perf_counter() - t_linear0
 
     t_hb0 = time.perf_counter()
     Y_base, C_block, hb_numba_used = _pac_hb_blocks(
-        Gf, Cf, K, N, n, fundamental, charge_caps=charge_caps)
+        Gf, Cf, K, N, n_state, fundamental, charge_caps=charge_caps)
     hb_assembly_time_s = time.perf_counter() - t_hb0
-    e = np.zeros(nb * n, dtype=complex)
-    base0 = K * n
+    e = np.zeros(nb * n_state, dtype=complex)
+    base0 = K * n_state
     for node, w in topo.output_weights().items():
         e[base0 + idx[node]] = w
 
@@ -693,16 +968,20 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     if nbr:
         all_branch_sources = list(topo.vsources) + list(topo.vcvs) + list(topo.ccvs)
         Binc = _branch_incidence(all_branch_sources, idx, n)
-        nt = nb * (n + nbr)
+        if n_state != n:
+            Bpad = np.zeros((n_state, nbr))
+            Bpad[:n, :] = Binc
+            Binc = Bpad
+        nt = nb * (n_state + nbr)
         Ya = np.zeros((nt, nt), dtype=complex)
         Ca = np.zeros((nt, nt), dtype=complex)
-        Ya[:nb * n, :nb * n] = Y_base
-        Ca[:nb * n, :nb * n] = C_block
-        boff = nb * n
+        Ya[:nb * n_state, :nb * n_state] = Y_base
+        Ca[:nb * n_state, :nb * n_state] = C_block
+        boff = nb * n_state
         for h in range(nb):
-            r0, c0 = h * n, boff + h * nbr
-            Ya[r0:r0 + n, c0:c0 + nbr] = Binc            # KCL: node <- branch current
-            Ya[c0:c0 + nbr, r0:r0 + n] = Binc.T          # constraint: V_p - V_q = 0
+            r0, c0 = h * n_state, boff + h * nbr
+            Ya[r0:r0 + n_state, c0:c0 + nbr] = Binc      # KCL: node <- branch current
+            Ya[c0:c0 + nbr, r0:r0 + n_state] = Binc.T    # constraint: V_p - V_q = 0
         Y_base, C_block = Ya, Ca
         e = np.concatenate([e, np.zeros(nb * nbr, dtype=complex)])
 
@@ -711,15 +990,15 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     # ``om_offset`` carries the per-block kr*f0 term used by the charge-cap form;
     # for the veriloga form the input sees only the baseband 2*pi*f (offset 0).
     kr_arr = np.arange(-K, K + 1)
-    Ginf_stacked = Ginf[kr_arr % N].reshape(nb * n)
-    Cinf_stacked = Cinf[kr_arr % N].reshape(nb * n)
-    om_offset = np.repeat(kr_arr * fundamental, n) if charge_caps else 0.0
+    Ginf_stacked = Ginf[kr_arr % N].reshape(nb * n_state)
+    Cinf_stacked = Cinf[kr_arr % N].reshape(nb * n_state)
+    om_offset = np.repeat(kr_arr * fundamental, n_state) if charge_caps else 0.0
     # ``b`` is rebuilt per frequency only in its node block; the branch rows are
     # frequency-independent (AC short -> 0, plus any driven true-MNA vsource
     # forcing), so set them once and reuse the buffer.
     b = np.zeros(e.shape[0], dtype=complex)
     for br_idx, amp in drive_branches:
-        b[nb * n + K * nbr + br_idx] = amp
+        b[nb * n_state + K * nbr + br_idx] = amp
     # Reuse one conversion-matrix buffer instead of allocating Y_base + s*C_block
     # (a full (2K+1)n square complex matrix) every frequency.
     Ybuf = np.empty_like(Y_base)
@@ -740,7 +1019,7 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             adj = np.linalg.solve(Ybuf.T, e)
         except np.linalg.LinAlgError:
             adj = np.linalg.lstsq(Ybuf.T, e, rcond=None)[0]
-        b[:nb * n] = -(Ginf_stacked + (2j * np.pi * (f + om_offset)) * Cinf_stacked)
+        b[:nb * n_state] = -(Ginf_stacked + (2j * np.pi * (f + om_offset)) * Cinf_stacked)
         response[fi] = adj @ b
 
     gains = np.abs(response)
@@ -763,7 +1042,9 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         "pac_input_cache_hits": 0,
         "pac_cache_enabled": bool(cache),
         "pac_condition_computed": bool(compute_condition),
-        "pac_hb_size": int(nb * n),
+        "pac_hb_size": int(nb * n_state),
+        "pac_state_size": int(n_state),
+        "pac_internal_gate1_states": int(n_gate1),
         "pac_numba_linearization_used": bool(lin_numba_used),
         "pac_numba_hb_used": bool(hb_numba_used),
         "pac_linearization_time_s": float(linearization_time_s),
@@ -837,42 +1118,65 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
 
     charge_caps = _charge_linearized_caps(pss_result)
     cache_store = pss_result.setdefault("_pac_td_cache", {}) if cache else {}
+    internal_gate_states, lin_dev_inst = _resolve_gate1_instances(
+        all_sizes, all_nf, corner, topo)
     lin_key = (
-        "pac_td_lin_v1", tuple(topo.solved), tuple(topo.devices),
+        "pac_td_lin_gate1_v1", tuple(topo.solved), tuple(topo.devices),
         tuple(topo.resistors), tuple(topo.cap_list()), float(period), int(N),
         _freeze_sizes(all_sizes), _freeze_nf(all_nf), _freeze_kwargs(corner or {}),
         "charge_caps" if charge_caps else "veriloga_caps",
+        bool(internal_gate_states),
         tuple(sorted(drive_list)),
         _freeze_complex_map(dict(zip(drive_list, drive_amps))))
     if cache and lin_key in cache_store:
-        Gt, Ct, Gin, Cin = cache_store[lin_key]
+        lin = cache_store[lin_key]
+        Gt, Ct, Gin, Cin = lin["Gt"], lin["Ct"], lin["Gin"], lin["Cin"]
+        n_gate1 = int(lin.get("n_gate1", max(0, Gt.shape[1] - n)))
     else:
-        fast_lin = _try_numba_pac_linearization(
-            all_sizes, all_nf, corner, topo, tbias, t_uniform,
-            node_wave, input_wave, node_inputs, drive_list, drive_amps,
-            charge_caps=charge_caps)
+        fast_lin = None
+        if not internal_gate_states:
+            fast_lin = _try_numba_pac_linearization(
+                all_sizes, all_nf, corner, topo, tbias, t_uniform,
+                node_wave, input_wave, node_inputs, drive_list, drive_amps,
+                charge_caps=charge_caps)
         if fast_lin is None:
-            return None     # TD needs the numba linearization; HB handles the rest
-        Gf, Cf, Ginf, Cinf = fast_lin
-        # The HB FFTs these harmonics; we keep the time samples (uniform grid).
-        Gt = np.fft.ifft(Gf * N, axis=0)
-        Ct = np.fft.ifft(Cf * N, axis=0)
-        Gin = np.fft.ifft(Ginf * N, axis=0)
-        Cin = np.fft.ifft(Cinf * N, axis=0)
+            Gt, Ct, Gin, Cin, n_gate1 = _assemble_pac_linearization_python(
+                all_sizes, all_nf, corner, topo, tbias, t_uniform,
+                node_wave, input_wave, node_inputs, drive_list, drive_amps,
+                charge_caps=charge_caps,
+                internal_gate_states=internal_gate_states,
+                dev_inst=lin_dev_inst)
+        else:
+            Gf, Cf, Ginf, Cinf = fast_lin
+            # The HB FFTs these harmonics; we keep the time samples (uniform grid).
+            Gt = np.fft.ifft(Gf * N, axis=0)
+            Ct = np.fft.ifft(Cf * N, axis=0)
+            Gin = np.fft.ifft(Ginf * N, axis=0)
+            Cin = np.fft.ifft(Cinf * N, axis=0)
+            n_gate1 = 0
         if cache:
-            cache_store[lin_key] = (Gt, Ct, Gin, Cin)
+            cache_store[lin_key] = {
+                "Gt": Gt, "Ct": Ct, "Gin": Gin, "Cin": Cin,
+                "n_gate1": int(n_gate1),
+            }
 
-    w = np.zeros(n, dtype=complex)
+    n_state = Gt.shape[1]
+    w = np.zeros(n_state, dtype=complex)
     for node, weight in topo.output_weights().items():
         if node in idx:
             w[idx[node]] = weight
     h = period / N
     tm = np.arange(N) * h
-    I_n = np.eye(n, dtype=complex)
+    I_n = np.eye(n_state, dtype=complex)
 
     # Frequency-INDEPENDENT one-period propagators + monodromy (built once).
     t_setup0 = time.perf_counter()
     Cin1 = np.roll(Cin, 1, axis=0)
+    td_boundary_mode = "monodromy"
+    td_chunk_steps = 0
+    gear2_chunks = None
+    gear2_A_chunks = None
+    gear2_boundary_template = None
     if integration == "be":
         A = Ct / h + Gt
         Cprev = np.roll(Ct, 1, axis=0)
@@ -880,28 +1184,41 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         P = np.array([lu_solve(luA[m], Cprev[m] / h) for m in range(N)])
         Psi = I_n.copy()
         for m in range(1, N + 1):
-            Psi = P[m % N] @ Psi
-        sysdim = n
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                Psi = P[m % N] @ Psi
+            if (not np.all(np.isfinite(Psi))) or _max_abs_finite(Psi) > _PAC_TD_GROWTH_LIMIT:
+                return None
+        sysdim = n_state
     else:  # gear2 / BDF2 on the uniform grid: (a0,a1,a2) = (3/2,-2,1/2)
         a0, a1, a2 = 1.5, -2.0, 0.5
         A = a0 * Ct / h + Gt
         C1 = np.roll(Ct, 1, axis=0); C2 = np.roll(Ct, 2, axis=0)
         Cin2 = np.roll(Cin, 2, axis=0)
         luA = [lu_factor(A[m]) for m in range(N)]
-        Zn = np.zeros((n, n), dtype=complex)
-        M = np.empty((N, 2 * n, 2 * n), dtype=complex)
+        Zn = np.zeros((n_state, n_state), dtype=complex)
+        M = np.empty((N, 2 * n_state, 2 * n_state), dtype=complex)
         for m in range(N):
             B1 = lu_solve(luA[m], a1 * C1[m] / h)
             B2 = lu_solve(luA[m], a2 * C2[m] / h)
             M[m] = np.block([[-B1, -B2], [I_n, Zn]])
-        Psi = np.eye(2 * n, dtype=complex)
+        Psi = np.eye(2 * n_state, dtype=complex)
         for m in range(1, N + 1):
-            Psi = M[m % N] @ Psi
-        sysdim = 2 * n
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                Psi = M[m % N] @ Psi
+            if (not np.all(np.isfinite(Psi))) or _max_abs_finite(Psi) > _PAC_TD_GROWTH_LIMIT:
+                td_boundary_mode = "multiple_shooting"
+                Psi = None
+                break
+        if td_boundary_mode == "multiple_shooting":
+            gear2_chunks, gear2_A_chunks, td_chunk_steps = _build_gear2_chunk_maps(M)
+            gear2_boundary_template = _gear2_boundary_template(gear2_A_chunks)
+        sysdim = 2 * n_state
     setup_time = time.perf_counter() - t_setup0
     Imat = np.eye(sysdim, dtype=complex)
 
     response = np.empty(len(freqs), dtype=complex)
+    boundary_solve_time = 0.0
+    replay_time = 0.0
     for fi, f in enumerate(freqs):
         wf = 2.0 * np.pi * float(f)
         ph = np.exp(1j * wf * tm)
@@ -909,27 +1226,64 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             php = np.exp(1j * wf * (tm - h))
             fm = -((Cin * ph[:, None] - Cin1 * php[:, None]) / h + Gin * ph[:, None])
             r = np.array([lu_solve(luA[m], fm[m]) for m in range(N)])
-            g = np.zeros(n, dtype=complex)
+            g = np.zeros(n_state, dtype=complex)
             for m in range(1, N + 1):
                 g = P[m % N] @ g + r[m % N]
             x0 = np.linalg.solve(np.exp(1j * wf * period) * Imat - Psi, g)
-            x = np.empty((N, n), dtype=complex); x[0] = x0
+            x = np.empty((N, n_state), dtype=complex); x[0] = x0
             for m in range(1, N):
                 x[m] = P[m] @ x[m - 1] + r[m]
         else:
             p1 = np.exp(1j * wf * (tm - h)); p2 = np.exp(1j * wf * (tm - 2 * h))
             fm = -((a0 * Cin * ph[:, None] + a1 * Cin1 * p1[:, None]
                     + a2 * Cin2 * p2[:, None]) / h + Gin * ph[:, None])
-            s = np.zeros((N, 2 * n), dtype=complex)
+            s = np.zeros((N, 2 * n_state), dtype=complex)
             for m in range(N):
-                s[m, :n] = lu_solve(luA[m], fm[m])
-            g = np.zeros(2 * n, dtype=complex)
-            for m in range(1, N + 1):
-                g = M[m % N] @ g + s[m % N]
-            z0 = np.linalg.solve(np.exp(1j * wf * period) * Imat - Psi, g)
-            x = np.empty((N, n), dtype=complex); zprev = z0; x[0] = z0[:n]
-            for m in range(1, N):
-                zi = M[m] @ zprev + s[m]; x[m] = zi[:n]; zprev = zi
+                s[m, :n_state] = lu_solve(luA[m], fm[m])
+            gamma = np.exp(1j * wf * period)
+            direct_ok = td_boundary_mode == "monodromy"
+            if direct_ok:
+                g = np.zeros(2 * n_state, dtype=complex)
+                for m in range(1, N + 1):
+                    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                        g = M[m % N] @ g + s[m % N]
+                    if (not np.all(np.isfinite(g))) or _max_abs_finite(g) > _PAC_TD_GROWTH_LIMIT:
+                        direct_ok = False
+                        break
+            if direct_ok:
+                z0 = np.linalg.solve(gamma * Imat - Psi, g)
+                x = np.empty((N, n_state), dtype=complex)
+                zprev = z0
+                x[0] = z0[:n_state]
+                for m in range(1, N):
+                    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                        zi = M[m] @ zprev + s[m]
+                    if (not np.all(np.isfinite(zi))) or _max_abs_finite(zi) > _PAC_TD_GROWTH_LIMIT:
+                        direct_ok = False
+                        break
+                    x[m] = zi[:n_state]
+                    zprev = zi
+            if not direct_ok:
+                if gear2_chunks is None or gear2_A_chunks is None:
+                    gear2_chunks, gear2_A_chunks, td_chunk_steps = _build_gear2_chunk_maps(M)
+                    gear2_boundary_template = _gear2_boundary_template(gear2_A_chunks)
+                    td_boundary_mode = "multiple_shooting"
+                tb0 = time.perf_counter()
+                z0 = _solve_gear2_chunk_boundary(
+                    M, s, gamma, gear2_chunks, gear2_A_chunks,
+                    boundary_template=gear2_boundary_template)
+                boundary_solve_time += time.perf_counter() - tb0
+                x = np.empty((N, n_state), dtype=complex)
+                zprev = z0
+                x[0] = z0[:n_state]
+                tr0 = time.perf_counter()
+                for m in range(1, N):
+                    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                        zprev = M[m] @ zprev + s[m]
+                    if not np.all(np.isfinite(zprev)):
+                        raise FloatingPointError("gear2 PAC trajectory overflow")
+                    x[m] = zprev[:n_state]
+                replay_time += time.perf_counter() - tr0
         X0 = (np.exp(-1j * wf * tm)[:, None] * x).mean(axis=0)
         response[fi] = w @ X0
 
@@ -942,7 +1296,13 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         "pac_residual": np.zeros(len(freqs)), "pac_condition": np.ones(len(freqs)),
         "pac_period_runs": 0, "pac_cache_enabled": bool(cache),
         "pac_td_setup_time_s": float(setup_time),
+        "pac_td_boundary_solve_time_s": float(boundary_solve_time),
+        "pac_td_replay_time_s": float(replay_time),
         "pac_td_integration": str(integration), "pac_td_samples": int(N),
+        "pac_td_boundary_mode": td_boundary_mode,
+        "pac_td_chunk_steps": int(td_chunk_steps),
+        "pac_state_size": int(n_state),
+        "pac_internal_gate1_states": int(n_gate1),
         "nfail": np.zeros(len(freqs), dtype=int),
         "method": "pss_time_domain",
     }
@@ -1027,7 +1387,7 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
             fast["pacmag"] = float(pacmag)
             return fast
 
-    if time_domain:
+    if time_domain and analytic:
         td = _time_domain_pac(
             all_sizes, tbias, freqs, pss_result=pss_result,
             input_drive=input_drive, all_nf=all_nf, corner=corner,

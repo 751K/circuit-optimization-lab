@@ -21,13 +21,12 @@ except Exception:  # pragma: no cover - scipy is a project dependency
     _spla = None
 
 try:
-    from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
+    from .ac_mna import _branch_incidence
     from .ac_solver import _dev_corner, _dev_nf, build_devices, get_ss_params
     from .noise_solver import band_rms, noise_analysis
     from .numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
     from .pac_solver import (
-        _periodic_wave_derivatives,
-        _stamp_pmos_dynamic_cap_terms,
+        _assemble_pac_linearization_python,
         _freeze_kwargs,
         _freeze_nf,
         _freeze_sizes,
@@ -35,13 +34,12 @@ try:
         pac_solve,
     )
 except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
+    from ac_mna import _branch_incidence
     from ac_solver import _dev_corner, _dev_nf, build_devices, get_ss_params
     from noise_solver import band_rms, noise_analysis
     from numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
     from pac_solver import (
-        _periodic_wave_derivatives,
-        _stamp_pmos_dynamic_cap_terms,
+        _assemble_pac_linearization_python,
         _freeze_kwargs,
         _freeze_nf,
         _freeze_sizes,
@@ -499,8 +497,6 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         key: _periodic_interp(t_orbit, val, t_uniform, period)
         for key, val in pss_result.get("inputs", {}).items()
     }
-    node_dot = _periodic_wave_derivatives(node_wave, period)
-    input_dot = _periodic_wave_derivatives(input_wave, period)
     devices = list(topo.devices)
     gated_noise = set(gds_noise_devices or ())
     # Spectre PNoise linearizes the Verilog-A small-signal model expressions
@@ -520,18 +516,9 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
             return input_wave[node_inputs[node]][m]
         return rails[node]
 
-    def term_derivative(node, m):
-        if node in idx:
-            return node_dot[node][m]
-        if node in node_inputs:
-            return input_dot[node_inputs[node]][m]
-        return 0.0
-
-    def term(node):
-        return ("n", idx[node]) if node in idx else ("v", 0.0)
-
+    internal_gate_states = True
     lin_key = (
-        "pnoise_lin_v3",
+        "pnoise_lin_gate1_v1",
         tuple(topo.solved),
         tuple(topo.devices),
         tuple(topo.resistors),
@@ -542,6 +529,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         _freeze_nf(all_nf),
         _freeze_kwargs(corner or {}),
         "charge_caps" if charge_caps else "veriloga_caps",
+        bool(internal_gate_states),
         tuple(sorted(gated_noise)),
         bool(switch_noise_conductance_gated),
     )
@@ -553,28 +541,21 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         Gf = lin["Gf"]
         Cf = lin["Cf"]
         all_noise_sources = lin["noise_sources"]
+        n_state = int(lin.get("n_state", Gf.shape[1]))
+        n_gate1 = int(lin.get("n_gate1", max(0, n_state - n)))
     else:
         dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
-        G_const = np.zeros((n, n))
-        C_const = np.zeros((n, n))
-        rhs_g = np.zeros(n)
-        rhs_c = np.zeros(n)
-        for a, b, cap in topo.cap_list():
-            _stamp_adm(C_const, rhs_c, term(a), term(b), cap)
-        for _, a, b, R in topo.resistors:
-            _stamp_adm(G_const, rhs_g, term(a), term(b), 1.0 / R)
-        for k in range(n):
-            G_const[k, k] += 1e-12
-
-        Gt = np.zeros((N, n, n))
-        Ct = np.zeros((N, n, n))
+        Gt, Ct, _gdrive, _cdrive, n_gate1 = _assemble_pac_linearization_python(
+            all_sizes, all_nf, corner, topo, tbias, t_uniform,
+            node_wave, input_wave, node_inputs, (), np.empty(0, dtype=complex),
+            charge_caps=charge_caps,
+            internal_gate_states=internal_gate_states,
+            dev_inst=dev_inst,
+        )
+        n_state = Gt.shape[1]
         Sth = np.zeros((len(devices), N))
         Sfl = np.zeros((len(devices), N))
         for m in range(N):
-            Gm = Gt[m]
-            Cm = Ct[m]
-            Gm += G_const
-            Cm += C_const
             for j, (name, d, g, s) in enumerate(devices):
                 Vs = term_value(s, m)
                 Vd = term_value(d, m)
@@ -584,16 +565,6 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                     corner=_dev_corner(corner, name), nf=_dev_nf(all_nf, name),
                     dev_inst=dev_inst[name],
                 )
-                _stamp_mos_lti(
-                    Gm, Cm, rhs_g, rhs_c, term(d), term(g), term(s),
-                    p["gm"], p["gds"], p["Cgs"], p["Cgd"],
-                )
-                if not charge_caps:
-                    _stamp_pmos_dynamic_cap_terms(
-                        Gm, term(d), term(g), term(s), dev_inst[name],
-                        Vs, Vd, Vg,
-                        term_derivative(s, m), term_derivative(d, m),
-                        term_derivative(g, m))
                 if name in gated_noise:
                     S_th = 4.0 * _KB * _TEMP * abs(p["gds"])
                     S_fl1 = 0.0
@@ -633,6 +604,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 "Gf": Gf,
                 "Cf": Cf,
                 "noise_sources": all_noise_sources,
+                "n_state": int(n_state),
+                "n_gate1": int(n_gate1),
             }
     linearization_time_s = time.perf_counter() - t_linear0
 
@@ -653,9 +626,9 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
               float(hb_sparse_drop_tol),
               "charge_caps" if charge_caps else "veriloga_caps")
     hb_cache_hit = bool(cache_linearization and hb_key in cache)
-    hb_size = int(nb * n)
+    hb_size = int(nb * n_state)
     sparse_density_estimate = _estimate_hb_sparse_density(
-        Gf, Cf, K, N, n, drop_tol=hb_sparse_drop_tol)
+        Gf, Cf, K, N, n_state, drop_tol=hb_sparse_drop_tol)
     prefer_sparse = (
         hb_solver_requested in {"sparse", "iterative"} or
         (hb_solver_requested == "auto" and hb_size >= hb_sparse_min_size and
@@ -683,7 +656,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 Y_sparse, C_sparse = _to_sparse_hb(Y_base, C_block)
             else:
                 Y_sparse, C_sparse = _hb_blocks_sparse(
-                    Gf, Cf, K, N, n, fundamental,
+                    Gf, Cf, K, N, n_state, fundamental,
                     drop_tol=hb_sparse_drop_tol, charge_caps=charge_caps)
             hb["Y_base_sparse"] = Y_sparse
             hb["C_block_sparse"] = C_sparse
@@ -698,7 +671,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     need_dense = solver_used == "dense" or Y_sparse is None or C_sparse is None
     if need_dense and (Y_base is None or C_block is None):
         Y_base, C_block, hb_numba_used = _hb_blocks(
-            Gf, Cf, K, N, n, fundamental, charge_caps=charge_caps)
+            Gf, Cf, K, N, n_state, fundamental, charge_caps=charge_caps)
         hb["Y_base"] = Y_base
         hb["C_block"] = C_block
         hb["numba_used"] = bool(hb_numba_used)
@@ -720,7 +693,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         cache[hb_key] = hb
     hb_assembly_time_s = time.perf_counter() - t_hb0
 
-    harm_offsets = np.arange(nb, dtype=int) * n
+    harm_offsets = np.arange(nb, dtype=int) * n_state
     # thermal: Toeplitz of the power harmonics (white -> correct).
     # flicker: the sqrt(PWR) modulation harmonics M_{-2K..2K}; the fold builds the
     # cyclostationary matrix S_kl = sum_a M_{k-a} M*_{l-a} / nu_a from them.
@@ -735,8 +708,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         )
         for name, pi, qi, sth_coeff, sfl_coeff in noise_sources
     ]
-    e = np.zeros(nb * n, dtype=complex)
-    base0 = K * n
+    e = np.zeros(nb * n_state, dtype=complex)
+    base0 = K * n_state
     for node, weight in out_w.items():
         e[base0 + idx[node]] = weight
 
@@ -767,25 +740,30 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     hb_iterative_infos = []
     hb_iterative_iterations = []
     # Ideal voltage sources: border the HB adjoint with branch-current unknowns appended
-    # after the nb*n node block (node positions in the fold stay unchanged). Force the
-    # dense path; vsource circuits are small testbenches, not the large chopper HB.
+    # after the nb*n_state node block (external node positions in the fold stay
+    # unchanged). Force the dense path; vsource circuits are small testbenches,
+    # not the large chopper HB.
     nbr = topo.n_branches
     if nbr:
         if Y_base is None or C_block is None:
-            Y_base, C_block, _ = _hb_blocks(Gf, Cf, K, N, n, fundamental,
+            Y_base, C_block, _ = _hb_blocks(Gf, Cf, K, N, n_state, fundamental,
                                             charge_caps=charge_caps)
         all_branch_sources = list(topo.vsources) + list(topo.vcvs) + list(topo.ccvs)
         Binc = _branch_incidence(all_branch_sources, idx, n)
-        nt = nb * (n + nbr)
+        if n_state != n:
+            Bpad = np.zeros((n_state, nbr))
+            Bpad[:n, :] = Binc
+            Binc = Bpad
+        nt = nb * (n_state + nbr)
         Ya = np.zeros((nt, nt), dtype=complex)
         Ca = np.zeros((nt, nt), dtype=complex)
-        Ya[:nb * n, :nb * n] = Y_base
-        Ca[:nb * n, :nb * n] = C_block
-        boff = nb * n
+        Ya[:nb * n_state, :nb * n_state] = Y_base
+        Ca[:nb * n_state, :nb * n_state] = C_block
+        boff = nb * n_state
         for h in range(nb):
-            r0, c0 = h * n, boff + h * nbr
-            Ya[r0:r0 + n, c0:c0 + nbr] = Binc
-            Ya[c0:c0 + nbr, r0:r0 + n] = Binc.T
+            r0, c0 = h * n_state, boff + h * nbr
+            Ya[r0:r0 + n_state, c0:c0 + nbr] = Binc
+            Ya[c0:c0 + nbr, r0:r0 + n_state] = Binc.T
         Y_base, C_block = Ya, Ca
         Y_sparse = C_sparse = None
         solver_used = "dense"
@@ -803,7 +781,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
             preconditioner = None
             if hb_preconditioner_kind == "block_jacobi":
                 preconditioner = _block_jacobi_preconditioner(
-                    Gf, Cf, K, n, fundamental, freq)
+                    Gf, Cf, K, n_state, fundamental, freq)
                 if preconditioner is not None:
                     hb_block_preconditioner_count += 1
             adj, solve_info = _solve_hb_adjoint(
@@ -829,8 +807,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     hb_solve_time_s = time.perf_counter() - t_solve0
 
     fold_work = len(freqs) * max(1, len(source_grids)) * nb * nb
-    # The numba fold assumes nb*n-wide adjoints; bordered (vsource) adjoints are wider,
-    # so fold in Python (node positions index the same nb*n prefix).
+    # The numba fold accepts explicit source indices into the adjoint vector;
+    # bordered (vsource) adjoints are wider, so fold those in Python.
     use_numba_fold = pnoise_fold_psd_numba is not None and fold_work >= 1000 and nbr == 0
     source_names = [name for name, *_ in source_grids]
     t_fold0 = time.perf_counter()
@@ -921,7 +899,9 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         "pnoise_hb_cache_hit": bool(hb_cache_hit),
         "pnoise_adjoint_cache_hits": int(adj_cache_hits),
         "pnoise_cache_enabled": bool(cache_linearization),
-        "pnoise_hb_size": int(nb * n),
+        "pnoise_hb_size": int(nb * n_state),
+        "pnoise_state_size": int(n_state),
+        "pnoise_internal_gate1_states": int(n_gate1),
         "pnoise_hb_solve_count": int(hb_solve_count),
         "pnoise_noise_source_count": int(len(noise_sources)),
         "pnoise_numba_hb_used": bool(hb_numba_used),

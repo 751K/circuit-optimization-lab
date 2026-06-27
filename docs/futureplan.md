@@ -14,7 +14,7 @@
 | **电路描述**        | JSON 格式 + schema 校验，多器件/多输出/仿真参数内嵌                                                                               | ✅ 成熟     |
 | **DC/AC/Noise** | 工作点求解、小信号增益/带宽、热噪声+闪烁噪声、等价输入噪声                                                                                   | ✅ 成熟     |
 | **瞬态**          | 后向欧拉（默认）+ gear2/BDF2（可选），BE 与裸 gear2 maxstep/retry/subdivision 均走 Numba grid；Python/LS 仅作兜底                                  | ✅ 成熟     |
-| **周期分析**        | 通用 shooting PSS（解析 monodromy + Broyden 复用）、通用 PAC（默认解析伴随 HB + 可选 time-domain Floquet 加速）、通用 PNoise（harmonic balance，第一性原理，无标定常数） | ✅ 成熟     |
+| **周期分析**        | 通用 shooting PSS（解析 monodromy + Broyden 复用）、通用 PAC（通用默认解析伴随 HB，chopper 默认 time-domain Floquet + PMOS gate1 内部状态）、通用 PNoise（HB + PMOS gate1 扩维，第一性原理，无标定常数） | ✅ 成熟     |
 | **周期验证**        | SC 低通（2-PMOS 开关电容，201 点/周期，f_clk=1kHz），PSS/PAC/PNoise 全路径跑通。**2026-06-22 修了 3 个 bug**（见下文 A1/A3/A4），修复后 PAC BW 17.2 Hz vs 解析 15.9 Hz（Δ=+8%，修复前 Δ=−28%），PNoise IRN 4.5 µVrms（修复前 20.6 µVrms，flicker 过估计已消除） | ✅ 新增     |
 | **Stiff PSS**    | Levenberg-Marquardt trust-region Newton（mu=0 → 精确 Newton；stiff τ≫T 时自动 regularize）+ 物理边界 runaway 检测 + best-physical 回退，SC 低通 residual 从 0.07V 降至 0.007V（10× 改善），chopper 路径逐字节不变 | ✅ 完成     |
 | **Flicker噪声修正** | PNoise 闪烁噪声用 FFT(√PWR) 调制幅值向量替代 FFT(PWR) 功率谱构建 cyclostationary 折叠矩阵，消除强调制器件（硬开关）的过估计（<PWR>/<√PWR>² 倍），恒偏置器件（AFE amp）不变 | ✅ 完成     |
@@ -24,7 +24,7 @@
 | **设计探索**        | JSON 配置层、LHS/随机采样、约束过滤、Pareto 选择、CSV/JSONL 导出、CLI                                                                | ✅ 成熟     |
 | **Surrogate 基础** | 已具备可信 teacher solver、JSON 设计空间、批量 sweep/export、Cadence 校准数据；尚未实现 ML 训练/推理层                                      | 🟡 待扩展    |
 | **工艺角/鲁棒性**     | 全局 corner（typ/slow/fast）、逐器件 mismatch MC、确定性 latch 筛查                                                            | ✅ 成熟     |
-| **Numba 加速**    | PMOS 电流、内部节点 Newton、偏置电容、terminal derivative、BE/gear2 transient grid（含 maxstep/retry）、PAC 周期线性化/time-domain PAC、PNoise HB block 组装和噪声折叠 | ✅ 全覆盖    |
+| **Numba 加速**    | PMOS 电流、内部节点 Newton、偏置电容、terminal derivative、BE/gear2 transient grid（含 maxstep/retry）、PAC 周期线性化/time-domain PAC、PNoise HB block 组装和噪声折叠；PAC/PNoise gate1 扩维当前为 Python 装配 | ✅ 全覆盖    |
 | **gear2/BDF2**  | 变步长 BDF2、Numba grid、解析 monodromy、裸 transient retry/subdivision。PAC baseband 三 corner 全部 <1%（BE 时 −2.5%）。PSS/PAC/PNoise 默认 gear2 | ✅ 完成     |
 | **CLI**         | `python -m core <circuit.json>` 全分析 dispatch + exploration 模式 + 结果导出 + CLI 参考手册（`docs/cli_reference.md`）             | ✅ 完成     |
 | **Demo**        | Flask Web 前端 + REST API（`demo/server.py`）                                                                        | ✅ 可用     |
@@ -49,7 +49,7 @@ calibration/                ~450 行  (5 个 case 目录, 含 PSFASCII 参考文
 | DC 工作点 / AC 增益                          | 与 Spectre 误差 ~0.01 dB                             |
 | AC 带宽                                   | 对齐 Spectre                                        |
 | 等价输入噪声（非 chopper）                       | 百分之几以内                                            |
-| Chopper PSS/PAC/PNoise（原生，无标定常数）        | 默认 HB PAC baseband + 200 Hz <1%，IRN <1%（D3 slow corner） |
+| Chopper PSS/PAC/PNoise（原生，无标定常数）        | 默认 time-domain PAC baseband + 200 Hz <1%（D3 slow corner）；PNoise HB 已复用 gate1 扩维并通过 slow guard |
 | Chopper transient（8-PMOS hard-switched） | 输出均值 −10.76 mV vs Spectre −10.62 mV，nfail=0       |
 | Mismatch MC mean/std                    | 与 Cadence 趋势一致                                    |
 
@@ -279,16 +279,18 @@ create_transistor("nmos", pdk="myproc", W=100, L=10)  # 便捷创建
 - gear2/BDF2 已上线，PAC 精度从 BE 的 −2.5% 提升到 <1%
 - 裸 `transient()` 默认 BE；默认 BE chopper transient 已从“Numba + Python tail + 1 次 LS”修成全 Numba（0 LS）
 - `integration_method="gear2"` 在请求 `max_step` / `flat_max_step` / `max_retry_subdivisions` 时也走 Numba grid，按 accepted substep 维护 rolling 两步 BDF2 历史；Python solve_chunk 仅作为 Numba 拒绝 robust step 时的兜底
-- 当前 chopper 周期全流程旧瓶颈是通用 HB PAC frequency solve（UI 尺寸，f_chop=225Hz，switch=5000/30，edge=20us）：61 点 `PSS+PAC(HB)+PNoise` ≈25.6s，其中 PAC≈24.7s；121 点 ≈48.9s，其中 PAC≈47.6s。新增 `time_domain=True` 的 Floquet PAC 后，同一 PSS 轨道上 PAC 61 点约 1.3s、121 点约 1.9s；但 2026-06-26 三 corner Cadence 对比显示 baseband gain: typical −0.44%、slow −1.89%、fast −0.27%，slow 未达 <1% 默认化标准。
+- 当前 chopper 周期全流程旧瓶颈是通用 HB PAC frequency solve（UI 尺寸，f_chop=225Hz，switch=5000/30，edge=20us）：显式 `PSS+PAC(HB)+PNoise`（`time_domain=False`）61 点约 25.6s，其中 PAC≈24.7s；121 点约 48.9s，其中 PAC≈47.6s。默认 chopper time-domain PAC 已加入 PMOS `gate1` 内部小信号状态，修复了 slow −1.89% 误差；同一 PSS 轨道上 61 点 PAC 约 1.4s，并已作为 `pmos_chopper_pac` 默认路径。
 
 ### 后续方向
 
 - [x] ~~**compiled step plan / raw gear2 subdivision**~~ ✅ 已完成：raw gear2 maxstep/retry/subdivision 已移入 Numba grid
 - [ ] **小矩阵特化**：对 6×6（chopper）级别矩阵做专用 dense solve，跳过通用 LU 开销
 - [x] ~~**chopper transient 深度编译化（默认 BE 热路径）**~~ ✅ 已完成：默认 BE UI chopper transient 全 Numba，`nfail=0`、`least_squares_calls=0`
-- [x] ~~**PAC time-domain Floquet 加速入口**~~ ✅ 已完成：`pac_solve(..., time_domain=True)` / `pmos_chopper_pac(..., time_domain=True)` / JSON `analyses.pac.time_domain` 均可启用，默认 HB 保留为通用兜底。
-- [ ] **修 time-domain PAC slow-corner 误差**：当前不是采样点数或 PSS 迭代问题（`td_n_period_samples=768→3072`、更多 shooting/stab 都仍约 −1.9%）；优先查 Floquet/BDF2 边界系统、monodromy 缩放/平衡、以及 slow corner 近单位 Floquet multiplier 的数值病态。修到三 corner baseband/BW 都 <1% 后再考虑默认打开。
-- [ ] **time-domain PAC 覆盖扩展/默认化评估**：扩大到更多 rail-driven 周期拓扑、更多 corner/f_chop/switch size，并用 Cadence PAC 回归确认 <1% 后再考虑把 chopper wrapper 默认切到 time-domain；默认化前还要处理 monodromy 连乘的 overflow/invalid warning（当前 slow guard 通过但会告警）。
+- [x] ~~**PAC time-domain Floquet 加速入口**~~ ✅ 已完成：`pac_solve(..., time_domain=True)` / `pmos_chopper_pac(...)` 默认 time-domain / JSON `analyses.pac.time_domain` 均可启用，HB 保留为通用兜底。
+- [x] ~~**修 time-domain PAC slow-corner 误差**~~ ✅ 已完成：根因是 PMOS_TFT 周期转换中把内部 `gate1` 节点塌缩成静态端口 `{gm,gds,Cgs,Cgd}`，丢失 Cadence PAC 保留的 `R_cap/R_cap2/Cgs/Cgd` 内部小信号状态。现已在 PAC 周期线性化中为每个 PMOS 扩展 `gate1` state，D3 slow 默认 PAC baseband/200Hz 进入 <1% 门限。
+- [x] ~~**time-domain PAC 默认化评估**~~ ✅ 已完成：`pmos_chopper_pac` 默认切到 time-domain；`analytic=False` 仍强制走原有限差分 shooting；显式 `time_domain=False` 可跑 HB 对照。
+- [x] ~~**PNoise gate1 扩维**~~ ✅ 已完成：PNoise HB 复用 PAC 的 PMOS `gate1` 扩维线性化，噪声源仍按 drain/source 电流源注入，但传播矩阵保留内部 `gate1` 状态；slow PNoise guard 通过，并新增 `pnoise_internal_gate1_states` 回归断言。
+- [x] ~~**monodromy 缩放/平衡**~~ ✅ 已完成：PSS LM normal equation 改为 lazy 计算并按有限分量缩放，`mu=0` Newton 步不再提前形成 `J.T@J`；time-domain PAC gear2 companion 连乘加入增长检测，超过安全尺度时切到分块 multiple-shooting 周期边界求解，消除了 overflow/invalid warning。
 - [ ] **HB PAC frequency solve 优化**：作为通用兜底路径继续保留；若需要 HB（bordered/vsource 驱动或 time-domain 不适用），再 profile/优化每频率 HB 求解、factorization 复用或批量线性解。
 - [ ] **batch transient / MC 并行化**：多个瞬态仿真并行（thread-level 或 process-level）
 - [x] ~~**gear2 grid subdivision/retry 硬化**~~ ✅ 已完成：裸 transient 的 `integration_method="gear2"`

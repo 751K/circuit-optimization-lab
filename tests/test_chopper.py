@@ -548,14 +548,12 @@ def test_pmos_chopper_pnoise_matches_cadence_band():
     assert r["method"] == "pss_harmonic_balance_conversion_matrix"
     assert np.all(np.isfinite(r["out_psd"])) and np.all(r["out_psd"] > 0.0)
     assert r["max_sideband"] == 32
-    # Converged slow-corner IRN sits a touch high vs this (older, design-#3 /
-    # f_chop=200) reference: gear2 -> ~12.85 uV (+2.9%), and the 2026-06-22
-    # cyclostationary-flicker folding fix (sqrt(PWR) modulation harmonics) +
-    # always-signed device current nudged it to ~13.03 uV (+4.4%). Both are
-    # validated-more-correct (SC-LPF noise +363% -> +1.7%; flicker reduces to the
-    # old form for constant bias). The AUTHORITATIVE gate is the fresh f_chop=225
-    # 3-corner Spectre calibration (`python -m core.calibration --all`), where the
-    # slow IRN is +1.8%; this older single-point reference just guards convergence.
+    assert r["pnoise_internal_gate1_states"] == len(pss["topology"].devices)
+    assert r["pnoise_state_size"] == pss["topology"].n + len(pss["topology"].devices)
+    # This older design-#3 / f_chop=200 reference is kept as a convergence guard.
+    # The authoritative chopper calibration remains the fresh f_chop=225
+    # 3-corner Spectre sweep; this test mainly prevents regressions in the PNoise
+    # HB fold and now also guards that the PMOS gate1 states stay in the matrix.
     assert abs(r["irn_uV_band"] - 12.4886) / 12.4886 < 0.05
 
 
@@ -563,8 +561,9 @@ def test_pmos_chopper_pnoise_matches_cadence_band():
                     reason="slow PSS+PAC verification; set RUN_SLOW_CHOPPER=1 to run")
 def test_pmos_chopper_pac_matches_cadence_baseband_gain():
     # PSS+PAC vs Cadence design-#3 PSS/PAC reference at f_chop=200 Hz.
-    # The official ADE netlist is slow corner; K64 is needed locally to resolve
-    # the hard-edge commutation and brings baseband/fundamental gain within ~1%.
+    # The official ADE netlist is slow corner. The default chopper PAC path is
+    # the time-domain shooting solver with PMOS gate1 internal states retained;
+    # this avoids both HB sideband truncation and the old terminal-cap collapse.
     freqs = np.array([0.05, 1.0, 200.0])
     pss = pmos_chopper_pss(
         _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
@@ -575,7 +574,9 @@ def test_pmos_chopper_pac_matches_cadence_baseband_gain():
     pac = pmos_chopper_pac(
         _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
         nf=_CHOP_D3_NF, corner="slow")
-    assert pac["method"] == "pss_analytic_adjoint"
+    assert pac["method"] == "pss_time_domain"
+    assert pac["pac_internal_gate1_states"] == len(pss["topology"].devices)
+    assert pac["pac_state_size"] == pss["topology"].n + len(pss["topology"].devices)
     g = pac["gains"]
     assert abs(g[0] - 10.3975) / 10.3975 < 0.01
     assert abs(g[1] - 10.3975) / 10.3975 < 0.01
@@ -605,12 +606,12 @@ def test_pmos_chopper_pac_gear2_matches_cadence_within_1pct():
 
 @pytest.mark.skipif(not os.environ.get("RUN_SLOW_CHOPPER"),
                     reason="slow time-domain PAC verification; set RUN_SLOW_CHOPPER=1")
-def test_pmos_chopper_pac_time_domain_matches_hb_and_cadence():
-    # The opt-in time-domain (shooting) PAC integrates the linearized orbit with
+def test_pmos_chopper_pac_time_domain_matches_cadence():
+    # The default time-domain (shooting) PAC integrates the linearized orbit with
     # the Floquet BC x(T)=e^{jwT}x(0): a frequency-independent monodromy + a small
-    # boundary solve per frequency, truncation-free.  It must (a) be selected only
-    # when asked (HB stays the default), and (b) agree with the HB baseband gain to
-    # within the harmonic-truncation gap and stay within ~3% of Cadence (13.921).
+    # boundary solve per frequency, truncation-free. It must stay within 1% of
+    # Cadence (13.921 V/V) while retaining the hidden PMOS gate1 states that
+    # Spectre keeps during PAC conversion.
     freqs = np.array([0.05, 200.0])
     pss = pmos_chopper_pss(
         _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
@@ -619,14 +620,10 @@ def test_pmos_chopper_pac_time_domain_matches_hb_and_cadence():
         fallback_least_squares=False, n_points=321, max_shooting_iters=5,
         output_filter=(1e6, 680e-12), corner="typical",
         integration_method="gear2", analytic_jacobian=False)
-    hb = pmos_chopper_pac(
-        _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
-        nf=_CHOP_D3_NF, corner="typical")
     td = pmos_chopper_pac(
         _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
-        nf=_CHOP_D3_NF, corner="typical", time_domain=True)
-    assert hb["method"] == "pss_analytic_adjoint"          # default unchanged
-    assert td["method"] == "pss_time_domain"               # opt-in path taken
+        nf=_CHOP_D3_NF, corner="typical")
+    assert td["method"] == "pss_time_domain"
     assert td["pac_td_integration"] == "gear2"
-    assert abs(td["gains"][0] - hb["gains"][0]) / hb["gains"][0] < 0.03
-    assert abs(td["gains"][0] - 13.921) / 13.921 < 0.03
+    assert td["pac_internal_gate1_states"] == len(pss["topology"].devices)
+    assert abs(td["gains"][0] - 13.921) / 13.921 < 0.01

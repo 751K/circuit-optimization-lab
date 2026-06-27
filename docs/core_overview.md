@@ -233,20 +233,17 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   shooting PSS solver and returns one periodic orbit for the selected clock
   period. This is the foundation for native PAC/PNoise.
 - `pmos_chopper_pac(...)` is a compatibility wrapper over the generic
-  `core.pac_solver.pac_solve(...)`. By default it uses the analytic-adjoint
-  harmonic-balance kernel: sample periodic G(t)/C(t) along the PSS orbit,
-  FFT to Fourier coefficients, build the conversion matrix Y_HB(f), and solve
-  one adjoint linear system per frequency for sideband-0 gain — O(1) solves
-  with no extra transient runs. Set `analytic=False` for the original
-  finite-difference shooting path (one `n_state`-period state linearization
-  plus two input-quadrature period runs per frequency). Set `time_domain=True`
-  for the rail-driven chopper fast path: it builds the one-period Floquet
-  monodromy once in time domain, then solves a small quasi-periodic boundary
-  system per frequency (`method="pss_time_domain"`). Unsupported bordered or
-  vsource-driven cases fall back to HB when `analytic=True`. This fast path is
-  still opt-in: the 2026-06-26 check versus stored Cadence chopper references is
-  typical −0.44%, slow −1.89%, fast −0.27% at baseband. Static PSS orbits
-  automatically reduce to ordinary `ac_solve`, avoiding PAC transient runs.
+  `core.pac_solver.pac_solve(...)`. The generic solver still defaults to the
+  analytic-adjoint HB path, but the chopper wrapper defaults to the time-domain
+  Floquet path (`method="pss_time_domain"`): it builds the one-period monodromy
+  once in time domain, then solves a small quasi-periodic boundary system per
+  frequency. For PMOS_TFT periodic conversion it retains each device's hidden
+  `gate1` small-signal state (`R_cap`, `R_cap2`, `Cgs`, `Cgd`) instead of
+  collapsing to terminal `{gm,gds,Cgs,Cgd}` at every orbit sample. Set
+  `time_domain=False` for the analytic-adjoint HB comparison path, or
+  `analytic=False` for the original finite-difference shooting path. Static PSS
+  orbits automatically reduce to ordinary `ac_solve`, avoiding PAC transient
+  runs.
 - `pmos_chopper_pnoise(...)` is a compatibility wrapper over the generic
   `core.pnoise_solver.pnoise_solve(...)`. The generic PNoise kernel uses
   harmonic balance on a PSS orbit: sample periodic small-signal G(t)/C(t), FFT to
@@ -261,8 +258,9 @@ native `pmos_chopper_pac` and `pmos_chopper_pnoise` now replace those
 calibration-dependent paths with first-principles periodic small-signal and
 noise solves. The finite-edge transient path has been checked against Spectre
 `tran`. For the D3 `chop_tb_d3` slow-corner PSS/PAC/PNoise reference, native
-default-HB PAC is within 1% at baseband and 200 Hz, and native PNoise IRN is
-within 1% when run on the same dec=10 noise grid and `maxsideband=10`.
+default time-domain PAC is within 1% at baseband and 200 Hz. Native PNoise
+uses the same expanded PMOS `gate1` HB conversion model and remains
+first-principles.
 
 ### `pss_solver.py`
 
@@ -313,14 +311,15 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
   for single-ended input.
 - Four performance paths, tried in order:
   1. **LTI fast path** — static PSS orbits reduce to ordinary `ac_solve`.
-  2. **Time-domain Floquet PAC** (opt-in, `time_domain=True`) — samples
+  2. **Time-domain Floquet PAC** (`time_domain=True`; chopper wrapper default) — samples
      periodic G(t)/C(t) and input coupling on a uniform orbit grid, builds the
      frequency-independent monodromy once, then solves
      `(exp(jωT)I - Ψ)x0 = g` per frequency. This avoids HB sideband truncation
-     and the large `(2K+1)n` conversion matrix, but currently requires a
-     rail-driven, unbordered topology with Numba linearization available.
-     Unsupported cases return `None` and continue to the next path.
-  3. **Analytic-adjoint** (default, `analytic=True`) — samples periodic G(t)/C(t)
+     and the large `(2K+1)n` conversion matrix. PMOS_TFT devices are expanded
+     with their internal `gate1` small-signal states during periodic conversion.
+     Unsupported bordered/vsource-driven cases return `None` and continue to the
+     next path.
+  3. **Analytic-adjoint** (generic default, `analytic=True`) — samples periodic G(t)/C(t)
      and input-coupling columns G_in(t)/C_in(t) on the PSS orbit, FFTs to
      harmonic coefficients G_k/C_k, builds the harmonic-balance conversion
      matrix Y_HB(f), and reads sideband-0 gain from a single adjoint linear
@@ -585,13 +584,12 @@ default run uses Numba when available; `CIRCUIT_USE_NUMBA=0` is useful for
 pure-Python comparison.
 
 The old UI chopper full-flow bottleneck was the portable HB PAC frequency solve:
-`PSS+PAC(HB)+PNoise` takes about 25.6 s for 61 frequency points
-(PSS≈0.35 s, PAC≈24.7 s, PNoise≈0.55 s) and about 48.9 s for 121 points
-(PSS≈0.44 s, PAC≈47.6 s, PNoise≈0.93 s). With the opt-in time-domain PAC path,
-PAC on the same PSS orbit is about 1.3 s for 61 points and 1.9 s for 121 points.
-It is not the default yet because the slow-corner baseband gain error is still
-about −1.9% against Cadence. A non-chopper AFE `DC+AC+Noise` 121-point run is
-about 1.8 ms when noise reuses the AC result.
+explicit `PSS+PAC(HB)+PNoise` (`time_domain=False`) takes about 25.6 s for
+61 frequency points (PSS≈0.35 s, PAC≈24.7 s, PNoise≈0.55 s) and about 48.9 s for
+121 points (PSS≈0.44 s, PAC≈47.6 s, PNoise≈0.93 s). The default chopper
+time-domain PAC path keeps the PMOS `gate1` states and takes about 1.4 s for
+61 points on the same PSS orbit. A non-chopper AFE `DC+AC+Noise` 121-point run
+is about 1.8 ms when noise reuses the AC result.
 
 ## Calibration Status
 
@@ -613,9 +611,9 @@ The current core was calibrated against Cadence Spectre 24.1 for the AT4000TG AF
   `12.591 uVrms`.
 - Native `pmos_chopper_pac` and `pmos_chopper_pnoise` (first-principles,
   no calibration constants) match the D3 `chop_tb_d3` slow-corner Spectre
-  PSS/PAC/PNoise reference at `f_chop=200 Hz`: default-HB PAC baseband and
-  200 Hz gain are within 1%, and PNoise IRN is within 1% on the same dec=10
-  noise grid.
+  PSS/PAC/PNoise reference at `f_chop=200 Hz`: default time-domain PAC baseband
+  and 200 Hz gain are within 1%. PNoise remains first-principles HB and uses the
+  same expanded PMOS `gate1` conversion model.
 - Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms
   input-referred noise.
 

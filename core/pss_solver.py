@@ -26,6 +26,22 @@ except ImportError:  # pragma: no cover - legacy direct module import
     from transient_solver import transient
 
 
+def _finite_component_max(a):
+    arr = np.asarray(a)
+    if arr.size == 0:
+        return 0.0
+    if np.iscomplexobj(arr):
+        parts = (np.abs(arr.real), np.abs(arr.imag))
+    else:
+        parts = (np.abs(arr),)
+    out = 0.0
+    for part in parts:
+        finite = part[np.isfinite(part)]
+        if finite.size:
+            out = max(out, float(np.max(finite)))
+    return out
+
+
 def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
                         dev_inst, gmin=1e-12, integration_method="be"):
     """Analytic one-period monodromy d(x_end)/d(x0) from the orbit small signal.
@@ -528,9 +544,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                 # circuits, e.g. the chopper, are byte-identical); mu grows only on
                 # rejection, regularizing near-singular (I-M) so a stiff (tau>>T)
                 # orbit's step cannot overshoot the basin into a runaway.
-                H = jac.T @ jac
-                grad = jac.T @ residual
-                diagH = np.maximum(np.abs(np.diag(H)), 1e-30)
+                H = grad = diagH = None
                 mu = lm_mu
                 for _lm in range(lm_max_tries):
                     if mu == 0.0:
@@ -539,6 +553,39 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                         except np.linalg.LinAlgError:
                             dx = np.linalg.lstsq(jac, -residual, rcond=None)[0]
                     else:
+                        if H is None:
+                            lm_scale = max(
+                                1.0,
+                                _finite_component_max(jac),
+                                _finite_component_max(residual),
+                            )
+                            if not np.isfinite(lm_scale) or lm_scale <= 0.0:
+                                break
+                            jac_lm = np.nan_to_num(
+                                jac / lm_scale, nan=0.0, posinf=0.0, neginf=0.0)
+                            residual_lm = np.nan_to_num(
+                                residual / lm_scale, nan=0.0, posinf=0.0, neginf=0.0)
+                            jac_lm = np.asarray(jac_lm, dtype=float)
+                            residual_lm = np.asarray(residual_lm, dtype=float)
+                            post_scale = _finite_component_max(jac_lm)
+                            if (not np.isfinite(post_scale)) or post_scale <= 0.0:
+                                break
+                            if post_scale > 1.0:
+                                jac_lm = jac_lm / post_scale
+                                residual_lm = residual_lm / post_scale
+                            try:
+                                with np.errstate(over="raise", invalid="raise",
+                                                 divide="raise"):
+                                    H = jac_lm.T @ jac_lm
+                                    grad = jac_lm.T @ residual_lm
+                            except FloatingPointError:
+                                H = grad = None
+                                break
+                            if (not np.all(np.isfinite(H)) or
+                                    not np.all(np.isfinite(grad))):
+                                H = grad = None
+                                break
+                            diagH = np.maximum(np.abs(np.diag(H)), 1e-30)
                         A = H + mu * np.diag(diagH)
                         try:
                             dx = np.linalg.solve(A, -grad)
