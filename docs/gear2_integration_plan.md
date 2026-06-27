@@ -1,6 +1,6 @@
 # Gear2/BDF2 积分器升级 — 完成报告
 
-> **状态：✅ 已完成（2026-06-21）；2026-06-26 补齐 raw gear2 Numba retry/subdivision**
+> **状态：✅ 已完成（2026-06-21）；2026-06-26 补齐 raw gear2 Numba retry/subdivision；2026-06-27 补齐 chopper PSS cap-mode override**
 > 
 > 所有 5 个里程碑（M1–M5）均已交付，chopper PSS/PAC/PNoise 默认使用 gear2，
 > 三 corner PAC baseband 全部 <1%。裸 `transient()` 保留 BE 默认，
@@ -9,6 +9,9 @@
 > 不再依赖 BE clean rerun。
 > 2026-06-26 之后 PAC 又新增了可选 `time_domain=True` 的 Floquet/time-domain
 > 加速路径；默认通用 HB 路径仍保留，用于 bordered/vsource-driven 等更广拓扑。
+> 当前全局 transient/PSS 仍以 charge Q-stamp 为默认；PMOS chopper PSS 单独默认
+> `cap_mode="average"`，用于对齐 Cadence commutation feedthrough。PAC/PNoise
+> conversion 使用独立的 Verilog-A `C(V)*ddt(V)` 小信号折叠算子。
 > 最新回归：146 passed, 9 skipped。
 > 
 > 此文档保留原始任务计划作为历史参考。
@@ -17,8 +20,10 @@
 
 ## 0. 一句话目标
 
-把瞬态积分从一阶 backward-Euler（BE）换成二阶刚性稳定的 **变步长 BDF2（gear2）**，
-在**稳定的 charge 电容公式**上做，使 chopper PAC baseband 三个 corner 都对齐到 **<1%**。
+把瞬态积分从一阶 backward-Euler（BE）换成二阶刚性稳定的 **变步长 BDF2（gear2）**。
+通用 transient/PSS 保持稳定的 charge 电容公式；PMOS chopper PSS 通过 per-call
+`cap_mode="average"` 对齐 Cadence feedthrough，使 chopper PAC baseband 三个 corner
+都进入 **<1%** 目标。
 
 ## 进度（最终：2026-06-21，全部完成）
 
@@ -47,6 +52,7 @@
   - **默认值**：PSS / PAC / PNoise / chopper 全部默认 **gear2**（对齐关键路径，robust + 快）；
     裸 `transient()` 保留 **BE** 默认。请求 `max_retry_subdivisions` / `max_step` 的裸 gear2
     transient 现在由 Numba grid 直接处理，以正确维护 pieces / retry 中的 rolling 两步历史。
+    PMOS chopper PSS 还会传 `cap_mode="average"` 给 transient；其他拓扑不受影响。
   - **细分/retry 硬化尝试（失败）→ 连带弄坏 numba grid → 已定位并修复**：
     - 试过把 gear2 grid 改成 pieces + retry + rolling 两步历史 → PSS 跑偏 −3.5%；又加了一个
       grid 预细分 helper `_refine_grid_for_gear2`（按 `max_step` 把区间切成均匀 substep 再跑 gear2，
@@ -107,8 +113,9 @@
 
 - Cadence 用 `method=gear2only`。chopper PAC baseband 在 typ/fast 差 **−2.5%**，
   已严格定位为 **BE 一阶积分在 20µs 开关沿处的误差**（高带宽 corner 把边沿敏感的高次谐波权重放大）。
-- 已证伪的方向：换 `veriloga`（C·dV/dt）cap 模式——数值不稳定（slow 不收敛、fast 收敛到错误轨道）。
-  忠实形式在 BE 下本质不可用；charge 模式（ΔQ，单调守恒）是稳定的最优解。
+- 已证伪的方向：把**全局/裸 transient**切到 `veriloga`（C·dV/dt）cap 模式——数值不稳定
+  （slow 不收敛、fast 收敛到错误轨道）。通用路径仍以 charge 模式（ΔQ，单调守恒）为稳定默认；
+  后续仅在 PMOS chopper PSS 轨道中引入受限的 `average` override 来匹配 Cadence feedthrough。
 - 决定性证据：本地转换法跑在 **Cadence 轨道**上 = +0.6%，跑在**本地 BE 轨道**上 = −2.6%。
   差距 100% 来自轨道的 BE 误差，且 charge 模式细步只到 ~−1.5% 就平台 → 是**积分阶数**，不是步长、不是 cap 模式。
 - 关键边界：**PAC/PNoise 的 HB 线性化用连续时间 jωC，与积分阶数无关**。所以只改 transient
@@ -227,5 +234,6 @@ PSS 的 tstab + shooting 会把自启动那一步的小不一致吸收掉。
 - gate1 内部节点的忠实建模（C·dV/dt + 100Ω 串阻）——后续 PAC slow-corner
   误差排查证实这里确实是 LPTV conversion 残差来源；现已在 time-domain PAC
   和 PNoise HB 中用 PMOS `gate1` 小信号状态扩维修复。
-- veriloga cap 模式（已证伪，保留代码但不作为路径）。
+- 全局 veriloga/average cap 模式（已证伪，不作为通用路径）；PMOS chopper PSS 的
+  `cap_mode="average"` 是后续加入的受限例外。
 - PAC/PNoise 的 HB 公式（与积分阶数解耦，不动）。

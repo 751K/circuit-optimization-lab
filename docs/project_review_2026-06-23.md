@@ -230,7 +230,7 @@ register_pdk("at4000tg", {"pmos": PMOS_TFT}, default=True,
 
 | 事项 | 原因 |
 |------|------|
-| Verilog-A 电容模式 (C·dV/dt) | 已证伪 — charge 模式最优 |
+| 全局 Verilog-A/average 电容模式 | 不全局切换。通用 transient/PSS 仍以 charge Q-stamp 为默认；PMOS chopper PSS 单独用 `cap_mode="average"` 对齐 Cadence feedthrough，PAC/PNoise conversion 另行使用 Spectre PAC 的 `C(V)*ddt(V)` 小信号折叠。 |
 | GPU 加速 | PMOS + MNA 矩阵 ≤20×20 对 GPU 无优势 |
 | Sign-off 级仿真器认证 | 项目定位是设计探索工具，不做 Spectre 替代品 |
 | 大规模 CI/CD | 单人研究项目，手动 pytest 足够 |

@@ -1147,13 +1147,25 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
                      fallback_least_squares=False, fallback_tol=1e-10,
                      analytic_jacobian=True,
                      base_topo=AFE_TOPO, output_filter=None, profile=False,
-                     split_input_pair=False, integration_method="gear2"):
+                     split_input_pair=False, integration_method="gear2",
+                     cap_mode="average"):
     """Periodic steady state of the eight-PMOS chopper.
 
     This is a shooting PSS wrapper around the same hard-switched topology and
     transient stamps used by :func:`pmos_chopper_transient`.  It returns one
     periodic orbit; PAC/PNoise can be built on top of the returned trajectory.
+
+    ``cap_mode`` selects the parasitic-cap transient operator for the orbit.
+    Default ``"average"`` (trapezoidal ``0.5*(C(Vn)+C(Vn-1))*dV``): a STABLE,
+    non-conservative discretization that matches Cadence's commutation
+    feedthrough on the high-Z internal nodes -- closing the slow PAC gap to
+    ~0% (the conservative ``"charge"`` Q-stamp over-swings the feedthrough ~26%,
+    leaving a slow-corner +1% residual). ``"charge"`` stays the global default
+    for stiff tau>>T circuits (e.g. SC-LPF) where the trapezoidal rule rings.
     """
+    _CAP_MODE_IDS = {"charge": 0, "q": 0, "average": 1, "avg": 1, "trapezoid": 1,
+                     "veriloga": 2, "branch": 3, "self": 3}
+    cap_mode_id = None if cap_mode is None else _CAP_MODE_IDS[str(cap_mode).lower()]
     f_chop = float(f_chop)
     if f_chop <= 0.0:
         raise ValueError("f_chop must be positive")
@@ -1285,6 +1297,7 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
         analytic_jacobian=analytic_jacobian,
         rail_margin=rail_margin, check_periodic_inputs=False, profile=profile,
         edge_mask=edge_mask, integration_method=integration_method,
+        cap_mode_id=cap_mode_id,
     )
     requested_output = np.interp(requested_tgrid, result["t"], result["output"])
     requested_nodes = {

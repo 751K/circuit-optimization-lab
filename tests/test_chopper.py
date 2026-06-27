@@ -1,3 +1,4 @@
+import copy
 import os
 
 import numpy as np
@@ -627,3 +628,35 @@ def test_pmos_chopper_pac_time_domain_matches_cadence():
     assert td["pac_td_integration"] == "gear2"
     assert td["pac_internal_gate1_states"] == len(pss["topology"].devices)
     assert abs(td["gains"][0] - 13.921) / 13.921 < 0.01
+
+
+def test_pmos_chopper_pac_gate1_numba_matches_python():
+    # The gate1-retained Verilog-A (C(V)*ddt(V)) linearization has a numba kernel
+    # (_pac_linearize_orbit_gate1_impl). It must reproduce the pure-Python assembly
+    # to numerical noise (the only diff is the nested cap-derivative FD's internal
+    # solve warm-start). Guards future kernel edits.
+    import core.pac_solver as psp
+    if psp.pac_linearize_orbit_gate1_numba is None:
+        pytest.skip("numba unavailable")
+    freqs = np.array([0.05, 1.0, 200.0])
+    pss = pmos_chopper_pss(
+        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
+        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
+        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
+        fallback_least_squares=False, n_points=161, max_shooting_iters=4,
+        output_filter=(1e6, 680e-12), corner="slow", cap_mode="average")
+
+    def run():
+        return pmos_chopper_pac(
+            _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0,
+            pss_result=copy.deepcopy(pss), nf=_CHOP_D3_NF, corner="slow")["gains"]
+
+    g_numba = np.abs(run())
+    orig = psp._try_numba_pac_linearization_gate1
+    psp._try_numba_pac_linearization_gate1 = lambda *a, **k: None
+    try:
+        g_python = np.abs(run())
+    finally:
+        psp._try_numba_pac_linearization_gate1 = orig
+    # both retain gate1 states; values agree to FD noise (<0.05%).
+    np.testing.assert_allclose(g_numba, g_python, rtol=5e-4)

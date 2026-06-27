@@ -297,7 +297,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               input_periodic_tol=1e-9, profile=False, edge_mask=None,
               integration_method="gear2",
               physical_factor=2.0, max_stabilization_periods=200,
-              levenberg_marquardt=True):
+              levenberg_marquardt=True, cap_mode_id=None):
     """Solve periodic steady state with transient shooting.
 
     Parameters are intentionally close to :func:`transient` so the same topology,
@@ -341,6 +341,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         rail_margin=rail_margin,
         edge_mask=edge_mask,
         integration_method=integration_method,
+        cap_mode_id=cap_mode_id,
         # Shooting manages its own convergence per period; never let a single
         # period silently fall back to a BE orbit mid-iteration.
         gear2_be_fallback=False,

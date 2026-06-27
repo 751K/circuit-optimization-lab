@@ -160,7 +160,11 @@ across all corners. On stiff circuits (e.g. chopper), `integration_method="gear2
 stays in the Numba gear2 grid when `max_step` / `max_retry_subdivisions` request
 subdivision/retry; the grid maintains rolling two-step history through accepted
 substeps. PSS/PAC/PNoise pipelines default to gear2 for accuracy; bare
-`transient()` defaults to BE.
+`transient()` defaults to BE. The global transient capacitance operator remains
+the charge-conservative Q stamp; the PMOS chopper PSS wrapper deliberately uses
+`cap_mode="average"` for its orbit, matching Cadence's commutation feedthrough
+on the high-impedance internal nodes while keeping `charge` as the safer default
+for generic stiff switched-capacitor circuits.
 
 ### 3. Chopper Analysis (Three Levels)
 
@@ -228,9 +232,13 @@ The PSS→PAC→PNoise pipeline is the local equivalent of Cadence Spectre
   boundary system per frequency, avoiding the large `(2K+1)n` HB matrix. For
   PMOS_TFT periodic conversion it retains each device's internal `gate1`
   small-signal state (`R_cap`, `R_cap2`, `Cgs`, `Cgd`) instead of collapsing the
-  device to terminal `{gm,gds,Cgs,Cgd}` at every orbit sample. This fixes the
-  former slow-corner −1.89% chopper PAC error; the D3 slow guard is now within
-  1% of Cadence.
+  device to terminal `{gm,gds,Cgs,Cgd}` at every orbit sample. The conversion
+  linearization uses the Verilog-A-style `C(V)*ddt(V)` operator, separate from
+  the orbit's transient Q/average companion, because this is what Spectre PAC
+  folds. When Numba is available and the PMOS devices all expose `gate1`
+  dynamics, this gate1-retained conversion assembly uses the compiled
+  `pac_linearize_orbit_gate1` kernel. This fixes the former slow-corner −1.89%
+  chopper PAC error; the D3 slow guard is now within 1% of Cadence.
 
 Set `analytic=False` only for the original finite-difference shooting path
 (accurate but costs `n_state+2` transient runs per frequency). PNoise uses
@@ -468,7 +476,9 @@ or `n_period_samples` (trade time-domain resolution for speed). Reuse the same
 `pss_result` when sweeping output bands or repeated frequency grids: PNoise now
 caches LPTV linearization, HB blocks, and identical-frequency adjoint solves.
 With Numba installed, large HB block assembly, noise folding, and gm/gds
-linearization also use compiled kernels.
+linearization also use compiled kernels. The chopper PAC gate1 conversion
+linearization is compiled too when the topology is the all-PMOS gate1 case; mixed
+or unsupported topologies fall back to the Python assembly with the same stamps.
 For the current UI chopper case, PNoise is not the full-flow bottleneck: about
 0.55 s for 61 points and 0.93 s for 121 points.
 

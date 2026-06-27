@@ -91,7 +91,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
               fallback_least_squares=False, fallback_tol=1e-9,
               signed_devices=None, profile=False, edge_mask=None,
               rail_margin=None, integration_method="be",
-              gear2_be_fallback=True):
+              gear2_be_fallback=True, cap_mode_id=None):
     """Backward-Euler (default) or gear2/BDF2 transient.
 
       integration_method : "be" (backward-Euler, 1st order; the default for the
@@ -141,6 +141,12 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     tft = build_devices(sizes, nf=nf, corner=corner, topo=topo)
     tgrid = np.asarray(tgrid, float)
     N = len(tgrid)
+    # Per-call cap operator override (default = the module/env-selected mode).
+    # The chopper PSS uses the trapezoidal "average" mode (id 1) -- a STABLE,
+    # non-conservative C(V)*dV/dt discretization that matches Cadence's commutation
+    # feedthrough (charge Q-stamp over-swings it ~26%); charge stays the default
+    # everywhere else (it is L-stable on stiff tau>>T circuits where average rings).
+    _cap_id = int(_CAP_MODE_ID if cap_mode_id is None else cap_mode_id)
     if inputs is None:
         inputs = {}
         if vip is not None:
@@ -753,7 +759,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                     cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value,
                     isrc_pi, isrc_qi, isrc_value,
                     dyn_pi, dyn_qi, dyn_input_idx,
-                    int(_CAP_MODE_ID),
+                    int(_cap_id),
                     float(clip_lo), float(clip_hi),
                 )
                 if ok:
@@ -967,7 +973,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 cap_ai, cap_bi, cap_value,
                 isrc_pi, isrc_qi, isrc_value,
                 dyn_pi, dyn_qi, dyn_input_idx,
-                int(_CAP_MODE_ID), float(clip_lo), float(clip_hi),
+                int(_cap_id), float(clip_lo), float(clip_hi),
             )
             ok_g2, Vfast, fast_substeps, fail_index, raw_profile, _rfi = g2
             profile_wall_s = time.perf_counter() - t_profile0
@@ -1248,7 +1254,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value,
                 isrc_pi, isrc_qi, isrc_value,
                 dyn_pi, dyn_qi, dyn_input_idx,
-                int(_CAP_MODE_ID),
+                int(_cap_id),
                 float(clip_lo), float(clip_hi),
             )
             if len(grid_result) == 5:
@@ -1402,7 +1408,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     result = {"t": tgrid, "output": out, "vout": out, "nfail": nfail,
               "nretry": nretry, "nsubsteps": nsubsteps, "nodes": nodes,
               "transient_cap_mode": _CAP_MODE,
-              "transient_cap_mode_id": int(_CAP_MODE_ID)}
+              "transient_cap_mode_id": int(_cap_id)}
     result["numba_grid_solver"] = bool(used_grid_numba or gear2_numba_used)
     if integration_method == "gear2":
         result["gear2_python_retry_solver"] = bool(gear2_python_retry_used)

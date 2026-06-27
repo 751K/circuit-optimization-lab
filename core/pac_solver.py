@@ -16,13 +16,15 @@ from scipy.sparse import linalg as _spla
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from .ac_solver import _bw_from_gain, _dev_corner, _dev_nf, ac_solve, build_devices, get_ss_params
-    from .numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_numba
+    from .numba_kernels import (pac_hb_blocks_numba, pac_linearize_orbit_numba,
+                                pac_linearize_orbit_gate1_numba)
     from .topology import Topology
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from ac_solver import _bw_from_gain, _dev_corner, _dev_nf, ac_solve, build_devices, get_ss_params
-    from numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_numba
+    from numba_kernels import (pac_hb_blocks_numba, pac_linearize_orbit_numba,
+                               pac_linearize_orbit_gate1_numba)
     from topology import Topology
     from transient_solver import transient
 
@@ -239,6 +241,26 @@ def _charge_linearized_caps(pss_result):
     mode = str(pss_result.get("transient_cap_mode", "charge")).lower()
     return mode in {"charge", "q", "qstamp", "q-stamp",
                     "branch", "self", "self-charge"}
+
+
+def _conversion_charge_caps(pss_result, internal_gate_states):
+    """Cap operator for the PAC/PNoise *conversion* (separate from the orbit's).
+
+    Cadence's PAC/PNoise linearizes the device's NON-conservative Verilog-A
+    operator ``I = C(V)*ddt(V)`` -- including the multi-variable
+    ``Cgss(Vs,Vg,Vd)`` cross-coupling (``dC/dVd*dVd``-type terms) -- NOT the
+    transient Q-stamp companion used to *integrate* the PSS orbit.  When
+    PMOS_TFT gate1 caps are present, fold the conversion with that operator
+    (``charge_caps=False``), mirroring :mod:`core.pnoise_solver` which already
+    does this for noise.  Verified on Cadence's own slow chopper orbit: the
+    ``C(V)*ddt(V)`` fold gives +0.05% vs the charge/Q collapse's -2.41% (the
+    collapse's wrong cross-coupling was the slow-corner -1.9% PAC residual).
+    Circuits without those caps keep the orbit's (numba-fast) charge fold --
+    for linear caps the row/col folds are identical anyway.
+    """
+    if internal_gate_states:
+        return False
+    return _charge_linearized_caps(pss_result)
 
 
 def _is_constant_wave(values, tol=1e-12):
@@ -693,6 +715,123 @@ def _try_numba_pac_linearization(
         return None
 
 
+def _try_numba_pac_linearization_gate1(
+        all_sizes, all_nf, corner, topo, tbias, t_uniform, node_wave,
+        input_wave, node_inputs, drive_list, drive_amps, *, dev_inst=None):
+    """Numba twin of the gate1-retained Verilog-A (``charge_caps=False``)
+    linearization. Returns (Gf, Cf, Ginf, Cinf, n_gate1) or None to fall back to
+    the Python assembly. Requires every device to carry gate1 dynamics."""
+    if pac_linearize_orbit_gate1_numba is None:
+        return None
+    if (getattr(topo, "vccs", ()) or getattr(topo, "vcvs", ()) or
+            getattr(topo, "cccs", ()) or getattr(topo, "ccvs", ())):
+        return None
+    try:
+        N = len(t_uniform)
+        n = topo.n
+        idx = topo.idx
+        rails = topo.rail_values(tbias)
+        if dev_inst is None:
+            dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
+        # The kernel assumes EVERY device has a gate1 node (index n+pos, in topo order,
+        # matching _assemble_pac_linearization_python). Mixed topologies -> Python.
+        if not all(_has_gate1_dynamics(dev_inst.get(name)) for name, *_ in topo.devices):
+            return None
+
+        input_keys = tuple(input_wave)
+        input_index = {key: i for i, key in enumerate(input_keys)}
+        drive_index = {node: i for i, node in enumerate(drive_list)}
+        if any(key not in input_index for key in node_inputs.values()):
+            return None
+
+        def value_term(node):
+            if node in idx:
+                return (0, idx[node])
+            if node in node_inputs:
+                return (1, input_index[node_inputs[node]])
+            return (2, float(rails[node]))
+
+        def stamp_term(node):
+            if node in idx:
+                return (0, idx[node])
+            if node in drive_index:
+                return (1, drive_index[node])
+            return (2, 0)
+
+        node_wave_arr = np.vstack([
+            np.asarray(node_wave[node], float) for node in topo.solved]).T
+        input_wave_arr = (np.vstack([np.asarray(input_wave[k], float) for k in input_keys])
+                          if input_keys else np.empty((0, N), dtype=float))
+        period = float(t_uniform[1] - t_uniform[0]) * float(N) if N > 1 else 0.0
+        node_dot = _periodic_wave_derivatives(node_wave, period)
+        input_dot = _periodic_wave_derivatives(input_wave, period)
+        node_dot_arr = np.vstack([
+            np.asarray(node_dot[node], float) for node in topo.solved]).T
+        input_dot_arr = (np.vstack([np.asarray(input_dot[k], float) for k in input_keys])
+                         if input_keys else np.empty((0, N), dtype=float))
+
+        params = [dev_inst[name].get_numba_params() for name, *_ in topo.devices]
+        flt = lambda attr: np.array([getattr(p, attr) for p in params], dtype=float)
+        p_Vfb = flt("Vfb"); p_Vss = flt("Vss"); p_Lc = flt("Lc")
+        p_lambda = flt("lambda_"); p_contact_scale = flt("contact_scale")
+        p_exponent = flt("channel_exponent"); p_current_scale = flt("current_scale")
+        p_inv_Rleak = flt("inv_Rleak"); p_two_over_pi = flt("two_over_pi")
+        p_cap_cgs1 = flt("cap_cgs1"); p_cap_cgd1 = flt("cap_cgd1")
+        p_cap_half_wl_ci = flt("cap_half_wl_ci")
+        p_cap_cgs3_base = flt("cap_cgs3_base"); p_cap_cgd3_base = flt("cap_cgd3_base")
+        p_k1 = flt("k1")
+        p_R_cap = np.array([float(dev_inst[name].R_cap) for name, *_ in topo.devices])
+        p_R_cap2 = np.array([float(dev_inst[name].R_cap2) for name, *_ in topo.devices])
+        ndev = len(topo.devices)
+        gate1_ref = np.arange(n, n + ndev, dtype=np.int64)
+        n_state = n + ndev
+
+        vt_d = _term_arrays([value_term(d) for _n, d, _g, _s in topo.devices])
+        vt_g = _term_arrays([value_term(g) for _n, _d, g, _s in topo.devices])
+        vt_s = _term_arrays([value_term(s) for _n, _d, _g, s in topo.devices])
+        st_d = _stamp_arrays([stamp_term(d) for _n, d, _g, _s in topo.devices])
+        st_g = _stamp_arrays([stamp_term(g) for _n, _d, g, _s in topo.devices])
+        st_s = _stamp_arrays([stamp_term(s) for _n, _d, _g, s in topo.devices])
+        res_a = _stamp_arrays([stamp_term(a) for _n, a, _b, _R in topo.resistors])
+        res_b = _stamp_arrays([stamp_term(b) for _n, _a, b, _R in topo.resistors])
+        res_g = np.array([1.0 / float(R) for _n, _a, _b, R in topo.resistors], dtype=float)
+        caps = topo.cap_list()
+        cap_a = _stamp_arrays([stamp_term(a) for a, _b, _c in caps])
+        cap_b = _stamp_arrays([stamp_term(b) for _a, b, _c in caps])
+        cap_value = np.array([float(c) for _a, _b, c in caps], dtype=float)
+
+        ok, Gt, Ct, Gin, Cin = pac_linearize_orbit_gate1_numba(
+            np.asarray(node_wave_arr, float), np.asarray(input_wave_arr, float),
+            np.asarray(node_dot_arr, float), np.asarray(input_dot_arr, float),
+            vt_d[0], vt_d[1], vt_d[2], vt_g[0], vt_g[1], vt_g[2],
+            vt_s[0], vt_s[1], vt_s[2],
+            st_d[0], st_d[1], st_g[0], st_g[1], st_s[0], st_s[1],
+            gate1_ref, p_R_cap, p_R_cap2,
+            p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+            p_current_scale, p_inv_Rleak,
+            p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+            p_cap_cgs3_base, p_cap_cgd3_base, p_k1,
+            res_a[0], res_a[1], res_b[0], res_b[1], res_g,
+            cap_a[0], cap_a[1], cap_b[0], cap_b[1], cap_value,
+            len(drive_list), int(n_state), 1e-4)
+        if not ok:
+            return None
+        Gf = np.fft.fft(Gt, axis=0) / N
+        Cf = np.fft.fft(Ct, axis=0) / N
+        if len(drive_list):
+            damp = np.asarray(drive_amps, complex)
+            gdrive = np.tensordot(Gin, damp, axes=([2], [0]))
+            cdrive = np.tensordot(Cin, damp, axes=([2], [0]))
+        else:
+            gdrive = np.zeros((N, n_state), dtype=complex)
+            cdrive = np.zeros((N, n_state), dtype=complex)
+        Ginf = np.fft.fft(gdrive, axis=0) / N
+        Cinf = np.fft.fft(cdrive, axis=0) / N
+        return Gf, Cf, Ginf, Cinf, ndev
+    except Exception:
+        return None
+
+
 def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
                           corner=None,
                           compute_condition=False):
@@ -890,10 +1029,10 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         for key, val in pss_result.get("inputs", {}).items()
     }
 
-    charge_caps = _charge_linearized_caps(pss_result)
     cache_store = pss_result.setdefault("_pac_analytic_cache", {}) if cache else {}
     internal_gate_states, lin_dev_inst = _resolve_gate1_instances(
         all_sizes, all_nf, corner, topo)
+    charge_caps = _conversion_charge_caps(pss_result, internal_gate_states)
     lin_key = (
         "pac_analytic_lin_gate1_v1", tuple(topo.solved), tuple(topo.devices),
         tuple(topo.resistors), tuple(topo.cap_list()), float(period), int(N),
@@ -914,16 +1053,27 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         lin_numba_used = bool(lin.get("numba_used", False))
     else:
         fast_lin = None
+        gate1_fast = None
         if not internal_gate_states:
             fast_lin = _try_numba_pac_linearization(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
                 charge_caps=charge_caps,
             )
+        elif not charge_caps:
+            gate1_fast = _try_numba_pac_linearization_gate1(
+                all_sizes, all_nf, corner, topo, tbias, t_uniform,
+                node_wave, input_wave, node_inputs, drive_list, drive_amps,
+                dev_inst=lin_dev_inst,
+            )
         if fast_lin is not None:
             Gf, Cf, Ginf, Cinf = fast_lin
             n_state = n
             n_gate1 = 0
+            lin_numba_used = True
+        elif gate1_fast is not None:
+            Gf, Cf, Ginf, Cinf, n_gate1 = gate1_fast
+            n_state = Gf.shape[1]
             lin_numba_used = True
         else:
             Gt, Ct, gdrive, cdrive, n_gate1 = _assemble_pac_linearization_python(
@@ -1116,10 +1266,10 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         key: np.interp(t_uniform, t_orbit, np.asarray(val, float), period=period)
         for key, val in pss_result.get("inputs", {}).items()}
 
-    charge_caps = _charge_linearized_caps(pss_result)
     cache_store = pss_result.setdefault("_pac_td_cache", {}) if cache else {}
     internal_gate_states, lin_dev_inst = _resolve_gate1_instances(
         all_sizes, all_nf, corner, topo)
+    charge_caps = _conversion_charge_caps(pss_result, internal_gate_states)
     lin_key = (
         "pac_td_lin_gate1_v1", tuple(topo.solved), tuple(topo.devices),
         tuple(topo.resistors), tuple(topo.cap_list()), float(period), int(N),
@@ -1134,12 +1284,18 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         n_gate1 = int(lin.get("n_gate1", max(0, Gt.shape[1] - n)))
     else:
         fast_lin = None
+        gate1_fast = None
         if not internal_gate_states:
             fast_lin = _try_numba_pac_linearization(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
                 charge_caps=charge_caps)
-        if fast_lin is None:
+        elif not charge_caps:
+            gate1_fast = _try_numba_pac_linearization_gate1(
+                all_sizes, all_nf, corner, topo, tbias, t_uniform,
+                node_wave, input_wave, node_inputs, drive_list, drive_amps,
+                dev_inst=lin_dev_inst)
+        if fast_lin is None and gate1_fast is None:
             Gt, Ct, Gin, Cin, n_gate1 = _assemble_pac_linearization_python(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
@@ -1147,13 +1303,16 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
                 internal_gate_states=internal_gate_states,
                 dev_inst=lin_dev_inst)
         else:
-            Gf, Cf, Ginf, Cinf = fast_lin
+            if gate1_fast is not None:
+                Gf, Cf, Ginf, Cinf, n_gate1 = gate1_fast
+            else:
+                Gf, Cf, Ginf, Cinf = fast_lin
+                n_gate1 = 0
             # The HB FFTs these harmonics; we keep the time samples (uniform grid).
             Gt = np.fft.ifft(Gf * N, axis=0)
             Ct = np.fft.ifft(Cf * N, axis=0)
             Gin = np.fft.ifft(Ginf * N, axis=0)
             Cin = np.fft.ifft(Cinf * N, axis=0)
-            n_gate1 = 0
         if cache:
             cache_store[lin_key] = {
                 "Gt": Gt, "Ct": Ct, "Gin": Gin, "Cin": Cin,

@@ -153,7 +153,9 @@ Gear2（变步长 BDF2）将 PAC baseband 误差从 BE 的约 −2.5% 降到三 
 在刚性电路（如 chopper）上，`integration_method="gear2"` 如果同时请求
 `max_retry_subdivisions` / `max_step`，会留在 Numba gear2 grid 内维护两步历史并做二分 retry；
 PSS/PAC/PNoise 管线默认使用快速 Numba gear2 grid 以保证精度；
-裸 `transient()` 默认使用 BE。
+裸 `transient()` 默认使用 BE。全局 transient 电容算子仍默认使用电荷守恒的 Q-stamp；
+PMOS chopper PSS wrapper 单独默认 `cap_mode="average"`，用于匹配 Cadence 在高阻内部节点上的
+commutation feedthrough；泛化的 stiff switched-capacitor 电路仍以 `charge` 作为更稳的默认选择。
 
 ### 3. Chopper 分析（三种精度层级）
 
@@ -219,8 +221,11 @@ PAC 现在有两条一等公民路径：
   单周期 monodromy，再对每个频点求一个小的 quasi-periodic 边界系统，避免大型
   `(2K+1)n` HB 矩阵。对 PMOS_TFT 周期转换，它保留每个器件的内部 `gate1` 小信号状态
   （`R_cap`、`R_cap2`、`Cgs`、`Cgd`），不再把器件逐时刻塌缩成端口
-  `{gm,gds,Cgs,Cgd}`。这修复了旧 slow-corner −1.89% chopper PAC 误差；D3 slow
-  回归现在已进入 Cadence 1% 门限内。
+  `{gm,gds,Cgs,Cgd}`。转换线性化使用 Verilog-A 风格的 `C(V)*ddt(V)` 算子，
+  与生成 PSS 轨道时使用的 transient Q/average companion 分开处理，因为 Spectre PAC
+  折叠的是这个转换算子。Numba 可用且所有 PMOS 都有 `gate1` 动态时，这条 gate1
+  扩维转换会走编译版 `pac_linearize_orbit_gate1` 内核。这修复了旧 slow-corner
+  −1.89% chopper PAC 误差；D3 slow 回归现在已进入 Cadence 1% 门限内。
 
 只有需要原有限差分 shooting 时才设置 `analytic=False`（每频点需 `n_state+2`
 次瞬态周期）。PNoise 在 PSS 轨道上做谐波平衡——这是第一性原理的 LPTV 噪声解，
@@ -445,6 +450,8 @@ HB 对照时才设置 `time_domain=False`。
 （用时域分辨率换速度）。扫不同输出带宽或重复频点时复用同一个 `pss_result`：
 PNoise 现在会缓存 LPTV 线性化、HB block 和相同频点的 adjoint 解。安装
 Numba 时，大规模 HB block 组装、噪声折叠和 gm/gds 线性化也会走编译内核。
+Chopper PAC 的 gate1 转换线性化在全 PMOS gate1 拓扑下也会走编译内核；混合或暂不支持的
+拓扑会回退到同一 stamp 的 Python 装配。
 当前 UI chopper 的 PNoise 不是全流程瓶颈；61 点约 0.55s、121 点约 0.93s。
 
 **PSS / 周期 transient 太慢。**

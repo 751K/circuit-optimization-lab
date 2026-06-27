@@ -231,7 +231,11 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   common-mode charge balance is not lost.
 - `pmos_chopper_pss(...)` wraps that same hard-switched topology in the generic
   shooting PSS solver and returns one periodic orbit for the selected clock
-  period. This is the foundation for native PAC/PNoise.
+  period. This is the foundation for native PAC/PNoise. The wrapper defaults to
+  `cap_mode="average"` for the orbit: a trapezoidal `0.5*(C_n+C_{n-1})*dV`
+  discretization that matches Cadence's commutation feedthrough on the chopper's
+  high-impedance internal nodes. Generic transient/PSS calls still default to
+  the charge-conservative Q-stamp.
 - `pmos_chopper_pac(...)` is a compatibility wrapper over the generic
   `core.pac_solver.pac_solve(...)`. The generic solver still defaults to the
   analytic-adjoint HB path, but the chopper wrapper defaults to the time-domain
@@ -239,11 +243,16 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   once in time domain, then solves a small quasi-periodic boundary system per
   frequency. For PMOS_TFT periodic conversion it retains each device's hidden
   `gate1` small-signal state (`R_cap`, `R_cap2`, `Cgs`, `Cgd`) instead of
-  collapsing to terminal `{gm,gds,Cgs,Cgd}` at every orbit sample. Set
-  `time_domain=False` for the analytic-adjoint HB comparison path, or
-  `analytic=False` for the original finite-difference shooting path. Static PSS
-  orbits automatically reduce to ordinary `ac_solve`, avoiding PAC transient
-  runs.
+  collapsing to terminal `{gm,gds,Cgs,Cgd}` at every orbit sample. The periodic
+  conversion linearization uses the Verilog-A-style `C(V)*ddt(V)` operator that
+  Spectre PAC folds, not necessarily the transient companion operator used to
+  generate the large-signal orbit. When every PMOS device exposes the `gate1`
+  network and Numba is enabled, the gate1-retained PAC linearization is assembled
+  by the compiled `pac_linearize_orbit_gate1` kernel; mixed topologies fall back
+  to the Python assembly. Set `time_domain=False` for the analytic-adjoint HB
+  comparison path, or `analytic=False` for the original finite-difference
+  shooting path. Static PSS orbits automatically reduce to ordinary `ac_solve`,
+  avoiding PAC transient runs.
 - `pmos_chopper_pnoise(...)` is a compatibility wrapper over the generic
   `core.pnoise_solver.pnoise_solve(...)`. The generic PNoise kernel uses
   harmonic balance on a PSS orbit: sample periodic small-signal G(t)/C(t), FFT to
@@ -290,9 +299,10 @@ engine:
   `shooting_jacobian_reuses`. The history records the Jacobian kind used
   (`"analytic_monodromy"` or `"finite_difference"`).
 - PMOS chopper wrappers default to the Numba-grid transient path
-  (`fallback_least_squares=False`) and one stabilization period when they build a
-  PSS orbit internally for PAC/PNoise. This preserves the residual/nfail
-  convergence checks while avoiding Python fallback reruns on every period.
+  (`fallback_least_squares=False`), one stabilization period, and the chopper-only
+  `cap_mode="average"` orbit when they build a PSS internally for PAC/PNoise.
+  This preserves the residual/nfail convergence checks while avoiding Python
+  fallback reruns on every period.
 - Chopper PSS auto-seeding caches the bare-AFE DC seed for identical
   size/bias/corner inputs. Repeated analyses reuse only the initial guess; the
   real shooting residual is still recomputed, so convergence accuracy is unchanged.
@@ -317,8 +327,9 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
      `(exp(jωT)I - Ψ)x0 = g` per frequency. This avoids HB sideband truncation
      and the large `(2K+1)n` conversion matrix. PMOS_TFT devices are expanded
      with their internal `gate1` small-signal states during periodic conversion.
-     Unsupported bordered/vsource-driven cases return `None` and continue to the
-     next path.
+     The all-PMOS gate1 case uses a Numba assembly kernel; unsupported mixed,
+     bordered, or vsource-driven cases return `None` and continue to the next
+     path.
   3. **Analytic-adjoint** (generic default, `analytic=True`) — samples periodic G(t)/C(t)
      and input-coupling columns G_in(t)/C_in(t) on the PSS orbit, FFTs to
      harmonic coefficients G_k/C_k, builds the harmonic-balance conversion
@@ -354,10 +365,11 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
 - With Numba available, large LPTV PNoise runs use compiled HB block assembly
   and compiled `freq × source × sideband²` noise folding. `get_ss_params()` also
   uses the compiled terminal-derivative path for gm/gds and falls back to the
-  original finite difference near small-current/kink regions. Numba/Rust-style
-  compiled code mainly helps the matrix-fill and noise-fold loops; HB linear
-  solves are dominated by BLAS/LAPACK, SuperLU, or GMRES rather than Python loop
-  overhead.
+  original finite difference near small-current/kink regions. The all-PMOS
+  `gate1` PAC conversion assembly is also compiled when available. Numba/Rust-
+  style compiled code mainly helps the matrix-fill and noise-fold loops; HB
+  linear solves are dominated by BLAS/LAPACK, SuperLU, or GMRES rather than
+  Python loop overhead.
 - If `gains` or `pac_result` are not provided, pass the same `input_drive` and
   the function will call generic `pac_solve` for input-referred noise.
 
@@ -371,6 +383,11 @@ Solves the time-domain response of the topology-defined system using backward Eu
 - `current_inputs=[{"p": node_a, "q": node_b, "input": key}]` stamps a
   time-varying ideal current source flowing `p -> q`; the PMOS chopper helper uses
   this for charge-injection pulses.
+- `cap_mode_id` is an internal/per-call capacitance-operator override. `None`
+  uses the module/environment default (`charge`), while chopper PSS passes the
+  `average` operator explicitly for Cadence-matched clock feedthrough. This
+  override affects only the transient/PSS orbit, not PAC/PNoise conversion
+  linearization.
 - `max_step`, `max_retry_subdivisions`, `fallback_full_jacobian`, and
   `fallback_least_squares` provide
   controlled step refinement and bounded fallback solving for switched transient
@@ -404,6 +421,9 @@ also supports variable-step BDF2 (second-order, stiffly stable). Key properties:
 
 - Uses the stable charge-mode capacitor companion `i_n = (α0·Q_n + α1·Q_{n-1} +
   α2·Q_{n-2})/h_n`, same as BE's `(Q_n − Q_{n-1})/h` but with two-step history.
+  A per-call cap-mode override exists for calibrated orbit generation; the PMOS
+  chopper PSS wrapper uses the `average` operator to match Spectre feedthrough,
+  while generic stiff circuits keep the charge default.
 - Step-ratio clamp ρ≤2 guarantees zero-stability on non-uniform grids.
 - BE self-start on the first step of every interval.
 - A compiled Numba gear2 grid solver (`_transient_solve_grid_gear2_impl`) handles
@@ -587,8 +607,9 @@ The old UI chopper full-flow bottleneck was the portable HB PAC frequency solve:
 explicit `PSS+PAC(HB)+PNoise` (`time_domain=False`) takes about 25.6 s for
 61 frequency points (PSS≈0.35 s, PAC≈24.7 s, PNoise≈0.55 s) and about 48.9 s for
 121 points (PSS≈0.44 s, PAC≈47.6 s, PNoise≈0.93 s). The default chopper
-time-domain PAC path keeps the PMOS `gate1` states and takes about 1.4 s for
-61 points on the same PSS orbit. A non-chopper AFE `DC+AC+Noise` 121-point run
+time-domain PAC path keeps the PMOS `gate1` states and uses the Numba gate1
+conversion assembly when available; it takes about 1.4 s for 61 points on the
+same PSS orbit. A non-chopper AFE `DC+AC+Noise` 121-point run
 is about 1.8 ms when noise reuses the AC result.
 
 ## Calibration Status

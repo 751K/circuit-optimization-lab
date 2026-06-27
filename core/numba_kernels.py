@@ -2084,6 +2084,206 @@ def _pac_linearize_orbit_impl(
     return True, Gt, Ct, Gin, Cin
 
 
+def _pac_term_deriv_impl(kind, ref, node_dot, input_dot, m):
+    # d/dt of a device terminal's large-signal waveform (matches term_derivative):
+    # solved node -> node_dot, input/clock -> input_dot, rail -> 0.
+    if kind == 0:
+        return node_dot[m, ref]
+    elif kind == 1:
+        return input_dot[ref, m]
+    return 0.0
+
+
+def _pac_linearize_orbit_gate1_impl(
+        node_wave, input_wave, node_dot, input_dot,
+        dev_value_d_kind, dev_value_d_ref, dev_value_d_val,
+        dev_value_g_kind, dev_value_g_ref, dev_value_g_val,
+        dev_value_s_kind, dev_value_s_ref, dev_value_s_val,
+        dev_stamp_d_kind, dev_stamp_d_ref,
+        dev_stamp_g_kind, dev_stamp_g_ref,
+        dev_stamp_s_kind, dev_stamp_s_ref,
+        gate1_ref, p_R_cap, p_R_cap2,
+        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+        p_current_scale, p_inv_Rleak,
+        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+        p_cap_cgs3_base, p_cap_cgd3_base, p_k1,
+        res_a_kind, res_a_ref, res_b_kind, res_b_ref, res_g,
+        cap_a_kind, cap_a_ref, cap_b_kind, cap_b_ref, cap_value,
+        ndrive, n_state, fd_step):
+    # Verilog-A (non-conservative) cap linearization WITH the PMOS_TFT gate1 internal
+    # node retained -- the numba twin of _assemble_pac_linearization_python (charge_caps
+    # False, internal_gate_states True). Caps flow s/d <-> gate1 (not gate), with R_cap /
+    # R_cap2 resistive branches, plus the edge-only multi-variable cross-coupling
+    # [dC/dx * dx]*dV0/dt that the conservative charge fold drops.
+    N = node_wave.shape[0]
+    n = node_wave.shape[1]
+    ndev = p_Vfb.shape[0]
+    Gt = np.zeros((N, n_state, n_state), dtype=np.float64)
+    Ct = np.zeros((N, n_state, n_state), dtype=np.float64)
+    Gin = np.zeros((N, n_state, ndrive), dtype=np.float64)
+    Cin = np.zeros((N, n_state, ndrive), dtype=np.float64)
+    op_valid = np.zeros(ndev, dtype=np.bool_)
+    op_vs1 = np.zeros(ndev, dtype=np.float64)
+    op_vd1 = np.zeros(ndev, dtype=np.float64)
+    h = fd_step
+
+    for m in range(N):
+        Gm = Gt[m]; Cm = Ct[m]; Gim = Gin[m]; Cim = Cin[m]
+        for k in range(n):
+            Gm[k, k] += 1e-12
+        for pos in range(res_g.shape[0]):
+            _pac_stamp_adm_impl(Gm, Gim, res_a_kind[pos], res_a_ref[pos],
+                                res_b_kind[pos], res_b_ref[pos], res_g[pos])
+        for pos in range(cap_value.shape[0]):
+            _pac_stamp_adm_impl(Cm, Cim, cap_a_kind[pos], cap_a_ref[pos],
+                                cap_b_kind[pos], cap_b_ref[pos], cap_value[pos])
+
+        for pos in range(ndev):
+            Vs = _pac_term_value_impl(dev_value_s_kind[pos], dev_value_s_ref[pos],
+                                      dev_value_s_val[pos], node_wave, input_wave, m)
+            Vd = _pac_term_value_impl(dev_value_d_kind[pos], dev_value_d_ref[pos],
+                                      dev_value_d_val[pos], node_wave, input_wave, m)
+            Vg = _pac_term_value_impl(dev_value_g_kind[pos], dev_value_g_ref[pos],
+                                      dev_value_g_val[pos], node_wave, input_wave, m)
+            ok, Vs1, Vd1, _, _, _ = _solve_internal_with_guesses_impl(
+                Vs, Vd, Vg, op_valid[pos], op_vs1[pos], op_vd1[pos], 1e-12, 40,
+                p_Vfb[pos], p_Vss[pos], p_Lc[pos], p_lambda[pos],
+                p_contact_scale[pos], p_exponent[pos], p_current_scale[pos],
+                p_inv_Rleak[pos])
+            if not ok:
+                return False, Gt, Ct, Gin, Cin
+            op_valid[pos] = True; op_vs1[pos] = Vs1; op_vd1[pos] = Vd1
+
+            F0a, F0b, j00, j01, j10, j11 = _residual_pair_jac_internal_impl(
+                Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_Vss[pos], p_Lc[pos],
+                p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
+                p_current_scale[pos], p_inv_Rleak[pos])
+            Idc0 = F0b - (Vs1 - Vd1) / 0.1
+            use_fd = abs(Idc0) < 1e-10
+            gm = 0.0; gds = 1e-12
+            if not use_fd:
+                okd, gm_neg, gds_neg = _terminal_derivatives_from_jac_impl(
+                    Vs, Vd, Vg, Vs1, Vd1, F0a, F0b, Idc0, j00, j01, j10, j11,
+                    True, True, False, 1e-3, p_Vfb[pos], p_Vss[pos], p_Lc[pos],
+                    p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                if okd and math.isfinite(gm_neg) and math.isfinite(gds_neg):
+                    gm = -gm_neg; gds = -gds_neg
+                else:
+                    use_fd = True
+            if use_fd:
+                hd = 1e-3
+                okp, idp = _pac_idc_solved_impl(
+                    Vs, Vd, Vg + hd, True, Vs1, Vd1, p_Vfb[pos], p_Vss[pos],
+                    p_Lc[pos], p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                okm2, idm = _pac_idc_solved_impl(
+                    Vs, Vd, Vg - hd, True, Vs1, Vd1, p_Vfb[pos], p_Vss[pos],
+                    p_Lc[pos], p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                okdp, iddp = _pac_idc_solved_impl(
+                    Vs, Vd + hd, Vg, True, Vs1, Vd1, p_Vfb[pos], p_Vss[pos],
+                    p_Lc[pos], p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                okdm, iddm = _pac_idc_solved_impl(
+                    Vs, Vd - hd, Vg, True, Vs1, Vd1, p_Vfb[pos], p_Vss[pos],
+                    p_Lc[pos], p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                if not (okp and okm2 and okdp and okdm):
+                    return False, Gt, Ct, Gin, Cin
+                gm = (idp - idm) / (2.0 * hd)
+                gds = (iddp - iddm) / (2.0 * hd)
+                if not math.isfinite(gm) or not math.isfinite(gds):
+                    return False, Gt, Ct, Gin, Cin
+                if gm < 0.0:
+                    gm = 0.0
+                if gds < 1e-12:
+                    gds = 1e-12
+            Cgs, Cgd = _capacitances_impl(
+                Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_two_over_pi[pos],
+                p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
+                p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
+
+            dk = dev_stamp_d_kind[pos]; dr = dev_stamp_d_ref[pos]
+            gk = dev_stamp_g_kind[pos]; gr = dev_stamp_g_ref[pos]
+            sk = dev_stamp_s_kind[pos]; sr = dev_stamp_s_ref[pos]
+            g1r = gate1_ref[pos]                       # gate1 solved-node index (always >=0)
+            inv_rc = 1.0 / p_R_cap[pos]
+            inv_rc2 = 1.0 / p_R_cap2[pos]
+            # channel gm/gds (to gate, no caps), then gate1 resistive + cap network.
+            _pac_stamp_adm_impl(Gm, Gim, dk, dr, sk, sr, gds)
+            _pac_stamp_vccs_impl(Gm, Gim, dk, dr, gk, gr, sk, sr, gm)
+            _pac_stamp_adm_impl(Gm, Gim, 0, g1r, gk, gr, inv_rc)      # gate1 <-> gate
+            _pac_stamp_adm_impl(Gm, Gim, sk, sr, 0, g1r, inv_rc2)     # s <-> gate1 leak
+            _pac_stamp_adm_impl(Gm, Gim, dk, dr, 0, g1r, inv_rc2)     # d <-> gate1 leak
+            _pac_stamp_adm_impl(Cm, Cim, sk, sr, 0, g1r, Cgs)         # Cgs to gate1
+            _pac_stamp_adm_impl(Cm, Cim, dk, dr, 0, g1r, Cgd)         # Cgd to gate1
+
+            # Edge-only cross-coupling: [dC/dx * dx]*dV0(s/d,gate1)/dt.
+            dVs_dt = _pac_term_deriv_impl(dev_value_s_kind[pos], dev_value_s_ref[pos],
+                                          node_dot, input_dot, m)
+            dVd_dt = _pac_term_deriv_impl(dev_value_d_kind[pos], dev_value_d_ref[pos],
+                                          node_dot, input_dot, m)
+            dVg_dt = _pac_term_deriv_impl(dev_value_g_kind[pos], dev_value_g_ref[pos],
+                                          node_dot, input_dot, m)
+            # gate1 DC is LINEAR in (Vs,Vd,Vg) (KCL of R_cap/R_cap2), so its time
+            # derivative is the same linear combo of the terminal derivatives -- exactly
+            # the periodic derivative of dev._gate1_dc the Python path samples+differences.
+            denom = inv_rc + 2.0 * inv_rc2
+            dVg1_dt = (dVg_dt * inv_rc + (dVs_dt + dVd_dt) * inv_rc2) / denom
+            vdot_sg1 = dVs_dt - dVg1_dt
+            vdot_dg1 = dVd_dt - dVg1_dt
+            if abs(vdot_sg1) < 1e-30 and abs(vdot_dg1) < 1e-30:
+                continue
+            # central-difference dC/d{Vs,Vd,Vg} (re-solving internals like get_capacitances)
+            for axis in range(3):
+                vsp = Vs; vdp = Vd; vgp = Vg
+                vsm = Vs; vdm = Vd; vgm = Vg
+                if axis == 0:
+                    vsp = Vs + h; vsm = Vs - h
+                elif axis == 1:
+                    vdp = Vd + h; vdm = Vd - h
+                else:
+                    vgp = Vg + h; vgm = Vg - h
+                okp2, vs1p, vd1p, _, _, _ = _solve_internal_with_guesses_impl(
+                    vsp, vdp, vgp, True, Vs1, Vd1, 1e-12, 40, p_Vfb[pos], p_Vss[pos],
+                    p_Lc[pos], p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                okm3, vs1m, vd1m, _, _, _ = _solve_internal_with_guesses_impl(
+                    vsm, vdm, vgm, True, Vs1, Vd1, 1e-12, 40, p_Vfb[pos], p_Vss[pos],
+                    p_Lc[pos], p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
+                    p_current_scale[pos], p_inv_Rleak[pos])
+                if not (okp2 and okm3):
+                    return False, Gt, Ct, Gin, Cin
+                cgsp, cgdp = _capacitances_impl(
+                    vsp, vdp, vgp, vs1p, vd1p, p_Vfb[pos], p_two_over_pi[pos],
+                    p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
+                    p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
+                cgsm, cgdm = _capacitances_impl(
+                    vsm, vdm, vgm, vs1m, vd1m, p_Vfb[pos], p_two_over_pi[pos],
+                    p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
+                    p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
+                dCgs = (cgsp - cgsm) / (2.0 * h)
+                dCgd = (cgdp - cgdm) / (2.0 * h)
+                if axis == 0:
+                    ck = sk; cr = sr
+                elif axis == 1:
+                    ck = dk; cr = dr
+                else:
+                    ck = gk; cr = gr
+                # branch s->gate1 controlled by ctrl: +dCgs*vdot_sg1 ; d->gate1: +dCgd*vdot_dg1
+                if vdot_sg1 != 0.0 and dCgs != 0.0:
+                    cc = dCgs * vdot_sg1
+                    _pac_stamp_coeff_impl(Gm, Gim, sk, sr, ck, cr, cc)
+                    _pac_stamp_coeff_impl(Gm, Gim, 0, g1r, ck, cr, -cc)
+                if vdot_dg1 != 0.0 and dCgd != 0.0:
+                    cc = dCgd * vdot_dg1
+                    _pac_stamp_coeff_impl(Gm, Gim, dk, dr, ck, cr, cc)
+                    _pac_stamp_coeff_impl(Gm, Gim, 0, g1r, ck, cr, -cc)
+
+    return True, Gt, Ct, Gin, Cin
+
+
 def _pnoise_fold_psd_impl(adjs, freqs, K, fundamental,
                           p_indices, q_indices, sth_grids, mfl_grids):
     # sth_grids[si] is the Toeplitz power-harmonic matrix of the (white) thermal
@@ -2180,6 +2380,8 @@ if NUMBA_AVAILABLE:
     _pac_stamp_vccs_impl = njit(cache=NUMBA_CACHE)(_pac_stamp_vccs_impl)
     _pac_idc_solved_impl = njit(cache=NUMBA_CACHE)(_pac_idc_solved_impl)
     _pac_linearize_orbit_impl = njit(cache=NUMBA_CACHE)(_pac_linearize_orbit_impl)
+    _pac_term_deriv_impl = njit(cache=NUMBA_CACHE)(_pac_term_deriv_impl)
+    _pac_linearize_orbit_gate1_impl = njit(cache=NUMBA_CACHE)(_pac_linearize_orbit_gate1_impl)
     _pnoise_fold_psd_impl = njit(cache=NUMBA_CACHE)(_pnoise_fold_psd_impl)
     eval_currents_numba = _eval_currents_impl
     newton_internal_numba = _newton_internal_impl
@@ -2192,6 +2394,7 @@ if NUMBA_AVAILABLE:
     pnoise_hb_blocks_numba = _pnoise_hb_blocks_impl
     pac_hb_blocks_numba = _pnoise_hb_blocks_impl
     pac_linearize_orbit_numba = _pac_linearize_orbit_impl
+    pac_linearize_orbit_gate1_numba = _pac_linearize_orbit_gate1_impl
     pnoise_fold_psd_numba = _pnoise_fold_psd_impl
 else:
     eval_currents_numba = None
@@ -2205,4 +2408,5 @@ else:
     pnoise_hb_blocks_numba = None
     pac_hb_blocks_numba = None
     pac_linearize_orbit_numba = None
+    pac_linearize_orbit_gate1_numba = None
     pnoise_fold_psd_numba = None
