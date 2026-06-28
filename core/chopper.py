@@ -42,6 +42,7 @@ import numpy as np
 
 try:
     from .ac_solver import _bw_from_gain, ac_solve, _dev_corner, _dev_nf, _is_afe_topology
+    from .adaptive_config import resolve_adaptive_config
     from .device_model import create_device, get_default_model_type
     from .noise_solver import band_rms, noise_analysis
     from .pac_solver import pac_solve
@@ -51,6 +52,7 @@ try:
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_solver import _bw_from_gain, ac_solve, _dev_corner, _dev_nf, _is_afe_topology
+    from adaptive_config import resolve_adaptive_config
     from device_model import create_device, get_default_model_type
     from noise_solver import band_rms, noise_analysis
     from pac_solver import pac_solve
@@ -1152,7 +1154,8 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
                      cap_mode="average",
                      adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
                      adaptive_iabstol=1e-12, adaptive_max_steps=200000,
-                     adaptive_h0=None, adaptive_freeze_factor=10.0):
+                     adaptive_h0=None, adaptive_freeze_factor=10.0,
+                     adaptive_config=None):
     """Periodic steady state of the eight-PMOS chopper.
 
     This is a shooting PSS wrapper around the same hard-switched topology and
@@ -1175,6 +1178,15 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
     matches Cadence to ~+0.02%, so adaptive offers no accuracy gain on the chopper
     (unlike the SC-LPF, which needs it to resolve its harsh switch-conduction).
     """
+    adaptive_config = resolve_adaptive_config(
+        adaptive_config,
+        adaptive_reltol=adaptive_reltol,
+        adaptive_vabstol=adaptive_vabstol,
+        adaptive_iabstol=adaptive_iabstol,
+        adaptive_max_steps=adaptive_max_steps,
+        adaptive_h0=adaptive_h0,
+        adaptive_freeze_factor=adaptive_freeze_factor,
+    )
     if adaptive:
         warnings.warn(
             "pmos_chopper_pss: adaptive=True is not supported on the chopper "
@@ -1189,12 +1201,17 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
             "to BE on this topology).",
             RuntimeWarning, stacklevel=2)
         adaptive = False
-    # "endpoint" is the literal C(Vn)*dV companion (unstable in the shooting,
-    # experiments only); "veriloga" kept as a legacy alias for it. The stable
-    # non-conservative operator that matches Cadence's feedthrough is "average".
     _CAP_MODE_IDS = {"charge": 0, "q": 0, "average": 1, "avg": 1, "trapezoid": 1,
-                     "endpoint": 2, "veriloga": 2, "branch": 3, "self": 3}
-    cap_mode_id = None if cap_mode is None else _CAP_MODE_IDS[str(cap_mode).lower()]
+                     "qstamp": 0, "q-stamp": 0, "trap": 1}
+    if cap_mode is None:
+        cap_mode_id = None
+    else:
+        key = str(cap_mode).lower()
+        if key not in _CAP_MODE_IDS:
+            raise ValueError(
+                "cap_mode must be 'charge' or 'average' "
+                "(aliases: q/qstamp/q-stamp, avg/trapezoid/trap)")
+        cap_mode_id = _CAP_MODE_IDS[key]
     f_chop = float(f_chop)
     if f_chop <= 0.0:
         raise ValueError("f_chop must be positive")
@@ -1327,10 +1344,7 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
         rail_margin=rail_margin, check_periodic_inputs=False, profile=profile,
         edge_mask=edge_mask, integration_method=integration_method,
         cap_mode_id=cap_mode_id,
-        adaptive=adaptive, adaptive_reltol=adaptive_reltol,
-        adaptive_vabstol=adaptive_vabstol, adaptive_iabstol=adaptive_iabstol,
-        adaptive_max_steps=adaptive_max_steps, adaptive_h0=adaptive_h0,
-        adaptive_freeze_factor=adaptive_freeze_factor,
+        adaptive=adaptive, adaptive_config=adaptive_config,
     )
     requested_output = np.interp(requested_tgrid, result["t"], result["output"])
     requested_nodes = {

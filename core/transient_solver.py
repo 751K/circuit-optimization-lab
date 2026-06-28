@@ -13,11 +13,9 @@ Method
       i_ab ≈ C_step·[(Va-Vb)_n − (Va-Vb)_{n-1}] / h
   Linear capacitors use their fixed C. PMOS Cgss/Cgdd follow the AT_4000TG
   step companion selected by CIRCUIT_PMOS_TRANSIENT_CAP_MODE (or the per-call
-  cap_mode_id): `charge` (default, L-stable Q-stamp), `average` (trapezoidal,
-  the stable non-conservative form matching Cadence's feedthrough), `branch`,
-  or `endpoint`/`veriloga` (the literal C(Vn)*dV companion, unstable in the
-  shooting -- experiments only). AC/PAC/noise still use the local small-signal
-  capacitances.
+  cap_mode_id): `charge` (default, L-stable Q-stamp) or `average`
+  (trapezoidal, the stable non-conservative form matching Cadence's
+  feedthrough). AC/PAC/noise still use the local small-signal capacitances.
   The AT_4000TG model routes these caps through an internal gate1 node; this
   solver keeps the long-timescale R_cap2 leakage from source/drain to gate1 and
   collapses the 100 Ω gate-to-gate1 RC because its ns-scale time constant is far
@@ -48,6 +46,18 @@ from types import SimpleNamespace
 
 import numpy as np
 try:
+    from .adaptive_config import (
+        ADAPTIVE_ACCEPT_WRMS,
+        ADAPTIVE_ERR_FLOOR,
+        ADAPTIVE_GROWTH_MAX,
+        adaptive_critical_times,
+        adaptive_done_tol,
+        adaptive_initial_h,
+        adaptive_lte_wrms,
+        adaptive_min_h,
+        adaptive_next_h,
+        resolve_adaptive_config,
+    )
     from .topology import AFE_TOPO
     from .ac_solver import ac_solve, build_devices, _dev_corner, _dev_nf
     from .numba_kernels import (
@@ -59,6 +69,18 @@ try:
     )
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
+    from adaptive_config import (
+        ADAPTIVE_ACCEPT_WRMS,
+        ADAPTIVE_ERR_FLOOR,
+        ADAPTIVE_GROWTH_MAX,
+        adaptive_critical_times,
+        adaptive_done_tol,
+        adaptive_initial_h,
+        adaptive_lte_wrms,
+        adaptive_min_h,
+        adaptive_next_h,
+        resolve_adaptive_config,
+    )
     from topology import AFE_TOPO
     from ac_solver import ac_solve, build_devices, _dev_corner, _dev_nf
     from compiled_topology import CompiledTopology
@@ -79,16 +101,8 @@ except ImportError:  # pragma: no cover - legacy direct module import
 
 
 _CAP_MODE = os.environ.get("CIRCUIT_PMOS_TRANSIENT_CAP_MODE", "charge").lower()
-_USE_CHARGE_CAPS = _CAP_MODE in {"charge", "q", "qstamp", "q-stamp"}
 _USE_AVERAGE_CAPS = _CAP_MODE in {"average", "avg", "trapezoid", "trap"}
-_USE_BRANCH_CAPS = _CAP_MODE in {"branch", "self", "self-charge"}
-# "endpoint" (a.k.a. legacy "veriloga"): the literal C(Vn)*dV endpoint companion.
-# Non-conservative like Cadence's ddt(), but UNSTABLE in the shooting (non-monotone
-# period map) -- kept for experiments only; the STABLE non-conservative operator is
-# "average" (trapezoidal). Anything unrecognized falls back to charge (id 0, L-stable).
-_USE_ENDPOINT_CAPS = _CAP_MODE in {"endpoint", "veriloga"}
-_CAP_MODE_ID = (3 if _USE_BRANCH_CAPS else 1 if _USE_AVERAGE_CAPS
-                else 2 if _USE_ENDPOINT_CAPS else 0)
+_CAP_MODE_ID = 1 if _USE_AVERAGE_CAPS else 0
 
 # Use the numba gear2 grid for periodic/PSS and raw maxstep/retry transients.
 # Set CIRCUIT_GEAR2_NUMBA=0 to fall back to the verified pure-Python gear2 loop.
@@ -98,8 +112,6 @@ _GEAR2_NUMBA_GRID = os.environ.get("CIRCUIT_GEAR2_NUMBA", "1").lower() in {"1", 
 _CAP_MODE_IDS = {
     "charge": 0, "q": 0, "qstamp": 0, "q-stamp": 0,
     "average": 1, "avg": 1, "trapezoid": 1, "trap": 1,
-    "endpoint": 2, "veriloga": 2,
-    "branch": 3, "self": 3, "self-charge": 3,
 }
 
 
@@ -192,12 +204,8 @@ def _k_device_prev_cap_terms(ctx, V, input_vals):
         Vg = termv(gterm, V, input_vals)
         try:
             Vs1, Vd1 = dev.get_op(Vs, Vd, Vg)
-            if _cap_id == 3:
-                qgs, qgd, _, _, Cgs, Cgd = dev._capacitance_branch_terms_from_op(
-                    Vs, Vd, Vg, Vs1, Vd1)
-            else:
-                qgs, qgd, Cgs, Cgd = dev._capacitance_charges_from_op(
-                    Vs, Vd, Vg, Vs1, Vd1)
+            qgs, qgd, Cgs, Cgd = dev._capacitance_charges_from_op(
+                Vs, Vd, Vg, Vs1, Vd1)
             if _cap_id == 1:
                 qgs, qgd = Cgs, Cgd
         except Exception:
@@ -304,13 +312,6 @@ def _k_step_residual(ctx, V, input_now, states, prev_dev_terms, load_prev_dv, h,
         if Cgs != 0.0:
             if ctx.cap_id == 1:
                 i_ab = 0.5 * (Cgs + pQgs) * ((Vg - Vs) - (pVg - pVs)) * inv_h
-            elif ctx.cap_id == 2:
-                i_ab = Cgs * ((Vg - Vs) - (pVg - pVs)) * inv_h
-            elif ctx.cap_id == 3:
-                qgs_self, _, cgs_cross, _, _, _ = state[0]._capacitance_branch_terms_from_op(
-                    Vs, Vd, Vg, state[8], state[9])
-                i_ab = ((qgs_self - pQgs) +
-                        cgs_cross * ((Vg - Vs) - (pVg - pVs))) * inv_h
             else:
                 qgs = state[0]._capacitance_charges_from_op(
                     Vs, Vd, Vg, state[8], state[9])[0]
@@ -322,13 +323,6 @@ def _k_step_residual(ctx, V, input_now, states, prev_dev_terms, load_prev_dv, h,
         if Cgd != 0.0:
             if ctx.cap_id == 1:
                 i_ab = 0.5 * (Cgd + pQgd) * ((Vg - Vd) - (pVg - pVd)) * inv_h
-            elif ctx.cap_id == 2:
-                i_ab = Cgd * ((Vg - Vd) - (pVg - pVd)) * inv_h
-            elif ctx.cap_id == 3:
-                _, qgd_self, _, cgd_cross, _, _ = state[0]._capacitance_branch_terms_from_op(
-                    Vs, Vd, Vg, state[8], state[9])
-                i_ab = ((qgd_self - pQgd) +
-                        cgd_cross * ((Vg - Vd) - (pVg - pVd))) * inv_h
             else:
                 qgd = state[0]._capacitance_charges_from_op(
                     Vs, Vd, Vg, state[8], state[9])[1]
@@ -1031,13 +1025,14 @@ def _solve_adaptive_gear2_numba(ctx, V0, tgrid, input_values, profile):
         return out
     try:
         max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
-        h0_arg = -1.0 if ctx.adaptive_h0 is None else float(ctx.adaptive_h0)
+        acfg = ctx.adaptive_config
+        h0_arg = -1.0 if acfg.h0 is None else float(acfg.h0)
         t_profile0 = time.perf_counter()
         ad = transient_solve_adaptive_gear2_numba(
             np.asarray(V0, float), np.asarray(tgrid, float),
             np.asarray(input_values, float), profile,
-            max_step_arg, float(ctx.adaptive_reltol), float(ctx.adaptive_vabstol),
-            float(ctx.adaptive_iabstol), int(ctx.adaptive_max_steps), h0_arg,
+            max_step_arg, float(acfg.reltol), float(acfg.vabstol),
+            float(acfg.iabstol), int(acfg.max_steps), h0_arg,
             int(ctx.n), int(ctx.newton_maxit), float(ctx.newton_step_limit),
             float(ctx.newton_vtol), float(ctx.gmin),
             bool(ctx.fallback_full_jacobian or ctx.fallback_least_squares),
@@ -1233,30 +1228,15 @@ def _solve_adaptive_gear2_python(ctx, V0, tgrid, input_values,
     if span <= 0.0:
         raise ValueError("adaptive transient requires tgrid[-1] > tgrid[0]")
     max_step_eff = span if ctx.max_step is None or ctx.max_step <= 0.0 else min(float(ctx.max_step), span)
-    if ctx.adaptive_h0 is None:
-        h = min(max_step_eff, max(span / max(16, len(t_src) - 1), 1e-18))
-        if len(t_src) > 1:
-            h = min(h, float(np.min(np.diff(t_src))))
-    else:
-        h = float(ctx.adaptive_h0)
-    if h <= 0.0 or not np.isfinite(h):
-        h = min(max_step_eff, span / 100.0)
-    h = min(h, max_step_eff)
-    min_h = max(1e-18, span * 1e-15)
-    reltol = float(ctx.adaptive_reltol)
-    vabstol = float(ctx.adaptive_vabstol)
-    iabstol = float(ctx.adaptive_iabstol)
-    max_adapt_steps = max(1, int(ctx.adaptive_max_steps))
-    critical_times = []
-    if input_values.shape[0] and len(t_src) >= 3:
-        dt = np.diff(t_src)
-        slopes = np.diff(input_values, axis=1) / dt[None, :]
-        global_slope = max(1.0, float(np.max(np.abs(slopes))))
-        for kk in range(1, len(t_src) - 1):
-            jump = np.max(np.abs(slopes[:, kk] - slopes[:, kk - 1]))
-            if jump > 0.1 * global_slope:
-                critical_times.append(float(t_src[kk]))
-    critical_times = np.asarray(critical_times, float)
+    acfg = ctx.adaptive_config
+    h = adaptive_initial_h(t_src, max_step_eff, acfg.h0)
+    min_h = adaptive_min_h(span)
+    done_tol = adaptive_done_tol(span)
+    reltol = float(acfg.reltol)
+    vabstol = float(acfg.vabstol)
+    iabstol = float(acfg.iabstol)
+    max_adapt_steps = max(1, int(acfg.max_steps))
+    critical_times = adaptive_critical_times(t_src, input_values)
 
     def input_at_time(tt):
         if input_values.shape[0] == 0:
@@ -1265,23 +1245,6 @@ def _solve_adaptive_gear2_python(ctx, V0, tgrid, input_values,
         for ii in range(input_values.shape[0]):
             vals[ii] = np.interp(tt, t_src, input_values[ii])
         return vals
-
-    def wrms_lte(v_ref, v_full, lte):
-        scale = reltol * np.maximum(np.abs(v_ref), np.abs(v_full))
-        if ctx.n > 0:
-            scale[:ctx.n] += vabstol
-        if ctx.n_aug > ctx.n:
-            scale[ctx.n:] += iabstol
-        scale = np.maximum(scale, 1e-30)
-        return float(np.sqrt(np.mean((lte / scale) ** 2)))
-
-    def propose_h(step, err):
-        if not np.isfinite(err) or err <= 0.0:
-            fac = 2.0
-        else:
-            fac = 0.9 * err ** (-1.0 / 3.0)
-            fac = min(2.0, max(0.2, fac))
-        return step * fac
 
     t_list = [t0]
     v_list = [np.asarray(V0, float).copy()]
@@ -1298,11 +1261,11 @@ def _solve_adaptive_gear2_python(ctx, V0, tgrid, input_values,
     nsubsteps = int(nsubsteps0)
     rejected_too_small = False
     for _adapt_iter in range(max_adapt_steps):
-        if tt >= t_end - max(1e-18, 1e-13 * span):
+        if tt >= t_end - done_tol:
             tt = t_end
             break
         if h_prev is not None:
-            h = min(h, 2.0 * h_prev)
+            h = min(h, ADAPTIVE_GROWTH_MAX * h_prev)
         h = min(h, max_step_eff, t_end - tt)
         if critical_times.size:
             upcoming = critical_times[critical_times > tt + min_h]
@@ -1330,11 +1293,10 @@ def _solve_adaptive_gear2_python(ctx, V0, tgrid, input_values,
                 use_fallback=True)
         nsubsteps += 3
         if ok_full and ok_mid and ok_half2:
-            lte = (Vhalf2 - Vfull) / 3.0
-            err = wrms_lte(Vhalf2, Vfull, lte)
+            err = adaptive_lte_wrms(Vhalf2, Vfull, ctx.n, reltol, vabstol, iabstol)
         else:
             err = np.inf
-        if err <= 1.0:
+        if err <= ADAPTIVE_ACCEPT_WRMS:
             tt = min(t_end, tt + h)
             t_list.append(tt)
             v_list.append(Vhalf2.copy())
@@ -1345,7 +1307,7 @@ def _solve_adaptive_gear2_python(ctx, V0, tgrid, input_values,
             if critical_times.size:
                 hit_critical = bool(np.any(np.isclose(
                     critical_times, tt, rtol=0.0,
-                    atol=max(min_h, 1e-13 * span))))
+                    atol=max(min_h, done_tol))))
             if hit_critical:
                 Vp2 = None
                 input_prev2 = None
@@ -1354,10 +1316,10 @@ def _solve_adaptive_gear2_python(ctx, V0, tgrid, input_values,
                 Vp2 = v_list[-2].copy()
                 input_prev2 = input_list[-2].copy()
                 h_prev = h
-            h = propose_h(h, max(err, 1e-12))
+            h = adaptive_next_h(h, max(err, ADAPTIVE_ERR_FLOOR))
         else:
             nretry += 1
-            h = max(min_h, propose_h(h, err))
+            h = max(min_h, adaptive_next_h(h, err))
     else:
         nfail += 1
 
@@ -1443,9 +1405,9 @@ def _assemble_result(ctx, tgrid, Vhist, input_values, input_keys,
               "transient_cap_mode_id": int(ctx.cap_id)}
     if adaptive_used:
         result["adaptive"] = True
-        result["adaptive_reltol"] = float(ctx.adaptive_reltol)
-        result["adaptive_vabstol"] = float(ctx.adaptive_vabstol)
-        result["adaptive_iabstol"] = float(ctx.adaptive_iabstol)
+        result["adaptive_reltol"] = float(ctx.adaptive_config.reltol)
+        result["adaptive_vabstol"] = float(ctx.adaptive_config.vabstol)
+        result["adaptive_iabstol"] = float(ctx.adaptive_config.iabstol)
         result["adaptive_accepted_steps"] = int(max(0, len(tgrid) - 1))
         result["adaptive_rejected_steps"] = int(nretry)
         result["inputs"] = {
@@ -1584,7 +1546,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
               gear2_be_fallback=True, cap_mode=None, cap_mode_id=None,
               adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
               adaptive_iabstol=1e-12, adaptive_max_steps=200000,
-              adaptive_h0=None):
+              adaptive_h0=None, adaptive_config=None):
     """Backward-Euler (default) or gear2/BDF2 transient.
 
       integration_method : "be" (backward-Euler, 1st order; the default for the
@@ -1632,6 +1594,14 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     fields are included when those nodes exist.
     """
     integration_method = str(integration_method).lower()
+    adaptive_config = resolve_adaptive_config(
+        adaptive_config,
+        adaptive_reltol=adaptive_reltol,
+        adaptive_vabstol=adaptive_vabstol,
+        adaptive_iabstol=adaptive_iabstol,
+        adaptive_max_steps=adaptive_max_steps,
+        adaptive_h0=adaptive_h0,
+    )
     if adaptive and integration_method != "gear2":
         raise ValueError("adaptive transient requires integration_method='gear2'")
     if cap_mode is not None and cap_mode_id is not None:
@@ -1650,6 +1620,8 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     _cap_id = int(_CAP_MODE_ID if cap_mode_from_name is None and cap_mode_id is None
                   else cap_mode_from_name if cap_mode_from_name is not None
                   else cap_mode_id)
+    if _cap_id not in (0, 1):
+        raise ValueError("cap_mode_id must be 0 (charge) or 1 (average)")
     if inputs is None:
         inputs = {}
         if vip is not None:
@@ -1897,9 +1869,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         max_retry_subdivisions=max_retry_subdivisions, edge_mask_arr=edge_mask_arr,
         signed_devices=signed_devices, gear2_be_fallback=gear2_be_fallback,
         integration_method=integration_method,
-        adaptive=adaptive, adaptive_reltol=adaptive_reltol,
-        adaptive_vabstol=adaptive_vabstol, adaptive_iabstol=adaptive_iabstol,
-        adaptive_max_steps=adaptive_max_steps, adaptive_h0=adaptive_h0,
+        adaptive=adaptive, adaptive_config=adaptive_config,
     )
 
     fixed_g2 = _solve_fixed_gear2_numba(

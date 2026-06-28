@@ -507,7 +507,8 @@ For gear2 PSS/transient, set `"adaptive": true` to enable LTE-controlled
 adaptive timestepping. The dispatch forwards `"adaptive_reltol"`,
 `"adaptive_vabstol"`, `"adaptive_iabstol"`, `"adaptive_max_steps"`,
 `"adaptive_h0"`, and `"cap_mode"`; pulse/square periodic inputs get edge
-breakpoints inserted before the adaptive run.
+breakpoints inserted before the adaptive run. `cap_mode` is limited to
+`"charge"` (id 0) and `"average"` (id 1), plus their documented aliases.
 PAC uses analytic-adjoint harmonic balance by default (`"analytic": true`): one
 adjoint linear solve per frequency on the orbit conversion matrix, with zero extra
 transient runs. `"max_sideband"` and `"n_period_samples"` control the HB resolution.

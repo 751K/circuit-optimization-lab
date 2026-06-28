@@ -10,6 +10,41 @@ import os
 
 import numpy as np
 
+try:
+    from .adaptive_config import (
+        ADAPTIVE_ACCEPT_WRMS,
+        ADAPTIVE_DONE_ABS,
+        ADAPTIVE_DONE_REL,
+        ADAPTIVE_ERR_FLOOR,
+        ADAPTIVE_GROWTH_MAX,
+        ADAPTIVE_GROWTH_MIN,
+        ADAPTIVE_INITIAL_MIN_DENOM,
+        ADAPTIVE_INPUT_SLOPE_BREAK_FRACTION,
+        ADAPTIVE_LTE_DIVISOR,
+        ADAPTIVE_MIN_H_ABS,
+        ADAPTIVE_MIN_H_REL,
+        ADAPTIVE_SAFETY,
+        ADAPTIVE_SCALE_FLOOR,
+        ADAPTIVE_STEP_ORDER,
+    )
+except ImportError:  # pragma: no cover - legacy direct module import
+    from adaptive_config import (
+        ADAPTIVE_ACCEPT_WRMS,
+        ADAPTIVE_DONE_ABS,
+        ADAPTIVE_DONE_REL,
+        ADAPTIVE_ERR_FLOOR,
+        ADAPTIVE_GROWTH_MAX,
+        ADAPTIVE_GROWTH_MIN,
+        ADAPTIVE_INITIAL_MIN_DENOM,
+        ADAPTIVE_INPUT_SLOPE_BREAK_FRACTION,
+        ADAPTIVE_LTE_DIVISOR,
+        ADAPTIVE_MIN_H_ABS,
+        ADAPTIVE_MIN_H_REL,
+        ADAPTIVE_SAFETY,
+        ADAPTIVE_SCALE_FLOOR,
+        ADAPTIVE_STEP_ORDER,
+    )
+
 
 _FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 _USE_NUMBA_FLAG = os.environ.get("CIRCUIT_USE_NUMBA")
@@ -21,10 +56,6 @@ if _USE_NUMBA_FLAG is not None and _USE_NUMBA_FLAG.lower() in _FALSE_ENV_VALUES:
 _NUMBA_CACHE_FLAG = os.environ.get("CIRCUIT_NUMBA_CACHE")
 NUMBA_CACHE = (_NUMBA_CACHE_FLAG is None or
                _NUMBA_CACHE_FLAG.lower() not in _FALSE_ENV_VALUES)
-_CAP_MODE_FLAG = os.environ.get("CIRCUIT_PMOS_TRANSIENT_CAP_MODE", "charge").lower()
-USE_CHARGE_CAPS = _CAP_MODE_FLAG in {"charge", "q", "qstamp", "q-stamp"}
-USE_AVERAGE_CAPS = _CAP_MODE_FLAG in {"average", "avg", "trapezoid", "trap"}
-
 try:
     from numba import njit
 except Exception:  # pragma: no cover - depends on optional dependency
@@ -345,44 +376,6 @@ def _capacitance_charges_impl(Vs, Vd, Vg, Vs1, Vd1, Vfb, two_over_pi,
     return qgs, qgd, Cgss, Cgdd
 
 
-def _va_sorted_nodes_impl(Vs, Vd, Vs1, Vd1):
-    v_s = Vs if Vs > Vs1 else Vs1
-    v_s1 = Vs1 if Vs > Vs1 else Vs
-    v_d = Vd1 if Vd1 > Vd else Vd
-    v_d1 = Vd if Vd1 > Vd else Vd1
-    return v_s, v_s1, v_d, v_d1
-
-
-def _capacitance_branch_terms_impl(Vs, Vd, Vg, Vs1, Vd1, Vfb, two_over_pi,
-                                   cap_cgs1, cap_cgd1, cap_half_wl_ci,
-                                   cap_cgs3_base, cap_cgd3_base, k1):
-    v_s, _, v_d, _ = _va_sorted_nodes_impl(Vs, Vd, Vs1, Vd1)
-    y_s = v_s - Vg + Vfb
-    y_d = v_d - Vg + Vfb
-    x_gs = Vg - Vs
-    x_gd = Vg - Vd
-    cgs2_coeff = 1.43 * cap_half_wl_ci
-    cgd2_coeff = 0.33 * cap_half_wl_ci
-    cgs3_coeff = 0.34 * cap_cgs3_base
-    cgd3_coeff = 0.52 * cap_cgd3_base
-    f_s_060 = two_over_pi * math.atan(y_s * 0.6) + 1.0
-    f_s_201 = two_over_pi * math.atan(y_s * 2.01) + 1.0
-    f_d_021 = two_over_pi * math.atan(y_d * 0.21) + 1.0
-    f_d_042 = two_over_pi * math.atan(y_d * 0.42) + 1.0
-    qscale = k1 * 1e4 * 1e-12
-    cgs_cross = qscale * cgs3_coeff * f_d_021
-    cgd_cross = qscale * cgd2_coeff * f_s_201
-    qgs_self = qscale * (
-        cap_cgs1 * x_gs -
-        cgs2_coeff * _atan_cap_integral_impl(y_s, 0.6, two_over_pi))
-    qgd_self = qscale * (
-        cap_cgd1 * x_gd -
-        cgd3_coeff * _atan_cap_integral_impl(y_d, 0.42, two_over_pi))
-    Cgss = qscale * (cap_cgs1 + cgs2_coeff * f_s_060) + cgs_cross
-    Cgdd = qscale * (cap_cgd1 + cgd3_coeff * f_d_042) + cgd_cross
-    return qgs_self, qgd_self, cgs_cross, cgd_cross, Cgss, Cgdd
-
-
 def _eval_at_impl(Vs, Vd, Vg, Vs1, Vd1, Vfb, Vss, Lc, lambda_,
                   contact_scale, exponent, current_scale, inv_Rleak):
     I_s_s1, I_s1_d1, I_d1_d, _, _ = _eval_currents_impl(
@@ -686,16 +679,10 @@ def _fill_prev_terms_impl(
         op_cache_valid[pos] = True
         op_cache_vs1[pos] = pVs1
         op_cache_vd1[pos] = pVd1
-        if cap_mode == 3:
-            qgs, qgd, _, _, Cgs, Cgd = _capacitance_branch_terms_impl(
-                pVs, pVd, pVg, pVs1, pVd1, p_Vfb[pos], p_two_over_pi[pos],
-                p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
-                p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
-        else:
-            qgs, qgd, Cgs, Cgd = _capacitance_charges_impl(
-                pVs, pVd, pVg, pVs1, pVd1, p_Vfb[pos], p_two_over_pi[pos],
-                p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
-                p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
+        qgs, qgd, Cgs, Cgd = _capacitance_charges_impl(
+            pVs, pVd, pVg, pVs1, pVd1, p_Vfb[pos], p_two_over_pi[pos],
+            p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
+            p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
         if cap_mode == 1:
             qgs = Cgs
             qgd = Cgd
@@ -864,18 +851,10 @@ def _stamp_transient_system_impl(
             Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_Vss[pos], p_Lc[pos],
             p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
             p_current_scale[pos], p_inv_Rleak[pos])
-        if cap_mode == 3:
-            qgs, qgd, cgs_cross, cgd_cross, Cgs, Cgd = _capacitance_branch_terms_impl(
-                Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_two_over_pi[pos],
-                p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
-                p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
-        else:
-            qgs, qgd, Cgs, Cgd = _capacitance_charges_impl(
-                Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_two_over_pi[pos],
-                p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
-                p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
-            cgs_cross = 0.0
-            cgd_cross = 0.0
+        qgs, qgd, Cgs, Cgd = _capacitance_charges_impl(
+            Vs, Vd, Vg, Vs1, Vd1, p_Vfb[pos], p_two_over_pi[pos],
+            p_cap_cgs1[pos], p_cap_cgd1[pos], p_cap_half_wl_ci[pos],
+            p_cap_cgs3_base[pos], p_cap_cgd3_base[pos], p_k1[pos])
 
         di = dev_di[pos]
         gi = dev_gi[pos]
@@ -903,11 +882,6 @@ def _stamp_transient_system_impl(
         if Cgs != 0.0:
             if cap_mode == 1:
                 i_ab = 0.5 * (Cgs + prev_cgs[pos]) * ((Vg - Vs) - (pVg - pVs)) * inv_h
-            elif cap_mode == 2:
-                i_ab = Cgs * ((Vg - Vs) - (pVg - pVs)) * inv_h
-            elif cap_mode == 3:
-                i_ab = ((qgs - prev_cgs[pos]) +
-                        cgs_cross * ((Vg - Vs) - (pVg - pVs))) * inv_h
             else:  # charge (id 0) + any unrecognized mode -> L-stable Q-stamp
                 i_ab = (bdf_a0 * qgs + bdf_a1 * prev_cgs[pos] +
                         bdf_a2 * prev2_cgs[pos]) * inv_h
@@ -918,11 +892,6 @@ def _stamp_transient_system_impl(
         if Cgd != 0.0:
             if cap_mode == 1:
                 i_ab = 0.5 * (Cgd + prev_cgd[pos]) * ((Vg - Vd) - (pVg - pVd)) * inv_h
-            elif cap_mode == 2:
-                i_ab = Cgd * ((Vg - Vd) - (pVg - pVd)) * inv_h
-            elif cap_mode == 3:
-                i_ab = ((qgd - prev_cgd[pos]) +
-                        cgd_cross * ((Vg - Vd) - (pVg - pVd))) * inv_h
             else:  # charge (id 0) + any unrecognized mode -> L-stable Q-stamp
                 i_ab = (bdf_a0 * qgd + bdf_a1 * prev_cgd[pos] +
                         bdf_a2 * prev2_cgd[pos]) * inv_h
@@ -1581,22 +1550,24 @@ def _adaptive_error_impl(Vhalf, Vfull, n_nodes, reltol, vabstol, iabstol):
     for i in range(n):
         abstol = vabstol if i < n_nodes else iabstol
         scale = reltol * max(abs(Vhalf[i]), abs(Vfull[i])) + abstol
-        if scale < 1e-30:
-            scale = 1e-30
-        e = ((Vhalf[i] - Vfull[i]) / 3.0) / scale
+        if scale < ADAPTIVE_SCALE_FLOOR:
+            scale = ADAPTIVE_SCALE_FLOOR
+        e = ((Vhalf[i] - Vfull[i]) / ADAPTIVE_LTE_DIVISOR) / scale
         acc += e * e
     return math.sqrt(acc / n)
 
 
 def _adaptive_next_h_impl(h, err):
-    if (not math.isfinite(err)) or err <= 0.0:
-        fac = 2.0
+    if err <= 0.0:
+        fac = ADAPTIVE_GROWTH_MAX
+    elif not math.isfinite(err):
+        fac = ADAPTIVE_GROWTH_MIN
     else:
-        fac = 0.9 * err ** (-1.0 / 3.0)
-        if fac < 0.2:
-            fac = 0.2
-        elif fac > 2.0:
-            fac = 2.0
+        fac = ADAPTIVE_SAFETY * err ** (-1.0 / ADAPTIVE_STEP_ORDER)
+        if fac < ADAPTIVE_GROWTH_MIN:
+            fac = ADAPTIVE_GROWTH_MIN
+        elif fac > ADAPTIVE_GROWTH_MAX:
+            fac = ADAPTIVE_GROWTH_MAX
     return h * fac
 
 
@@ -1747,8 +1718,8 @@ def _transient_solve_adaptive_gear2_impl(
         h = adaptive_h0
     else:
         denom = Nsrc - 1
-        if denom < 16:
-            denom = 16
+        if denom < ADAPTIVE_INITIAL_MIN_DENOM:
+            denom = ADAPTIVE_INITIAL_MIN_DENOM
         h = span / denom
         mindt = span
         for k in range(1, Nsrc):
@@ -1763,20 +1734,57 @@ def _transient_solve_adaptive_gear2_impl(
         h = span / 100.0
     if h > max_step_eff:
         h = max_step_eff
-    min_h = max(1e-18, span * 1e-15)
+    min_h = max(ADAPTIVE_MIN_H_ABS, span * ADAPTIVE_MIN_H_REL)
+    done_tol = max(ADAPTIVE_DONE_ABS, span * ADAPTIVE_DONE_REL)
+    critical_times = np.empty(Nsrc)
+    ncritical = 0
+    if ninputs > 0 and Nsrc >= 3:
+        global_slope = 1.0
+        valid_slopes = True
+        for k in range(1, Nsrc):
+            dt = tgrid_src[k] - tgrid_src[k - 1]
+            if dt <= 0.0:
+                valid_slopes = False
+                break
+            for ii in range(ninputs):
+                slope = (input_values_src[ii, k] - input_values_src[ii, k - 1]) / dt
+                mag = abs(slope)
+                if mag > global_slope:
+                    global_slope = mag
+        if valid_slopes:
+            for k in range(1, Nsrc - 1):
+                dt0 = tgrid_src[k] - tgrid_src[k - 1]
+                dt1 = tgrid_src[k + 1] - tgrid_src[k]
+                jump = 0.0
+                for ii in range(ninputs):
+                    s0 = (input_values_src[ii, k] - input_values_src[ii, k - 1]) / dt0
+                    s1 = (input_values_src[ii, k + 1] - input_values_src[ii, k]) / dt1
+                    mag = abs(s1 - s0)
+                    if mag > jump:
+                        jump = mag
+                if jump > ADAPTIVE_INPUT_SLOPE_BREAK_FRACTION * global_slope:
+                    critical_times[ncritical] = tgrid_src[k]
+                    ncritical += 1
     h_prev = -1.0
     accepted = 0
     nsubsteps = 0
     nreject = 0
     tt = t0
 
-    while accepted < max_steps and tt < tend - max(1e-18, 1e-13 * span):
-        if h_prev > 0.0 and h > 2.0 * h_prev:
-            h = 2.0 * h_prev
+    while accepted < max_steps and tt < tend - done_tol:
+        if h_prev > 0.0 and h > ADAPTIVE_GROWTH_MAX * h_prev:
+            h = ADAPTIVE_GROWTH_MAX * h_prev
         if h > max_step_eff:
             h = max_step_eff
         if tt + h > tend:
             h = tend - tt
+        if ncritical > 0:
+            for kc in range(ncritical):
+                tc = critical_times[kc]
+                if tc > tt + min_h:
+                    if tc < tt + h:
+                        h = tc - tt
+                    break
         if h <= min_h:
             return False, thist, Vhist, input_hist, accepted + 1, nsubsteps, nreject, profile_stats
         _interp_inputs_at_time_impl(tgrid_src, input_values_src, tt + h, input_now)
@@ -1853,7 +1861,7 @@ def _transient_solve_adaptive_gear2_impl(
                                        adaptive_vabstol, adaptive_iabstol)
         else:
             err = math.inf
-        if err <= 1.0:
+        if err <= ADAPTIVE_ACCEPT_WRMS:
             tt += h
             accepted += 1
             thist[accepted] = tt
@@ -1865,14 +1873,30 @@ def _transient_solve_adaptive_gear2_impl(
                 input_hist[accepted, ii] = input_now[ii]
                 input_prev2[ii] = input_prev[ii]
                 input_prev[ii] = input_now[ii]
-            h_prev = h
-            h = _adaptive_next_h_impl(h, max(err, 1e-12))
+            hit_critical = False
+            if ncritical > 0:
+                crit_tol = min_h
+                if done_tol > crit_tol:
+                    crit_tol = done_tol
+                for kc in range(ncritical):
+                    if abs(critical_times[kc] - tt) <= crit_tol:
+                        hit_critical = True
+                        break
+            if hit_critical:
+                for i in range(n):
+                    Vp2[i] = Vp[i]
+                for ii in range(ninputs):
+                    input_prev2[ii] = input_prev[ii]
+                h_prev = -1.0
+            else:
+                h_prev = h
+            h = _adaptive_next_h_impl(h, max(err, ADAPTIVE_ERR_FLOOR))
         else:
             nreject += 1
             h = _adaptive_next_h_impl(h, err)
             if h < min_h:
                 h = min_h
-    ok = tt >= tend - max(1e-18, 1e-13 * span)
+    ok = tt >= tend - done_tol
     return ok, thist, Vhist, input_hist, accepted + 1, nsubsteps, nreject, profile_stats
 
 
@@ -2602,8 +2626,6 @@ if NUMBA_AVAILABLE:
     _capacitances_impl = njit(cache=NUMBA_CACHE)(_capacitances_impl)
     _atan_cap_integral_impl = njit(cache=NUMBA_CACHE)(_atan_cap_integral_impl)
     _capacitance_charges_impl = njit(cache=NUMBA_CACHE)(_capacitance_charges_impl)
-    _va_sorted_nodes_impl = njit(cache=NUMBA_CACHE)(_va_sorted_nodes_impl)
-    _capacitance_branch_terms_impl = njit(cache=NUMBA_CACHE)(_capacitance_branch_terms_impl)
     _eval_at_impl = njit(cache=NUMBA_CACHE)(_eval_at_impl)
     _terminal_deriv_one_impl = njit(cache=NUMBA_CACHE)(_terminal_deriv_one_impl)
     _terminal_derivatives_from_base_impl = njit(cache=NUMBA_CACHE)(_terminal_derivatives_from_base_impl)

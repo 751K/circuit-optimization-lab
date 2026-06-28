@@ -224,12 +224,12 @@ def test_dispatch_forwards_adaptive_pss_options(monkeypatch):
     )
 
     assert seen["adaptive"] is True
-    assert seen["adaptive_reltol"] == 1e-4
-    assert seen["adaptive_vabstol"] == 1e-6
-    assert seen["adaptive_iabstol"] == 1e-12
-    assert seen["adaptive_max_steps"] == 1234
-    assert seen["adaptive_h0"] == 1e-6
-    assert seen["adaptive_freeze_factor"] == 5.0
+    assert seen["adaptive_config"].reltol == 1e-4
+    assert seen["adaptive_config"].vabstol == 1e-6
+    assert seen["adaptive_config"].iabstol == 1e-12
+    assert seen["adaptive_config"].max_steps == 1234
+    assert seen["adaptive_config"].h0 == 1e-6
+    assert seen["adaptive_config"].freeze_factor == 5.0
     assert seen["cap_mode"] == "average"
 
 

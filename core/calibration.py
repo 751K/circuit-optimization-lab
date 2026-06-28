@@ -38,11 +38,13 @@ import numpy as np
 try:
     from . import psf
     from .ac_solver import ac_solve
+    from .adaptive_config import resolve_adaptive_config
     from .noise_solver import band_rms, noise_analysis
     from .topology import AFE_TOPO
 except ImportError:  # pragma: no cover - legacy direct module import
     import psf
     from ac_solver import ac_solve
+    from adaptive_config import resolve_adaptive_config
     from noise_solver import band_rms, noise_analysis
     from topology import AFE_TOPO
 
@@ -159,13 +161,11 @@ def _run_local_chopper(sizes, bias, nf, corner, metadata, want):
     c = metadata["circuit"]
     s = metadata.get("solver", {})
     f_chop = float(c.get("f_chop", 225.0))
-    adaptive_kwargs = {
-        key: s[key] for key in (
-            "adaptive", "adaptive_reltol", "adaptive_vabstol",
-            "adaptive_iabstol", "adaptive_max_steps", "adaptive_h0",
-            "adaptive_freeze_factor", "cap_mode",
-        ) if key in s
-    }
+    adaptive_kwargs = {"adaptive_config": resolve_adaptive_config(s)}
+    if "adaptive" in s:
+        adaptive_kwargs["adaptive"] = bool(s["adaptive"])
+    if "cap_mode" in s:
+        adaptive_kwargs["cap_mode"] = s["cap_mode"]
     pss = pmos_chopper_pss(
         sizes, bias, f_chop,
         switch_size=tuple(c.get("switch_size", (5000, 30))),
@@ -293,12 +293,7 @@ def _run_local_sc_lpf(metadata, want):
         integration_method=s.get("integration_method", "be"),
         max_stabilization_periods=int(s.get("max_stabilization_periods", 200)),
         adaptive=adaptive,
-        adaptive_reltol=float(s.get("adaptive_reltol", 1e-4)),
-        adaptive_vabstol=float(s.get("adaptive_vabstol", 1e-6)),
-        adaptive_iabstol=float(s.get("adaptive_iabstol", 1e-12)),
-        adaptive_max_steps=int(s.get("adaptive_max_steps", 200000)),
-        adaptive_h0=s.get("adaptive_h0"),
-        adaptive_freeze_factor=float(s.get("adaptive_freeze_factor", 10.0)),
+        adaptive_config=resolve_adaptive_config(s),
         cap_mode=s.get("cap_mode"),
         **pss_grid_kwargs)
     out = {}

@@ -17,11 +17,13 @@ import numpy as np
 try:
     from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from .ac_solver import ac_solve, _dev_corner, _dev_nf, build_devices, get_ss_params
+    from .adaptive_config import resolve_adaptive_config
     from .topology import AFE_TOPO
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
     from ac_solver import ac_solve, _dev_corner, _dev_nf, build_devices, get_ss_params
+    from adaptive_config import resolve_adaptive_config
     from topology import AFE_TOPO
     from transient_solver import transient
 
@@ -310,7 +312,8 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               levenberg_marquardt=True, cap_mode=None, cap_mode_id=None,
               adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
               adaptive_iabstol=1e-12, adaptive_max_steps=200000,
-              adaptive_h0=None, adaptive_freeze_factor=10.0):
+              adaptive_h0=None, adaptive_freeze_factor=10.0,
+              adaptive_config=None):
     """Solve periodic steady state with transient shooting.
 
     Parameters are intentionally close to :func:`transient` so the same topology,
@@ -321,6 +324,15 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     and shooting iteration history.  Non-convergence is reported in the result
     instead of raising, so callers can inspect the best trajectory.
     """
+    adaptive_config = resolve_adaptive_config(
+        adaptive_config,
+        adaptive_reltol=adaptive_reltol,
+        adaptive_vabstol=adaptive_vabstol,
+        adaptive_iabstol=adaptive_iabstol,
+        adaptive_max_steps=adaptive_max_steps,
+        adaptive_h0=adaptive_h0,
+        adaptive_freeze_factor=adaptive_freeze_factor,
+    )
     tgrid = _make_period_grid(period, tgrid, n_points)
     period = float(period)
     inputs = _prepare_inputs(
@@ -354,11 +366,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         edge_mask=edge_mask,
         integration_method=integration_method,
         adaptive=bool(adaptive),
-        adaptive_reltol=float(adaptive_reltol),
-        adaptive_vabstol=float(adaptive_vabstol),
-        adaptive_iabstol=float(adaptive_iabstol),
-        adaptive_max_steps=int(adaptive_max_steps),
-        adaptive_h0=adaptive_h0,
+        adaptive_config=adaptive_config,
         cap_mode=cap_mode,
         cap_mode_id=cap_mode_id,
         # Shooting manages its own convergence per period; never let a single
@@ -389,7 +397,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     def _maybe_freeze_grid(tr, norm, nfail):
         nonlocal adaptive_grid_frozen, frozen_tgrid, frozen_inputs
         if (not adaptive or adaptive_grid_frozen or nfail != 0 or
-                norm > float(adaptive_freeze_factor) * float(residual_tol)):
+                norm > float(adaptive_config.freeze_factor) * float(residual_tol)):
             return
         tr_t = np.asarray(tr["t"], float)
         if tr_t.ndim != 1 or len(tr_t) < 2:

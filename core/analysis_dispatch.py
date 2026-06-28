@@ -12,6 +12,7 @@ import numpy as np
 
 try:
     from .ac_solver import ac_solve
+    from .adaptive_config import resolve_adaptive_config
     from .circuit_loader import CircuitSpec, load_circuit_json
     from .noise_solver import band_rms, noise_analysis
     from .pac_solver import pac_solve
@@ -20,6 +21,7 @@ try:
     from .transient_solver import transient
 except ImportError:  # pragma: no cover - legacy direct module import
     from ac_solver import ac_solve
+    from adaptive_config import resolve_adaptive_config
     from circuit_loader import CircuitSpec, load_circuit_json
     from noise_solver import band_rms, noise_analysis
     from pac_solver import pac_solve
@@ -36,7 +38,7 @@ _PSS_KWARGS = {
     "residual_tol", "max_shooting_iters", "fd_step", "min_damping",
     "jacobian_reuse", "jacobian_rebuild_interval", "rail_margin",
     "check_periodic_inputs", "input_periodic_tol", "profile", "corner",
-    "integration_method", "cap_mode", "cap_mode_id", "adaptive",
+    "integration_method", "cap_mode", "cap_mode_id", "adaptive", "adaptive_config",
     "adaptive_reltol", "adaptive_vabstol", "adaptive_iabstol",
     "adaptive_max_steps", "adaptive_h0", "adaptive_freeze_factor",
 }
@@ -44,10 +46,25 @@ _TRANSIENT_KWARGS = {
     "max_step", "flat_max_step", "max_retry_subdivisions", "newton_maxit",
     "newton_step_limit", "newton_vtol", "fallback_full_jacobian",
     "fallback_least_squares", "fallback_tol", "profile", "rail_margin", "corner",
-    "integration_method", "cap_mode", "cap_mode_id", "adaptive",
+    "integration_method", "cap_mode", "cap_mode_id", "adaptive", "adaptive_config",
     "adaptive_reltol", "adaptive_vabstol", "adaptive_iabstol",
     "adaptive_max_steps", "adaptive_h0",
 }
+
+_ADAPTIVE_KWARGS = {
+    "adaptive_reltol", "adaptive_vabstol", "adaptive_iabstol",
+    "adaptive_max_steps", "adaptive_h0", "adaptive_freeze_factor",
+}
+
+
+def _pack_adaptive_config(kwargs):
+    legacy = {key: kwargs.pop(key) for key in tuple(kwargs) if key in _ADAPTIVE_KWARGS}
+    if "adaptive_config" in kwargs:
+        kwargs["adaptive_config"] = resolve_adaptive_config(
+            kwargs["adaptive_config"], **legacy)
+    elif legacy:
+        kwargs["adaptive_config"] = resolve_adaptive_config(legacy)
+    return kwargs
 
 
 def _as_spec(spec_or_path):
@@ -342,7 +359,7 @@ def _pss_config(spec, analyses, owner_cfg):
 
 
 def _run_pss(spec, pss_cfg, periodic):
-    kwargs = {k: v for k, v in pss_cfg.items() if k in _PSS_KWARGS}
+    kwargs = _pack_adaptive_config({k: v for k, v in pss_cfg.items() if k in _PSS_KWARGS})
     context = build_periodic_context(spec, periodic)
     if bool(kwargs.get("adaptive", False)):
         tgrid = _with_adaptive_waveform_breakpoints(periodic, context["tgrid"], context["period"])
@@ -373,7 +390,7 @@ def _run_transient(spec, cfg):
         tgrid = _time_grid(grid_cfg, default_stop=default_stop,
                            default_points=int(cfg.get("n_points", 101)))
         context = build_periodic_context(spec, periodic, tgrid=tgrid)
-        kwargs = {k: v for k, v in cfg.items() if k in _TRANSIENT_KWARGS}
+        kwargs = _pack_adaptive_config({k: v for k, v in cfg.items() if k in _TRANSIENT_KWARGS})
         if bool(kwargs.get("adaptive", False)):
             tgrid = _with_adaptive_waveform_breakpoints(periodic, context["tgrid"], period)
             if len(tgrid) != len(context["tgrid"]):
@@ -388,7 +405,7 @@ def _run_transient(spec, cfg):
         )
     tgrid = _time_grid(cfg.get("tgrid", cfg), default_stop=cfg.get("tstop", cfg.get("duration")),
                        default_points=int(cfg.get("n_points", 101)))
-    kwargs = {k: v for k, v in cfg.items() if k in _TRANSIENT_KWARGS}
+    kwargs = _pack_adaptive_config({k: v for k, v in cfg.items() if k in _TRANSIENT_KWARGS})
     if "corner" in kwargs:
         kwargs["corner"] = _corner_from_cfg(cfg)
     return transient(

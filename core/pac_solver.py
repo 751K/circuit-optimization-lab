@@ -237,10 +237,9 @@ def _charge_linearized_caps(pss_result):
     """True when the PSS trajectory came from charge/Q-style transient stamping."""
     mode_id = pss_result.get("transient_cap_mode_id")
     if mode_id is not None:
-        return int(mode_id) in (0, 3)
+        return int(mode_id) == 0
     mode = str(pss_result.get("transient_cap_mode", "charge")).lower()
-    return mode in {"charge", "q", "qstamp", "q-stamp",
-                    "branch", "self", "self-charge"}
+    return mode in {"charge", "q", "qstamp", "q-stamp"}
 
 
 def _conversion_charge_caps(pss_result, internal_gate_states):
@@ -1137,8 +1136,8 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
 
     # Pre-stack the frequency-independent input-coupling harmonics so the per-
     # frequency RHS is one vectorized expression rather than a (2K+1) Python loop.
-    # ``om_offset`` carries the per-block kr*f0 term used by the charge-cap form;
-    # for the veriloga form the input sees only the baseband 2*pi*f (offset 0).
+    # ``om_offset`` carries the per-block kr*f0 term used by charge/Q orbit caps;
+    # for the non-conservative C(V)*ddt conversion the input sees only baseband.
     kr_arr = np.arange(-K, K + 1)
     Ginf_stacked = Ginf[kr_arr % N].reshape(nb * n_state)
     Cinf_stacked = Cinf[kr_arr % N].reshape(nb * n_state)

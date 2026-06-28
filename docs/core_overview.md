@@ -394,16 +394,23 @@ Solves the time-domain response of the topology-defined system using backward Eu
   time-varying ideal current source flowing `p -> q`; the PMOS chopper helper uses
   this for charge-injection pulses.
 - `cap_mode` / `cap_mode_id` are per-call capacitance-operator overrides.
-  `None` uses the module/environment default (`charge`), while chopper PSS passes
-  the `average` operator explicitly for Cadence-matched clock feedthrough. This
+  Production paths only support `charge`/id 0 and `average`/id 1. `None` uses
+  the module/environment default (`charge`), while chopper PSS passes the
+  `average` operator explicitly for Cadence-matched clock feedthrough. This
   override affects only the transient/PSS orbit, not PAC/PNoise conversion
   linearization.
 - `adaptive=True` is an opt-in LTE-controlled gear2 path. It treats the supplied
   `tgrid` as the input-sampling grid and `[t0, tstop]` boundary, then returns a
   self-chosen non-uniform accepted grid. It is valid only with
-  `integration_method="gear2"` and uses `adaptive_reltol`,
-  `adaptive_vabstol`, `adaptive_iabstol`, `adaptive_max_steps`, and
-  `adaptive_h0`.
+  `integration_method="gear2"`. Public callers may still pass
+  `adaptive_reltol`, `adaptive_vabstol`, `adaptive_iabstol`,
+  `adaptive_max_steps`, and `adaptive_h0`; internally these are normalized into
+  `AdaptiveConfig` and shared by transient/PSS/chopper paths. PSS additionally
+  uses `adaptive_freeze_factor` from the same config.
+  The adaptive LTE policy constants and Python helpers live in
+  `core/adaptive_config.py`; Numba keeps a compiled mirror for performance, with
+  tests checking the two implementations agree. Newton failure rejects now shrink
+  the candidate step, while zero-error accepted steps may grow it.
 - `max_step`, `max_retry_subdivisions`, `fallback_full_jacobian`, and
   `fallback_least_squares` provide
   controlled step refinement and bounded fallback solving for switched transient

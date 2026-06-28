@@ -348,13 +348,20 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - `max_step`、`max_retry_subdivisions`、`fallback_full_jacobian` 和
   `fallback_least_squares` 用于 switched
   transient 步的受控细分和有界 fallback 求解。
-- `cap_mode` / `cap_mode_id` 是 per-call 电容算子 override；`None` 使用环境默认
-  `charge`，chopper PSS 显式传 `average` 匹配 Cadence feedthrough。该 override
-  只影响 transient/PSS 轨道，不影响 PAC/PNoise conversion 线性化。
+- `cap_mode` / `cap_mode_id` 是 per-call 电容算子 override；生产路径只支持
+  `charge`/id 0 和 `average`/id 1。`None` 使用环境默认 `charge`，chopper PSS
+  显式传 `average` 匹配 Cadence feedthrough。该 override 只影响
+  transient/PSS 轨道，不影响 PAC/PNoise conversion 线性化。
 - `adaptive=True` 是 opt-in 的 LTE-controlled gear2 路径：传入的 `tgrid` 作为输入采样网格
   和 `[t0, tstop]` 边界，返回自选的非均匀 accepted grid。它只允许配合
-  `integration_method="gear2"`，参数包括 `adaptive_reltol`、`adaptive_vabstol`、
-  `adaptive_iabstol`、`adaptive_max_steps` 和 `adaptive_h0`。
+  `integration_method="gear2"`。公开 API 仍兼容 `adaptive_reltol`、
+  `adaptive_vabstol`、`adaptive_iabstol`、`adaptive_max_steps` 和
+  `adaptive_h0`；内部会统一归一化成 `AdaptiveConfig`，供
+  transient/PSS/chopper 共用。PSS 额外从同一个 config 读取
+  `adaptive_freeze_factor`。
+  adaptive LTE policy 的常量和 Python helper 位于 `core/adaptive_config.py`；
+  Numba 为性能保留 compiled mirror，并由测试校验两边一致。Newton 失败的
+  reject 现在会缩小候选步长，零误差 accepted step 才允许放大。
 - 包含拓扑定义的负载电容（及电容元件），加上电阻和理想电流源支路。
 - 在牛顿迭代期间重新计算非线性电容，并包含 PDK Verilog-A 使用的 PMOS
   `R_cap2` 源/漏到 gate 的泄漏支路。

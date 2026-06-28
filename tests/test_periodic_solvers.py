@@ -3,6 +3,8 @@ import pytest
 
 from core.numba_kernels import (pac_hb_blocks_numba, pac_linearize_orbit_numba,
                                 transient_solve_adaptive_gear2_numba)
+from core.adaptive_config import AdaptiveConfig, adaptive_lte_wrms, adaptive_next_h
+import core.numba_kernels as nk
 from core.pac_solver import pac_solve
 from core.pnoise_solver import pnoise_solve
 from core.pss_solver import pss_solve
@@ -289,8 +291,10 @@ def test_adaptive_gear2_rc_lowpass_uses_nonuniform_grid():
     tr = transient(
         {}, {"VIN": 0.0}, t, topo=topo, inputs={"vin": vin},
         node_inputs={"VIN": "vin"}, V0=np.array([0.0]),
-        integration_method="gear2", adaptive=True, adaptive_reltol=1e-4,
-        adaptive_vabstol=1e-6, adaptive_h0=period / 20, max_step=period / 5)
+        integration_method="gear2", adaptive=True,
+        adaptive_config=AdaptiveConfig(reltol=1e-4, vabstol=1e-6,
+                                       h0=period / 20),
+        max_step=period / 5)
 
     tt = tr["t"]
     assert tr["nfail"] == 0
@@ -316,6 +320,33 @@ def test_adaptive_requires_gear2():
     with pytest.raises(ValueError, match="adaptive transient requires"):
         transient({}, {"VIN": 0.0}, t, topo=topo, inputs={"vin": np.zeros_like(t)},
                   node_inputs={"VIN": "vin"}, integration_method="be", adaptive=True)
+
+
+def test_transient_rejects_removed_cap_modes():
+    topo = _rc_lowpass_topology()
+    t = np.linspace(0.0, 1e-3, 11)
+    inputs = {"vin": np.zeros_like(t)}
+    common = dict(topo=topo, inputs=inputs, node_inputs={"VIN": "vin"},
+                  V0=np.array([0.0]))
+    for mode in ("endpoint", "veriloga", "branch", "self", "self-charge"):
+        with pytest.raises(ValueError, match="unknown cap_mode"):
+            transient({}, {"VIN": 0.0}, t, cap_mode=mode, **common)
+    for mode_id in (2, 3):
+        with pytest.raises(ValueError, match="cap_mode_id must be 0 .* or 1"):
+            transient({}, {"VIN": 0.0}, t, cap_mode_id=mode_id, **common)
+
+
+def test_adaptive_step_policy_matches_numba_helpers():
+    v_half = np.array([1.0, -2.0, 3.0])
+    v_full = np.array([1.0002, -1.9997, 2.9995])
+    err_py = adaptive_lte_wrms(v_half, v_full, 2, 1e-4, 1e-6, 1e-12)
+    err_nb = nk._adaptive_error_impl(v_half, v_full, 2, 1e-4, 1e-6, 1e-12)
+    assert err_py == pytest.approx(err_nb)
+    for err in (0.0, 1e-12, 0.2, 1.0, 7.0, np.inf):
+        assert adaptive_next_h(1e-6, err) == pytest.approx(
+            nk._adaptive_next_h_impl(1e-6, err))
+    assert adaptive_next_h(1e-6, 0.0) > 1e-6
+    assert adaptive_next_h(1e-6, np.inf) < 1e-6
 
 
 def test_adaptive_pss_inputs_match_orbit_grid():
@@ -355,6 +386,30 @@ def test_numba_adaptive_gear2_matches_python(monkeypatch):
         V0=np.array([0.0]), integration_method="gear2", adaptive=True,
         adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
         adaptive_h0=period / 20, max_step=period / 5,
+    )
+    nb = transient({}, {"VIN": 0.0}, t, **kw)
+    assert nb["numba_adaptive_solver"] is True
+
+    monkeypatch.setattr(ts, "transient_solve_adaptive_gear2_numba", None)
+    py = transient({}, {"VIN": 0.0}, t, **kw)
+    assert py["numba_adaptive_solver"] is False
+    np.testing.assert_allclose(nb["t"], py["t"], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(nb["nodes"]["OUT"], py["nodes"]["OUT"], rtol=0, atol=1e-8)
+
+
+@pytest.mark.skipif(transient_solve_adaptive_gear2_numba is None,
+                    reason="numba adaptive gear2 kernel unavailable")
+def test_numba_adaptive_gear2_matches_python_at_input_kinks(monkeypatch):
+    import core.transient_solver as ts
+
+    topo = _rc_lowpass_topology(1e5, 1e-9)
+    t = np.array([0.0, 1e-3, 2e-3, 4e-3])
+    vin = np.array([0.0, 1.0, 0.0, 0.0])
+    kw = dict(
+        topo=topo, inputs={"vin": vin}, node_inputs={"VIN": "vin"},
+        V0=np.array([0.0]), integration_method="gear2", adaptive=True,
+        adaptive_config=AdaptiveConfig(reltol=1e-4, vabstol=1e-6, h0=0.8e-3),
+        max_step=2e-3,
     )
     nb = transient({}, {"VIN": 0.0}, t, **kw)
     assert nb["numba_adaptive_solver"] is True
