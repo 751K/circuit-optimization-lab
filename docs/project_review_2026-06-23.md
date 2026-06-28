@@ -142,9 +142,9 @@ register_pdk("at4000tg", {"pmos": PMOS_TFT}, default=True,
 | Case | 电路 | Corner | 分析 | 对标结果 |
 |------|------|--------|------|---------|
 | `amp_design3_typical` | AFE 放大器 | typical | DC, AC, Noise | gain +0.00dB / IRN +0.0% |
-| `chopper_design3_typical` | 8-PMOS chopper | typical | PAC, PNoise | gain +1.11% / IRN +0.18% |
-| `chopper_design3_slow` | 8-PMOS chopper | slow | PAC, PNoise | gain −0.88% / IRN +1.92% |
-| `chopper_design3_fast` | 8-PMOS chopper | fast | PAC, PNoise | gain +1.07% / IRN −0.26% |
+| `chopper_design3_typical` | 8-PMOS chopper | typical | PAC, PNoise | TD PAC <1% / TD IRN −0.00% |
+| `chopper_design3_slow` | 8-PMOS chopper | slow | PAC, PNoise | TD PAC +0.03% / TD IRN +0.02% |
+| `chopper_design3_fast` | 8-PMOS chopper | fast | PAC, PNoise | TD PAC <1% / TD IRN +0.57% |
 | `sc_lpf` | SC 低通 | typical | PAC, PNoise | gain −1.4% / BW +0.9% / 噪声 +1.4% |
 
 ### 5.2 覆盖缺口

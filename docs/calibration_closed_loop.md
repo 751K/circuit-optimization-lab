@@ -6,8 +6,9 @@
 > 24.1.0.078）、`tests/test_calibration.py` 均已就绪。运行 `python -m core.calibration --all`。
 >
 > **首次闭环结果：全部 PASS。** amp DC/AC/noise 精确到机器精度（gain +0.00 dB、IRN +0.0%）；
-> chopper PAC/PNoise 三 corner 均在 ~1–2%（typ +1.11%/+0.18%、slow −0.88%/+1.92%、fast
-> +1.07%/−0.26%）。**关键经验**：本地 chopper 必须复刻已验证的求解配置（gear2 PSS 轨道 +
+> chopper 首版 PAC/PNoise 三 corner 均在 ~1–2%。后续 TD PAC + TD PNoise 修复后，
+> slow chopper 已到 PAC +0.03%、IRN +0.02%，PNoise IRN 三 corner 为
+> slow/typ/fast = +0.02% / −0.00% / +0.57%。**关键经验**：本地 chopper 必须复刻已验证的求解配置（gear2 PSS 轨道 +
 > `switch_size`/`edge_time`/`output_filter`/settling，存于 `metadata.json` 的 `circuit`/`solver`
 > 块）——裸默认调用会把增益错报 >10%。下文为原始设计方案。
 

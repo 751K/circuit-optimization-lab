@@ -2,7 +2,7 @@
 
 [English README](README.md) | [中文说明](README_zh.md) | [核心求解器概览](core_overview_zh.md)
 
-## 当前状态（2026-06-26）
+## 当前状态（2026-06-28）
 
 项目是一个成熟的本地模拟电路仿真与设计探索框架，首个应用场景为 AT4000TG PMOS-OTFT ECG AFE，
 已对 Cadence Spectre 24.1 完成校准。核心能力全部落地，正在从"功能开发"转向"生态完善"阶段。
@@ -14,7 +14,7 @@
 | **电路描述**        | JSON 格式 + schema 校验，多器件/多输出/仿真参数内嵌                                                                               | ✅ 成熟     |
 | **DC/AC/Noise** | 工作点求解、小信号增益/带宽、热噪声+闪烁噪声、等价输入噪声                                                                                   | ✅ 成熟     |
 | **瞬态**          | 后向欧拉（默认）+ gear2/BDF2（可选），BE 与裸 gear2 maxstep/retry/subdivision 均走 Numba grid；Python/LS 仅作兜底                                  | ✅ 成熟     |
-| **周期分析**        | 通用 shooting PSS（解析 monodromy + Broyden 复用）、通用 PAC（通用默认解析伴随 HB，chopper 默认 time-domain Floquet + PMOS gate1 内部状态）、通用 PNoise（HB + PMOS gate1 扩维，第一性原理，无标定常数） | ✅ 成熟     |
+| **周期分析**        | 通用 shooting PSS（解析 monodromy + Broyden 复用）、通用 PAC（通用默认解析伴随 HB，chopper 默认 time-domain Floquet + PMOS gate1 内部状态）、通用 PNoise（HB 对照/兜底 + chopper 默认 TD-adjoint，PMOS gate1 扩维，第一性原理，无标定常数） | ✅ 成熟     |
 | **周期验证**        | SC 低通（2-PMOS 开关电容，201 点/周期，f_clk=1kHz），PSS/PAC/PNoise 全路径跑通。**2026-06-22 修了 3 个 bug**（见下文 A1/A3/A4），修复后 PAC BW 17.2 Hz vs 解析 15.9 Hz（Δ=+8%，修复前 Δ=−28%），PNoise IRN 4.5 µVrms（修复前 20.6 µVrms，flicker 过估计已消除） | ✅ 新增     |
 | **Stiff PSS**    | Levenberg-Marquardt trust-region Newton（mu=0 → 精确 Newton；stiff τ≫T 时自动 regularize）+ 物理边界 runaway 检测 + best-physical 回退，SC 低通 residual 从 0.07V 降至 0.007V（10× 改善），chopper 路径逐字节不变 | ✅ 完成     |
 | **Flicker噪声修正** | PNoise 闪烁噪声用 FFT(√PWR) 调制幅值向量替代 FFT(PWR) 功率谱构建 cyclostationary 折叠矩阵，消除强调制器件（硬开关）的过估计（<PWR>/<√PWR>² 倍），恒偏置器件（AFE amp）不变 | ✅ 完成     |
@@ -49,7 +49,7 @@ calibration/                ~450 行  (5 个 case 目录, 含 PSFASCII 参考文
 | DC 工作点 / AC 增益                          | 与 Spectre 误差 ~0.01 dB                             |
 | AC 带宽                                   | 对齐 Spectre                                        |
 | 等价输入噪声（非 chopper）                       | 百分之几以内                                            |
-| Chopper PSS/PAC/PNoise（原生，无标定常数）        | 默认 time-domain PAC baseband + 200 Hz <1%（D3 slow corner）；PNoise HB 已复用 gate1 扩维并通过 slow guard |
+| Chopper PSS/PAC/PNoise（原生，无标定常数）        | 默认 time-domain PAC 和 TD-adjoint PNoise 已对齐 D3 slow：PAC +0.03%、IRN +0.02%；三 corner TD PNoise IRN 误差 +0.02% / −0.00% / +0.57% |
 | Chopper transient（8-PMOS hard-switched） | 输出均值 −10.76 mV vs Spectre −10.62 mV，nfail=0       |
 | Mismatch MC mean/std                    | 与 Cadence 趋势一致                                    |
 
@@ -95,16 +95,26 @@ tests/test_calibration.py   回归守卫：5 个 case 全部 PASS 才算通过
 - [x] **`core/calibration.py`（360 行）** — `load_reference`→`run_local`→`compare_dc/ac/noise/pac/pnoise`→报告；CLI `python -m core.calibration [--all --analyses --json --relaxed]`
 - [x] **`core/cadence_netlist.py`（203 行）** — `gen_amp_netlist` / `gen_chopper_netlist` 从仓库拓扑+sizes 生成网表，与 solver 同参；含 `gen_runner` bash 模板
 - [x] **`tests/test_calibration.py`（59 行）** — amp 精确 PASS + chopper 三 corner 慢测守卫（`RUN_SLOW_CHOPPER=1`）；参考数据随码入库
-- [x] **首次全量闭环 PASS**（Spectre 24.1.0.078，2026-06-21）：amp DC/AC/noise 精确到机器精度（gain +0.00dB / IRN +0.0%）；chopper PAC/PNoise 三 corner 均在 ~1–2%
+- [x] **首次全量闭环 PASS**（Spectre 24.1.0.078，2026-06-21）：amp DC/AC/noise 精确到机器精度（gain +0.00dB / IRN +0.0%）；chopper PAC/PNoise 首版三 corner 均在 ~1–2%。后续 TD PAC/TD PNoise 已把 D3 slow 收到 PAC +0.03%、IRN +0.02%。
 
 ### 对标结果
 
 | case | 指标 | local | Cadence | Δ |
 |------|------|------:|--------:|----:|
 | amp_design3_typical | gain / IRN | 22.90 dB / 38.31 µV | 22.89 dB / 38.31 µV | **+0.00 dB / +0.0%** |
-| chopper_design3_typical | PAC gain / IRN | 11.96 / 9.83 µV | 11.83 / 9.81 µV | **+1.11% / +0.18%** |
-| chopper_design3_slow | PAC gain / IRN | 8.95 / 9.50 µV | 9.03 / 9.32 µV | **−0.88% / +1.92%** |
-| chopper_design3_fast | PAC gain / IRN | 12.00 / 10.81 µV | 11.87 / 10.84 µV | **+1.07% / −0.26%** |
+| chopper_design3_typical | PAC gain / IRN | TD PAC / TD PNoise | Spectre PSS/PAC/PNoise | **PAC <1% / IRN −0.00%** |
+| chopper_design3_slow | PAC gain / IRN | TD PAC / TD PNoise | Spectre PSS/PAC/PNoise | **PAC +0.03% / IRN +0.02%** |
+| chopper_design3_fast | PAC gain / IRN | TD PAC / TD PNoise | Spectre PSS/PAC/PNoise | **PAC <1% / IRN +0.57%** |
+
+PNoise IRN 的旧 HB-K32 → 新 TD-adjoint 三角误差：
+
+| corner | IRN 修前（HB-K32） | IRN 修后（TD） |
+|--------|-------------------:|---------------:|
+| slow | +1.81% | +0.02% |
+| typical | +1.05% | −0.00% |
+| fast | +0.66% | +0.57% |
+
+这一路出现过三次“假舒适”：HB-K64 gain 看似收敛、IRN 折算看似接近、PNoise K 截断看似够用。最终闭合方式都是避开经验截断/塌缩：PAC 用 time-domain Floquet + gate1 + average orbit，PNoise 用截断无关的 TD adjoint。
 
 ### 剩余跟进（低优先级）
 
@@ -292,6 +302,7 @@ create_transistor("nmos", pdk="myproc", W=100, L=10)  # 便捷创建
 - [x] ~~**PNoise gate1 扩维**~~ ✅ 已完成：PNoise HB 复用 PAC 的 PMOS `gate1` 扩维线性化，噪声源仍按 drain/source 电流源注入，但传播矩阵保留内部 `gate1` 状态；slow PNoise guard 通过，并新增 `pnoise_internal_gate1_states` 回归断言。
 - [x] ~~**monodromy 缩放/平衡**~~ ✅ 已完成：PSS LM normal equation 改为 lazy 计算并按有限分量缩放，`mu=0` Newton 步不再提前形成 `J.T@J`；time-domain PAC gear2 companion 连乘加入增长检测，超过安全尺度时切到分块 multiple-shooting 周期边界求解，消除了 overflow/invalid warning。
 - [x] ~~**PAC gate1 转换 Numba 化**~~ ✅ 已完成：新增 `pac_linearize_orbit_gate1_numba`，全 PMOS gate1 拓扑的 Verilog-A `C(V)*ddt(V)` 周期转换装配走编译内核；测试守卫 numba 与 Python 装配在 D3 slow chopper PAC 上 <0.05%。
+- [x] ~~**PNoise TD adjoint 去截断**~~ ✅ 已完成：chopper PNoise 默认 `time_domain=True`，用稀疏周期伴随 BVP 替代 K 截断 HB adjoint；slow chopper IRN 从 HB-K32 的 +1.81% 降到 +0.02%，并新增 K16/K64 截断无关慢测守卫。
 - [ ] **HB PAC frequency solve 优化**：作为通用兜底路径继续保留；若需要 HB（bordered/vsource 驱动或 time-domain 不适用），再 profile/优化每频率 HB 求解、factorization 复用或批量线性解。
 - [ ] **batch transient / MC 并行化**：多个瞬态仿真并行（thread-level 或 process-level）
 - [x] ~~**gear2 grid subdivision/retry 硬化**~~ ✅ 已完成：裸 transient 的 `integration_method="gear2"`

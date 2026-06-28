@@ -204,7 +204,7 @@ pac = pmos_chopper_pac(
     pss_result=pss)
 print(f"PAC 增益: {pac['Av_dc_dB']:.2f} dB,  带宽: {pac['bw_Hz']:.1f} Hz")
 
-# 第三步：PNoise — 周期噪声（谐波平衡法，无需标定常数）
+# 第三步：PNoise — 周期噪声（chopper 默认 TD-adjoint，无需标定常数）
 pnoise = pmos_chopper_pnoise(
     spec.sizes, spec.bias, freqs, f_chop=225.0,
     pss_result=pss, pac_result=pac, max_sideband=10,
@@ -228,11 +228,15 @@ PAC 现在有两条一等公民路径：
   −1.89% chopper PAC 误差；D3 slow 回归现在已进入 Cadence 1% 门限内。
 
 只有需要原有限差分 shooting 时才设置 `analytic=False`（每频点需 `n_state+2`
-次瞬态周期）。PNoise 在 PSS 轨道上做谐波平衡——这是第一性原理的 LPTV 噪声解，
-**不需要任何 Cadence 标定常数**。对 D3 / `chop_tb_d3`
-官方 `slow` corner Spectre 参考，在 `f_chop=200 Hz` 下，默认 chopper PAC 的
-baseband 和 200 Hz 增益误差均 <1%。PNoise 也在同一 PSS 轨道上使用扩展 PMOS
-`gate1` 的 HB 转换矩阵，不需要任何标定常数。
+次瞬态周期）。Chopper PNoise 现在默认使用 time-domain Floquet adjoint
+（`pnoise_time_domain_used=True`）：直接求稀疏周期伴随 BVP，因此转换不再受
+HB 边带截断限制。旧的 K=32 HB 结果看起来已经“够舒服”，但仍留下 0.6-1.8%
+IRN 误差；这条 TD 路径把这个“假舒适”揭掉了。HB PNoise 仍可用
+`time_domain=False` 显式作为对照/兜底。
+对 D3 / `chop_tb_d3` 官方 `slow` corner Spectre 参考，在 `f_chop=200 Hz` 下，
+默认 chopper PAC 约 +0.03%，TD PNoise IRN 约 +0.02%。三 corner IRN 误差从
+HB-K32 的 slow/typical/fast = +1.81% / +1.05% / +0.66%，更新为 TD adjoint 的
++0.02% / −0.00% / +0.57%。全流程仍不需要任何 Cadence 标定常数。
 `pmos_chopper_pac` / `pmos_chopper_pnoise` 是 chopper 兼容包装器；任意周期拓扑可直接使用
 `core.pac_solver.pac_solve` 和 `core.pnoise_solver.pnoise_solve`，输入为通用 `pss_solve`
 返回的周期轨道和 `input_drive` 映射。
@@ -446,13 +450,16 @@ HB 对照时才设置 `time_domain=False`。
 检查所有输入波形是否周期相同、周期一致。
 
 **PNoise 太慢。**
-减少 `max_sideband`（奇次谐波主导折叠，5–7 通常够了），或降低 `n_period_samples`
-（用时域分辨率换速度）。扫不同输出带宽或重复频点时复用同一个 `pss_result`：
-PNoise 现在会缓存 LPTV 线性化、HB block 和相同频点的 adjoint 解。安装
+通用 HB 路径可减少 `max_sideband`（奇次谐波主导折叠），或降低 `n_period_samples`
+（用时域分辨率换速度）。Chopper 默认 TD-adjoint 路径中，`max_sideband` 不再控制
+转换截断；`n_period_samples` 小于 640 时会自动抬到 768 保证收敛。扫不同输出带宽或
+重复频点时复用同一个 `pss_result`：PNoise 会按适用路径缓存 LPTV 线性化、HB block 和相同频点的
+adjoint 解。安装
 Numba 时，大规模 HB block 组装、噪声折叠和 gm/gds 线性化也会走编译内核。
 Chopper PAC 的 gate1 转换线性化在全 PMOS gate1 拓扑下也会走编译内核；混合或暂不支持的
 拓扑会回退到同一 stamp 的 Python 装配。
-当前 UI chopper 的 PNoise 不是全流程瓶颈；61 点约 0.55s、121 点约 0.93s。
+旧 HB PNoise 路径在 UI chopper 上约 61 点 0.55s、121 点 0.93s；现在 chopper
+验证默认优先使用精度更稳的 TD 路径。
 
 **PSS / 周期 transient 太慢。**
 首先确保使用默认的 `analytic_jacobian=True` — 它将 shooting Jacobian 构建

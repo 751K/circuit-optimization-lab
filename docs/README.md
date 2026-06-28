@@ -241,13 +241,17 @@ The PSS→PAC→PNoise pipeline is the local equivalent of Cadence Spectre
   chopper PAC error; the D3 slow guard is now within 1% of Cadence.
 
 Set `analytic=False` only for the original finite-difference shooting path
-(accurate but costs `n_state+2` transient runs per frequency). PNoise uses
-harmonic balance on the PSS orbit — it's a first-principles LPTV noise solve with
-no calibration fudge factors.
+(accurate but costs `n_state+2` transient runs per frequency). Chopper PNoise now
+defaults to a time-domain Floquet adjoint (`pnoise_time_domain_used=True`): it
+solves the sparse periodic adjoint BVP directly, so the conversion is not limited
+by the HB sideband truncation that made the old K=32 result look comfortable but
+left a 0.6-1.8% IRN error. The HB PNoise path remains available with
+`time_domain=False` and as the generic fallback.
 For the D3 `chop_tb_d3` slow-corner Spectre reference at `f_chop=200 Hz`,
-the default chopper PAC gain is within 1% at baseband and 200 Hz. PNoise also
-uses the expanded PMOS `gate1` HB conversion matrix on the same PSS orbit, with
-no calibration constants.
+the default chopper PAC gain is now about +0.03%, and TD PNoise IRN is about
++0.02%. Across the three chopper corners the old HB-K32 IRN errors
+(slow/typical/fast) were +1.81% / +1.05% / +0.66%; the TD-adjoint errors are now
++0.02% / -0.00% / +0.57%. No calibration constants are used.
 `pmos_chopper_pac` / `pmos_chopper_pnoise` are chopper compatibility wrappers;
 generic periodic topologies can call `core.pac_solver.pac_solve` and
 `core.pnoise_solver.pnoise_solve` directly using the orbit returned by
@@ -471,16 +475,20 @@ residual is decreasing. If it stalls, the orbit may be genuinely aperiodic —
 check that all input waveforms are periodic with the same period.
 
 **PNoise is slow.**
-Reduce `max_sideband` (odd harmonics dominate the fold; 5–7 is often enough)
-or `n_period_samples` (trade time-domain resolution for speed). Reuse the same
-`pss_result` when sweeping output bands or repeated frequency grids: PNoise now
-caches LPTV linearization, HB blocks, and identical-frequency adjoint solves.
+For the generic HB path, reduce `max_sideband` (odd harmonics dominate the fold)
+or `n_period_samples` (trade time-domain resolution for speed). For the chopper
+default TD-adjoint path, `max_sideband` no longer controls the conversion
+truncation, and `n_period_samples` below 640 is bumped to 768 for convergence.
+Reuse the same `pss_result` when sweeping output bands or repeated frequency
+grids: PNoise caches LPTV linearization, HB blocks, and identical-frequency
+adjoint solves where applicable.
 With Numba installed, large HB block assembly, noise folding, and gm/gds
 linearization also use compiled kernels. The chopper PAC gate1 conversion
 linearization is compiled too when the topology is the all-PMOS gate1 case; mixed
 or unsupported topologies fall back to the Python assembly with the same stamps.
-For the current UI chopper case, PNoise is not the full-flow bottleneck: about
-0.55 s for 61 points and 0.93 s for 121 points.
+The older HB PNoise path was about 0.55 s for 61 points and 0.93 s for 121
+points on the UI chopper; the TD path is now the accuracy default for chopper
+verification.
 
 **PSS / periodic transient is slow.**
 For chopper PSS, first ensure `analytic_jacobian=True` (the default), which builds

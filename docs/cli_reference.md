@@ -209,7 +209,7 @@ python -m core chopper examples/afe_explore.json --level pnoise --f-chop 225
 | `lptv` | PMOS 有限边沿 + 谐波边带折叠 |
 | `pss` | Shooting PSS 周期稳态 |
 | `pac` | PSS + PAC 边带转换增益 |
-| `pnoise` | PSS + PAC + PNoise harmonic-balance 噪声 |
+| `pnoise` | PSS + PAC + PNoise；chopper wrapper 默认使用 TD-adjoint PNoise，HB 可作为对照 |
 | `transient` | 硬开关瞬态仿真 |
 
 **参数：**
@@ -223,7 +223,7 @@ python -m core chopper examples/afe_explore.json --level pnoise --f-chop 225
 | `--switch-l` | float | `30.0` | 开关长度 (µm) |
 | `--edge-time` | float | `2e-5` | 时钟上升/下降时间 (s) |
 | `--max-harmonic` | int | `31` | ideal/LPTV 最大谐波数 |
-| `--max-sideband` | int | `10` | PNoise 最大边带数 |
+| `--max-sideband` | int | `10` | PNoise 边带数；TD-adjoint chopper PNoise 不再受 HB adjoint 截断限制 |
 | `--tstab-periods` | int | `2` | PSS 稳定周期数 |
 | `--n-points` | int | `121` | 每周期时间点数 |
 | `--n-periods` | float | `8.0` | 瞬态仿真周期数 |

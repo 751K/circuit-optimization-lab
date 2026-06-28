@@ -559,6 +559,42 @@ def test_pmos_chopper_pnoise_matches_cadence_band():
 
 
 @pytest.mark.skipif(not os.environ.get("RUN_SLOW_CHOPPER"),
+                    reason="slow PSS+pnoise; set RUN_SLOW_CHOPPER=1 to run")
+def test_pmos_chopper_pnoise_time_domain_is_truncation_free():
+    # The time-domain Floquet-adjoint PNoise (sparse BVP solve of F^H zeta = c)
+    # computes the adjoint transfer EXACTLY in the sideband index, so its output is
+    # ~independent of max_sideband -- unlike the HB fold, whose K-truncation needs
+    # K~96 to converge (K=32 is +1.8% on the slow chopper). Guards that the TD path
+    # is taken and is truncation-free.
+    pss = pmos_chopper_pss(
+        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
+        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
+        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
+        fallback_least_squares=False, n_points=161,
+        output_filter=(1e6, 680e-12), corner="slow")
+    freqs = np.array([0.05, 1.0, 100.0])
+
+    def irn(td, K):
+        r = pmos_chopper_pnoise(
+            _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=copy.deepcopy(pss),
+            nf=_CHOP_D3_NF, corner="slow", band=(0.05, 100.0),
+            time_domain=td, max_sideband=K)
+        return r["out_uV_band"], bool(r.get("pnoise_time_domain_used"))
+
+    td_lo, used_lo = irn(True, 16)
+    td_hi, used_hi = irn(True, 64)
+    hb_lo, _ = irn(False, 16)
+    hb_hi, _ = irn(False, 64)
+    assert used_lo and used_hi                      # the TD path is taken
+    # TD is truncation-free: K=16 vs K=64 agree tightly (no sideband truncation in
+    # the adjoint), and the TD K-spread is far smaller than the HB's K-drift.
+    td_spread = abs(td_hi - td_lo) / td_hi
+    hb_spread = abs(hb_hi - hb_lo) / hb_hi
+    assert td_spread < 2e-3
+    assert td_spread < 0.5 * hb_spread
+
+
+@pytest.mark.skipif(not os.environ.get("RUN_SLOW_CHOPPER"),
                     reason="slow PSS+PAC verification; set RUN_SLOW_CHOPPER=1 to run")
 def test_pmos_chopper_pac_matches_cadence_baseband_gain():
     # PSS+PAC vs Cadence design-#3 PSS/PAC reference at f_chop=200 Hz.

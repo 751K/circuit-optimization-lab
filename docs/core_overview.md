@@ -15,7 +15,8 @@ The current solver stack covers:
 - Periodic steady-state (PSS) shooting for periodic transient orbits.
 - PSS-assisted PAC (periodic AC) via analytic-adjoint harmonic balance (default),
   opt-in time-domain Floquet shooting, or finite-difference shooting.
-- Harmonic-balance PNoise (periodic noise) with cyclostationary noise folding.
+- Periodic PNoise, with harmonic-balance and time-domain Floquet-adjoint paths
+  plus cyclostationary noise folding.
 - Process-corner and per-device mismatch perturbations.
 - Cadence/Spectre-oriented validation for operating point, AC, noise, transient,
   PSS, PAC, and PNoise behavior.
@@ -40,7 +41,7 @@ core/
   transient_solver.py  Time-domain transient solver.
   pss_solver.py        Transient-shooting periodic steady-state solver.
   pac_solver.py        Generic PSS-assisted PAC solver.
-  pnoise_solver.py     Generic harmonic-balance PNoise solver.
+  pnoise_solver.py     Generic PNoise solver (HB + TD adjoint).
   analysis_dispatch.py JSON analysis-configuration dispatch entry point.
   psf.py               PSFASCII parser for Spectre reference data.
   calibration.py       Local-vs-Cadence calibration comparison helpers.
@@ -254,12 +255,15 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   shooting path. Static PSS orbits automatically reduce to ordinary `ac_solve`,
   avoiding PAC transient runs.
 - `pmos_chopper_pnoise(...)` is a compatibility wrapper over the generic
-  `core.pnoise_solver.pnoise_solve(...)`. The generic PNoise kernel uses
-  harmonic balance on a PSS orbit: sample periodic small-signal G(t)/C(t), FFT to
-  Fourier coefficients, assemble `Y[kr,kc] = G_{kr-kc} + jω·C_{kr-kc}`, solve one
-  adjoint system per baseband frequency, and fold cyclostationary device/resistor
-  noise to the baseband output. Unlike `pmos_chopper_lptv_analysis`, this needs
-  no Cadence calibration factor.
+  `core.pnoise_solver.pnoise_solve(...)`. For chopper verification it defaults to
+  the time-domain Floquet adjoint: solve the sparse periodic adjoint BVP
+  directly, then reuse the existing cyclostationary device/resistor noise fold.
+  This removes the HB-adjoint sideband-truncation error. The harmonic-balance
+  PNoise path remains available with `time_domain=False`: sample periodic
+  small-signal G(t)/C(t), FFT to Fourier coefficients, assemble
+  `Y[kr,kc] = G_{kr-kc} + jω·C_{kr-kc}`, solve one adjoint system per baseband
+  frequency, and fold noise to the baseband output. Unlike
+  `pmos_chopper_lptv_analysis`, neither path needs a Cadence calibration factor.
 
 The PMOS-switch sideband path was initially validated with
 `pmos_chopper_lptv_analysis` paired with Cadence calibration constants. The
@@ -267,8 +271,10 @@ native `pmos_chopper_pac` and `pmos_chopper_pnoise` now replace those
 calibration-dependent paths with first-principles periodic small-signal and
 noise solves. The finite-edge transient path has been checked against Spectre
 `tran`. For the D3 `chop_tb_d3` slow-corner PSS/PAC/PNoise reference, native
-default time-domain PAC is within 1% at baseband and 200 Hz. Native PNoise
-uses the same expanded PMOS `gate1` HB conversion model and remains
+default time-domain PAC is about +0.03%, and native TD PNoise IRN is about
++0.02%. The old HB-K32 PNoise IRN errors across slow/typical/fast were
++1.81% / +1.05% / +0.66%; the TD-adjoint errors are +0.02% / -0.00% / +0.57%.
+This closes the earlier false comfort from sideband truncation while remaining
 first-principles.
 
 ### `pss_solver.py`
@@ -356,7 +362,11 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
   source.
 - Static PSS orbits use the same LTI `noise_analysis` path as normal noise
   analysis. True LPTV runs cache sampled `G(t)/C(t)`, HB blocks, and
-  identical-frequency adjoint solves on `pss_result`.
+  identical-frequency adjoint solves on `pss_result` where the HB path is used.
+- With `time_domain=True`, PNoise replaces the K-truncated HB adjoint solve with
+  a sparse Floquet adjoint BVP (`pnoise_time_domain_used=True`). This is exact in
+  the conversion sideband index; its remaining numerical error is the time-grid
+  discretization, so default-like `n_period_samples < 640` is raised to 768.
 - HB adjoint solves support `hb_solver="auto" | "dense" | "sparse" |
   "iterative"`. The default keeps small systems on dense BLAS/LAPACK and switches
   large, very sparse HB matrices to SciPy sparse direct solves. Forced
@@ -632,9 +642,10 @@ The current core was calibrated against Cadence Spectre 24.1 for the AT4000TG AF
   `12.591 uVrms`.
 - Native `pmos_chopper_pac` and `pmos_chopper_pnoise` (first-principles,
   no calibration constants) match the D3 `chop_tb_d3` slow-corner Spectre
-  PSS/PAC/PNoise reference at `f_chop=200 Hz`: default time-domain PAC baseband
-  and 200 Hz gain are within 1%. PNoise remains first-principles HB and uses the
-  same expanded PMOS `gate1` conversion model.
+  PSS/PAC/PNoise reference at `f_chop=200 Hz`: default time-domain PAC is about
+  +0.03%, and TD-adjoint PNoise IRN is about +0.02%. Across slow/typical/fast,
+  the old HB-K32 IRN errors were +1.81% / +1.05% / +0.66%; TD PNoise gives
+  +0.02% / -0.00% / +0.57%.
 - Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms
   input-referred noise.
 

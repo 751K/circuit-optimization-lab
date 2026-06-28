@@ -1400,6 +1400,7 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
 def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
                         corner=None,
                         max_sideband=32, n_period_samples=384,
+                        time_domain=True,
                         band=(0.05, 100.0), gains=None, pac_result=None,
                         noise_devices=None, switch_noise_conductance_gated=True,
                         cache_linearization=True, lti_fast_path=True,
@@ -1410,16 +1411,14 @@ def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
     """PSS-based LPTV periodic noise for the eight-PMOS chopper.
 
     This wrapper builds the chopper PSS orbit when needed, then delegates the
-    harmonic-balance noise conversion matrix to :func:`core.pnoise_solver.pnoise_solve`.
+    periodic-noise conversion to :func:`core.pnoise_solver.pnoise_solve`.
 
-    ``max_sideband`` defaults to 32 (not 10) because the local HB noise-conversion
-    truncation converges more slowly in sidebands than Spectre's shooting PNoise:
-    matching ``maxsideband=10`` in the chopper netlist requires ~32 local
-    sidebands. Verified against the official chop_tb_d3 reference re-run at
-    ``maxsideband=40`` (converged) — local msb=32 lands the band IRN within ~1.4%
-    across slow/typical/fast, vs -6% on typical/fast at msb=10. The input-referred
-    IRN is robust to the residual orbit gain error because it cancels in the
-    noise/gain ratio.
+    The default ``time_domain=True`` uses the sparse Floquet-adjoint PNoise path,
+    which removes the HB adjoint sideband-truncation error seen on the hard
+    chopper. Set ``time_domain=False`` to run the harmonic-balance path as an
+    explicit comparison/fallback. In that mode ``max_sideband`` defaults to 32
+    because the local HB noise-conversion truncation converges more slowly than
+    Spectre's shooting PNoise for hard switch edges.
     """
     f_chop = float(f_chop)
     if f_chop <= 0.0:
@@ -1449,7 +1448,7 @@ def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
     return pnoise_solve(
         sizes, bias, freqs, pss_result=pss_result, fundamental=f_chop,
         nf=nf, corner=corner, max_sideband=max_sideband,
-        n_period_samples=n_period_samples,
+        n_period_samples=n_period_samples, time_domain=time_domain,
         band=band, gains=gains, pac_result=pac_result,
         input_drive={"vip": 0.5, "vin": -0.5},
         noise_devices=noise_devices, gds_noise_devices=gds_noise_devices,

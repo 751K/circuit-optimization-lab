@@ -523,6 +523,12 @@ condition diagnostics are off by default because they require an SVD at every
 frequency; enable them with
 `"profile": true`, `"debug": true`, or explicit `"compute_condition": true`.
 
+The JSON dispatch `pnoise` entry is the generic HB path. The chopper helper
+`pmos_chopper_pnoise(...)` now defaults to the TD-adjoint PNoise path for Cadence
+alignment; use that wrapper, or call `core.pnoise_solver.pnoise_solve(...,
+time_domain=True)` directly, when the truncation-free chopper PNoise path is
+required.
+
 ### `explore`
 
 Optional. Design-space exploration configuration — variables to sweep with ranges,

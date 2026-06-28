@@ -12,6 +12,8 @@
 > 当前全局 transient/PSS 仍以 charge Q-stamp 为默认；PMOS chopper PSS 单独默认
 > `cap_mode="average"`，用于对齐 Cadence commutation feedthrough。PAC/PNoise
 > conversion 使用独立的 Verilog-A `C(V)*ddt(V)` 小信号折叠算子。
+> 2026-06-28 又补齐 PNoise time-domain Floquet adjoint：chopper PNoise 默认
+> `time_domain=True`，slow IRN 从 HB-K32 的 +1.81% 收到 +0.02%。
 > 最新回归：146 passed, 9 skipped。
 > 
 > 此文档保留原始任务计划作为历史参考。
@@ -104,7 +106,8 @@
     - **结果**：默认 BE chopper transient 变成全 Numba，`nfail=0`、`least_squares_calls=0`，
       warm 约 `0.15 s`；相对 Python/LS reference 输出 max diff ≈ `1.6e-7 V`。
   - **三 corner 最终对标（gear2 默认）**：PAC baseband 全部 <1% —— slow +0.61%、typical +0.49%、
-    fast +0.12%（BE 时是 −0.5/−2.6/−2.4%）；PAC@200Hz 全 <1%；IRN slow +2.8/typ +2.0/fast −0.8%。
+    fast +0.12%（BE 时是 −0.5/−2.6/−2.4%）；PAC@200Hz 全 <1%。后续 TD-adjoint
+    PNoise 把 IRN 三 corner 从 HB-K32 的 +1.81/+1.05/+0.66% 收到 +0.02/−0.00/+0.57%。
   - 最新全套回归 **146 passed, 9 skipped**；smoke/pnoise 两个测试按 gear2 重新 baseline。
 
 ---
@@ -118,8 +121,8 @@
   后续仅在 PMOS chopper PSS 轨道中引入受限的 `average` override 来匹配 Cadence feedthrough。
 - 决定性证据：本地转换法跑在 **Cadence 轨道**上 = +0.6%，跑在**本地 BE 轨道**上 = −2.6%。
   差距 100% 来自轨道的 BE 误差，且 charge 模式细步只到 ~−1.5% 就平台 → 是**积分阶数**，不是步长、不是 cap 模式。
-- 关键边界：**PAC/PNoise 的 HB 线性化用连续时间 jωC，与积分阶数无关**。所以只改 transient
-  轨道，下游 PAC/PNoise 代码不动——这把改动范围限制在 transient 求解器内部。
+- 当时的关键边界：**PAC/PNoise 的 HB 线性化用连续时间 jωC，与积分阶数无关**。所以先只改 transient
+  轨道。后续 PNoise 又加入 TD-adjoint 路径，解决 HB-K 截断带来的“假舒适”。
 
 ---
 
@@ -170,7 +173,7 @@ PSS 的 tstab + shooting 会把自启动那一步的小不一致吸收掉。
   - **后**：再推导 BDF2 解析 monodromy 作为性能优化。
 
 ### 3.4 PAC / PNoise
-- **不改**。确认 HB 用连续时间 jωC，只是吃到更准的轨道。加一条断言/注释固化这个边界。
+- **PAC 当时不改 HB 公式**。确认 HB 用连续时间 jωC，只是吃到更准的轨道。加一条断言/注释固化这个边界。
   - **⚠️ 修正（2026-06-22）**：这个"与积分阶数无关"只对 **rail-drive**（节点输入驱动，chopper）成立。
     对 **true-MNA vsource drive**（如 SC-LPF 的 `V_IN`），解析伴随 PAC 旧版会 bail（`not drive_nodes`）
     退回 **FD shooting**（`V0=x0`）——它对刚性 τ≫T 电路的轨道边界点 `x0` 病态敏感：gear2 与 BE 仅差
@@ -178,6 +181,9 @@ PSS 的 tstab + shooting 会把自启动那一步的小不一致吸收掉。
     无效）。已修：`_analytic_adjoint_pac` 把 vsource 小信号驱动耦合进 bordered HB 的支路约束行（baseband
     kr=0），SC-LPF PAC 现在走解析伴随、真正与积分阶数无关（gear2==BE==~1.006，比旧 FD-BE 的 0.988 更准）。
     chopper 走 rail-drive 路径，逐字节不变。守卫 `test_sc_lpf_pac_is_integration_method_independent`。
+- **PNoise 后续修正（2026-06-28）**：HB adjoint 的 K 截断会带来“假舒适”，K=32 在 slow chopper
+  仍有 +1.81% IRN 误差。现已增加 time-domain Floquet adjoint，直接解稀疏周期伴随 BVP，
+  chopper wrapper 默认启用，slow IRN 收到 +0.02%。
 
 ---
 
@@ -199,7 +205,7 @@ PSS 的 tstab + shooting 会把自启动那一步的小不一致吸收掉。
 ## 5. 验收标准
 
 - ✅ 解析 RC：gear2 误差远小于 BE，匹配闭式解。
-- ✅ chopper PAC baseband vs Cadence（slow/typ/fast）**全部 <1%**；PAC@200Hz <1%；IRN 维持 <1.5%。
+- ✅ chopper PAC baseband vs Cadence（slow/typ/fast）**全部 <1%**；PAC@200Hz <1%；TD PNoise IRN 三 corner 为 +0.02/−0.00/+0.57%。
 - ✅ 现有 **91 个测试全过**（BE 默认路径不受影响）。
 - ✅ chopper transient 波形回归（`test_pmos_chopper_transient_ui_finite_edge_matches_cadence_scale`）
   仍对齐 Spectre tran（必要时按 gear2 重新 baseline）。
@@ -233,7 +239,7 @@ PSS 的 tstab + shooting 会把自启动那一步的小不一致吸收掉。
 
 - gate1 内部节点的忠实建模（C·dV/dt + 100Ω 串阻）——后续 PAC slow-corner
   误差排查证实这里确实是 LPTV conversion 残差来源；现已在 time-domain PAC
-  和 PNoise HB 中用 PMOS `gate1` 小信号状态扩维修复。
+  和 PNoise 转换中用 PMOS `gate1` 小信号状态扩维修复。
 - 全局 veriloga/average cap 模式（已证伪，不作为通用路径）；PMOS chopper PSS 的
   `cap_mode="average"` 是后续加入的受限例外。
-- PAC/PNoise 的 HB 公式（与积分阶数解耦，不动）。
+- PAC HB 公式（与积分阶数解耦，不动）。PNoise 已在后续增加 TD adjoint，避免 HB-K 截断。

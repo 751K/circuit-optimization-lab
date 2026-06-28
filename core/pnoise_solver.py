@@ -1,8 +1,10 @@
 """Generic PSS-based periodic-noise solver.
 
-This module contains the topology-independent harmonic-balance conversion
-matrix used for PNoise.  Wrappers such as the PMOS chopper only provide a PSS
-orbit, optional PAC gains, and device-specific noise policy.
+This module contains the topology-independent PNoise conversion machinery:
+the harmonic-balance path used as the generic fallback/comparison path and the
+time-domain Floquet adjoint used by the chopper wrapper to avoid HB sideband
+truncation. Wrappers such as the PMOS chopper only provide a PSS orbit, optional
+PAC gains, and device-specific noise policy.
 """
 from __future__ import annotations
 
@@ -416,8 +418,58 @@ def _solve_hb_adjoint(Y_base, C_block, Y_sparse, C_sparse, freq, e, solver,
         return np.linalg.lstsq(dense.T, e, rcond=None)[0], info
 
 
+def _time_domain_pnoise_adjoint(Gf, Cf, e, freqs, K, n_state, fundamental):
+    """Truncation-free pnoise adjoint via the Floquet BVP (dual of the TD-PAC).
+
+    The cyclostationary fold only needs the per-device per-sideband adjoint
+    transfer ``Z_r``; the HB path gets them from ``Y_HB^H adj = e`` truncated at
+    K.  Here we solve the periodic block-bidiagonal ``F^H ζ = c`` DIRECTLY (scipy
+    sparse ``splu`` -> no recursion -> no overflow), where ``F`` is the BE
+    time-stepping operator of the SAME ``G(t)/C(t)`` (``Gf/Cf`` ifft'd).  Real
+    Gt/Ct ⇒ ``F^H = F^T`` except the periodic corner phase (``1/γ``); the output
+    weight ``w`` is the baseband block of ``e``; ``Z_r = FFT(ζ·e^{jωt})[(-r)%N]``
+    assembled into the ``[(r+K)·n_state+node]`` vector the fold indexes.  The
+    adjoint is exact in the sideband index (no K-truncation of the conversion);
+    its only error is the BE 1st-order time discretization, controlled by N
+    (``n_period_samples``; converged by ~640).  Returns ``adjs`` (nfreq, nb·n).
+    """
+    if _spla is None or _sp is None:
+        return None
+    N = int(Gf.shape[0]); ns = int(n_state)
+    period = 1.0 / float(fundamental); h = period / N
+    Gt = np.fft.ifft(Gf * N, axis=0); Ct = np.fft.ifft(Cf * N, axis=0)
+    tm = np.arange(N) * h
+    w = np.asarray(e[K * ns:(K + 1) * ns], dtype=complex)  # baseband block = output weights
+    A = Ct / h + Gt; Bm = np.roll(Ct, 1, axis=0) / h
+    AT = np.transpose(A, (0, 2, 1)); BT = np.transpose(Bm, (0, 2, 1))
+    rb = np.arange(ns)[:, None].repeat(ns, 1); cb = np.arange(ns)[None, :].repeat(ns, 0)
+    # frequency-independent block-bidiagonal of F^H: diag AT[m], super -BT[m+1].
+    ri = []; ci = []; va = []
+    for mm in range(N):
+        ri.append((mm * ns + rb).ravel()); ci.append((mm * ns + cb).ravel()); va.append(AT[mm].ravel())
+        if mm < N - 1:
+            ri.append((mm * ns + rb).ravel()); ci.append(((mm + 1) * ns + cb).ravel())
+            va.append((-BT[mm + 1]).ravel())
+    RI = np.concatenate(ri); CI = np.concatenate(ci); VA = np.concatenate(va)
+    crow = ((N - 1) * ns + rb).ravel(); ccol = cb.ravel()      # corner (row N-1, col 0)
+    nb = 2 * K + 1
+    adjs = np.empty((len(freqs), nb * ns), dtype=complex)
+    for fi, f in enumerate(freqs):
+        wf = 2.0 * np.pi * float(f); gamma = np.exp(1j * wf * period)
+        Vall = np.concatenate([VA, (-BT[0] / gamma).ravel()])
+        Rall = np.concatenate([RI, crow]); Call = np.concatenate([CI, ccol])
+        F = _sp.csc_matrix((Vall, (Rall, Call)), shape=(N * ns, N * ns))
+        cc = (1.0 / N) * np.exp(-1j * wf * tm)[:, None] * w[None, :]
+        zeta = _spla.splu(F).solve(cc.ravel()).reshape(N, ns)
+        Fh = np.fft.fft(zeta * np.exp(1j * wf * tm)[:, None], axis=0)
+        for j, rr in enumerate(range(-K, K + 1)):
+            adjs[fi, j * ns:(j + 1) * ns] = Fh[(-rr) % N]
+    return adjs
+
+
 def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                  corner=None, max_sideband=10, n_period_samples=384,
+                 time_domain=False,
                  band=(0.05, 100.0), gains=None, pac_result=None,
                  input_drive=None, noise_devices=None,
                  gds_noise_devices=None, switch_noise_conductance_gated=True,
@@ -456,6 +508,11 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         raise ValueError("fundamental must be positive")
 
     N = int(n_period_samples)
+    # The truncation-free TD adjoint is BE 1st-order in time; it needs a finer
+    # grid than the (time-resolution-insensitive) HB fold to converge. Bump a
+    # default-ish N up so the TD matches Cadence (~640+; see N-convergence note).
+    if time_domain and N < 640:
+        N = 768
     if N < 2:
         raise ValueError("n_period_samples must be at least 2")
     K = int(max_sideband)
@@ -771,7 +828,17 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
 
     adjs = np.empty((len(freqs), e.shape[0]), dtype=complex)
     t_solve0 = time.perf_counter()
+    # Truncation-free time-domain Floquet adjoint (non-bordered case): replaces the
+    # K-truncated HB adjoint solve with an exact-in-sideband sparse BVP solve. The
+    # existing cyclostationary fold below is reused unchanged.
+    td_adjs = (_time_domain_pnoise_adjoint(Gf, Cf, e, freqs, K, n_state, fundamental)
+               if (time_domain and nbr == 0) else None)
+    pnoise_time_domain_used = td_adjs is not None
+    if pnoise_time_domain_used:
+        adjs = td_adjs
     for fi, freq in enumerate(freqs):
+        if pnoise_time_domain_used:
+            break
         freq = float(freq)
         adj_key = adj_prefix + (freq,)
         if cache_linearization and adj_key in adj_cache:
@@ -906,6 +973,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         "pnoise_noise_source_count": int(len(noise_sources)),
         "pnoise_numba_hb_used": bool(hb_numba_used),
         "pnoise_numba_fold_used": bool(use_numba_fold),
+        "pnoise_time_domain_used": bool(pnoise_time_domain_used),
         "pnoise_hb_solver_requested": hb_solver_requested,
         "pnoise_hb_solver": str(solver_used),
         "pnoise_hb_sparse_available": bool(_sp is not None and _spla is not None),
