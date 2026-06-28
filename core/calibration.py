@@ -159,6 +159,13 @@ def _run_local_chopper(sizes, bias, nf, corner, metadata, want):
     c = metadata["circuit"]
     s = metadata.get("solver", {})
     f_chop = float(c.get("f_chop", 225.0))
+    adaptive_kwargs = {
+        key: s[key] for key in (
+            "adaptive", "adaptive_reltol", "adaptive_vabstol",
+            "adaptive_iabstol", "adaptive_max_steps", "adaptive_h0",
+            "adaptive_freeze_factor", "cap_mode",
+        ) if key in s
+    }
     pss = pmos_chopper_pss(
         sizes, bias, f_chop,
         switch_size=tuple(c.get("switch_size", (5000, 30))),
@@ -172,7 +179,7 @@ def _run_local_chopper(sizes, bias, nf, corner, metadata, want):
         max_shooting_iters=int(s.get("max_shooting_iters", 5)),
         integration_method=s.get("integration_method", "gear2"),
         analytic_jacobian=bool(s.get("analytic_jacobian", False)),
-        fallback_least_squares=False, corner=corner)
+        fallback_least_squares=False, corner=corner, **adaptive_kwargs)
     out = {}
     pac = (pmos_chopper_pac(sizes, bias, np.array([0.05, 200.0]), f_chop,
                             pss_result=pss, nf=nf, corner=corner)
@@ -234,6 +241,23 @@ def _sc_lpf_clocks(c, tgrid):
             "vin": np.full(n, float(c.get("vin_dc", 20.0)))}
 
 
+def _sc_lpf_adaptive_tgrid(c, n_points):
+    period = 1.0 / float(c["f_clk"])
+    base = np.linspace(0.0, period, int(n_points))
+    width = float(c.get("duty", 0.45)) * period
+    edge = float(c.get("edge_time", 2e-6))
+    pts = [0.0, period]
+    for shift in (0.0, 0.5 * period):
+        for off in (0.0, edge, width, width + edge):
+            pts.append(float(np.mod(shift + off, period)))
+    out = np.unique(np.concatenate([base, np.asarray(pts, float)]))
+    out = out[(out >= -1e-15) & (out <= period + 1e-15)]
+    out[0] = 0.0
+    if not np.isclose(out[-1], period, rtol=1e-12, atol=max(1e-18, period * 1e-12)):
+        out = np.append(out, period)
+    return out
+
+
 def _run_local_sc_lpf(metadata, want):
     """Switched-capacitor LPF PSS/PAC/PNoise (single-ended LPTV). PSS converges on the
     signed-current device model + LM/best-physical shooting; PAC gives the baseband
@@ -253,14 +277,30 @@ def _run_local_sc_lpf(metadata, want):
     f_clk = float(c["f_clk"])
     period = 1.0 / f_clk
     n_points = int(s.get("n_points", 201))
-    tgrid = np.linspace(0.0, period, n_points + 1)[:-1]
+    adaptive = bool(s.get("adaptive", False))
+    if adaptive:
+        tgrid = _sc_lpf_adaptive_tgrid(c, n_points)
+        pss_grid_kwargs = {"tgrid": tgrid}
+    else:
+        tgrid = np.linspace(0.0, period, n_points + 1)[:-1]
+        pss_grid_kwargs = {"n_points": n_points}
     pss = pss_solve(
-        sizes, {}, period, topo=topo, n_points=n_points,
+        sizes, {}, period, topo=topo,
         inputs=_sc_lpf_clocks(c, tgrid),
         tstab_periods=int(s.get("tstab_periods", 60)),
         residual_tol=float(s.get("residual_tol", 2e-2)),
         max_shooting_iters=int(s.get("max_shooting_iters", 20)),
-        integration_method=s.get("integration_method", "be"))
+        integration_method=s.get("integration_method", "be"),
+        max_stabilization_periods=int(s.get("max_stabilization_periods", 200)),
+        adaptive=adaptive,
+        adaptive_reltol=float(s.get("adaptive_reltol", 1e-4)),
+        adaptive_vabstol=float(s.get("adaptive_vabstol", 1e-6)),
+        adaptive_iabstol=float(s.get("adaptive_iabstol", 1e-12)),
+        adaptive_max_steps=int(s.get("adaptive_max_steps", 200000)),
+        adaptive_h0=s.get("adaptive_h0"),
+        adaptive_freeze_factor=float(s.get("adaptive_freeze_factor", 10.0)),
+        cap_mode=s.get("cap_mode"),
+        **pss_grid_kwargs)
     out = {}
     if {"pac", "pnoise"} & set(want):
         pf = np.logspace(-1, 3, 41)
@@ -273,8 +313,10 @@ def _run_local_sc_lpf(metadata, want):
         band = tuple(c.get("noise_band", (0.1, 100.0)))
         nf = np.logspace(np.log10(band[0]), np.log10(band[1]), 21)
         pn = pnoise_solve(sizes, {}, nf, pss_result=pss, fundamental=f_clk,
-                          input_drive={"vin": 1.0}, max_sideband=10,
-                          n_period_samples=128, band=band)
+                          input_drive={"vin": 1.0},
+                          max_sideband=int(s.get("pnoise_max_sideband", 10)),
+                          n_period_samples=int(s.get("pnoise_n_period_samples", 128)),
+                          band=band)
         out["pnoise"] = {"out_uVrms": float(pn["out_uV_band"])}
     return out
 

@@ -1,9 +1,12 @@
 import numpy as np
+import pytest
 
-from core.numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_numba
+from core.numba_kernels import (pac_hb_blocks_numba, pac_linearize_orbit_numba,
+                                transient_solve_adaptive_gear2_numba)
 from core.pac_solver import pac_solve
 from core.pnoise_solver import pnoise_solve
 from core.pss_solver import pss_solve
+from core.transient_solver import transient
 from core.topology import Topology
 
 
@@ -271,6 +274,96 @@ def test_gear2_is_second_order_on_rc_lowpass():
     assert 3.3 < g2_coarse / g2_fine < 4.6
     # gear2 is far more accurate at the same step
     assert g2_fine < be_fine / 5.0
+
+
+def test_adaptive_gear2_rc_lowpass_uses_nonuniform_grid():
+    R = 1e5
+    C = 1e-9
+    f = 100.0
+    w = 2 * np.pi * f
+    period = 1.0 / f
+    t_stop = 6.0 * period
+    topo = _rc_lowpass_topology(R, C)
+    t = np.linspace(0.0, t_stop, 1201)
+    vin = np.sin(w * t)
+    tr = transient(
+        {}, {"VIN": 0.0}, t, topo=topo, inputs={"vin": vin},
+        node_inputs={"VIN": "vin"}, V0=np.array([0.0]),
+        integration_method="gear2", adaptive=True, adaptive_reltol=1e-4,
+        adaptive_vabstol=1e-6, adaptive_h0=period / 20, max_step=period / 5)
+
+    tt = tr["t"]
+    assert tr["nfail"] == 0
+    assert tr["adaptive"] is True
+    assert len(tt) < 500
+    assert np.all(np.diff(tt) > 0.0)
+    assert np.std(np.diff(tt)) > 0.0
+    assert tt[-1] == pytest.approx(t_stop)
+    assert len(tr["nodes"]["OUT"]) == len(tt)
+    assert len(tr["inputs"]["vin"]) == len(tt)
+
+    RC = R * C
+    hmag = 1.0 / np.sqrt(1.0 + (w * RC) ** 2)
+    phi = -np.arctan(w * RC)
+    mask = tt >= t_stop - period
+    expected = hmag * np.sin(w * tt[mask] + phi)
+    np.testing.assert_allclose(tr["nodes"]["OUT"][mask], expected, atol=3e-4)
+
+
+def test_adaptive_requires_gear2():
+    topo = _rc_lowpass_topology()
+    t = np.linspace(0.0, 1e-3, 11)
+    with pytest.raises(ValueError, match="adaptive transient requires"):
+        transient({}, {"VIN": 0.0}, t, topo=topo, inputs={"vin": np.zeros_like(t)},
+                  node_inputs={"VIN": "vin"}, integration_method="be", adaptive=True)
+
+
+def test_adaptive_pss_inputs_match_orbit_grid():
+    period = 1e-3
+    t = np.linspace(0.0, period, 101)
+    topo = _rc_lowpass_topology()
+    pss = pss_solve(
+        {}, {"VIN": 0.0}, period, topo=topo, tgrid=t,
+        inputs={"vin": np.zeros_like(t)}, node_inputs={"VIN": "vin"},
+        V0=np.array([0.0]), residual_tol=1e-10, max_shooting_iters=2,
+        integration_method="gear2", adaptive=True, adaptive_reltol=1e-4)
+    assert pss["converged"]
+    assert pss["adaptive"] is True
+    assert len(pss["inputs"]["vin"]) == len(pss["t"])
+    pac = pac_solve({}, {"VIN": 0.0}, np.array([100.0]), pss_result=pss,
+                    input_drive={"vin": 1.0}, lti_fast_path=False,
+                    analytic=True, max_sideband=1, n_period_samples=16)
+    assert np.isfinite(pac["gains"][0])
+
+
+@pytest.mark.skipif(transient_solve_adaptive_gear2_numba is None,
+                    reason="numba adaptive gear2 kernel unavailable")
+def test_numba_adaptive_gear2_matches_python(monkeypatch):
+    import core.transient_solver as ts
+
+    R = 1e5
+    C = 1e-9
+    f = 100.0
+    w = 2 * np.pi * f
+    period = 1.0 / f
+    t_stop = 2.0 * period
+    topo = _rc_lowpass_topology(R, C)
+    t = np.linspace(0.0, t_stop, 401)
+    vin = np.sin(w * t)
+    kw = dict(
+        topo=topo, inputs={"vin": vin}, node_inputs={"VIN": "vin"},
+        V0=np.array([0.0]), integration_method="gear2", adaptive=True,
+        adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
+        adaptive_h0=period / 20, max_step=period / 5,
+    )
+    nb = transient({}, {"VIN": 0.0}, t, **kw)
+    assert nb["numba_adaptive_solver"] is True
+
+    monkeypatch.setattr(ts, "transient_solve_adaptive_gear2_numba", None)
+    py = transient({}, {"VIN": 0.0}, t, **kw)
+    assert py["numba_adaptive_solver"] is False
+    np.testing.assert_allclose(nb["t"], py["t"], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(nb["nodes"]["OUT"], py["nodes"]["OUT"], rtol=0, atol=1e-8)
 
 
 def test_reverse_biased_pass_switch_restores_not_pumps():

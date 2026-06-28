@@ -12,9 +12,12 @@ Method
 - Capacitor companion (backward Euler), cap branch between terminals a,b:
       i_ab ≈ C_step·[(Va-Vb)_n − (Va-Vb)_{n-1}] / h
   Linear capacitors use their fixed C. PMOS Cgss/Cgdd follow the AT_4000TG
-  experimental step companion selected by CIRCUIT_PMOS_TRANSIENT_CAP_MODE:
-  `charge` (default), `average`, or `veriloga`. AC/PAC/noise still use the
-  local small-signal capacitances.
+  step companion selected by CIRCUIT_PMOS_TRANSIENT_CAP_MODE (or the per-call
+  cap_mode_id): `charge` (default, L-stable Q-stamp), `average` (trapezoidal,
+  the stable non-conservative form matching Cadence's feedthrough), `branch`,
+  or `endpoint`/`veriloga` (the literal C(Vn)*dV companion, unstable in the
+  shooting -- experiments only). AC/PAC/noise still use the local small-signal
+  capacitances.
   The AT_4000TG model routes these caps through an internal gate1 node; this
   solver keeps the long-timescale R_cap2 leakage from source/drain to gate1 and
   collapses the 100 Ω gate-to-gate1 RC because its ns-scale time constant is far
@@ -50,6 +53,7 @@ try:
         transient_newton_numba,
         transient_solve_grid_numba,
         transient_solve_grid_gear2_numba,
+        transient_solve_adaptive_gear2_numba,
     )
     from .compiled_topology import CompiledTopology
 except ImportError:  # pragma: no cover - legacy direct module import
@@ -62,23 +66,48 @@ except ImportError:  # pragma: no cover - legacy direct module import
             transient_newton_numba,
             transient_solve_grid_numba,
             transient_solve_grid_gear2_numba,
+            transient_solve_adaptive_gear2_numba,
         )
     except Exception:
         terminal_derivatives_numba = None
         transient_newton_numba = None
         transient_solve_grid_numba = None
         transient_solve_grid_gear2_numba = None
+        transient_solve_adaptive_gear2_numba = None
 
 
 _CAP_MODE = os.environ.get("CIRCUIT_PMOS_TRANSIENT_CAP_MODE", "charge").lower()
 _USE_CHARGE_CAPS = _CAP_MODE in {"charge", "q", "qstamp", "q-stamp"}
 _USE_AVERAGE_CAPS = _CAP_MODE in {"average", "avg", "trapezoid", "trap"}
 _USE_BRANCH_CAPS = _CAP_MODE in {"branch", "self", "self-charge"}
-_CAP_MODE_ID = 3 if _USE_BRANCH_CAPS else (1 if _USE_AVERAGE_CAPS else (0 if _USE_CHARGE_CAPS else 2))
+# "endpoint" (a.k.a. legacy "veriloga"): the literal C(Vn)*dV endpoint companion.
+# Non-conservative like Cadence's ddt(), but UNSTABLE in the shooting (non-monotone
+# period map) -- kept for experiments only; the STABLE non-conservative operator is
+# "average" (trapezoidal). Anything unrecognized falls back to charge (id 0, L-stable).
+_USE_ENDPOINT_CAPS = _CAP_MODE in {"endpoint", "veriloga"}
+_CAP_MODE_ID = (3 if _USE_BRANCH_CAPS else 1 if _USE_AVERAGE_CAPS
+                else 2 if _USE_ENDPOINT_CAPS else 0)
 
 # Use the numba gear2 grid for periodic/PSS and raw maxstep/retry transients.
 # Set CIRCUIT_GEAR2_NUMBA=0 to fall back to the verified pure-Python gear2 loop.
 _GEAR2_NUMBA_GRID = os.environ.get("CIRCUIT_GEAR2_NUMBA", "1").lower() in {"1", "true", "on"}
+
+
+_CAP_MODE_IDS = {
+    "charge": 0, "q": 0, "qstamp": 0, "q-stamp": 0,
+    "average": 1, "avg": 1, "trapezoid": 1, "trap": 1,
+    "endpoint": 2, "veriloga": 2,
+    "branch": 3, "self": 3, "self-charge": 3,
+}
+
+
+def _cap_mode_to_id(cap_mode):
+    if cap_mode is None:
+        return None
+    key = str(cap_mode).lower()
+    if key not in _CAP_MODE_IDS:
+        raise ValueError(f"unknown cap_mode {cap_mode!r}; expected one of {sorted(_CAP_MODE_IDS)}")
+    return _CAP_MODE_IDS[key]
 
 
 def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
@@ -91,7 +120,10 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
               fallback_least_squares=False, fallback_tol=1e-9,
               signed_devices=None, profile=False, edge_mask=None,
               rail_margin=None, integration_method="be",
-              gear2_be_fallback=True, cap_mode_id=None):
+              gear2_be_fallback=True, cap_mode=None, cap_mode_id=None,
+              adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
+              adaptive_iabstol=1e-12, adaptive_max_steps=200000,
+              adaptive_h0=None):
     """Backward-Euler (default) or gear2/BDF2 transient.
 
       integration_method : "be" (backward-Euler, 1st order; the default for the
@@ -138,6 +170,13 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
     fields are included when those nodes exist.
     """
+    integration_method = str(integration_method).lower()
+    if adaptive and integration_method != "gear2":
+        raise ValueError("adaptive transient requires integration_method='gear2'")
+    if cap_mode is not None and cap_mode_id is not None:
+        requested = _cap_mode_to_id(cap_mode)
+        if int(cap_mode_id) != int(requested):
+            raise ValueError("cap_mode and cap_mode_id disagree")
     tft = build_devices(sizes, nf=nf, corner=corner, topo=topo)
     tgrid = np.asarray(tgrid, float)
     N = len(tgrid)
@@ -146,7 +185,10 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     # non-conservative C(V)*dV/dt discretization that matches Cadence's commutation
     # feedthrough (charge Q-stamp over-swings it ~26%); charge stays the default
     # everywhere else (it is L-stable on stiff tau>>T circuits where average rings).
-    _cap_id = int(_CAP_MODE_ID if cap_mode_id is None else cap_mode_id)
+    cap_mode_from_name = _cap_mode_to_id(cap_mode)
+    _cap_id = int(_CAP_MODE_ID if cap_mode_from_name is None and cap_mode_id is None
+                  else cap_mode_from_name if cap_mode_from_name is not None
+                  else cap_mode_id)
     if inputs is None:
         inputs = {}
         if vip is not None:
@@ -336,13 +378,13 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             Vg = termv(gterm, V, input_vals)
             try:
                 Vs1, Vd1 = dev.get_op(Vs, Vd, Vg)
-                if _USE_BRANCH_CAPS:
+                if _cap_id == 3:
                     qgs, qgd, _, _, Cgs, Cgd = dev._capacitance_branch_terms_from_op(
                         Vs, Vd, Vg, Vs1, Vd1)
                 else:
                     qgs, qgd, Cgs, Cgd = dev._capacitance_charges_from_op(
                         Vs, Vd, Vg, Vs1, Vd1)
-                if _USE_AVERAGE_CAPS:
+                if _cap_id == 1:
                     qgs, qgd = Cgs, Cgd
             except Exception:
                 qgs = qgd = 0.0
@@ -362,6 +404,18 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     V0 = np.asarray(V0, float)
     if V0.shape[0] < n_aug:                  # pad ideal-source branch currents (seed 0)
         V0 = np.concatenate([V0, np.zeros(n_aug - V0.shape[0])])
+    if len(vs_meta) and input_values.shape[1] > 0:
+        input0 = input_values[:, 0]
+        Vseed = V0.copy()
+        for aterm, bterm, pi, qi, _bi, e_const, e_idx in vs_meta:
+            E = e_const if e_idx < 0 else input0[e_idx]
+            if pi is not None and qi is not None:
+                Vseed[pi] = Vseed[qi] + E
+            elif pi is not None:
+                Vseed[pi] = termv(bterm, Vseed, input0) + E
+            elif qi is not None:
+                Vseed[qi] = termv(aterm, Vseed, input0) - E
+        V0 = Vseed
     Vhist = np.zeros((N, n_aug)); Vhist[0] = V0
     gmin = 1e-12
 
@@ -456,41 +510,41 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                 if gi is not None:
                     R[gi] += i_dg
             if Cgs != 0.0:
-                if _USE_CHARGE_CAPS:
-                    qgs = state[0]._capacitance_charges_from_op(
-                        Vs, Vd, Vg, state[8], state[9])[0]
-                    i_ab = (ca0 * qgs + ca1 * pQgs + ca2 * ppQgs) * inv_h  # gate -> source
-                elif _USE_AVERAGE_CAPS:
+                if _cap_id == 1:
                     i_ab = 0.5 * (Cgs + pQgs) * ((Vg - Vs) - (pVg - pVs)) * inv_h
-                elif _USE_BRANCH_CAPS:
+                elif _cap_id == 2:
+                    i_ab = Cgs * ((Vg - Vs) - (pVg - pVs)) * inv_h
+                elif _cap_id == 3:
                     qgs_self, _, cgs_cross, _, _, _ = state[0]._capacitance_branch_terms_from_op(
                         Vs, Vd, Vg, state[8], state[9])
                     i_ab = (
                         (qgs_self - pQgs) +
                         cgs_cross * ((Vg - Vs) - (pVg - pVs))
                     ) * inv_h
-                else:
-                    i_ab = Cgs * ((Vg - Vs) - (pVg - pVs)) * inv_h
+                else:  # charge (id 0) + any unrecognized mode -> L-stable Q-stamp
+                    qgs = state[0]._capacitance_charges_from_op(
+                        Vs, Vd, Vg, state[8], state[9])[0]
+                    i_ab = (ca0 * qgs + ca1 * pQgs + ca2 * ppQgs) * inv_h  # gate -> source
                 if gi is not None:
                     R[gi] -= i_ab
                 if si is not None:
                     R[si] += i_ab
             if Cgd != 0.0:
-                if _USE_CHARGE_CAPS:
-                    qgd = state[0]._capacitance_charges_from_op(
-                        Vs, Vd, Vg, state[8], state[9])[1]
-                    i_ab = (ca0 * qgd + ca1 * pQgd + ca2 * ppQgd) * inv_h  # gate -> drain
-                elif _USE_AVERAGE_CAPS:
+                if _cap_id == 1:
                     i_ab = 0.5 * (Cgd + pQgd) * ((Vg - Vd) - (pVg - pVd)) * inv_h
-                elif _USE_BRANCH_CAPS:
+                elif _cap_id == 2:
+                    i_ab = Cgd * ((Vg - Vd) - (pVg - pVd)) * inv_h
+                elif _cap_id == 3:
                     _, qgd_self, _, cgd_cross, _, _ = state[0]._capacitance_branch_terms_from_op(
                         Vs, Vd, Vg, state[8], state[9])
                     i_ab = (
                         (qgd_self - pQgd) +
                         cgd_cross * ((Vg - Vd) - (pVg - pVd))
                     ) * inv_h
-                else:
-                    i_ab = Cgd * ((Vg - Vd) - (pVg - pVd)) * inv_h
+                else:  # charge (id 0) + any unrecognized mode -> L-stable Q-stamp
+                    qgd = state[0]._capacitance_charges_from_op(
+                        Vs, Vd, Vg, state[8], state[9])[1]
+                    i_ab = (ca0 * qgd + ca1 * pQgd + ca2 * ppQgd) * inv_h  # gate -> drain
                 if gi is not None:
                     R[gi] -= i_ab
                 if di is not None:
@@ -939,7 +993,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
          (max_step is not None and max_step > 0.0) or
          (flat_max_step is not None and flat_max_step > 0.0))
     )
-    if (integration_method == "gear2" and _GEAR2_NUMBA_GRID and
+    if (not adaptive and integration_method == "gear2" and _GEAR2_NUMBA_GRID and
             transient_solve_grid_gear2_numba is not None and n_aug == n):
         try:
             max_step_arg = -1.0 if max_step is None else float(max_step)
@@ -1152,9 +1206,214 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                         True, left_steps + right_steps, left_retry + right_retry + 1)
             return Vp, Vp2, input_prev2, h_prev, False, (
                 left_steps + right_steps), left_retry + right_retry + (1 if depth == 0 else 0)
-        return Vp, Vp2, input_prev2, h_prev, False, 1, 1 if depth == 0 else 0
+            return Vp, Vp2, input_prev2, h_prev, False, 1, 1 if depth == 0 else 0
 
-    if integration_method == "gear2" and not gear2_done:
+    adaptive_used = False
+    adaptive_numba_used = False
+    if adaptive and integration_method == "gear2" and not gear2_done:
+        if (_GEAR2_NUMBA_GRID and transient_solve_adaptive_gear2_numba is not None
+                and n_aug == n):
+            try:
+                max_step_arg = -1.0 if max_step is None else float(max_step)
+                h0_arg = -1.0 if adaptive_h0 is None else float(adaptive_h0)
+                t_profile0 = time.perf_counter()
+                ad = transient_solve_adaptive_gear2_numba(
+                    np.asarray(V0, float), np.asarray(tgrid, float),
+                    np.asarray(input_values, float), profile,
+                    max_step_arg, float(adaptive_reltol), float(adaptive_vabstol),
+                    float(adaptive_iabstol), int(adaptive_max_steps), h0_arg,
+                    int(n), int(newton_maxit), float(newton_step_limit),
+                    float(newton_vtol), float(gmin),
+                    bool(fallback_full_jacobian or fallback_least_squares),
+                    float(fallback_tol), float(HH),
+                    dev_d_kind, dev_d_ref, dev_d_val,
+                    dev_g_kind, dev_g_ref, dev_g_val,
+                    dev_s_kind, dev_s_ref, dev_s_val,
+                    dev_di, dev_gi, dev_si, dev_use_abs,
+                    p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+                    p_current_scale, p_inv_Rleak,
+                    p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+                    p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+                    op_cache_valid, op_cache_vs1, op_cache_vd1,
+                    res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+                    res_b_val, res_ai, res_bi, res_g,
+                    cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+                    cap_b_val, cap_ai, cap_bi, cap_value,
+                    isrc_pi, isrc_qi, isrc_value,
+                    dyn_pi, dyn_qi, dyn_input_idx,
+                    int(_cap_id), float(clip_lo), float(clip_hi),
+                )
+                ok_ad, tfast, Vfast, input_fast, naccept, fast_substeps, fast_rejects, raw_profile = ad
+                if ok_ad:
+                    naccept = int(naccept)
+                    tgrid = np.ascontiguousarray(tfast[:naccept])
+                    Vhist = np.ascontiguousarray(Vfast[:naccept])
+                    input_values = np.ascontiguousarray(input_fast[:naccept].T)
+                    N = len(tgrid)
+                    nsubsteps = int(fast_substeps)
+                    nretry = int(fast_rejects)
+                    profile_stats = np.asarray(raw_profile, float)
+                    profile_wall_s = time.perf_counter() - t_profile0
+                    gear2_done = True
+                    adaptive_used = True
+                    adaptive_numba_used = True
+                    gear2_numba_used = True
+            except Exception as exc:
+                numba_grid_error = f"adaptive_gear2: {type(exc).__name__}: {exc}"
+
+    if adaptive and integration_method == "gear2" and not gear2_done:
+        t_src = np.asarray(tgrid, float)
+        if len(t_src) < 2 or not np.all(np.diff(t_src) > 0.0):
+            raise ValueError("adaptive transient requires a strictly increasing tgrid")
+        t0 = float(t_src[0])
+        t_end = float(t_src[-1])
+        span = t_end - t0
+        if span <= 0.0:
+            raise ValueError("adaptive transient requires tgrid[-1] > tgrid[0]")
+        max_step_eff = span if max_step is None or max_step <= 0.0 else min(float(max_step), span)
+        if adaptive_h0 is None:
+            h = min(max_step_eff, max(span / max(16, len(t_src) - 1), 1e-18))
+            if len(t_src) > 1:
+                h = min(h, float(np.min(np.diff(t_src))))
+        else:
+            h = float(adaptive_h0)
+        if h <= 0.0 or not np.isfinite(h):
+            h = min(max_step_eff, span / 100.0)
+        h = min(h, max_step_eff)
+        min_h = max(1e-18, span * 1e-15)
+        reltol = float(adaptive_reltol)
+        vabstol = float(adaptive_vabstol)
+        iabstol = float(adaptive_iabstol)
+        max_adapt_steps = max(1, int(adaptive_max_steps))
+        critical_times = []
+        if input_values.shape[0] and len(t_src) >= 3:
+            dt = np.diff(t_src)
+            slopes = np.diff(input_values, axis=1) / dt[None, :]
+            global_slope = max(1.0, float(np.max(np.abs(slopes))))
+            for kk in range(1, len(t_src) - 1):
+                jump = np.max(np.abs(slopes[:, kk] - slopes[:, kk - 1]))
+                scale = global_slope
+                if jump > 0.1 * scale:
+                    critical_times.append(float(t_src[kk]))
+        critical_times = np.asarray(critical_times, float)
+
+        def input_at_time(tt):
+            if input_values.shape[0] == 0:
+                return np.empty(0, float)
+            out = np.empty(input_values.shape[0], float)
+            for ii in range(input_values.shape[0]):
+                out[ii] = np.interp(tt, t_src, input_values[ii])
+            return out
+
+        def wrms_lte(v_ref, v_full, lte):
+            scale = reltol * np.maximum(np.abs(v_ref), np.abs(v_full))
+            if n > 0:
+                scale[:n] += vabstol
+            if n_aug > n:
+                scale[n:] += iabstol
+            scale = np.maximum(scale, 1e-30)
+            return float(np.sqrt(np.mean((lte / scale) ** 2)))
+
+        def propose_h(step, err):
+            if not np.isfinite(err) or err <= 0.0:
+                fac = 2.0
+            else:
+                fac = 0.9 * err ** (-1.0 / 3.0)
+                fac = min(2.0, max(0.2, fac))
+            return step * fac
+
+        t_list = [t0]
+        v_list = [np.asarray(V0, float).copy()]
+        in0 = input_at_time(t0)
+        input_list = [in0.copy()]
+        Vp = np.asarray(V0, float).copy()
+        Vp2 = None
+        input_prev = in0
+        input_prev2 = None
+        h_prev = None
+        tt = t0
+        rejected_too_small = False
+        for _adapt_iter in range(max_adapt_steps):
+            if tt >= t_end - max(1e-18, 1e-13 * span):
+                tt = t_end
+                break
+            if h_prev is not None:
+                h = min(h, 2.0 * h_prev)
+            h = min(h, max_step_eff, t_end - tt)
+            if critical_times.size:
+                upcoming = critical_times[critical_times > tt + min_h]
+                if upcoming.size:
+                    next_critical = float(upcoming[0])
+                    if next_critical < tt + h:
+                        h = next_critical - tt
+            if h <= min_h:
+                rejected_too_small = True
+                nfail += 1
+                break
+            input_now = input_at_time(tt + h)
+            input_mid = input_at_time(tt + 0.5 * h)
+            Vfull, ok_full, _ = gear2_try_step(
+                Vp, Vp2, input_prev, input_prev2, input_now, h, h_prev,
+                use_fallback=True)
+            Vmid, ok_mid, _ = gear2_try_step(
+                Vp, Vp2, input_prev, input_prev2, input_mid, 0.5 * h, h_prev,
+                use_fallback=True)
+            ok_half2 = False
+            Vhalf2 = Vp
+            if ok_mid:
+                Vhalf2, ok_half2, _ = gear2_try_step(
+                    Vmid, Vp, input_mid, input_prev, input_now, 0.5 * h, 0.5 * h,
+                    use_fallback=True)
+            nsubsteps += 3
+            if ok_full and ok_mid and ok_half2:
+                lte = (Vhalf2 - Vfull) / 3.0
+                err = wrms_lte(Vhalf2, Vfull, lte)
+            else:
+                err = np.inf
+            if err <= 1.0:
+                tt = min(t_end, tt + h)
+                t_list.append(tt)
+                v_list.append(Vhalf2.copy())
+                input_list.append(input_now.copy())
+                Vp = Vhalf2
+                input_prev = input_now
+                hit_critical = False
+                if critical_times.size:
+                    hit_critical = bool(np.any(np.isclose(
+                        critical_times, tt, rtol=0.0,
+                        atol=max(min_h, 1e-13 * span))))
+                if hit_critical:
+                    # Restart BDF2 after input-slope discontinuities (pulse/square
+                    # rise/fall boundaries). Otherwise the next post-edge step
+                    # reuses a two-step history from the ramp and can fail on
+                    # switched-MNA circuits with ideal voltage-source clocks.
+                    Vp2 = None
+                    input_prev2 = None
+                    h_prev = None
+                else:
+                    Vp2 = v_list[-2].copy()
+                    input_prev2 = input_list[-2].copy()
+                    h_prev = h
+                h = propose_h(h, max(err, 1e-12))
+            else:
+                nretry += 1
+                h = max(min_h, propose_h(h, err))
+        else:
+            nfail += 1
+
+        tgrid = np.asarray(t_list, float)
+        Vhist = np.vstack(v_list)
+        if input_values.shape[0] == 0:
+            input_values = np.empty((0, len(tgrid)), float)
+        else:
+            input_values = np.vstack(input_list).T
+        N = len(tgrid)
+        gear2_done = True
+        adaptive_used = True
+        if rejected_too_small:
+            nretry += 1
+
+    if (not adaptive) and integration_method == "gear2" and not gear2_done:
         gear2_python_retry_used = bool(gear2_retry_requested)
         for k in range(1, N):
             h_n = tgrid[k] - tgrid[k - 1]
@@ -1207,7 +1466,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     # so re-run with the robust backward-Euler path (recursive bisection + LS).
     # The PSS/periodic path opts out (gear2_be_fallback=False): shooting manages
     # its own convergence and must not mix a BE orbit into the gear2 iteration.
-    if (integration_method == "gear2" and gear2_done and gear2_be_fallback and
+    if ((not adaptive) and integration_method == "gear2" and gear2_done and gear2_be_fallback and
             nfail > max(8, int(0.10 * (N - 1)))):
         be_result = transient(
             sizes, bias, tgrid, vip=vip, vin=vin, nf=nf, V0=V0, topo=topo,
@@ -1225,7 +1484,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         be_result["gear2_nfail_before_fallback"] = int(nfail)
         return be_result
 
-    if (not gear2_done and transient_solve_grid_numba is not None and n_aug == n):
+    if ((not adaptive) and not gear2_done and transient_solve_grid_numba is not None and n_aug == n):
         try:
             max_step_arg = -1.0 if max_step is None else float(max_step)
             flat_max_step_arg = -1.0 if flat_max_step is None else float(flat_max_step)
@@ -1409,7 +1668,19 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
               "nretry": nretry, "nsubsteps": nsubsteps, "nodes": nodes,
               "transient_cap_mode": _CAP_MODE,
               "transient_cap_mode_id": int(_cap_id)}
+    if adaptive_used:
+        result["adaptive"] = True
+        result["adaptive_reltol"] = float(adaptive_reltol)
+        result["adaptive_vabstol"] = float(adaptive_vabstol)
+        result["adaptive_iabstol"] = float(adaptive_iabstol)
+        result["adaptive_accepted_steps"] = int(max(0, len(tgrid) - 1))
+        result["adaptive_rejected_steps"] = int(nretry)
+        result["inputs"] = {
+            key: input_values[pos].copy()
+            for pos, key in enumerate(input_keys)
+        }
     result["numba_grid_solver"] = bool(used_grid_numba or gear2_numba_used)
+    result["numba_adaptive_solver"] = bool(adaptive_numba_used)
     if integration_method == "gear2":
         result["gear2_python_retry_solver"] = bool(gear2_python_retry_used)
     if numba_newton_attempts:

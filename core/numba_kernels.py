@@ -901,31 +901,31 @@ def _stamp_transient_system_impl(
                 R[gi] += i_dg
 
         if Cgs != 0.0:
-            if cap_mode == 0:
-                i_ab = (bdf_a0 * qgs + bdf_a1 * prev_cgs[pos] +
-                        bdf_a2 * prev2_cgs[pos]) * inv_h
-            elif cap_mode == 1:
+            if cap_mode == 1:
                 i_ab = 0.5 * (Cgs + prev_cgs[pos]) * ((Vg - Vs) - (pVg - pVs)) * inv_h
+            elif cap_mode == 2:
+                i_ab = Cgs * ((Vg - Vs) - (pVg - pVs)) * inv_h
             elif cap_mode == 3:
                 i_ab = ((qgs - prev_cgs[pos]) +
                         cgs_cross * ((Vg - Vs) - (pVg - pVs))) * inv_h
-            else:
-                i_ab = Cgs * ((Vg - Vs) - (pVg - pVs)) * inv_h
+            else:  # charge (id 0) + any unrecognized mode -> L-stable Q-stamp
+                i_ab = (bdf_a0 * qgs + bdf_a1 * prev_cgs[pos] +
+                        bdf_a2 * prev2_cgs[pos]) * inv_h
             if gi >= 0:
                 R[gi] -= i_ab
             if si >= 0:
                 R[si] += i_ab
         if Cgd != 0.0:
-            if cap_mode == 0:
-                i_ab = (bdf_a0 * qgd + bdf_a1 * prev_cgd[pos] +
-                        bdf_a2 * prev2_cgd[pos]) * inv_h
-            elif cap_mode == 1:
+            if cap_mode == 1:
                 i_ab = 0.5 * (Cgd + prev_cgd[pos]) * ((Vg - Vd) - (pVg - pVd)) * inv_h
+            elif cap_mode == 2:
+                i_ab = Cgd * ((Vg - Vd) - (pVg - pVd)) * inv_h
             elif cap_mode == 3:
                 i_ab = ((qgd - prev_cgd[pos]) +
                         cgd_cross * ((Vg - Vd) - (pVg - pVd))) * inv_h
-            else:
-                i_ab = Cgd * ((Vg - Vd) - (pVg - pVd)) * inv_h
+            else:  # charge (id 0) + any unrecognized mode -> L-stable Q-stamp
+                i_ab = (bdf_a0 * qgd + bdf_a1 * prev_cgd[pos] +
+                        bdf_a2 * prev2_cgd[pos]) * inv_h
             if gi >= 0:
                 R[gi] -= i_ab
             if di >= 0:
@@ -1551,6 +1551,55 @@ def _transient_solve_grid_impl(
     return True, Vhist, nsubsteps, -1, profile_stats, failed_interval_indices
 
 
+def _interp_inputs_at_time_impl(tgrid, input_values, tt, out):
+    ninputs = input_values.shape[0]
+    N = tgrid.shape[0]
+    if ninputs == 0:
+        return
+    if tt <= tgrid[0]:
+        for ii in range(ninputs):
+            out[ii] = input_values[ii, 0]
+        return
+    if tt >= tgrid[N - 1]:
+        for ii in range(ninputs):
+            out[ii] = input_values[ii, N - 1]
+        return
+    k = 0
+    for j in range(N - 1):
+        if tgrid[j] <= tt <= tgrid[j + 1]:
+            k = j
+            break
+    h = tgrid[k + 1] - tgrid[k]
+    frac = 0.0 if h <= 0.0 else (tt - tgrid[k]) / h
+    for ii in range(ninputs):
+        out[ii] = input_values[ii, k] + frac * (input_values[ii, k + 1] - input_values[ii, k])
+
+
+def _adaptive_error_impl(Vhalf, Vfull, n_nodes, reltol, vabstol, iabstol):
+    n = Vhalf.shape[0]
+    acc = 0.0
+    for i in range(n):
+        abstol = vabstol if i < n_nodes else iabstol
+        scale = reltol * max(abs(Vhalf[i]), abs(Vfull[i])) + abstol
+        if scale < 1e-30:
+            scale = 1e-30
+        e = ((Vhalf[i] - Vfull[i]) / 3.0) / scale
+        acc += e * e
+    return math.sqrt(acc / n)
+
+
+def _adaptive_next_h_impl(h, err):
+    if (not math.isfinite(err)) or err <= 0.0:
+        fac = 2.0
+    else:
+        fac = 0.9 * err ** (-1.0 / 3.0)
+        if fac < 0.2:
+            fac = 0.2
+        elif fac > 2.0:
+            fac = 2.0
+    return h * fac
+
+
 def _gear2_substep_newton_reuse_impl(
         seed, Vp, Vp2, input_now, input_prev, input_prev2, h_n, h_prev,
         n, maxit, step_limit, vtol,
@@ -1624,6 +1673,207 @@ def _gear2_substep_newton_reuse_impl(
         Vwork, R, J, prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd,
         cap_prev_dv, profile_enabled, profile_stats,
         a0, a1, a2, prev2_cgs, prev2_cgd, cap_prev2_dv)
+
+
+def _transient_solve_adaptive_gear2_impl(
+        V0, tgrid_src, input_values_src, profile_enabled,
+        max_step, adaptive_reltol, adaptive_vabstol, adaptive_iabstol,
+        adaptive_max_steps, adaptive_h0,
+        n, maxit, step_limit, vtol,
+        gmin, fallback_accept, fallback_tol, HH,
+        dev_d_kind, dev_d_ref, dev_d_val,
+        dev_g_kind, dev_g_ref, dev_g_val,
+        dev_s_kind, dev_s_ref, dev_s_val,
+        dev_di, dev_gi, dev_si, dev_use_abs,
+        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+        p_current_scale, p_inv_Rleak,
+        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
+        p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+        op_cache_valid, op_cache_vs1, op_cache_vd1,
+        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+        res_b_val, res_ai, res_bi, res_g,
+        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+        cap_b_val, cap_ai, cap_bi, cap_value,
+        isrc_pi, isrc_qi, isrc_value,
+        dyn_pi, dyn_qi, dyn_input_idx,
+        cap_mode, clip_lo, clip_hi):
+    Nsrc = tgrid_src.shape[0]
+    ninputs = input_values_src.shape[0]
+    max_steps = int(adaptive_max_steps)
+    if max_steps < 1:
+        max_steps = 1
+    thist = np.empty(max_steps + 1)
+    Vhist = np.empty((max_steps + 1, n))
+    input_hist = np.empty((max_steps + 1, ninputs))
+    profile_stats = np.zeros(24)
+    for i in range(n):
+        Vhist[0, i] = V0[i]
+    thist[0] = tgrid_src[0]
+
+    ndev = dev_di.shape[0]
+    ncap = cap_value.shape[0]
+    Vp = V0.copy()
+    Vp2 = V0.copy()
+    Vfull = np.empty(n)
+    Vmid = np.empty(n)
+    Vhalf2 = np.empty(n)
+    Vwork = np.empty(n)
+    R = np.empty(n)
+    J = np.empty((n, n))
+    prev_vs = np.empty(ndev); prev_vd = np.empty(ndev); prev_vg = np.empty(ndev)
+    prev_cgs = np.empty(ndev); prev_cgd = np.empty(ndev)
+    cap_prev_dv = np.empty(ncap)
+    p2_vs = np.empty(ndev); p2_vd = np.empty(ndev); p2_vg = np.empty(ndev)
+    prev2_cgs = np.empty(ndev); prev2_cgd = np.empty(ndev)
+    cap_prev2_dv = np.empty(ncap)
+    op2_valid = np.zeros(ndev, dtype=np.bool_)
+    op2_vs1 = np.empty(ndev); op2_vd1 = np.empty(ndev)
+    input_prev = np.empty(ninputs)
+    input_prev2 = np.empty(ninputs)
+    input_now = np.empty(ninputs)
+    input_mid = np.empty(ninputs)
+    _interp_inputs_at_time_impl(tgrid_src, input_values_src, thist[0], input_prev)
+    for ii in range(ninputs):
+        input_hist[0, ii] = input_prev[ii]
+        input_prev2[ii] = input_prev[ii]
+
+    t0 = tgrid_src[0]
+    tend = tgrid_src[Nsrc - 1]
+    span = tend - t0
+    if span <= 0.0:
+        return False, thist, Vhist, input_hist, 1, 0, 0, profile_stats
+    max_step_eff = span if max_step <= 0.0 else min(max_step, span)
+    if adaptive_h0 > 0.0:
+        h = adaptive_h0
+    else:
+        denom = Nsrc - 1
+        if denom < 16:
+            denom = 16
+        h = span / denom
+        mindt = span
+        for k in range(1, Nsrc):
+            dt = tgrid_src[k] - tgrid_src[k - 1]
+            if dt <= 0.0:
+                return False, thist, Vhist, input_hist, 1, 0, 0, profile_stats
+            if dt < mindt:
+                mindt = dt
+        if h > mindt:
+            h = mindt
+    if h <= 0.0 or not math.isfinite(h):
+        h = span / 100.0
+    if h > max_step_eff:
+        h = max_step_eff
+    min_h = max(1e-18, span * 1e-15)
+    h_prev = -1.0
+    accepted = 0
+    nsubsteps = 0
+    nreject = 0
+    tt = t0
+
+    while accepted < max_steps and tt < tend - max(1e-18, 1e-13 * span):
+        if h_prev > 0.0 and h > 2.0 * h_prev:
+            h = 2.0 * h_prev
+        if h > max_step_eff:
+            h = max_step_eff
+        if tt + h > tend:
+            h = tend - tt
+        if h <= min_h:
+            return False, thist, Vhist, input_hist, accepted + 1, nsubsteps, nreject, profile_stats
+        _interp_inputs_at_time_impl(tgrid_src, input_values_src, tt + h, input_now)
+        _interp_inputs_at_time_impl(tgrid_src, input_values_src, tt + 0.5 * h, input_mid)
+
+        it1, ok_full, _ = _gear2_substep_newton_reuse_impl(
+            Vp, Vp, Vp2, input_now, input_prev, input_prev2, h, h_prev,
+            n, maxit, step_limit, vtol, gmin, fallback_accept, fallback_tol, HH,
+            dev_d_kind, dev_d_ref, dev_d_val, dev_g_kind, dev_g_ref, dev_g_val,
+            dev_s_kind, dev_s_ref, dev_s_val, dev_di, dev_gi, dev_si, dev_use_abs,
+            p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+            p_current_scale, p_inv_Rleak, p_two_over_pi, p_cap_cgs1, p_cap_cgd1,
+            p_cap_half_wl_ci, p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+            op_cache_valid, op_cache_vs1, op_cache_vd1,
+            res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref, res_b_val,
+            res_ai, res_bi, res_g, cap_a_kind, cap_a_ref, cap_a_val,
+            cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value,
+            isrc_pi, isrc_qi, isrc_value, dyn_pi, dyn_qi, dyn_input_idx,
+            cap_mode, clip_lo, clip_hi, Vwork, R, J, prev_vs, prev_vd, prev_vg,
+            prev_cgs, prev_cgd, cap_prev_dv, p2_vs, p2_vd, p2_vg,
+            prev2_cgs, prev2_cgd, cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
+            profile_enabled, profile_stats)
+        for i in range(n):
+            Vfull[i] = Vwork[i]
+
+        it2, ok_mid, _ = _gear2_substep_newton_reuse_impl(
+            Vp, Vp, Vp2, input_mid, input_prev, input_prev2, 0.5 * h, h_prev,
+            n, maxit, step_limit, vtol, gmin, fallback_accept, fallback_tol, HH,
+            dev_d_kind, dev_d_ref, dev_d_val, dev_g_kind, dev_g_ref, dev_g_val,
+            dev_s_kind, dev_s_ref, dev_s_val, dev_di, dev_gi, dev_si, dev_use_abs,
+            p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+            p_current_scale, p_inv_Rleak, p_two_over_pi, p_cap_cgs1, p_cap_cgd1,
+            p_cap_half_wl_ci, p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+            op_cache_valid, op_cache_vs1, op_cache_vd1,
+            res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref, res_b_val,
+            res_ai, res_bi, res_g, cap_a_kind, cap_a_ref, cap_a_val,
+            cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value,
+            isrc_pi, isrc_qi, isrc_value, dyn_pi, dyn_qi, dyn_input_idx,
+            cap_mode, clip_lo, clip_hi, Vwork, R, J, prev_vs, prev_vd, prev_vg,
+            prev_cgs, prev_cgd, cap_prev_dv, p2_vs, p2_vd, p2_vg,
+            prev2_cgs, prev2_cgd, cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
+            profile_enabled, profile_stats)
+        for i in range(n):
+            Vmid[i] = Vwork[i]
+
+        ok_half2 = False
+        it3 = 0
+        if ok_mid:
+            it3, ok_half2, _ = _gear2_substep_newton_reuse_impl(
+                Vmid, Vmid, Vp, input_now, input_mid, input_prev, 0.5 * h, 0.5 * h,
+                n, maxit, step_limit, vtol, gmin, fallback_accept, fallback_tol, HH,
+                dev_d_kind, dev_d_ref, dev_d_val, dev_g_kind, dev_g_ref, dev_g_val,
+                dev_s_kind, dev_s_ref, dev_s_val, dev_di, dev_gi, dev_si, dev_use_abs,
+                p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+                p_current_scale, p_inv_Rleak, p_two_over_pi, p_cap_cgs1, p_cap_cgd1,
+                p_cap_half_wl_ci, p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
+                op_cache_valid, op_cache_vs1, op_cache_vd1,
+                res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref, res_b_val,
+                res_ai, res_bi, res_g, cap_a_kind, cap_a_ref, cap_a_val,
+                cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value,
+                isrc_pi, isrc_qi, isrc_value, dyn_pi, dyn_qi, dyn_input_idx,
+                cap_mode, clip_lo, clip_hi, Vwork, R, J, prev_vs, prev_vd, prev_vg,
+                prev_cgs, prev_cgd, cap_prev_dv, p2_vs, p2_vd, p2_vg,
+                prev2_cgs, prev2_cgd, cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
+                profile_enabled, profile_stats)
+            for i in range(n):
+                Vhalf2[i] = Vwork[i]
+
+        nsubsteps += 3
+        if profile_enabled:
+            profile_stats[0] += it1 + it2 + it3
+        if ok_full and ok_mid and ok_half2:
+            err = _adaptive_error_impl(Vhalf2, Vfull, n, adaptive_reltol,
+                                       adaptive_vabstol, adaptive_iabstol)
+        else:
+            err = math.inf
+        if err <= 1.0:
+            tt += h
+            accepted += 1
+            thist[accepted] = tt
+            for i in range(n):
+                Vhist[accepted, i] = Vhalf2[i]
+                Vp2[i] = Vp[i]
+                Vp[i] = Vhalf2[i]
+            for ii in range(ninputs):
+                input_hist[accepted, ii] = input_now[ii]
+                input_prev2[ii] = input_prev[ii]
+                input_prev[ii] = input_now[ii]
+            h_prev = h
+            h = _adaptive_next_h_impl(h, max(err, 1e-12))
+        else:
+            nreject += 1
+            h = _adaptive_next_h_impl(h, err)
+            if h < min_h:
+                h = min_h
+    ok = tt >= tend - max(1e-18, 1e-13 * span)
+    return ok, thist, Vhist, input_hist, accepted + 1, nsubsteps, nreject, profile_stats
 
 
 def _transient_solve_grid_gear2_impl(
@@ -2372,6 +2622,10 @@ if NUMBA_AVAILABLE:
     _transient_newton_reuse_impl = njit(cache=NUMBA_CACHE)(_transient_newton_reuse_impl)
     _transient_solve_grid_impl = njit(cache=NUMBA_CACHE)(_transient_solve_grid_impl)
     _gear2_substep_newton_reuse_impl = njit(cache=NUMBA_CACHE)(_gear2_substep_newton_reuse_impl)
+    _interp_inputs_at_time_impl = njit(cache=NUMBA_CACHE)(_interp_inputs_at_time_impl)
+    _adaptive_error_impl = njit(cache=NUMBA_CACHE)(_adaptive_error_impl)
+    _adaptive_next_h_impl = njit(cache=NUMBA_CACHE)(_adaptive_next_h_impl)
+    _transient_solve_adaptive_gear2_impl = njit(cache=NUMBA_CACHE)(_transient_solve_adaptive_gear2_impl)
     _transient_solve_grid_gear2_impl = njit(cache=NUMBA_CACHE)(_transient_solve_grid_gear2_impl)
     _pnoise_hb_blocks_impl = njit(cache=NUMBA_CACHE)(_pnoise_hb_blocks_impl)
     _pac_term_value_impl = njit(cache=NUMBA_CACHE)(_pac_term_value_impl)
@@ -2391,6 +2645,7 @@ if NUMBA_AVAILABLE:
     transient_newton_numba = _transient_newton_impl
     transient_solve_grid_numba = _transient_solve_grid_impl
     transient_solve_grid_gear2_numba = _transient_solve_grid_gear2_impl
+    transient_solve_adaptive_gear2_numba = _transient_solve_adaptive_gear2_impl
     pnoise_hb_blocks_numba = _pnoise_hb_blocks_impl
     pac_hb_blocks_numba = _pnoise_hb_blocks_impl
     pac_linearize_orbit_numba = _pac_linearize_orbit_impl
@@ -2405,6 +2660,7 @@ else:
     transient_newton_numba = None
     transient_solve_grid_numba = None
     transient_solve_grid_gear2_numba = None
+    transient_solve_adaptive_gear2_numba = None
     pnoise_hb_blocks_numba = None
     pac_hb_blocks_numba = None
     pac_linearize_orbit_numba = None

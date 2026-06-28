@@ -201,6 +201,16 @@
         "jacobian_reuse": {"type": "boolean"},
         "jacobian_rebuild_interval": {"type": "integer", "minimum": 0},
         "analytic_jacobian": {"type": "boolean"},
+        "integration_method": {"type": "string", "enum": ["gear2", "be"]},
+        "cap_mode": {"type": "string", "enum": ["charge", "q", "qstamp", "q-stamp", "average", "avg", "trapezoid", "trap", "endpoint", "veriloga", "branch", "self", "self-charge"]},
+        "cap_mode_id": {"type": "integer", "minimum": 0, "maximum": 3},
+        "adaptive": {"type": "boolean"},
+        "adaptive_reltol": {"$ref": "#/$defs/positiveNumber"},
+        "adaptive_vabstol": {"$ref": "#/$defs/positiveNumber"},
+        "adaptive_iabstol": {"$ref": "#/$defs/positiveNumber"},
+        "adaptive_max_steps": {"type": "integer", "minimum": 1},
+        "adaptive_h0": {"$ref": "#/$defs/positiveNumber"},
+        "adaptive_freeze_factor": {"$ref": "#/$defs/positiveNumber"},
         "corner": {"$ref": "#/$defs/corner"}
       }
     },
@@ -258,6 +268,15 @@
         "duration": {"$ref": "#/$defs/positiveNumber"},
         "tstop": {"$ref": "#/$defs/positiveNumber"},
         "n_points": {"type": "integer", "minimum": 2},
+        "integration_method": {"type": "string", "enum": ["gear2", "be"]},
+        "cap_mode": {"type": "string", "enum": ["charge", "q", "qstamp", "q-stamp", "average", "avg", "trapezoid", "trap", "endpoint", "veriloga", "branch", "self", "self-charge"]},
+        "cap_mode_id": {"type": "integer", "minimum": 0, "maximum": 3},
+        "adaptive": {"type": "boolean"},
+        "adaptive_reltol": {"$ref": "#/$defs/positiveNumber"},
+        "adaptive_vabstol": {"$ref": "#/$defs/positiveNumber"},
+        "adaptive_iabstol": {"$ref": "#/$defs/positiveNumber"},
+        "adaptive_max_steps": {"type": "integer", "minimum": 1},
+        "adaptive_h0": {"$ref": "#/$defs/positiveNumber"},
         "corner": {"$ref": "#/$defs/corner"}
       }
     },

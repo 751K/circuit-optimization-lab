@@ -503,6 +503,11 @@ it builds Φ in one orbit pass from the small-signal G(t)/C(t) stamps instead of
 The Jacobian is then reused with a Broyden update; for difficult convergence or
 tight reference comparisons, set `"jacobian_reuse": false` or periodically rebuild
 with `"jacobian_rebuild_interval": 2`.
+For gear2 PSS/transient, set `"adaptive": true` to enable LTE-controlled
+adaptive timestepping. The dispatch forwards `"adaptive_reltol"`,
+`"adaptive_vabstol"`, `"adaptive_iabstol"`, `"adaptive_max_steps"`,
+`"adaptive_h0"`, and `"cap_mode"`; pulse/square periodic inputs get edge
+breakpoints inserted before the adaptive run.
 PAC uses analytic-adjoint harmonic balance by default (`"analytic": true`): one
 adjoint linear solve per frequency on the orbit conversion matrix, with zero extra
 transient runs. `"max_sideband"` and `"n_period_samples"` control the HB resolution.

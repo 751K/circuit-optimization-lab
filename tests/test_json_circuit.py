@@ -195,6 +195,44 @@ def test_dispatch_forwards_integration_method(monkeypatch):
     assert seen.get("method") is None  # not forwarded -> pss_solve default applies
 
 
+def test_dispatch_forwards_adaptive_pss_options(monkeypatch):
+    spec = load_circuit_json("examples/periodic_rc.json")
+    seen = {}
+
+    def fake_pss_solve(*args, **kwargs):
+        seen.update(kwargs)
+        return {"converged": True, "period": args[2], "corner": kwargs.get("corner")}
+
+    monkeypatch.setattr(dispatch_mod, "pss_solve", fake_pss_solve)
+
+    run_analysis_suite(
+        spec,
+        analyses={
+            "pss": {
+                "integration_method": "gear2",
+                "adaptive": True,
+                "adaptive_reltol": 1e-4,
+                "adaptive_vabstol": 1e-6,
+                "adaptive_iabstol": 1e-12,
+                "adaptive_max_steps": 1234,
+                "adaptive_h0": 1e-6,
+                "adaptive_freeze_factor": 5.0,
+                "cap_mode": "average",
+                "max_shooting_iters": 0,
+            }
+        },
+    )
+
+    assert seen["adaptive"] is True
+    assert seen["adaptive_reltol"] == 1e-4
+    assert seen["adaptive_vabstol"] == 1e-6
+    assert seen["adaptive_iabstol"] == 1e-12
+    assert seen["adaptive_max_steps"] == 1234
+    assert seen["adaptive_h0"] == 1e-6
+    assert seen["adaptive_freeze_factor"] == 5.0
+    assert seen["cap_mode"] == "average"
+
+
 def test_dispatch_forwards_pac_algorithm_options(monkeypatch):
     spec = load_circuit_json("examples/periodic_rc.json")
     seen = {}

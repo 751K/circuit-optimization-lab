@@ -473,6 +473,10 @@ PSS 默认使用解析 monodromy Jacobian（`"analytic_jacobian": true`）：在
 `false` 可回退到原有限差分路径。Jacobian 构建后用 Broyden 更新复用；疑难收敛或
 极高精度对比时可设置 `"jacobian_reuse": false`，或用 `"jacobian_rebuild_interval": 2`
 周期性重建。
+Gear2 PSS/transient 可设置 `"adaptive": true` 启用 LTE-controlled adaptive timestepping。
+dispatch 会转发 `"adaptive_reltol"`、`"adaptive_vabstol"`、`"adaptive_iabstol"`、
+`"adaptive_max_steps"`、`"adaptive_h0"` 和 `"cap_mode"`；pulse/square 周期输入会在
+adaptive run 前自动补入边沿断点。
 PAC 默认使用解析伴随谐波平衡（`"analytic": true`）：在 PSS 轨道转换矩阵上每频率
 一次伴随线性求解，零额外瞬态运行。`"max_sideband"` 和 `"n_period_samples"` 控制
 HB 分辨率。对 rail-driven chopper 类电路，可设置 `"time_domain": true` 优先尝试

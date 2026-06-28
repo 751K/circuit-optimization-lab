@@ -29,6 +29,7 @@ try:
     from .numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
     from .pac_solver import (
         _assemble_pac_linearization_python,
+        _conversion_charge_caps,
         _freeze_kwargs,
         _freeze_nf,
         _freeze_sizes,
@@ -42,6 +43,7 @@ except ImportError:  # pragma: no cover - legacy direct module import
     from numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
     from pac_solver import (
         _assemble_pac_linearization_python,
+        _conversion_charge_caps,
         _freeze_kwargs,
         _freeze_nf,
         _freeze_sizes,
@@ -556,12 +558,13 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     }
     devices = list(topo.devices)
     gated_noise = set(gds_noise_devices or ())
-    # Spectre PNoise linearizes the Verilog-A small-signal model expressions
-    # (not the local transient companion form used to generate the PSS orbit).
-    # Keeping PNoise on the C(V)*ddt(V) operator matches the Cadence reference
-    # noise folding; using the transient Q-stamp operator under-counts output
-    # noise by ~20% for the hard-switched chopper.
-    charge_caps = False
+    # Spectre PNoise linearizes the Verilog-A small-signal C(V)*ddt(V) operator
+    # (not the local transient Q-stamp companion used to integrate the PSS orbit);
+    # the charge fold under-counts the hard-switched chopper noise by ~20%. The
+    # operator choice goes through the SAME decision helper as PAC (single source
+    # of truth): with internal gate-state retention it returns False (C(V)*ddt(V)).
+    internal_gate_states = True
+    charge_caps = _conversion_charge_caps(pss_result, internal_gate_states)
     if not switch_noise_conductance_gated:
         gated_noise = set()
     keep = set(noise_devices) if noise_devices is not None else None
@@ -573,7 +576,6 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
             return input_wave[node_inputs[node]][m]
         return rails[node]
 
-    internal_gate_states = True
     lin_key = (
         "pnoise_lin_gate1_v1",
         tuple(topo.solved),
@@ -585,7 +587,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         _freeze_sizes(all_sizes),
         _freeze_nf(all_nf),
         _freeze_kwargs(corner or {}),
-        "charge_caps" if charge_caps else "veriloga_caps",
+        "charge_caps" if charge_caps else "cvddt_caps",
         bool(internal_gate_states),
         tuple(sorted(gated_noise)),
         bool(switch_noise_conductance_gated),
@@ -681,7 +683,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
 
     hb_key = ("pnoise_hb_v2", lin_key, int(K), float(fundamental),
               float(hb_sparse_drop_tol),
-              "charge_caps" if charge_caps else "veriloga_caps")
+              "charge_caps" if charge_caps else "cvddt_caps")
     hb_cache_hit = bool(cache_linearization and hb_key in cache)
     hb_size = int(nb * n_state)
     sparse_density_estimate = _estimate_hb_sparse_density(
@@ -924,13 +926,14 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                     Z = adj[p_idx].copy()
                 if q_idx is not None:
                     Z -= adj[q_idx]
-                # thermal (white): Toeplitz quadratic form Z^H S_th Z.
-                contrib = float(np.real(Z @ (sth_grid @ np.conj(Z))))
-                # flicker (1/f, cyclostationary): sum_a |sum_r Z_r M_{r-a}|^2 / nu_a,
-                # with M_{r-a}=mfl_vec[(r-a)+2K] -> for sideband a, slice [2K-a:2K-a+nb].
-                U = np.array([Z @ mfl_vec[two_k - a: two_k - a + nb]
-                              for a in range(nb)])
-                contrib += float(np.sum((U.real ** 2 + U.imag ** 2) * inv_nu))
+                with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                    # thermal (white): Toeplitz quadratic form Z^H S_th Z.
+                    contrib = float(np.real(Z @ (sth_grid @ np.conj(Z))))
+                    # flicker (1/f, cyclostationary): sum_a |sum_r Z_r M_{r-a}|^2 / nu_a,
+                    # with M_{r-a}=mfl_vec[(r-a)+2K] -> for sideband a, slice [2K-a:2K-a+nb].
+                    U = np.array([Z @ mfl_vec[two_k - a: two_k - a + nb]
+                                  for a in range(nb)])
+                    contrib += float(np.sum((U.real ** 2 + U.imag ** 2) * inv_nu))
                 contrib = max(contrib, 0.0)
                 dev_psd[name][fi] += contrib
                 out_psd[fi] += contrib

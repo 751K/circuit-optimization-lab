@@ -57,6 +57,7 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
     """
     t = np.asarray(tr["t"], float)
     nodes = tr["nodes"]
+    inputs = tr.get("inputs", inputs)
     N = len(t)
     n = topo.n
     nbr = topo.n_branches                       # ideal voltage-source branch unknowns
@@ -202,6 +203,15 @@ def _prepare_inputs(inputs, tgrid, *, check_periodic, periodic_tol):
     return out
 
 
+def _resample_inputs(inputs, t_src, t_dst, period):
+    out = {}
+    t_src = np.asarray(t_src, float)
+    t_dst = np.asarray(t_dst, float)
+    for key, val in (inputs or {}).items():
+        out[key] = np.interp(t_dst, t_src, np.asarray(val, float), period=float(period))
+    return out
+
+
 def _initial_vector(sizes, bias, topo, nf, V0, corner=None):
     if V0 is not None:
         if isinstance(V0, dict):
@@ -297,7 +307,10 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               input_periodic_tol=1e-9, profile=False, edge_mask=None,
               integration_method="gear2",
               physical_factor=2.0, max_stabilization_periods=200,
-              levenberg_marquardt=True, cap_mode_id=None):
+              levenberg_marquardt=True, cap_mode=None, cap_mode_id=None,
+              adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
+              adaptive_iabstol=1e-12, adaptive_max_steps=200000,
+              adaptive_h0=None, adaptive_freeze_factor=10.0):
     """Solve periodic steady state with transient shooting.
 
     Parameters are intentionally close to :func:`transient` so the same topology,
@@ -323,7 +336,6 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     step_fallback_tol = min(float(fallback_tol), 0.1 * float(residual_tol))
     transient_kwargs = dict(
         topo=topo,
-        inputs=inputs,
         node_inputs=node_inputs,
         current_inputs=current_inputs,
         nf=nf,
@@ -341,6 +353,13 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         rail_margin=rail_margin,
         edge_mask=edge_mask,
         integration_method=integration_method,
+        adaptive=bool(adaptive),
+        adaptive_reltol=float(adaptive_reltol),
+        adaptive_vabstol=float(adaptive_vabstol),
+        adaptive_iabstol=float(adaptive_iabstol),
+        adaptive_max_steps=int(adaptive_max_steps),
+        adaptive_h0=adaptive_h0,
+        cap_mode=cap_mode,
         cap_mode_id=cap_mode_id,
         # Shooting manages its own convergence per period; never let a single
         # period silently fall back to a BE orbit mid-iteration.
@@ -355,6 +374,29 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     shooting_jacobian_reuses = 0
     phys_bounds = _physical_span(topo, bias, float(physical_factor))
     stab_runaway = False
+    adaptive_grid_frozen = False
+    frozen_tgrid = None
+    frozen_inputs = None
+
+    def _period_kwargs():
+        if adaptive_grid_frozen:
+            kw = dict(transient_kwargs)
+            kw["adaptive"] = False
+            kw["edge_mask"] = None
+            return frozen_tgrid, frozen_inputs, kw
+        return tgrid, inputs, transient_kwargs
+
+    def _maybe_freeze_grid(tr, norm, nfail):
+        nonlocal adaptive_grid_frozen, frozen_tgrid, frozen_inputs
+        if (not adaptive or adaptive_grid_frozen or nfail != 0 or
+                norm > float(adaptive_freeze_factor) * float(residual_tol)):
+            return
+        tr_t = np.asarray(tr["t"], float)
+        if tr_t.ndim != 1 or len(tr_t) < 2:
+            return
+        adaptive_grid_frozen = True
+        frozen_tgrid = tr_t.copy()
+        frozen_inputs = _resample_inputs(inputs, tgrid, frozen_tgrid, period)
 
     def _stabilize(x0, max_periods):
         """Pseudo-transient stabilization: advance period-by-period, tracking the
@@ -367,12 +409,17 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         for _ in range(max(0, int(max_periods))):
             x_start = x.copy()
             period_runs += 1
-            tr_s = transient(sizes, bias, tgrid, V0=x, profile=False,
-                             **transient_kwargs)
+            run_tgrid, run_inputs, run_kwargs = _period_kwargs()
+            tr_s = transient(sizes, bias, run_tgrid, V0=x, profile=False,
+                             inputs=run_inputs, **run_kwargs)
+            if "inputs" not in tr_s:
+                tr_s["inputs"] = {key: np.asarray(val, float).copy()
+                                  for key, val in run_inputs.items()}
             x_end_s = _end_vector(tr_s, topo)
             residual_s = x_end_s - x_start
             norm_s = float(np.linalg.norm(residual_s, ord=np.inf))
             nfail_s = int(tr_s.get("nfail", 0))
+            _maybe_freeze_grid(tr_s, norm_s, nfail_s)
             bounded = (_within(x_start, phys_bounds, topo)
                        and _within(x_end_s, phys_bounds, topo))
             if nfail_s == 0 and bounded and (best_phys is None or norm_s < best_phys[0]):
@@ -404,15 +451,21 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
 
     history = []
 
-    def run_period(x0):
+    def run_period(x0, allow_freeze=True):
         nonlocal period_runs
         period_runs += 1
-        tr = transient(sizes, bias, tgrid, V0=x0, profile=False,
-                       **transient_kwargs)
+        run_tgrid, run_inputs, run_kwargs = _period_kwargs()
+        tr = transient(sizes, bias, run_tgrid, V0=x0, profile=False,
+                       inputs=run_inputs, **run_kwargs)
+        if "inputs" not in tr:
+            tr["inputs"] = {key: np.asarray(val, float).copy()
+                            for key, val in run_inputs.items()}
         x_end = _end_vector(tr, topo)
         residual = x_end - x0
         norm = float(np.linalg.norm(residual, ord=np.inf))
         nfail = int(tr.get("nfail", 0))
+        if allow_freeze:
+            _maybe_freeze_grid(tr, norm, nfail)
         return tr, x_end, residual, norm, nfail
 
     if converged_stabilization is None:
@@ -470,7 +523,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
             if abs(delta) < 1e-30:
                 out[:, col] = 0.0
                 continue
-            _, _, rp, _, _ = run_period(xp)
+            _, _, rp, _, _ = run_period(xp, allow_freeze=False)
             out[:, col] = (rp - residual_base) / delta
         return out
 
@@ -507,7 +560,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
             used_reused_jac = False
             if rebuild:
                 jac = None
-                if analytic_jacobian:
+                if analytic_jacobian and (not adaptive or adaptive_grid_frozen):
                     try:
                         if mono_dev_inst is None:
                             mono_dev_inst = build_devices(sizes, nf=nf, corner=corner, topo=topo)
@@ -599,7 +652,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                             break
                         continue
                     xt = _rail_clip(xt, topo, bias, rail_margin)
-                    tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt)
+                    tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt, allow_freeze=False)
                     score_t = _residual_score(norm_t, nfail_t)
                     bounded_t = _within(x_end_t, phys_bounds, topo)
                     if bounded_t and (score_t < current_score or
@@ -625,7 +678,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                 alpha = 1.0
                 while alpha >= float(min_damping):
                     xt = _rail_clip(x + alpha * dx, topo, bias, rail_margin)
-                    tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt)
+                    tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt, allow_freeze=False)
                     score_t = _residual_score(norm_t, nfail_t)
                     if score_t < current_score or norm_t <= float(residual_tol):
                         accepted = (alpha, xt, tr_t, x_end_t, residual_t, norm_t,
@@ -660,6 +713,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
             break
 
         alpha, x, tr, x_end, residual, norm, nfail, score = accepted
+        _maybe_freeze_grid(tr, norm, nfail)
         if score < best["score"]:
             best = {
                 "x0": x.copy(),
@@ -670,7 +724,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
                 "transient": tr,
                 "score": score,
             }
-        if jacobian_reuse:
+        if jacobian_reuse and (not adaptive or adaptive_grid_frozen):
             jac = update_broyden(jac, x - old_x, residual - old_residual)
         else:
             jac = None
@@ -714,9 +768,30 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         nfail = best["nfail"]
         converged = (nfail == 0 and norm <= float(residual_tol))
 
+    if adaptive_grid_frozen and bool(tr.get("adaptive", False)):
+        kw = dict(transient_kwargs)
+        kw["adaptive"] = False
+        kw["edge_mask"] = None
+        period_runs += 1
+        tr = transient(sizes, bias, frozen_tgrid, V0=x, profile=False,
+                       inputs=frozen_inputs, **kw)
+        if "inputs" not in tr:
+            tr["inputs"] = {key: np.asarray(val, float).copy()
+                            for key, val in frozen_inputs.items()}
+        x_end = _end_vector(tr, topo)
+        residual = x_end - x
+        norm = float(np.linalg.norm(residual, ord=np.inf))
+        nfail = int(tr.get("nfail", 0))
+        converged = (nfail == 0 and norm <= float(residual_tol))
+
     if profile:
         period_runs += 1
-        tr = transient(sizes, bias, tgrid, V0=x, profile=True, **transient_kwargs)
+        run_tgrid, run_inputs, run_kwargs = _period_kwargs()
+        tr = transient(sizes, bias, run_tgrid, V0=x, profile=True,
+                       inputs=run_inputs, **run_kwargs)
+        if "inputs" not in tr:
+            tr["inputs"] = {key: np.asarray(val, float).copy()
+                            for key, val in run_inputs.items()}
         x_end = _end_vector(tr, topo)
         residual = x_end - x
         norm = float(np.linalg.norm(residual, ord=np.inf))
@@ -736,6 +811,9 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     else:
         pss_status = "best_physical"
 
+    final_inputs = tr.get("inputs")
+    if final_inputs is None:
+        final_inputs = _resample_inputs(inputs, tgrid, np.asarray(tr["t"], float), period)
     result = dict(tr)
     result.update({
         "converged": bool(converged),
@@ -758,7 +836,8 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         "shooting_jacobian_rebuild_interval": int(jacobian_rebuild_interval),
         "nfail": int(nfail),
         "topology": topo,
-        "inputs": {key: val.copy() for key, val in inputs.items()},
+        "inputs": {key: np.asarray(val, float).copy()
+                   for key, val in final_inputs.items()},
         "node_inputs": dict(node_inputs or {}),
         "current_inputs": tuple(current_inputs or ()),
         "signed_devices": tuple(signed_devices or ()),
@@ -766,5 +845,7 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         "transient_flat_max_step": flat_max_step,
         "rail_margin": rail_margin,
         "corner": corner,
+        "adaptive": bool(adaptive),
+        "adaptive_grid_frozen": bool(adaptive_grid_frozen),
     })
     return result

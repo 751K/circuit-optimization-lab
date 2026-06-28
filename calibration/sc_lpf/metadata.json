@@ -22,10 +22,19 @@
   },
   "solver": {
     "n_points": 201,
-    "tstab_periods": 60,
+    "tstab_periods": 10,
     "residual_tol": 0.02,
-    "max_shooting_iters": 20,
-    "integration_method": "be"
+    "max_shooting_iters": 8,
+    "max_stabilization_periods": 0,
+    "integration_method": "gear2",
+    "adaptive": true,
+    "adaptive_reltol": 0.001,
+    "adaptive_vabstol": 0.00001,
+    "adaptive_h0": 0.0000001,
+    "adaptive_max_steps": 10000,
+    "cap_mode": "average",
+    "pnoise_max_sideband": 20,
+    "pnoise_n_period_samples": 512
   },
   "analyses": ["pac", "pnoise"],
   "reference_files": {"pac": "pac.0.pac", "pnoise": "pnoise.pnoise"},

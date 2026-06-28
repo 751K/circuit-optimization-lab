@@ -6,7 +6,9 @@ to ~machine precision; the chopper PSS/PAC/PNoise cases match Cadence within ~1-
 PAC baseband gain and integrated IRN across all three corners. Every case must PASS —
 these are the regression guards that catch a model/solver change drifting off Cadence.
 """
+import json
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -61,13 +63,22 @@ def test_calibration_chopper_matches_cadence(case):
 SC_LPF = "calibration/sc_lpf"
 
 
+def test_sc_lpf_calibration_uses_adaptive_average_gear2_default():
+    metadata = json.loads(Path(SC_LPF, "metadata.json").read_text())
+    solver = metadata["solver"]
+    assert solver["integration_method"] == "gear2"
+    assert solver["adaptive"] is True
+    assert solver["cap_mode"] == "average"
+    assert solver["pnoise_n_period_samples"] >= 512
+    assert solver["pnoise_max_sideband"] >= 20
+
+
 @_slow
 def test_calibration_sc_lpf_matches_cadence():
     # Second periodic calibration case beside the chopper: a single-ended switched-
-    # capacitor LPF (vsource clocks, reverse-biased PMOS switches). Guards the two
-    # 2026-06-22 fixes — the signed reverse-bias device current (PAC -3 dB BW: was
-    # 12 Hz / -29%, now ~17 Hz) and the cyclostationary-flicker folding (output
-    # noise: was +363%, now ~+1.4%). PSS must converge (not the spurious ~40 V orbit).
+    # capacitor LPF (vsource clocks, reverse-biased PMOS switches). It now also
+    # guards the SC-LPF calibration default: gear2 + adaptive + cap_mode="average"
+    # with enough PNoise sampling to match the archived Spectre reference.
     report = run_calibration(SC_LPF, analyses=["pac", "pnoise"])
     assert report["overall_pass"], format_report(report)
     assert report["results"]["pac"]["metrics"]["gain_baseband"]["pass"]

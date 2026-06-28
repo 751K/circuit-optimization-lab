@@ -387,17 +387,23 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
 
 Solves the time-domain response of the topology-defined system using backward Euler (default) or variable-step BDF2/gear2 integration:
 
-- `transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None, topo=AFE_TOPO, inputs=None, node_inputs=None, integration_method="be")`
+- `transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None, topo=AFE_TOPO, inputs=None, node_inputs=None, integration_method="be", adaptive=False)`
 - Supports legacy AFE `vip/vin` inputs and generic `inputs={name: waveform}` driven through `topo.transient_inputs`.
 - `node_inputs={node: input_key}` drives a (rail) NODE with a waveform — used by a front-end testbench where the stimulus enters at source nodes and propagates through a passive network, rather than driving device gates directly.
 - `current_inputs=[{"p": node_a, "q": node_b, "input": key}]` stamps a
   time-varying ideal current source flowing `p -> q`; the PMOS chopper helper uses
   this for charge-injection pulses.
-- `cap_mode_id` is an internal/per-call capacitance-operator override. `None`
-  uses the module/environment default (`charge`), while chopper PSS passes the
-  `average` operator explicitly for Cadence-matched clock feedthrough. This
+- `cap_mode` / `cap_mode_id` are per-call capacitance-operator overrides.
+  `None` uses the module/environment default (`charge`), while chopper PSS passes
+  the `average` operator explicitly for Cadence-matched clock feedthrough. This
   override affects only the transient/PSS orbit, not PAC/PNoise conversion
   linearization.
+- `adaptive=True` is an opt-in LTE-controlled gear2 path. It treats the supplied
+  `tgrid` as the input-sampling grid and `[t0, tstop]` boundary, then returns a
+  self-chosen non-uniform accepted grid. It is valid only with
+  `integration_method="gear2"` and uses `adaptive_reltol`,
+  `adaptive_vabstol`, `adaptive_iabstol`, `adaptive_max_steps`, and
+  `adaptive_h0`.
 - `max_step`, `max_retry_subdivisions`, `fallback_full_jacobian`, and
   `fallback_least_squares` provide
   controlled step refinement and bounded fallback solving for switched transient
@@ -440,6 +446,10 @@ also supports variable-step BDF2 (second-order, stiffly stable). Key properties:
   periodic PSS/PAC/PNoise orbits and raw-transient `max_step`,
   `flat_max_step`, and `max_retry_subdivisions`; the analytic gear2 monodromy
   (augmented 2n-state) feeds the PSS shooting Jacobian.
+- The adaptive gear2 path uses a step-doubling LTE estimate and freezes the PSS
+  grid near convergence before the final fixed-grid orbit/monodromy. Numba
+  accelerates adaptive gear2 for `n_aug == n`; circuits with ideal-voltage-source
+  branch unknowns fall back to the Python adaptive loop.
 - Raw `transient(integration_method="gear2")` keeps the BE default opt-in
   boundary, but when `max_retry_subdivisions` or `max_step` asks for robustness
   it stays in the Numba gear2 grid. The grid updates rolling two-step BDF2
@@ -646,6 +656,11 @@ The current core was calibrated against Cadence Spectre 24.1 for the AT4000TG AF
   +0.03%, and TD-adjoint PNoise IRN is about +0.02%. Across slow/typical/fast,
   the old HB-K32 IRN errors were +1.81% / +1.05% / +0.66%; TD PNoise gives
   +0.02% / -0.00% / +0.57%.
+- SC-LPF calibration now explicitly uses `gear2 + adaptive + cap_mode="average"`
+  with edge breakpoints and enough PNoise resampling (`512` samples,
+  `max_sideband=20`). Against the archived Spectre SC-LPF reference it currently
+  passes with PAC gain about `-0.32%`, bandwidth `+1.07%`, and output noise
+  `+2.82%`.
 - Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms
   input-referred noise.
 

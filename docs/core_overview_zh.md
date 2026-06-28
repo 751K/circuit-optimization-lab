@@ -340,7 +340,7 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 
 使用后向欧拉（默认）或变步长 BDF2/gear2 积分求解拓扑定义系统的时域响应：
 
-- `transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None, topo=AFE_TOPO, inputs=None, node_inputs=None, integration_method="be")`
+- `transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None, topo=AFE_TOPO, inputs=None, node_inputs=None, integration_method="be", adaptive=False)`
 - 支持传统的 AFE `vip/vin` 输入，也支持通过 `topo.transient_inputs` 驱动的通用 `inputs={name: waveform}`。
 - `node_inputs={node: input_key}` 在某个（rail）节点上驱动波形——用于前端 testbench，其激励在源节点注入并通过无源网络传播，而非直接驱动器件栅极。
 - `current_inputs=[{"p": node_a, "q": node_b, "input": key}]` stamp 一个时变
@@ -348,6 +348,13 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - `max_step`、`max_retry_subdivisions`、`fallback_full_jacobian` 和
   `fallback_least_squares` 用于 switched
   transient 步的受控细分和有界 fallback 求解。
+- `cap_mode` / `cap_mode_id` 是 per-call 电容算子 override；`None` 使用环境默认
+  `charge`，chopper PSS 显式传 `average` 匹配 Cadence feedthrough。该 override
+  只影响 transient/PSS 轨道，不影响 PAC/PNoise conversion 线性化。
+- `adaptive=True` 是 opt-in 的 LTE-controlled gear2 路径：传入的 `tgrid` 作为输入采样网格
+  和 `[t0, tstop]` 边界，返回自选的非均匀 accepted grid。它只允许配合
+  `integration_method="gear2"`，参数包括 `adaptive_reltol`、`adaptive_vabstol`、
+  `adaptive_iabstol`、`adaptive_max_steps` 和 `adaptive_h0`。
 - 包含拓扑定义的负载电容（及电容元件），加上电阻和理想电流源支路。
 - 在牛顿迭代期间重新计算非线性电容，并包含 PDK Verilog-A 使用的 PMOS
   `R_cap2` 源/漏到 gate 的泄漏支路。
@@ -378,6 +385,9 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - 编译版 Numba gear2 grid 求解器（`_transient_solve_grid_gear2_impl`）处理
   PSS/PAC/PNoise 的周期轨道，也处理 raw transient 的 `max_step`、`flat_max_step`
   和 `max_retry_subdivisions`；解析 gear2 monodromy（增广 2n 态）供给 PSS shooting Jacobian。
+- adaptive gear2 使用 step-doubling LTE 估计；PSS 会在接近收敛时冻结 accepted grid，
+  再用该固定 grid 生成最终 orbit/monodromy。Numba 覆盖 `n_aug == n` 的 adaptive
+  gear2；含理想电压源支路未知量的拓扑会回退到 Python adaptive loop。
 - 裸 `transient(integration_method="gear2")` 仍是显式 opt-in；当调用方请求
   `max_retry_subdivisions` 或 `max_step` 的 robust 行为时，会留在 Numba gear2 grid；
   grid 在每个 accepted internal substep 后更新 rolling 两步 BDF2 历史，并在失败时按
@@ -548,6 +558,10 @@ AC 结果时约 1.8ms。
   `f_chop=200 Hz` 时默认 time-domain PAC 约 +0.03%，TD-adjoint PNoise IRN 约 +0.02%。
   slow/typical/fast 三 corner 的旧 HB-K32 IRN 误差为 +1.81% / +1.05% / +0.66%，
   TD PNoise 后为 +0.02% / −0.00% / +0.57%。
+- SC-LPF calibration 现在显式默认 `gear2 + adaptive + cap_mode="average"`，
+  输入网格补 clock edge 断点，并用 `pnoise_n_period_samples=512` /
+  `pnoise_max_sideband=20` 保证噪声采样。对入库 Spectre SC-LPF 参考，当前
+  PASS：PAC 增益约 −0.32%、带宽 +1.07%、输出噪声 +2.82%。
 - 最终锁定设计约 22.9 dB 增益、549 Hz 带宽、37 µVrms 等价输入噪声。
 
 上述数据描述当前的 AT4000TG 验证案例。后续 PDK 或拓扑应针对其各自的仿真器参考重新进行校准。

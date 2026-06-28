@@ -1148,7 +1148,10 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
                      analytic_jacobian=True,
                      base_topo=AFE_TOPO, output_filter=None, profile=False,
                      split_input_pair=False, integration_method="gear2",
-                     cap_mode="average"):
+                     cap_mode="average",
+                     adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
+                     adaptive_iabstol=1e-12, adaptive_max_steps=200000,
+                     adaptive_h0=None, adaptive_freeze_factor=10.0):
     """Periodic steady state of the eight-PMOS chopper.
 
     This is a shooting PSS wrapper around the same hard-switched topology and
@@ -1163,8 +1166,11 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
     leaving a slow-corner +1% residual). ``"charge"`` stays the global default
     for stiff tau>>T circuits (e.g. SC-LPF) where the trapezoidal rule rings.
     """
+    # "endpoint" is the literal C(Vn)*dV companion (unstable in the shooting,
+    # experiments only); "veriloga" kept as a legacy alias for it. The stable
+    # non-conservative operator that matches Cadence's feedthrough is "average".
     _CAP_MODE_IDS = {"charge": 0, "q": 0, "average": 1, "avg": 1, "trapezoid": 1,
-                     "veriloga": 2, "branch": 3, "self": 3}
+                     "endpoint": 2, "veriloga": 2, "branch": 3, "self": 3}
     cap_mode_id = None if cap_mode is None else _CAP_MODE_IDS[str(cap_mode).lower()]
     f_chop = float(f_chop)
     if f_chop <= 0.0:
@@ -1298,6 +1304,10 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
         rail_margin=rail_margin, check_periodic_inputs=False, profile=profile,
         edge_mask=edge_mask, integration_method=integration_method,
         cap_mode_id=cap_mode_id,
+        adaptive=adaptive, adaptive_reltol=adaptive_reltol,
+        adaptive_vabstol=adaptive_vabstol, adaptive_iabstol=adaptive_iabstol,
+        adaptive_max_steps=adaptive_max_steps, adaptive_h0=adaptive_h0,
+        adaptive_freeze_factor=adaptive_freeze_factor,
     )
     requested_output = np.interp(requested_tgrid, result["t"], result["output"])
     requested_nodes = {

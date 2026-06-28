@@ -36,13 +36,17 @@ _PSS_KWARGS = {
     "residual_tol", "max_shooting_iters", "fd_step", "min_damping",
     "jacobian_reuse", "jacobian_rebuild_interval", "rail_margin",
     "check_periodic_inputs", "input_periodic_tol", "profile", "corner",
-    "integration_method",
+    "integration_method", "cap_mode", "cap_mode_id", "adaptive",
+    "adaptive_reltol", "adaptive_vabstol", "adaptive_iabstol",
+    "adaptive_max_steps", "adaptive_h0", "adaptive_freeze_factor",
 }
 _TRANSIENT_KWARGS = {
     "max_step", "flat_max_step", "max_retry_subdivisions", "newton_maxit",
     "newton_step_limit", "newton_vtol", "fallback_full_jacobian",
     "fallback_least_squares", "fallback_tol", "profile", "rail_margin", "corner",
-    "integration_method",
+    "integration_method", "cap_mode", "cap_mode_id", "adaptive",
+    "adaptive_reltol", "adaptive_vabstol", "adaptive_iabstol",
+    "adaptive_max_steps", "adaptive_h0",
 }
 
 
@@ -125,6 +129,38 @@ def _time_grid(cfg, *, default_stop=None, default_points=101):
         out = np.linspace(start, stop, n_points)
     if out.ndim != 1 or len(out) < 2 or not np.all(np.diff(out) > 0.0):
         raise ValueError("time grid must be strictly increasing with at least two points")
+    return out
+
+
+def _with_adaptive_waveform_breakpoints(periodic, tgrid, period):
+    """Add pulse/square discontinuity and edge boundary times for adaptive runs."""
+    extras = []
+    for spec in (periodic or {}).get("inputs", {}).values():
+        if not isinstance(spec, dict):
+            continue
+        kind = str(spec.get("type", "constant")).lower()
+        if kind not in {"square", "pulse"}:
+            continue
+        delay = float(spec.get("delay", 0.0))
+        duty = float(spec.get("duty", 0.5))
+        width = duty * float(period)
+        offsets = [0.0, width]
+        if kind == "pulse":
+            rise = max(0.0, float(spec.get("rise", 0.0)))
+            fall = max(0.0, float(spec.get("fall", 0.0)))
+            offsets.extend([rise, width + fall])
+        for off in offsets:
+            tm = np.mod(delay + off, period)
+            extras.append(tm)
+            if tm == 0.0:
+                extras.append(period)
+    if not extras:
+        return tgrid
+    out = np.unique(np.concatenate([np.asarray(tgrid, float), np.asarray(extras, float)]))
+    out = out[(out >= -1e-15) & (out <= period + 1e-15)]
+    out[0] = 0.0
+    if not np.isclose(out[-1], period, rtol=1e-12, atol=max(1e-18, period * 1e-12)):
+        out = np.append(out, period)
     return out
 
 
@@ -306,8 +342,12 @@ def _pss_config(spec, analyses, owner_cfg):
 
 
 def _run_pss(spec, pss_cfg, periodic):
-    context = build_periodic_context(spec, periodic)
     kwargs = {k: v for k, v in pss_cfg.items() if k in _PSS_KWARGS}
+    context = build_periodic_context(spec, periodic)
+    if bool(kwargs.get("adaptive", False)):
+        tgrid = _with_adaptive_waveform_breakpoints(periodic, context["tgrid"], context["period"])
+        if len(tgrid) != len(context["tgrid"]):
+            context = build_periodic_context(spec, periodic, tgrid=tgrid)
     if "corner" in kwargs:
         kwargs["corner"] = _corner_from_cfg(pss_cfg)
     return pss_solve(
@@ -334,6 +374,10 @@ def _run_transient(spec, cfg):
                            default_points=int(cfg.get("n_points", 101)))
         context = build_periodic_context(spec, periodic, tgrid=tgrid)
         kwargs = {k: v for k, v in cfg.items() if k in _TRANSIENT_KWARGS}
+        if bool(kwargs.get("adaptive", False)):
+            tgrid = _with_adaptive_waveform_breakpoints(periodic, context["tgrid"], period)
+            if len(tgrid) != len(context["tgrid"]):
+                context = build_periodic_context(spec, periodic, tgrid=tgrid)
         if "corner" in kwargs:
             kwargs["corner"] = _corner_from_cfg(cfg)
         return transient(
