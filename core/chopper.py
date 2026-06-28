@@ -33,6 +33,7 @@ thermal noise are not included in this ideal analysis.
 """
 from __future__ import annotations
 
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
 from threading import RLock
@@ -1165,7 +1166,29 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
     ~0% (the conservative ``"charge"`` Q-stamp over-swings the feedthrough ~26%,
     leaving a slow-corner +1% residual). ``"charge"`` stays the global default
     for stiff tau>>T circuits (e.g. SC-LPF) where the trapezoidal rule rings.
+
+    ``adaptive`` is accepted for API symmetry with :func:`pss_solve` but is NOT
+    functional on the chopper topology yet: the LTE step controller collapses the
+    step to ~0 at the switch-edge stiffness (0 accepted steps -> a 1-point orbit
+    -> garbage PAC/PNoise). When True it is IGNORED with a ``RuntimeWarning`` and
+    the validated fixed edge-refined grid is used instead. The fixed grid already
+    matches Cadence to ~+0.02%, so adaptive offers no accuracy gain on the chopper
+    (unlike the SC-LPF, which needs it to resolve its harsh switch-conduction).
     """
+    if adaptive:
+        warnings.warn(
+            "pmos_chopper_pss: adaptive=True is not supported on the chopper "
+            "topology yet -- the LTE step controller collapses the step to ~0 at "
+            "the switch-edge stiffness (0 accepted steps -> 1-point orbit -> "
+            "garbage PAC/PNoise, e.g. baseband gain ~35 vs ~13). Ignoring adaptive "
+            "and using the validated fixed edge-refined grid (already ~+0.02% vs "
+            "Cadence; adaptive adds no accuracy here). Open issues if re-enabling: "
+            "(1) the chopper input waveforms must be resampled onto the adaptive "
+            "orbit grid for the TD-PAC/PNoise conversions; (2) the per-step Newton "
+            "stalls at the hard switch edges (same cause as raw gear2 falling back "
+            "to BE on this topology).",
+            RuntimeWarning, stacklevel=2)
+        adaptive = False
     # "endpoint" is the literal C(Vn)*dV companion (unstable in the shooting,
     # experiments only); "veriloga" kept as a legacy alias for it. The stable
     # non-conservative operator that matches Cadence's feedthrough is "average".
