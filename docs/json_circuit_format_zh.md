@@ -427,6 +427,11 @@ tran = transient(sizes, bias, t, topo=topology,
 会按 `ac -> noise -> transient -> pss -> pac -> pnoise` 顺序运行已配置的分析；
 PAC/PNoise 需要 PSS 时会自动复用或先运行 PSS。
 
+`transient` / `pss` / `pac` / `pnoise` 的权威 option registry 位于
+`core.analysis_options`。`analysis_dispatch.py` 从这个 registry 派生转发到
+solver 的 kwargs 和默认值；JSON schema 也用测试和同一 registry 对齐，避免新增
+solver 参数后 dispatch/schema/docs 继续漂移。
+
 ```json
 "analyses": {
   "pss": {

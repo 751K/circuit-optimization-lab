@@ -13,20 +13,12 @@ from scipy import sparse as _sp
 from scipy.linalg import lu_factor, lu_solve
 from scipy.sparse import linalg as _spla
 
-try:
-    from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-    from .ac_solver import _bw_from_gain, _dev_corner, _dev_nf, ac_solve, build_devices, get_ss_params
-    from .numba_kernels import (pac_hb_blocks_numba, pac_linearize_orbit_numba,
-                                pac_linearize_orbit_gate1_numba)
-    from .topology import Topology
-    from .transient_solver import transient
-except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-    from ac_solver import _bw_from_gain, _dev_corner, _dev_nf, ac_solve, build_devices, get_ss_params
-    from numba_kernels import (pac_hb_blocks_numba, pac_linearize_orbit_numba,
-                               pac_linearize_orbit_gate1_numba)
-    from topology import Topology
-    from transient_solver import transient
+from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
+from .ac_solver import _bw_from_gain, _dev_corner, _dev_nf, ac_solve, build_devices, get_ss_params
+from .numba_kernels import (pac_hb_blocks_numba, pac_linearize_orbit_numba,
+                            pac_linearize_orbit_gate1_numba)
+from .topology import Topology
+from .transient_solver import transient
 
 
 def _periodic_average(t, values):

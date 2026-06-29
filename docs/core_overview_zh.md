@@ -323,6 +323,8 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - 设置 `time_domain=True` 时，PNoise 会用稀疏 Floquet 伴随 BVP 替代 K 截断的 HB
   adjoint 求解（结果字段 `pnoise_time_domain_used=True`）。这条路径在转换边带上无截断；
   剩余误差主要来自时域网格离散，因此默认式 `n_period_samples < 640` 会自动抬到 768。
+  这条路径返回 `method="pss_time_domain_floquet_adjoint"`；HB 兜底路径返回
+  `method="pss_harmonic_balance_conversion_matrix"`。
 - HB adjoint 求解支持 `hb_solver="auto" | "dense" | "sparse" | "iterative"`。
   默认小矩阵继续走 dense BLAS/LAPACK；HB 规模变大且非常稀疏时切到 SciPy sparse
   direct。强制 `iterative` 时使用按谐波对角块 LU 的 block-Jacobi 预条件 GMRES，

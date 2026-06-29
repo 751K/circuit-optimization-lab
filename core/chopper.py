@@ -33,33 +33,21 @@ thermal noise are not included in this ideal analysis.
 """
 from __future__ import annotations
 
-import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
 from threading import RLock
 
 import numpy as np
 
-try:
-    from .ac_solver import _bw_from_gain, ac_solve, _dev_corner, _dev_nf, _is_afe_topology
-    from .adaptive_config import resolve_adaptive_config
-    from .device_model import create_device, get_default_model_type
-    from .noise_solver import band_rms, noise_analysis
-    from .pac_solver import pac_solve
-    from .pnoise_solver import pnoise_solve
-    from .pss_solver import pss_solve
-    from .topology import AFE_TOPO, Topology
-    from .transient_solver import transient
-except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_solver import _bw_from_gain, ac_solve, _dev_corner, _dev_nf, _is_afe_topology
-    from adaptive_config import resolve_adaptive_config
-    from device_model import create_device, get_default_model_type
-    from noise_solver import band_rms, noise_analysis
-    from pac_solver import pac_solve
-    from pnoise_solver import pnoise_solve
-    from pss_solver import pss_solve
-    from topology import AFE_TOPO, Topology
-    from transient_solver import transient
+from .ac_solver import _bw_from_gain, ac_solve, _dev_corner, _dev_nf, _is_afe_topology
+from .adaptive_config import resolve_adaptive_config
+from .device_model import create_device, get_default_model_type
+from .noise_solver import band_rms, noise_analysis
+from .pac_solver import pac_solve
+from .pnoise_solver import pnoise_solve
+from .pss_solver import pss_solve
+from .topology import AFE_TOPO, Topology
+from .transient_solver import transient
 
 
 # The quasi-static `pmos_chopper_lptv_analysis` below is a fast FIRST-ORDER
@@ -1170,13 +1158,10 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
     leaving a slow-corner +1% residual). ``"charge"`` stays the global default
     for stiff tau>>T circuits (e.g. SC-LPF) where the trapezoidal rule rings.
 
-    ``adaptive`` is accepted for API symmetry with :func:`pss_solve` but is NOT
-    functional on the chopper topology yet: the LTE step controller collapses the
-    step to ~0 at the switch-edge stiffness (0 accepted steps -> a 1-point orbit
-    -> garbage PAC/PNoise). When True it is IGNORED with a ``RuntimeWarning`` and
-    the validated fixed edge-refined grid is used instead. The fixed grid already
-    matches Cadence to ~+0.02%, so adaptive offers no accuracy gain on the chopper
-    (unlike the SC-LPF, which needs it to resolve its harsh switch-conduction).
+    ``adaptive=True`` is rejected on the chopper wrapper: the LTE step controller
+    currently collapses the step to ~0 at hard switch edges, producing a one-point
+    orbit and invalid PAC/PNoise. Use the validated fixed edge-refined grid until
+    chopper-specific adaptive stepping is implemented.
     """
     adaptive_config = resolve_adaptive_config(
         adaptive_config,
@@ -1188,19 +1173,12 @@ def pmos_chopper_pss(sizes, bias, f_chop, *, input_diff=0.0,
         adaptive_freeze_factor=adaptive_freeze_factor,
     )
     if adaptive:
-        warnings.warn(
-            "pmos_chopper_pss: adaptive=True is not supported on the chopper "
-            "topology yet -- the LTE step controller collapses the step to ~0 at "
-            "the switch-edge stiffness (0 accepted steps -> 1-point orbit -> "
-            "garbage PAC/PNoise, e.g. baseband gain ~35 vs ~13). Ignoring adaptive "
-            "and using the validated fixed edge-refined grid (already ~+0.02% vs "
-            "Cadence; adaptive adds no accuracy here). Open issues if re-enabling: "
-            "(1) the chopper input waveforms must be resampled onto the adaptive "
-            "orbit grid for the TD-PAC/PNoise conversions; (2) the per-step Newton "
-            "stalls at the hard switch edges (same cause as raw gear2 falling back "
-            "to BE on this topology).",
-            RuntimeWarning, stacklevel=2)
-        adaptive = False
+        raise ValueError(
+            "pmos_chopper_pss does not support adaptive=True on the hard-switched "
+            "chopper topology yet; use the fixed edge-refined grid, or call the "
+            "generic pss_solve adaptive path on a topology where the LTE controller "
+            "is validated."
+        )
     _CAP_MODE_IDS = {"charge": 0, "q": 0, "average": 1, "avg": 1, "trapezoid": 1,
                      "qstamp": 0, "q-stamp": 0, "trap": 1}
     if cap_mode is None:

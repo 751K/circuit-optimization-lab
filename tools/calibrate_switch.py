@@ -128,7 +128,6 @@ def _find(*cands):
 
 
 def _local():
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from core.ac_solver import get_ss_params
     from core.device_model import create_device
     inst = create_device("pmos_tft", W=SW_W, L=SW_L, NF=SW_NF)

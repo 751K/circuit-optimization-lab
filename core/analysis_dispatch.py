@@ -10,55 +10,22 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    from .ac_solver import ac_solve
-    from .adaptive_config import resolve_adaptive_config
-    from .circuit_loader import CircuitSpec, load_circuit_json
-    from .noise_solver import band_rms, noise_analysis
-    from .pac_solver import pac_solve
-    from .pnoise_solver import pnoise_solve
-    from .pss_solver import pss_solve
-    from .transient_solver import transient
-except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_solver import ac_solve
-    from adaptive_config import resolve_adaptive_config
-    from circuit_loader import CircuitSpec, load_circuit_json
-    from noise_solver import band_rms, noise_analysis
-    from pac_solver import pac_solve
-    from pnoise_solver import pnoise_solve
-    from pss_solver import pss_solve
-    from transient_solver import transient
+from .ac_solver import ac_solve
+from .adaptive_config import resolve_adaptive_config
+from .analysis_options import ADAPTIVE_OPTION_NAMES, solver_kwargs
+from .circuit_loader import CircuitSpec, load_circuit_json
+from .noise_solver import band_rms, noise_analysis
+from .pac_solver import pac_solve
+from .pnoise_solver import pnoise_solve
+from .pss_solver import pss_solve
+from .transient_solver import transient
 
 
 _ANALYSIS_ORDER = ("ac", "noise", "transient", "pss", "pac", "pnoise")
-_PSS_KWARGS = {
-    "tstab_periods", "max_step", "flat_max_step", "max_retry_subdivisions",
-    "newton_maxit", "newton_step_limit", "newton_vtol",
-    "fallback_full_jacobian", "fallback_least_squares", "fallback_tol",
-    "residual_tol", "max_shooting_iters", "fd_step", "min_damping",
-    "jacobian_reuse", "jacobian_rebuild_interval", "rail_margin",
-    "check_periodic_inputs", "input_periodic_tol", "profile", "corner",
-    "integration_method", "cap_mode", "cap_mode_id", "adaptive", "adaptive_config",
-    "adaptive_reltol", "adaptive_vabstol", "adaptive_iabstol",
-    "adaptive_max_steps", "adaptive_h0", "adaptive_freeze_factor",
-}
-_TRANSIENT_KWARGS = {
-    "max_step", "flat_max_step", "max_retry_subdivisions", "newton_maxit",
-    "newton_step_limit", "newton_vtol", "fallback_full_jacobian",
-    "fallback_least_squares", "fallback_tol", "profile", "rail_margin", "corner",
-    "integration_method", "cap_mode", "cap_mode_id", "adaptive", "adaptive_config",
-    "adaptive_reltol", "adaptive_vabstol", "adaptive_iabstol",
-    "adaptive_max_steps", "adaptive_h0",
-}
-
-_ADAPTIVE_KWARGS = {
-    "adaptive_reltol", "adaptive_vabstol", "adaptive_iabstol",
-    "adaptive_max_steps", "adaptive_h0", "adaptive_freeze_factor",
-}
 
 
 def _pack_adaptive_config(kwargs):
-    legacy = {key: kwargs.pop(key) for key in tuple(kwargs) if key in _ADAPTIVE_KWARGS}
+    legacy = {key: kwargs.pop(key) for key in tuple(kwargs) if key in ADAPTIVE_OPTION_NAMES}
     if "adaptive_config" in kwargs:
         kwargs["adaptive_config"] = resolve_adaptive_config(
             kwargs["adaptive_config"], **legacy)
@@ -306,10 +273,7 @@ def _complex_value(value, field):
 
 def _resolve_corner(corner):
     if isinstance(corner, str):
-        try:
-            from .corners import CORNERS
-        except ImportError:  # pragma: no cover - legacy direct module import
-            from corners import CORNERS
+        from .corners import CORNERS
         if corner not in CORNERS:
             raise ValueError(f"Unknown process corner {corner!r}; expected one of {sorted(CORNERS)}")
         return CORNERS[corner]
@@ -358,8 +322,18 @@ def _pss_config(spec, analyses, owner_cfg):
     return cfg, periodic
 
 
+def _analysis_periodic_grid(periodic, cfg):
+    periodic = dict(periodic or {})
+    if "tgrid" in cfg:
+        periodic["tgrid"] = cfg["tgrid"]
+    elif "n_points" in cfg:
+        periodic["n_points"] = cfg["n_points"]
+    return periodic
+
+
 def _run_pss(spec, pss_cfg, periodic):
-    kwargs = _pack_adaptive_config({k: v for k, v in pss_cfg.items() if k in _PSS_KWARGS})
+    kwargs = _pack_adaptive_config(solver_kwargs("pss", pss_cfg))
+    periodic = _analysis_periodic_grid(periodic, pss_cfg)
     context = build_periodic_context(spec, periodic)
     if bool(kwargs.get("adaptive", False)):
         tgrid = _with_adaptive_waveform_breakpoints(periodic, context["tgrid"], context["period"])
@@ -390,7 +364,7 @@ def _run_transient(spec, cfg):
         tgrid = _time_grid(grid_cfg, default_stop=default_stop,
                            default_points=int(cfg.get("n_points", 101)))
         context = build_periodic_context(spec, periodic, tgrid=tgrid)
-        kwargs = _pack_adaptive_config({k: v for k, v in cfg.items() if k in _TRANSIENT_KWARGS})
+        kwargs = _pack_adaptive_config(solver_kwargs("transient", cfg))
         if bool(kwargs.get("adaptive", False)):
             tgrid = _with_adaptive_waveform_breakpoints(periodic, context["tgrid"], period)
             if len(tgrid) != len(context["tgrid"]):
@@ -405,7 +379,7 @@ def _run_transient(spec, cfg):
         )
     tgrid = _time_grid(cfg.get("tgrid", cfg), default_stop=cfg.get("tstop", cfg.get("duration")),
                        default_points=int(cfg.get("n_points", 101)))
-    kwargs = _pack_adaptive_config({k: v for k, v in cfg.items() if k in _TRANSIENT_KWARGS})
+    kwargs = _pack_adaptive_config(solver_kwargs("transient", cfg))
     if "corner" in kwargs:
         kwargs["corner"] = _corner_from_cfg(cfg)
     return transient(
@@ -493,26 +467,11 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
             freqs = _frequency_grid(cfg.get("freqs"))
             _, periodic = _pss_config(spec, analysis_cfg, cfg)
             corner = _corner_from_cfg(cfg, default=pss.get("corner"))
+            kwargs = solver_kwargs("pac", cfg, include_defaults=True)
             results[name] = pac_solve(
                 spec.sizes, spec.bias, freqs, pss_result=pss,
                 input_drive=_input_drive(cfg, periodic), nf=spec.nf,
-                corner=corner,
-                fd_state_step=float(cfg.get("fd_state_step", 1e-4)),
-                fd_input_step=float(cfg.get("fd_input_step", 1e-4)),
-                transient_kwargs=dict(cfg.get("transient_kwargs", {}) or {}),
-                pacmag=float(cfg.get("pacmag", 1.0)),
-                cache_linearization=bool(cfg.get("cache_linearization", True)),
-                cache_forcing=bool(cfg.get("cache_forcing", True)),
-                compute_condition=cfg.get("compute_condition"),
-                lti_fast_path=bool(cfg.get("lti_fast_path", True)),
-                analytic=bool(cfg.get("analytic", True)),
-                n_period_samples=int(cfg.get("n_period_samples", 384)),
-                max_sideband=int(cfg.get("max_sideband", 10)),
-                time_domain=bool(cfg.get("time_domain", False)),
-                td_integration=str(cfg.get("td_integration", "gear2")),
-                td_n_period_samples=int(cfg.get("td_n_period_samples", 768)),
-                profile=bool(cfg.get("profile", False)),
-                debug=bool(cfg.get("debug", False)),
+                corner=corner, **kwargs,
             )
         elif name == "pnoise":
             pss = ensure_pss(cfg)
@@ -521,25 +480,14 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
             input_drive = _input_drive(cfg, periodic)
             pac_result = results.get("pac")
             corner = _corner_from_cfg(cfg, default=pss.get("corner"))
+            kwargs = solver_kwargs("pnoise", cfg, include_defaults=True)
+            band = kwargs.pop("band")
             results[name] = pnoise_solve(
                 spec.sizes, spec.bias, freqs, pss_result=pss,
                 fundamental=_fundamental_from(periodic), nf=spec.nf,
-                corner=corner,
-                max_sideband=int(cfg.get("max_sideband", 10)),
-                n_period_samples=int(cfg.get("n_period_samples", 384)),
-                band=tuple(cfg.get("band", (0.05, 100.0))),
+                corner=corner, band=band,
                 pac_result=pac_result, input_drive=input_drive,
-                noise_devices=cfg.get("noise_devices"),
-                gds_noise_devices=cfg.get("gds_noise_devices"),
-                cache_linearization=bool(cfg.get("cache_linearization", True)),
-                lti_fast_path=bool(cfg.get("lti_fast_path", True)),
-                hb_solver=cfg.get("hb_solver", "auto"),
-                hb_sparse_min_size=int(cfg.get("hb_sparse_min_size", 384)),
-                hb_sparse_max_density=float(cfg.get("hb_sparse_max_density", 0.12)),
-                hb_sparse_drop_tol=float(cfg.get("hb_sparse_drop_tol", 0.0)),
-                iterative_tol=float(cfg.get("iterative_tol", 1e-10)),
-                iterative_maxiter=cfg.get("iterative_maxiter", 10),
-                profile=bool(cfg.get("profile", False)),
+                **kwargs,
             )
     return results
 

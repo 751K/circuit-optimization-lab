@@ -203,6 +203,36 @@ def test_generic_pnoise_reuses_hb_and_adjoint_cache():
     np.testing.assert_allclose(second["out_psd"], first["out_psd"], rtol=0, atol=0)
 
 
+def test_generic_pnoise_method_matches_time_domain_flag():
+    R = 1e5
+    C = 1e-9
+    period = 1e-3
+    t = np.linspace(0.0, period, 101)
+    topo = _rc_lowpass_topology(R, C)
+    pss = pss_solve(
+        {}, {"VIN": 0.0}, period, topo=topo, tgrid=t,
+        inputs={"vin": np.zeros_like(t)}, node_inputs={"VIN": "vin"},
+        V0=np.array([0.0]), residual_tol=1e-12, max_shooting_iters=2,
+    )
+
+    freqs = np.array([10.0, 100.0])
+    common = dict(
+        max_sideband=1, n_period_samples=32, gains=np.ones_like(freqs),
+        lti_fast_path=False, cache_linearization=False,
+    )
+    td = pnoise_solve({}, {"VIN": 0.0}, freqs, pss_result=pss,
+                      time_domain=True, **common)
+    hb = pnoise_solve({}, {"VIN": 0.0}, freqs, pss_result=pss,
+                      time_domain=False, **common)
+
+    assert td["pnoise_time_domain_used"] is True
+    assert td["pnoise_conversion"] == "time_domain"
+    assert td["method"] == "pss_time_domain_floquet_adjoint"
+    assert hb["pnoise_time_domain_used"] is False
+    assert hb["pnoise_conversion"] == "harmonic_balance"
+    assert hb["method"] == "pss_harmonic_balance_conversion_matrix"
+
+
 def test_generic_pnoise_sparse_and_iterative_solvers_match_dense():
     R = 1e5
     C = 1e-9
@@ -242,6 +272,70 @@ def test_generic_pnoise_sparse_and_iterative_solvers_match_dense():
                                rtol=1e-8, atol=1e-30)
     np.testing.assert_allclose(iterative["out_psd"], dense["out_psd"],
                                rtol=1e-8, atol=1e-30)
+
+
+def test_pnoise_reports_sparse_solver_degradation(monkeypatch):
+    import core.pnoise_solver as pns
+
+    R = 1e5
+    C = 1e-9
+    period = 1e-3
+    t = np.linspace(0.0, period, 101)
+    topo = _rc_lowpass_topology(R, C)
+    pss = pss_solve(
+        {}, {"VIN": 0.0}, period, topo=topo, tgrid=t,
+        inputs={"vin": np.zeros_like(t)}, node_inputs={"VIN": "vin"},
+        V0=np.array([0.0]), residual_tol=1e-12, max_shooting_iters=2,
+    )
+    monkeypatch.setattr(pns, "_sp", None)
+    monkeypatch.setattr(pns, "_spla", None)
+
+    with pytest.warns(RuntimeWarning, match="falling back to dense"):
+        pn = pnoise_solve(
+            {}, {"VIN": 0.0}, np.array([100.0]), pss_result=pss,
+            max_sideband=1, n_period_samples=32, gains=np.ones(1),
+            lti_fast_path=False, cache_linearization=False, hb_solver="sparse",
+        )
+    assert pn["pnoise_hb_solver"] == "dense"
+    assert pn["pnoise_degraded"] is True
+    assert any(w["code"] == "hb_sparse_unavailable" for w in pn["pnoise_warnings"])
+
+
+def test_pnoise_reports_device_noise_degradation(monkeypatch):
+    from core.pmos_tft_model import PMOS_TFT
+
+    period = 1e-3
+    t = np.linspace(0.0, period, 33)
+    topo = Topology(
+        solved=["OUT"],
+        devices=[("M1", "OUT", "VG", "VDD")],
+        rails={"VDD": 40.0, "VG": 0.0, "GND": 0.0},
+        outputs=("OUT",),
+        resistors=[("R1", "OUT", "GND", 1e6)],
+    )
+    pss = {
+        "topology": topo,
+        "t": t,
+        "period": period,
+        "nodes": {"OUT": np.full_like(t, 20.0)},
+        "inputs": {},
+        "bias": {},
+    }
+
+    def fail_noise(self, Vs, Vd, Vg, frequency):
+        raise NotImplementedError("noise hook missing")
+
+    monkeypatch.setattr(PMOS_TFT, "get_noise_psd", fail_noise)
+    with pytest.warns(RuntimeWarning, match="device noise evaluation failed"):
+        pn = pnoise_solve(
+            {"M1": (5000.0, 30.0)}, {}, np.array([100.0]), pss_result=pss,
+            max_sideband=0, n_period_samples=16, gains=np.ones(1),
+            lti_fast_path=False, cache_linearization=False,
+        )
+    assert pn["pnoise_degraded"] is True
+    assert pn["pnoise_noise_failure_count"] > 0
+    assert pn["pnoise_noise_failure_devices"] == ("M1",)
+    assert any(w["code"] == "device_noise_unsupported" for w in pn["pnoise_warnings"])
 
 
 def test_gear2_is_second_order_on_rc_lowpass():

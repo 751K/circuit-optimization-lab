@@ -7,10 +7,7 @@ dependency-free so circuit definitions can live outside Python code.
 from dataclasses import dataclass
 import json
 
-try:
-    from .topology import Topology
-except ImportError:  # pragma: no cover - legacy direct module import
-    from topology import Topology
+from .topology import Topology
 
 
 @dataclass(frozen=True)

@@ -10,20 +10,11 @@ try:
         terminal_derivatives_numba,
     )
 except Exception:  # pragma: no cover - optional acceleration only
-    try:
-        from numba_kernels import (
-            eval_currents_numba,
-            newton_internal_numba,
-            capacitances_numba,
-            capacitance_charges_numba,
-            terminal_derivatives_numba,
-        )
-    except Exception:
-        eval_currents_numba = None
-        newton_internal_numba = None
-        capacitances_numba = None
-        capacitance_charges_numba = None
-        terminal_derivatives_numba = None
+    eval_currents_numba = None
+    newton_internal_numba = None
+    capacitances_numba = None
+    capacitance_charges_numba = None
+    terminal_derivatives_numba = None
 
 from .device_model import TransistorModel, NumbaParams, register_pdk
 

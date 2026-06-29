@@ -7,7 +7,6 @@ PAC baseband gain and integrated IRN across all three corners. Every case must P
 these are the regression guards that catch a model/solver change drifting off Cadence.
 """
 import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -22,8 +21,6 @@ CHOPPERS = [
     "calibration/chopper_design3_slow",
     "calibration/chopper_design3_fast",
 ]
-_slow = pytest.mark.skipif(not os.environ.get("RUN_SLOW_CHOPPER"),
-                           reason="slow chopper PSS/PAC/PNoise; set RUN_SLOW_CHOPPER=1")
 
 
 def test_psf_parses_amp_reference():
@@ -49,7 +46,6 @@ def test_calibration_amp_dc_exact():
         assert abs(row["delta"]) < 1e-3
 
 
-@_slow
 @pytest.mark.parametrize("case", CHOPPERS)
 def test_calibration_chopper_matches_cadence(case):
     # Chopper PAC baseband gain + PNoise IRN must stay within the per-case tolerances
@@ -73,7 +69,6 @@ def test_sc_lpf_calibration_uses_adaptive_average_gear2_default():
     assert solver["pnoise_max_sideband"] >= 20
 
 
-@_slow
 def test_calibration_sc_lpf_matches_cadence():
     # Second periodic calibration case beside the chopper: a single-ended switched-
     # capacitor LPF (vsource clocks, reverse-biased PMOS switches). It now also

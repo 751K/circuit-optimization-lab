@@ -29,10 +29,9 @@ Method
 Caps stamped: per device Cgs (gate-source) and Cgd (gate-drain), plus CL on the
 two outputs. Inputs: M7 gate = vip(t), M8 gate = vin(t) (driven); other rails fixed.
 
-CURRENT SIGN: default AFE device currents use abs(get_Idc), exactly like
-ac_solve's KCL. Bidirectional pass switches can be listed in signed_devices so
-their Verilog-A drain-terminal current keeps its physical sign when source/drain
-voltages reverse.
+CURRENT SIGN: devices use the signed Verilog-A drain-terminal current. The old
+``signed_devices`` knob is retained for API compatibility, but it is no longer a
+per-device behavior switch.
 
 This is the engine; chopper switch topologies can be driven through node_inputs.
 Clock feedthrough from the Verilog-A Cgss/Cgdd terms is included when the switch
@@ -42,24 +41,52 @@ pulses can be supplied through current_inputs.
 import os
 import time
 from dataclasses import dataclass
-from types import SimpleNamespace
 
 import numpy as np
+from .adaptive_config import (
+    ADAPTIVE_ACCEPT_WRMS,
+    ADAPTIVE_ERR_FLOOR,
+    ADAPTIVE_GROWTH_MAX,
+    adaptive_critical_times,
+    adaptive_done_tol,
+    adaptive_initial_h,
+    adaptive_lte_wrms,
+    adaptive_min_h,
+    adaptive_next_h,
+    resolve_adaptive_config,
+)
+from .topology import AFE_TOPO
+from .ac_solver import ac_solve, build_devices, _dev_corner, _dev_nf
+from .transient_profile import (
+    PROFILE_EDGE_NEWTON_ITERS,
+    PROFILE_EDGE_SUBSTEPS,
+    PROFILE_FAILED_EDGE_INTERVALS,
+    PROFILE_FAILED_FLAT_INTERVALS,
+    PROFILE_FAILED_INTERVALS,
+    PROFILE_FAILED_LAST_RESIDUAL_INF,
+    PROFILE_FAILED_LAST_STEP_INF,
+    PROFILE_FAILED_LINEAR_SOLVE_COUNT,
+    PROFILE_FAILED_MAX_RESIDUAL_INF,
+    PROFILE_FAILED_MAX_STEP_INF,
+    PROFILE_FAILED_MAXIT_COUNT,
+    PROFILE_FAILED_STAMP_OR_PREV_COUNT,
+    PROFILE_FAILED_SUBSTEPS,
+    PROFILE_FLAT_NEWTON_ITERS,
+    PROFILE_FLAT_SUBSTEPS,
+    PROFILE_INTERNAL_FD_JAC_FALLBACKS,
+    PROFILE_INTERVALS,
+    PROFILE_LEN,
+    PROFILE_NEWTON_ITERS,
+    PROFILE_PMOS_INTERNAL_NEWTON_ATTEMPTS,
+    PROFILE_PMOS_INTERNAL_NEWTON_ITERS,
+    PROFILE_PMOS_OP_SOLVES,
+    PROFILE_STALLED_RESIDUAL_ACCEPTS,
+    PROFILE_SUBSTEPS,
+    PROFILE_TERMINAL_FD_JAC_FALLBACKS,
+)
+from .compiled_topology import CompiledTopology
+
 try:
-    from .adaptive_config import (
-        ADAPTIVE_ACCEPT_WRMS,
-        ADAPTIVE_ERR_FLOOR,
-        ADAPTIVE_GROWTH_MAX,
-        adaptive_critical_times,
-        adaptive_done_tol,
-        adaptive_initial_h,
-        adaptive_lte_wrms,
-        adaptive_min_h,
-        adaptive_next_h,
-        resolve_adaptive_config,
-    )
-    from .topology import AFE_TOPO
-    from .ac_solver import ac_solve, build_devices, _dev_corner, _dev_nf
     from .numba_kernels import (
         terminal_derivatives_numba,
         transient_newton_numba,
@@ -67,37 +94,12 @@ try:
         transient_solve_grid_gear2_numba,
         transient_solve_adaptive_gear2_numba,
     )
-    from .compiled_topology import CompiledTopology
-except ImportError:  # pragma: no cover - legacy direct module import
-    from adaptive_config import (
-        ADAPTIVE_ACCEPT_WRMS,
-        ADAPTIVE_ERR_FLOOR,
-        ADAPTIVE_GROWTH_MAX,
-        adaptive_critical_times,
-        adaptive_done_tol,
-        adaptive_initial_h,
-        adaptive_lte_wrms,
-        adaptive_min_h,
-        adaptive_next_h,
-        resolve_adaptive_config,
-    )
-    from topology import AFE_TOPO
-    from ac_solver import ac_solve, build_devices, _dev_corner, _dev_nf
-    from compiled_topology import CompiledTopology
-    try:
-        from numba_kernels import (
-            terminal_derivatives_numba,
-            transient_newton_numba,
-            transient_solve_grid_numba,
-            transient_solve_grid_gear2_numba,
-            transient_solve_adaptive_gear2_numba,
-        )
-    except Exception:
-        terminal_derivatives_numba = None
-        transient_newton_numba = None
-        transient_solve_grid_numba = None
-        transient_solve_grid_gear2_numba = None
-        transient_solve_adaptive_gear2_numba = None
+except Exception:  # pragma: no cover - optional acceleration only
+    terminal_derivatives_numba = None
+    transient_newton_numba = None
+    transient_solve_grid_numba = None
+    transient_solve_grid_gear2_numba = None
+    transient_solve_adaptive_gear2_numba = None
 
 
 _CAP_MODE = os.environ.get("CIRCUIT_PMOS_TRANSIENT_CAP_MODE", "charge").lower()
@@ -140,6 +142,379 @@ class _PathOutcome:
     numba_grid_failed_substeps: object = None
     numba_grid_failed_profile: object = None
     numba_grid_failed_intervals: object = None
+
+
+@dataclass
+class _NewtonStats:
+    """Mutable diagnostic counters for the numba per-step Newton (held by the
+    otherwise-frozen :class:`_TransientCtx`; non-critical, reported in the result)."""
+    attempts: int = 0
+    success: int = 0
+    fallback: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _TopologyCtx:
+    """Compiled topology and solved-node indexing."""
+    plan: object
+    idx: dict
+    n: int
+    n_aug: int
+    termv: object
+    tft: dict
+    signed_devices: set
+
+
+@dataclass(frozen=True, slots=True)
+class _DeviceCtx:
+    """PMOS device metadata plus dense arrays consumed by Python/Numba kernels."""
+    dev_meta: list
+    dev_objs: list
+    dev_d_kind: np.ndarray; dev_d_ref: np.ndarray; dev_d_val: np.ndarray
+    dev_g_kind: np.ndarray; dev_g_ref: np.ndarray; dev_g_val: np.ndarray
+    dev_s_kind: np.ndarray; dev_s_ref: np.ndarray; dev_s_val: np.ndarray
+    dev_di: np.ndarray; dev_gi: np.ndarray; dev_si: np.ndarray
+    dev_use_abs: np.ndarray
+    p_Vfb: np.ndarray; p_Vss: np.ndarray; p_Lc: np.ndarray; p_lambda: np.ndarray
+    p_contact_scale: np.ndarray; p_exponent: np.ndarray; p_current_scale: np.ndarray
+    p_inv_Rleak: np.ndarray; p_two_over_pi: np.ndarray; p_cap_cgs1: np.ndarray
+    p_cap_cgd1: np.ndarray; p_cap_half_wl_ci: np.ndarray; p_cap_cgs3_base: np.ndarray
+    p_cap_cgd3_base: np.ndarray; p_k1: np.ndarray; p_gate_leak_g: np.ndarray
+    use_numba_newton: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PassiveCtx:
+    """Linear passive elements, in both Python metadata and Numba array form."""
+    load_meta: list
+    res_meta: list
+    res_a_kind: np.ndarray; res_a_ref: np.ndarray; res_a_val: np.ndarray
+    res_b_kind: np.ndarray; res_b_ref: np.ndarray; res_b_val: np.ndarray
+    res_ai: np.ndarray; res_bi: np.ndarray; res_g: np.ndarray
+    cap_a_kind: np.ndarray; cap_a_ref: np.ndarray; cap_a_val: np.ndarray
+    cap_b_kind: np.ndarray; cap_b_ref: np.ndarray; cap_b_val: np.ndarray
+    cap_ai: np.ndarray; cap_bi: np.ndarray; cap_value: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceCtx:
+    """Independent/dependent source metadata and Numba source arrays."""
+    isrc_meta: list
+    vccs_meta: list
+    vs_meta: list
+    vcvs_meta: list
+    cccs_meta: list
+    ccvs_meta: list
+    dyn_isrc_meta: list
+    isrc_pi: np.ndarray; isrc_qi: np.ndarray; isrc_value: np.ndarray
+    vccs_pi: np.ndarray; vccs_qi: np.ndarray; vccs_cpi: np.ndarray
+    vccs_cni: np.ndarray; vccs_gm: np.ndarray
+    dyn_pi: np.ndarray; dyn_qi: np.ndarray; dyn_input_idx: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class _SolverOptions:
+    """Scalar solver controls shared by the execution paths."""
+    gmin: float; HH: float; clip_lo: float; clip_hi: float; cap_id: int
+    rail_margin: object
+    newton_maxit: int; newton_step_limit: float; newton_vtol: float
+    fallback_full_jacobian: bool; fallback_least_squares: bool; fallback_tol: float
+    max_step: object; flat_max_step: object; max_retry_subdivisions: int
+    edge_mask_arr: np.ndarray; gear2_be_fallback: bool
+    integration_method: str
+    adaptive: bool; adaptive_config: object
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeCaches:
+    """Per-run mutable caches/counters kept out of the immutable problem data."""
+    op_cache_valid: np.ndarray
+    op_cache_vs1: np.ndarray
+    op_cache_vd1: np.ndarray
+    stats: _NewtonStats
+
+
+@dataclass(frozen=True, slots=True)
+class _TransientCtx:
+    """Immutable marshalled solve context shared by transient kernels.
+
+    Built once by :func:`_marshal_transient`; holds only compiled problem data
+    and solver options.  Running state such as ``Vhist`` and path flags lives in
+    the driver and flows through :class:`_PathOutcome`.  The grouped subcontexts
+    keep topology, device arrays, passive stamps, source stamps, scalar options,
+    and mutable runtime caches from growing into one flat field bag.
+
+    Existing kernels still read ``ctx.<field>`` through the compatibility proxy
+    below; new code should prefer the grouped attributes.
+    """
+    topology: _TopologyCtx
+    devices: _DeviceCtx
+    passives: _PassiveCtx
+    sources: _SourceCtx
+    solver: _SolverOptions
+    runtime: _RuntimeCaches
+
+    def __getattr__(self, name):
+        for group_name in ("topology", "devices", "passives", "sources",
+                           "solver", "runtime"):
+            group = object.__getattribute__(self, group_name)
+            try:
+                return getattr(group, name)
+            except AttributeError:
+                pass
+        raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class _TransientMarshal:
+    """Return bundle from transient input/topology marshalling."""
+    ctx: _TransientCtx
+    tgrid: np.ndarray
+    input_keys: tuple
+    input_values: np.ndarray
+    inputs: dict
+    node_inputs: dict
+    V0: np.ndarray
+    Vhist: np.ndarray
+    edge_mask_arr: np.ndarray
+    profile: bool
+    gear2_retry_requested: bool
+
+
+_NUMBA_COMMON_ARG_NAMES = (
+    "n", "maxit", "step_limit", "vtol",
+    "gmin", "fallback_accept", "fallback_tol", "HH",
+    "dev_d_kind", "dev_d_ref", "dev_d_val",
+    "dev_g_kind", "dev_g_ref", "dev_g_val",
+    "dev_s_kind", "dev_s_ref", "dev_s_val",
+    "dev_di", "dev_gi", "dev_si", "dev_use_abs",
+    "p_Vfb", "p_Vss", "p_Lc", "p_lambda", "p_contact_scale", "p_exponent",
+    "p_current_scale", "p_inv_Rleak",
+    "p_two_over_pi", "p_cap_cgs1", "p_cap_cgd1", "p_cap_half_wl_ci",
+    "p_cap_cgs3_base", "p_cap_cgd3_base", "p_k1", "p_gate_leak_g",
+    "op_cache_valid", "op_cache_vs1", "op_cache_vd1",
+    "res_a_kind", "res_a_ref", "res_a_val",
+    "res_b_kind", "res_b_ref", "res_b_val",
+    "res_ai", "res_bi", "res_g",
+    "cap_a_kind", "cap_a_ref", "cap_a_val",
+    "cap_b_kind", "cap_b_ref", "cap_b_val",
+    "cap_ai", "cap_bi", "cap_value",
+    "isrc_pi", "isrc_qi", "isrc_value",
+    "dyn_pi", "dyn_qi", "dyn_input_idx",
+    "cap_mode", "clip_lo", "clip_hi",
+)
+_NUMBA_GRID_ARG_NAMES = (
+    "V0", "tgrid", "input_values", "edge_mask", "profile_enabled",
+    "max_step", "flat_max_step", "max_retry_subdivisions",
+) + _NUMBA_COMMON_ARG_NAMES
+_NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS = (
+    ("run", ("V0", "tgrid_src", "input_values_src", "profile_enabled")),
+    ("step", (
+        "max_step", "adaptive_reltol", "adaptive_vabstol",
+        "adaptive_iabstol", "adaptive_max_steps", "adaptive_h0",
+    )),
+    ("solver", (
+        "n", "maxit", "step_limit", "vtol", "gmin",
+        "fallback_accept", "fallback_tol", "HH",
+    )),
+    ("device_terms", (
+        "dev_d_kind", "dev_d_ref", "dev_d_val",
+        "dev_g_kind", "dev_g_ref", "dev_g_val",
+        "dev_s_kind", "dev_s_ref", "dev_s_val",
+    )),
+    ("device_nodes", ("dev_di", "dev_gi", "dev_si", "dev_use_abs")),
+    ("model_params", (
+        "p_Vfb", "p_Vss", "p_Lc", "p_lambda", "p_contact_scale",
+        "p_exponent", "p_current_scale", "p_inv_Rleak",
+        "p_two_over_pi", "p_cap_cgs1", "p_cap_cgd1",
+        "p_cap_half_wl_ci", "p_cap_cgs3_base", "p_cap_cgd3_base",
+        "p_k1", "p_gate_leak_g",
+    )),
+    ("op_cache", ("op_cache_valid", "op_cache_vs1", "op_cache_vd1")),
+    ("passives", (
+        "res_a_kind", "res_a_ref", "res_a_val",
+        "res_b_kind", "res_b_ref", "res_b_val",
+        "res_ai", "res_bi", "res_g",
+        "cap_a_kind", "cap_a_ref", "cap_a_val",
+        "cap_b_kind", "cap_b_ref", "cap_b_val",
+        "cap_ai", "cap_bi", "cap_value",
+    )),
+    ("sources", (
+        "isrc_pi", "isrc_qi", "isrc_value",
+        "dyn_pi", "dyn_qi", "dyn_input_idx",
+    )),
+    ("cap_clip", ("cap_mode", "clip_lo", "clip_hi")),
+)
+_NUMBA_ADAPTIVE_GEAR2_ARG_NAMES = tuple(
+    group_name for group_name, _field_names in _NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS)
+
+
+def _checked_numba_args(names, args):
+    if len(args) != len(names):
+        raise AssertionError(f"numba arg packer produced {len(args)} args for {len(names)} names")
+    return args
+
+
+def _checked_numba_arg_groups(groups, args):
+    _checked_numba_args(tuple(name for name, _fields in groups), args)
+    for (name, fields), values in zip(groups, args):
+        if len(values) != len(fields):
+            raise AssertionError(
+                f"numba arg group {name!r} produced {len(values)} fields "
+                f"for {len(fields)} names")
+    return args
+
+
+def _numba_common_kernel_args(ctx):
+    """Shared positional tail for transient Numba kernels.
+
+    The tuple order is checked against ``core.numba_kernels`` signatures in
+    tests.  Keep all Python-side kernel calls going through this function so a
+    device/source/stamp field cannot be added to only one execution path.
+    """
+    args = (
+        int(ctx.n), int(ctx.newton_maxit), float(ctx.newton_step_limit),
+        float(ctx.newton_vtol), float(ctx.gmin),
+        bool(ctx.fallback_full_jacobian or ctx.fallback_least_squares),
+        float(ctx.fallback_tol), float(ctx.HH),
+        ctx.dev_d_kind, ctx.dev_d_ref, ctx.dev_d_val,
+        ctx.dev_g_kind, ctx.dev_g_ref, ctx.dev_g_val,
+        ctx.dev_s_kind, ctx.dev_s_ref, ctx.dev_s_val,
+        ctx.dev_di, ctx.dev_gi, ctx.dev_si, ctx.dev_use_abs,
+        ctx.p_Vfb, ctx.p_Vss, ctx.p_Lc, ctx.p_lambda, ctx.p_contact_scale,
+        ctx.p_exponent, ctx.p_current_scale, ctx.p_inv_Rleak,
+        ctx.p_two_over_pi, ctx.p_cap_cgs1, ctx.p_cap_cgd1,
+        ctx.p_cap_half_wl_ci, ctx.p_cap_cgs3_base, ctx.p_cap_cgd3_base,
+        ctx.p_k1, ctx.p_gate_leak_g,
+        ctx.op_cache_valid, ctx.op_cache_vs1, ctx.op_cache_vd1,
+        ctx.res_a_kind, ctx.res_a_ref, ctx.res_a_val,
+        ctx.res_b_kind, ctx.res_b_ref, ctx.res_b_val,
+        ctx.res_ai, ctx.res_bi, ctx.res_g,
+        ctx.cap_a_kind, ctx.cap_a_ref, ctx.cap_a_val,
+        ctx.cap_b_kind, ctx.cap_b_ref, ctx.cap_b_val,
+        ctx.cap_ai, ctx.cap_bi, ctx.cap_value,
+        ctx.isrc_pi, ctx.isrc_qi, ctx.isrc_value,
+        ctx.dyn_pi, ctx.dyn_qi, ctx.dyn_input_idx,
+        int(ctx.cap_id), float(ctx.clip_lo), float(ctx.clip_hi),
+    )
+    return _checked_numba_args(_NUMBA_COMMON_ARG_NAMES, args)
+
+
+def _numba_grid_kernel_args(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
+    max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
+    flat_max_step_arg = -1.0 if ctx.flat_max_step is None else float(ctx.flat_max_step)
+    args = (
+        np.asarray(V0, float), np.asarray(tgrid, float),
+        np.asarray(input_values, float), edge_mask_arr, profile,
+        max_step_arg, flat_max_step_arg, int(ctx.max_retry_subdivisions),
+    ) + _numba_common_kernel_args(ctx)
+    return _checked_numba_args(_NUMBA_GRID_ARG_NAMES, args)
+
+
+def _numba_adaptive_gear2_kernel_args(ctx, V0, tgrid, input_values, profile):
+    max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
+    acfg = ctx.adaptive_config
+    h0_arg = -1.0 if acfg.h0 is None else float(acfg.h0)
+    args = (
+        (
+            np.asarray(V0, float),
+            np.asarray(tgrid, float),
+            np.asarray(input_values, float),
+            bool(profile),
+        ),
+        (
+            max_step_arg,
+            float(acfg.reltol),
+            float(acfg.vabstol),
+            float(acfg.iabstol),
+            int(acfg.max_steps),
+            h0_arg,
+        ),
+        (
+            int(ctx.n),
+            int(ctx.newton_maxit),
+            float(ctx.newton_step_limit),
+            float(ctx.newton_vtol),
+            float(ctx.gmin),
+            bool(ctx.fallback_full_jacobian or ctx.fallback_least_squares),
+            float(ctx.fallback_tol),
+            float(ctx.HH),
+        ),
+        (
+            ctx.dev_d_kind,
+            ctx.dev_d_ref,
+            ctx.dev_d_val,
+            ctx.dev_g_kind,
+            ctx.dev_g_ref,
+            ctx.dev_g_val,
+            ctx.dev_s_kind,
+            ctx.dev_s_ref,
+            ctx.dev_s_val,
+        ),
+        (
+            ctx.dev_di,
+            ctx.dev_gi,
+            ctx.dev_si,
+            ctx.dev_use_abs,
+        ),
+        (
+            ctx.p_Vfb,
+            ctx.p_Vss,
+            ctx.p_Lc,
+            ctx.p_lambda,
+            ctx.p_contact_scale,
+            ctx.p_exponent,
+            ctx.p_current_scale,
+            ctx.p_inv_Rleak,
+            ctx.p_two_over_pi,
+            ctx.p_cap_cgs1,
+            ctx.p_cap_cgd1,
+            ctx.p_cap_half_wl_ci,
+            ctx.p_cap_cgs3_base,
+            ctx.p_cap_cgd3_base,
+            ctx.p_k1,
+            ctx.p_gate_leak_g,
+        ),
+        (
+            ctx.op_cache_valid,
+            ctx.op_cache_vs1,
+            ctx.op_cache_vd1,
+        ),
+        (
+            ctx.res_a_kind,
+            ctx.res_a_ref,
+            ctx.res_a_val,
+            ctx.res_b_kind,
+            ctx.res_b_ref,
+            ctx.res_b_val,
+            ctx.res_ai,
+            ctx.res_bi,
+            ctx.res_g,
+            ctx.cap_a_kind,
+            ctx.cap_a_ref,
+            ctx.cap_a_val,
+            ctx.cap_b_kind,
+            ctx.cap_b_ref,
+            ctx.cap_b_val,
+            ctx.cap_ai,
+            ctx.cap_bi,
+            ctx.cap_value,
+        ),
+        (
+            ctx.isrc_pi,
+            ctx.isrc_qi,
+            ctx.isrc_value,
+            ctx.dyn_pi,
+            ctx.dyn_qi,
+            ctx.dyn_input_idx,
+        ),
+        (
+            int(ctx.cap_id),
+            float(ctx.clip_lo),
+            float(ctx.clip_hi),
+        ),
+    )
+    return _checked_numba_arg_groups(_NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS, args)
 
 
 def _cap_mode_to_id(cap_mode):
@@ -546,7 +921,7 @@ def _k_newton(ctx, seed, Vp, input_now, input_prev, h, maxit=None, vtol=1e-8):
     maxit = int(ctx.newton_maxit if maxit is None else maxit)
     step_limit = float(ctx.newton_step_limit)
     if ctx.use_numba_newton:
-        ctx.numba_newton_attempts += 1
+        ctx.stats.attempts += 1
         try:
             Vn, iters, ok, usable = transient_newton_numba(
                 np.asarray(seed, float), np.asarray(Vp, float),
@@ -578,13 +953,13 @@ def _k_newton(ctx, seed, Vp, input_now, input_prev, h, maxit=None, vtol=1e-8):
                 float(ctx.clip_lo), float(ctx.clip_hi),
             )
             if ok:
-                ctx.numba_newton_success += 1
+                ctx.stats.success += 1
                 return Vn, int(iters), True
             if usable:
                 seed = Vn
         except Exception:
             pass
-        ctx.numba_newton_fallback += 1
+        ctx.stats.fallback += 1
 
     V = np.array(seed, float)
     prev = np.inf
@@ -958,41 +1333,14 @@ def _solve_fixed_gear2_numba(ctx, V0, tgrid, input_values, edge_mask_arr,
             ctx.n_aug == ctx.n):
         return out
     try:
-        max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
-        flat_max_step_arg = -1.0 if ctx.flat_max_step is None else float(ctx.flat_max_step)
         t_profile0 = time.perf_counter()
         # Numba gear2 owns both periodic single-step grids and raw transient
         # maxstep/retry subdivision. If it rejects a robust step, Python retry
         # remains the correctness fallback in the driver.
         g2_orig_idx = None
         g2 = transient_solve_grid_gear2_numba(
-            np.asarray(V0, float), np.asarray(tgrid, float),
-            np.asarray(input_values, float), edge_mask_arr, profile,
-            max_step_arg, flat_max_step_arg, int(ctx.max_retry_subdivisions),
-            int(ctx.n), int(ctx.newton_maxit), float(ctx.newton_step_limit),
-            float(ctx.newton_vtol), float(ctx.gmin),
-            bool(ctx.fallback_full_jacobian or ctx.fallback_least_squares),
-            float(ctx.fallback_tol), float(ctx.HH),
-            ctx.dev_d_kind, ctx.dev_d_ref, ctx.dev_d_val,
-            ctx.dev_g_kind, ctx.dev_g_ref, ctx.dev_g_val,
-            ctx.dev_s_kind, ctx.dev_s_ref, ctx.dev_s_val,
-            ctx.dev_di, ctx.dev_gi, ctx.dev_si, ctx.dev_use_abs,
-            ctx.p_Vfb, ctx.p_Vss, ctx.p_Lc, ctx.p_lambda, ctx.p_contact_scale,
-            ctx.p_exponent, ctx.p_current_scale, ctx.p_inv_Rleak,
-            ctx.p_two_over_pi, ctx.p_cap_cgs1, ctx.p_cap_cgd1,
-            ctx.p_cap_half_wl_ci, ctx.p_cap_cgs3_base, ctx.p_cap_cgd3_base,
-            ctx.p_k1, ctx.p_gate_leak_g,
-            ctx.op_cache_valid, ctx.op_cache_vs1, ctx.op_cache_vd1,
-            ctx.res_a_kind, ctx.res_a_ref, ctx.res_a_val,
-            ctx.res_b_kind, ctx.res_b_ref, ctx.res_b_val,
-            ctx.res_ai, ctx.res_bi, ctx.res_g,
-            ctx.cap_a_kind, ctx.cap_a_ref, ctx.cap_a_val,
-            ctx.cap_b_kind, ctx.cap_b_ref, ctx.cap_b_val,
-            ctx.cap_ai, ctx.cap_bi, ctx.cap_value,
-            ctx.isrc_pi, ctx.isrc_qi, ctx.isrc_value,
-            ctx.dyn_pi, ctx.dyn_qi, ctx.dyn_input_idx,
-            int(ctx.cap_id), float(ctx.clip_lo), float(ctx.clip_hi),
-        )
+            *_numba_grid_kernel_args(ctx, V0, tgrid, input_values,
+                                     edge_mask_arr, profile))
         ok_g2, Vfast, fast_substeps, fail_index, raw_profile, _rfi = g2
         out.profile_wall_s = time.perf_counter() - t_profile0
         if ok_g2:
@@ -1000,8 +1348,8 @@ def _solve_fixed_gear2_numba(ctx, V0, tgrid, input_values, edge_mask_arr,
                          if g2_orig_idx is not None else Vfast)
             out.nsubsteps = int(fast_substeps)
             raw_profile_arr = np.asarray(raw_profile, float)
-            out.nretry = int(raw_profile_arr[10])
-            out.nfail = int(raw_profile_arr[13])
+            out.nretry = int(raw_profile_arr[PROFILE_FAILED_SUBSTEPS])
+            out.nfail = int(raw_profile_arr[PROFILE_FAILED_INTERVALS])
             out.gear2_done = True
             out.gear2_numba_used = True
             out.profile_stats = raw_profile_arr
@@ -1024,39 +1372,10 @@ def _solve_adaptive_gear2_numba(ctx, V0, tgrid, input_values, profile):
             ctx.n_aug == ctx.n):
         return out
     try:
-        max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
-        acfg = ctx.adaptive_config
-        h0_arg = -1.0 if acfg.h0 is None else float(acfg.h0)
         t_profile0 = time.perf_counter()
         ad = transient_solve_adaptive_gear2_numba(
-            np.asarray(V0, float), np.asarray(tgrid, float),
-            np.asarray(input_values, float), profile,
-            max_step_arg, float(acfg.reltol), float(acfg.vabstol),
-            float(acfg.iabstol), int(acfg.max_steps), h0_arg,
-            int(ctx.n), int(ctx.newton_maxit), float(ctx.newton_step_limit),
-            float(ctx.newton_vtol), float(ctx.gmin),
-            bool(ctx.fallback_full_jacobian or ctx.fallback_least_squares),
-            float(ctx.fallback_tol), float(ctx.HH),
-            ctx.dev_d_kind, ctx.dev_d_ref, ctx.dev_d_val,
-            ctx.dev_g_kind, ctx.dev_g_ref, ctx.dev_g_val,
-            ctx.dev_s_kind, ctx.dev_s_ref, ctx.dev_s_val,
-            ctx.dev_di, ctx.dev_gi, ctx.dev_si, ctx.dev_use_abs,
-            ctx.p_Vfb, ctx.p_Vss, ctx.p_Lc, ctx.p_lambda, ctx.p_contact_scale,
-            ctx.p_exponent, ctx.p_current_scale, ctx.p_inv_Rleak,
-            ctx.p_two_over_pi, ctx.p_cap_cgs1, ctx.p_cap_cgd1,
-            ctx.p_cap_half_wl_ci, ctx.p_cap_cgs3_base, ctx.p_cap_cgd3_base,
-            ctx.p_k1, ctx.p_gate_leak_g,
-            ctx.op_cache_valid, ctx.op_cache_vs1, ctx.op_cache_vd1,
-            ctx.res_a_kind, ctx.res_a_ref, ctx.res_a_val,
-            ctx.res_b_kind, ctx.res_b_ref, ctx.res_b_val,
-            ctx.res_ai, ctx.res_bi, ctx.res_g,
-            ctx.cap_a_kind, ctx.cap_a_ref, ctx.cap_a_val,
-            ctx.cap_b_kind, ctx.cap_b_ref, ctx.cap_b_val,
-            ctx.cap_ai, ctx.cap_bi, ctx.cap_value,
-            ctx.isrc_pi, ctx.isrc_qi, ctx.isrc_value,
-            ctx.dyn_pi, ctx.dyn_qi, ctx.dyn_input_idx,
-            int(ctx.cap_id), float(ctx.clip_lo), float(ctx.clip_hi),
-        )
+            *_numba_adaptive_gear2_kernel_args(ctx, V0, tgrid,
+                                               input_values, profile))
         ok_ad, tfast, Vfast, input_fast, naccept, fast_substeps, fast_rejects, raw_profile = ad
         if ok_ad:
             naccept = int(naccept)
@@ -1084,38 +1403,10 @@ def _solve_be_numba(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
             ctx.n_aug == ctx.n):
         return out
     try:
-        max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
-        flat_max_step_arg = -1.0 if ctx.flat_max_step is None else float(ctx.flat_max_step)
         t_profile0 = time.perf_counter()
         grid_result = transient_solve_grid_numba(
-            np.asarray(V0, float), np.asarray(tgrid, float),
-            np.asarray(input_values, float), edge_mask_arr, profile,
-            max_step_arg, flat_max_step_arg,
-            int(ctx.max_retry_subdivisions),
-            int(ctx.n), int(ctx.newton_maxit), float(ctx.newton_step_limit),
-            float(ctx.newton_vtol), float(ctx.gmin),
-            bool(ctx.fallback_full_jacobian or ctx.fallback_least_squares),
-            float(ctx.fallback_tol), float(ctx.HH),
-            ctx.dev_d_kind, ctx.dev_d_ref, ctx.dev_d_val,
-            ctx.dev_g_kind, ctx.dev_g_ref, ctx.dev_g_val,
-            ctx.dev_s_kind, ctx.dev_s_ref, ctx.dev_s_val,
-            ctx.dev_di, ctx.dev_gi, ctx.dev_si, ctx.dev_use_abs,
-            ctx.p_Vfb, ctx.p_Vss, ctx.p_Lc, ctx.p_lambda, ctx.p_contact_scale,
-            ctx.p_exponent, ctx.p_current_scale, ctx.p_inv_Rleak,
-            ctx.p_two_over_pi, ctx.p_cap_cgs1, ctx.p_cap_cgd1,
-            ctx.p_cap_half_wl_ci, ctx.p_cap_cgs3_base, ctx.p_cap_cgd3_base,
-            ctx.p_k1, ctx.p_gate_leak_g,
-            ctx.op_cache_valid, ctx.op_cache_vs1, ctx.op_cache_vd1,
-            ctx.res_a_kind, ctx.res_a_ref, ctx.res_a_val,
-            ctx.res_b_kind, ctx.res_b_ref, ctx.res_b_val,
-            ctx.res_ai, ctx.res_bi, ctx.res_g,
-            ctx.cap_a_kind, ctx.cap_a_ref, ctx.cap_a_val,
-            ctx.cap_b_kind, ctx.cap_b_ref, ctx.cap_b_val,
-            ctx.cap_ai, ctx.cap_bi, ctx.cap_value,
-            ctx.isrc_pi, ctx.isrc_qi, ctx.isrc_value,
-            ctx.dyn_pi, ctx.dyn_qi, ctx.dyn_input_idx,
-            int(ctx.cap_id), float(ctx.clip_lo), float(ctx.clip_hi),
-        )
+            *_numba_grid_kernel_args(ctx, V0, tgrid, input_values,
+                                     edge_mask_arr, profile))
         if len(grid_result) == 5:
             ok_grid, Vfast, fast_substeps, fail_index, raw_profile = grid_result
             raw_failed_intervals = None
@@ -1129,10 +1420,10 @@ def _solve_be_numba(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
             out.Vhist = Vfast
             out.nsubsteps = int(fast_substeps)
             raw_profile_arr = np.asarray(raw_profile, float)
-            out.nfail = int(raw_profile_arr[13])
+            out.nfail = int(raw_profile_arr[PROFILE_FAILED_INTERVALS])
             out.nretry = out.nfail
-            ctx.numba_newton_attempts += out.nsubsteps
-            ctx.numba_newton_success += out.nsubsteps
+            ctx.stats.attempts += out.nsubsteps
+            ctx.stats.success += out.nsubsteps
             out.used_grid_numba = True
             out.profile_stats = raw_profile_arr
             out.handled = True
@@ -1143,8 +1434,8 @@ def _solve_be_numba(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
             if out.numba_grid_failed_index is not None and out.numba_grid_failed_index > 1:
                 out.Vhist = Vfast
                 out.nsubsteps = int(fast_substeps)
-                ctx.numba_newton_attempts += out.nsubsteps
-                ctx.numba_newton_success += out.nsubsteps
+                ctx.stats.attempts += out.nsubsteps
+                ctx.stats.success += out.nsubsteps
                 out.partial_grid_numba = True
                 out.python_start_idx = int(out.numba_grid_failed_index)
     except Exception as exc:
@@ -1392,6 +1683,12 @@ def _assemble_result(ctx, tgrid, Vhist, input_values, input_keys,
                      partial_grid_numba, numba_grid_error,
                      numba_grid_failed_index, numba_grid_failed_substeps,
                      numba_grid_failed_profile, numba_grid_failed_intervals):
+    def pval(stats, slot, default=0.0):
+        return float(stats[slot]) if stats is not None and len(stats) > slot else float(default)
+
+    def pint(stats, slot, default=0):
+        return int(pval(stats, slot, default))
+
     N = len(tgrid)
     idx = ctx.idx
     plan = ctx.plan
@@ -1418,22 +1715,22 @@ def _assemble_result(ctx, tgrid, Vhist, input_values, input_keys,
     result["numba_adaptive_solver"] = bool(adaptive_numba_used)
     if ctx.integration_method == "gear2":
         result["gear2_python_retry_solver"] = bool(gear2_python_retry_used)
-    if ctx.numba_newton_attempts:
-        result["numba_newton_attempts"] = ctx.numba_newton_attempts
-        result["numba_newton_success"] = ctx.numba_newton_success
-        result["numba_newton_fallback"] = ctx.numba_newton_fallback
+    if ctx.stats.attempts:
+        result["numba_newton_attempts"] = ctx.stats.attempts
+        result["numba_newton_success"] = ctx.stats.success
+        result["numba_newton_fallback"] = ctx.stats.fallback
     if profile:
         if profile_stats is None:
-            profile_stats = np.zeros(24, dtype=float)
-            profile_stats[0] = 0.0
-            profile_stats[6] = 0.0
-            profile_stats[7] = float(nsubsteps)
-            profile_stats[10] = float(nfail)
-            profile_stats[11] = float(N - 1)
-            profile_stats[12] = float(nsubsteps)
-        total_iters = float(profile_stats[0])
-        edge_iters = float(profile_stats[8])
-        flat_iters = float(profile_stats[9])
+            profile_stats = np.zeros(PROFILE_LEN, dtype=float)
+            profile_stats[PROFILE_NEWTON_ITERS] = 0.0
+            profile_stats[PROFILE_EDGE_SUBSTEPS] = 0.0
+            profile_stats[PROFILE_FLAT_SUBSTEPS] = float(nsubsteps)
+            profile_stats[PROFILE_FAILED_SUBSTEPS] = float(nfail)
+            profile_stats[PROFILE_INTERVALS] = float(N - 1)
+            profile_stats[PROFILE_SUBSTEPS] = float(nsubsteps)
+        total_iters = float(profile_stats[PROFILE_NEWTON_ITERS])
+        edge_iters = float(profile_stats[PROFILE_EDGE_NEWTON_ITERS])
+        flat_iters = float(profile_stats[PROFILE_FLAT_NEWTON_ITERS])
         iter_work = edge_iters + flat_iters
         edge_time_est = profile_wall_s * edge_iters / iter_work if iter_work else 0.0
         flat_time_est = profile_wall_s * flat_iters / iter_work if iter_work else 0.0
@@ -1445,83 +1742,66 @@ def _assemble_result(ctx, tgrid, Vhist, input_values, input_keys,
             "numba_grid_failed_index": numba_grid_failed_index,
             "numba_grid_failed_substeps": int(numba_grid_failed_substeps),
             "numba_grid_failed_newton_iters": (
-                int(numba_grid_failed_profile[0])
-                if numba_grid_failed_profile is not None else 0),
+                pint(numba_grid_failed_profile, PROFILE_NEWTON_ITERS)),
             "numba_grid_failed_substep_failures": (
-                int(numba_grid_failed_profile[10])
-                if numba_grid_failed_profile is not None else 0),
+                pint(numba_grid_failed_profile, PROFILE_FAILED_SUBSTEPS)),
             "numba_grid_failed_interval_failures": (
-                int(numba_grid_failed_profile[13])
-                if numba_grid_failed_profile is not None else 0),
+                pint(numba_grid_failed_profile, PROFILE_FAILED_INTERVALS)),
             "numba_grid_failed_last_residual_inf": (
-                float(numba_grid_failed_profile[16])
-                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 16
-                else 0.0),
+                pval(numba_grid_failed_profile, PROFILE_FAILED_LAST_RESIDUAL_INF)),
             "numba_grid_failed_max_residual_inf": (
-                float(numba_grid_failed_profile[17])
-                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 17
-                else 0.0),
+                pval(numba_grid_failed_profile, PROFILE_FAILED_MAX_RESIDUAL_INF)),
             "numba_grid_failed_last_step_inf": (
-                float(numba_grid_failed_profile[18])
-                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 18
-                else 0.0),
+                pval(numba_grid_failed_profile, PROFILE_FAILED_LAST_STEP_INF)),
             "numba_grid_failed_max_step_inf": (
-                float(numba_grid_failed_profile[19])
-                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 19
-                else 0.0),
+                pval(numba_grid_failed_profile, PROFILE_FAILED_MAX_STEP_INF)),
             "numba_grid_failed_stamp_or_prev_count": (
-                int(numba_grid_failed_profile[20])
-                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 20
-                else 0),
+                pint(numba_grid_failed_profile, PROFILE_FAILED_STAMP_OR_PREV_COUNT)),
             "numba_grid_failed_linear_solve_count": (
-                int(numba_grid_failed_profile[21])
-                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 21
-                else 0),
+                pint(numba_grid_failed_profile, PROFILE_FAILED_LINEAR_SOLVE_COUNT)),
             "numba_grid_failed_maxit_count": (
-                int(numba_grid_failed_profile[22])
-                if numba_grid_failed_profile is not None and len(numba_grid_failed_profile) > 22
-                else 0),
+                pint(numba_grid_failed_profile, PROFILE_FAILED_MAXIT_COUNT)),
             "wall_time_s": float(profile_wall_s),
             "nsubsteps": int(nsubsteps),
-            "intervals": int(profile_stats[11]),
-            "newton_iters_total": int(profile_stats[0]),
+            "intervals": int(profile_stats[PROFILE_INTERVALS]),
+            "newton_iters_total": int(profile_stats[PROFILE_NEWTON_ITERS]),
             "newton_iters_avg": float(total_iters / nsubsteps) if nsubsteps else 0.0,
-            "pmos_op_solves": int(profile_stats[1]),
-            "pmos_internal_newton_attempts": int(profile_stats[2]),
-            "pmos_internal_newton_iters": int(profile_stats[3]),
+            "pmos_op_solves": int(profile_stats[PROFILE_PMOS_OP_SOLVES]),
+            "pmos_internal_newton_attempts": int(profile_stats[PROFILE_PMOS_INTERNAL_NEWTON_ATTEMPTS]),
+            "pmos_internal_newton_iters": int(profile_stats[PROFILE_PMOS_INTERNAL_NEWTON_ITERS]),
             "pmos_internal_newton_iters_avg": (
-                float(profile_stats[3] / profile_stats[2]) if profile_stats[2] else 0.0),
-            "internal_fd_jac_fallbacks": int(profile_stats[4]),
-            "terminal_fd_jac_fallbacks": int(profile_stats[5]),
-            "edge_substeps": int(profile_stats[6]),
-            "flat_substeps": int(profile_stats[7]),
-            "edge_newton_iters": int(profile_stats[8]),
-            "flat_newton_iters": int(profile_stats[9]),
-            "failed_substeps": int(profile_stats[10]),
-            "failed_intervals": int(profile_stats[13]),
-            "failed_edge_intervals": int(profile_stats[14]),
-            "failed_flat_intervals": int(profile_stats[15]),
+                float(profile_stats[PROFILE_PMOS_INTERNAL_NEWTON_ITERS] / profile_stats[PROFILE_PMOS_INTERNAL_NEWTON_ATTEMPTS]) if profile_stats[PROFILE_PMOS_INTERNAL_NEWTON_ATTEMPTS] else 0.0),
+            "internal_fd_jac_fallbacks": int(profile_stats[PROFILE_INTERNAL_FD_JAC_FALLBACKS]),
+            "terminal_fd_jac_fallbacks": int(profile_stats[PROFILE_TERMINAL_FD_JAC_FALLBACKS]),
+            "edge_substeps": int(profile_stats[PROFILE_EDGE_SUBSTEPS]),
+            "flat_substeps": int(profile_stats[PROFILE_FLAT_SUBSTEPS]),
+            "edge_newton_iters": int(profile_stats[PROFILE_EDGE_NEWTON_ITERS]),
+            "flat_newton_iters": int(profile_stats[PROFILE_FLAT_NEWTON_ITERS]),
+            "failed_substeps": int(profile_stats[PROFILE_FAILED_SUBSTEPS]),
+            "failed_intervals": int(profile_stats[PROFILE_FAILED_INTERVALS]),
+            "failed_edge_intervals": int(profile_stats[PROFILE_FAILED_EDGE_INTERVALS]),
+            "failed_flat_intervals": int(profile_stats[PROFILE_FAILED_FLAT_INTERVALS]),
             "failed_interval_indices": (
                 [int(v) for v in numba_grid_failed_intervals
                  if int(v) >= 0]
                 if numba_grid_failed_intervals is not None else []
             ),
             "failed_last_residual_inf": (
-                float(profile_stats[16]) if len(profile_stats) > 16 else 0.0),
+                pval(profile_stats, PROFILE_FAILED_LAST_RESIDUAL_INF)),
             "failed_max_residual_inf": (
-                float(profile_stats[17]) if len(profile_stats) > 17 else 0.0),
+                pval(profile_stats, PROFILE_FAILED_MAX_RESIDUAL_INF)),
             "failed_last_step_inf": (
-                float(profile_stats[18]) if len(profile_stats) > 18 else 0.0),
+                pval(profile_stats, PROFILE_FAILED_LAST_STEP_INF)),
             "failed_max_step_inf": (
-                float(profile_stats[19]) if len(profile_stats) > 19 else 0.0),
+                pval(profile_stats, PROFILE_FAILED_MAX_STEP_INF)),
             "failed_stamp_or_prev_count": (
-                int(profile_stats[20]) if len(profile_stats) > 20 else 0),
+                pint(profile_stats, PROFILE_FAILED_STAMP_OR_PREV_COUNT)),
             "failed_linear_solve_count": (
-                int(profile_stats[21]) if len(profile_stats) > 21 else 0),
+                pint(profile_stats, PROFILE_FAILED_LINEAR_SOLVE_COUNT)),
             "failed_maxit_count": (
-                int(profile_stats[22]) if len(profile_stats) > 22 else 0),
+                pint(profile_stats, PROFILE_FAILED_MAXIT_COUNT)),
             "stalled_residual_accepts": (
-                int(profile_stats[23]) if len(profile_stats) > 23 else 0),
+                pint(profile_stats, PROFILE_STALLED_RESIDUAL_ACCEPTS)),
             "edge_time_s_est": float(edge_time_est),
             "flat_time_s_est": float(flat_time_est),
             "time_estimate_basis": "newton_iteration_weighted",
@@ -1533,66 +1813,20 @@ def _assemble_result(ctx, tgrid, Vhist, input_values, input_keys,
     return result
 
 
-def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
-              topo=AFE_TOPO, inputs=None, node_inputs=None, current_inputs=None,
-              corner=None,
-              max_step=None, flat_max_step=None,
-              max_retry_subdivisions=0, newton_maxit=30,
-              newton_step_limit=5.0, newton_vtol=1e-8,
-              fallback_full_jacobian=False,
-              fallback_least_squares=False, fallback_tol=1e-9,
-              signed_devices=None, profile=False, edge_mask=None,
-              rail_margin=None, integration_method="be",
-              gear2_be_fallback=True, cap_mode=None, cap_mode_id=None,
-              adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
-              adaptive_iabstol=1e-12, adaptive_max_steps=200000,
-              adaptive_h0=None, adaptive_config=None):
-    """Backward-Euler (default) or gear2/BDF2 transient.
-
-      integration_method : "be" (backward-Euler, 1st order; the default for the
-               raw transient because its numba grid keeps substep subdivision +
-               retry, which hard standalone transients rely on) or "gear2"
-               (variable-step BDF2, 2nd order, numba-accelerated, with maxstep
-               subdivision/retry support and step-ratio limiting). The PSS/chopper periodic path
-               defaults to gear2 (it closes the chopper PAC switch-edge error to
-               <1% and its grid is well-conditioned); raw transient callers can
-               opt in on uniform/well-conditioned grids.
-      tgrid : (N,) time points [s]
-      vip,vin : legacy AFE M7/M8 gate waveforms [V]
-      inputs : generic mapping {input_key: waveform}; device gates are mapped by
-               topo.transient_inputs, e.g. {"M1": "in"}.
-      node_inputs : mapping {node_name: input_key} to drive a (rail) NODE with a
-               waveform — used for a testbench where the stimulus enters at source
-               nodes and propagates through a front-end network, e.g.
-               {"VINP": "vip", "VINN": "vin"}.
-      current_inputs : time-varying ideal current sources. Each entry can be
-               {"p": nplus, "q": nminus, "input": key} or (p, q, key).
-               The waveform current flows p -> q, matching topology.isources.
-      max_step : optional maximum internal step. Intervals larger than this are
-               split linearly between adjacent input samples.
-      flat_max_step : optional maximum internal step for intervals not marked by
-               edge_mask. If omitted, max_step is used everywhere.
-      max_retry_subdivisions : if Newton fails on a step, recursively bisect that
-               step up to this depth before recording a failure.
-      fallback_least_squares : if true, a failed Newton step is retried with a
-               rail-bounded least-squares solve before substepping/failing.
-      fallback_full_jacobian : if true, a failed Newton step is retried with an
-               expensive finite-difference Jacobian of the full residual at the
-               smallest retry subdivision.
-      signed_devices : optional device names whose terminal current keeps the
-               Verilog-A drain-terminal sign. The default AFE devices use the
-               legacy abs(Idc) convention calibrated by AC/noise; bidirectional
-               pass switches should be signed.
-      profile : if true, include transient_profile counters in the result.
-      edge_mask : optional boolean mask over tgrid points; intervals touching a
-               true point are counted as edge work in transient_profile.
-      rail_margin : optional voltage margin around numeric rails for topologies
-               that need physical branch selection. If omitted, topologies with
-               require_dc_in_box use a 2 V margin; other topologies are unbounded.
-      V0    : optional initial solved-node vector.
-    Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
-    fields are included when those nodes exist.
-    """
+def _marshal_transient(
+        sizes, bias, tgrid, *, vip=None, vin=None, nf=None, V0=None,
+        topo=AFE_TOPO, inputs=None, node_inputs=None, current_inputs=None,
+        corner=None, max_step=None, flat_max_step=None,
+        max_retry_subdivisions=0, newton_maxit=30,
+        newton_step_limit=5.0, newton_vtol=1e-8,
+        fallback_full_jacobian=False, fallback_least_squares=False,
+        fallback_tol=1e-9, signed_devices=None, profile=False,
+        edge_mask=None, rail_margin=None, integration_method="be",
+        gear2_be_fallback=True, cap_mode=None, cap_mode_id=None,
+        adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
+        adaptive_iabstol=1e-12, adaptive_max_steps=200000,
+        adaptive_h0=None, adaptive_config=None):
+    """Validate public inputs and compile the immutable transient solve context."""
     integration_method = str(integration_method).lower()
     adaptive_config = resolve_adaptive_config(
         adaptive_config,
@@ -1608,9 +1842,11 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         requested = _cap_mode_to_id(cap_mode)
         if int(cap_mode_id) != int(requested):
             raise ValueError("cap_mode and cap_mode_id disagree")
+
     tft = build_devices(sizes, nf=nf, corner=corner, topo=topo)
     tgrid = np.asarray(tgrid, float)
     N = len(tgrid)
+
     # Per-call cap operator override (default = the module/env-selected mode).
     # The chopper PSS uses the trapezoidal "average" mode (id 1) -- a STABLE,
     # non-conservative C(V)*dV/dt discretization that matches Cadence's commutation
@@ -1622,6 +1858,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                   else cap_mode_id)
     if _cap_id not in (0, 1):
         raise ValueError("cap_mode_id must be 0 (charge) or 1 (average)")
+
     if inputs is None:
         inputs = {}
         if vip is not None:
@@ -1645,12 +1882,11 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     idx, n = plan.idx, plan.n
     n_aug = plan.n_aug                 # n nodes + m ideal-voltage-source branch currents
     termv = plan.term_value
+
     # Every device uses its signed Verilog-A drain current. abs(Idc) was only
     # correct for never-reversing devices (forward PMOS: I_d1_d>0 so signed==abs)
-    # but turned a *reverse*-biased pass-gate switch into an anti-restoring pump
-    # (the SC-LPF runaway). signed==abs in forward, so the AFE amp/chopper are
-    # unchanged; the chopper already listed its commutators in signed_devices.
-    # `signed_devices` is retained (no-op now) for back-compat with callers.
+    # but turned a *reverse*-biased pass-gate switch into an anti-restoring pump.
+    # `signed_devices` is retained as a no-op compatibility parameter.
     signed_devices = set(signed_devices or ())
     dev_meta = [(tft[item.name], True,
                  item.d, item.g, item.s, item.di, item.gi, item.si)
@@ -1664,7 +1900,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                  for item in plan.vccs]
     # Ideal voltage sources (true MNA, Python path): (a_term, b_term, pi, qi, bi,
     # e_const, e_input_idx). Branch current is the unknown at V[bi]; constraint row
-    # bi pins V_p - V_q = E. Vsource circuits force the pure-Python step path below.
+    # bi pins V_p - V_q = E. Vsource circuits force the pure-Python n_aug path.
     vs_meta = [(item.p, item.q, item.pi, item.qi, item.bi, item.e_const, item.e_input_idx)
                for item in plan.vsources]
     vcvs_meta = [(item.p, item.q, item.cp, item.cn, item.pi, item.qi,
@@ -1675,6 +1911,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     ccvs_meta = [(item.p, item.q, item.pi, item.qi, item.bi,
                   item.ctrl_bi, item.gamma)
                  for item in plan.ccvs]
+
     dyn_isrc_meta = []
     for pos, item in enumerate(current_inputs or ()):
         if isinstance(item, dict):
@@ -1738,18 +1975,19 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     isrc_qi = _index_array(item[1] for item in isrc_meta)
     isrc_value = np.array([item[2] for item in isrc_meta], dtype=float)
 
-    vccs_pi  = _index_array(item[0] for item in vccs_meta)
-    vccs_qi  = _index_array(item[1] for item in vccs_meta)
-    # For control nodes, extract solved index from the terminal tuple; rails → -1
+    vccs_pi = _index_array(item[0] for item in vccs_meta)
+    vccs_qi = _index_array(item[1] for item in vccs_meta)
+    # For control nodes, extract solved index from the terminal tuple; rails -> -1.
     vccs_cpi = _index_array(
         item[2][1] if item[2][0] == 0 else None for item in vccs_meta)
     vccs_cni = _index_array(
         item[3][1] if item[3][0] == 0 else None for item in vccs_meta)
-    vccs_gm  = np.array([item[4] for item in vccs_meta], dtype=float)
+    vccs_gm = np.array([item[4] for item in vccs_meta], dtype=float)
 
     dyn_pi = _index_array(item[0] for item in dyn_isrc_meta)
     dyn_qi = _index_array(item[1] for item in dyn_isrc_meta)
     dyn_input_idx = np.array([item[2] for item in dyn_isrc_meta], dtype=np.int64)
+
     if rail_margin is None and getattr(topo, "require_dc_in_box", False):
         rail_margin = 2.0
     clip_lo = np.inf
@@ -1759,21 +1997,18 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         if rails:
             clip_lo = min(rails) - float(rail_margin)
             clip_hi = max(rails) + float(rail_margin)
-    # Ideal voltage sources add branch-current unknowns (n_aug > n); the numba kernels
-    # are fixed at n nodes, so those circuits run on the pure-Python n_aug path instead.
-    use_numba_newton = transient_newton_numba is not None and n_aug == n
-    numba_newton_attempts = 0
-    numba_newton_success = 0
-    numba_newton_fallback = 0
 
-    # ── initial condition: DC op at static bias ──
+    # Ideal voltage sources add branch-current unknowns (n_aug > n); the numba
+    # kernels are fixed at n nodes, so those circuits run on the Python path.
+    use_numba_newton = transient_newton_numba is not None and n_aug == n
+
     if V0 is None:
         ac = ac_solve(sizes, bias, np.array([1.0]), nf=nf, topo=topo,
                       corner=corner)
         dc = ac["dc_op"]
         V0 = np.array([dc[name] for name in topo.solved])
     V0 = np.asarray(V0, float)
-    if V0.shape[0] < n_aug:                  # pad ideal-source branch currents (seed 0)
+    if V0.shape[0] < n_aug:                  # pad ideal-source branch currents
         V0 = np.concatenate([V0, np.zeros(n_aug - V0.shape[0])])
     if len(vs_meta) and input_values.shape[1] > 0:
         input0 = input_values[:, 0]
@@ -1787,28 +2022,9 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
             elif qi is not None:
                 Vseed[qi] = termv(aterm, Vseed, input0) - E
         V0 = Vseed
-    Vhist = np.zeros((N, n_aug)); Vhist[0] = V0
-    gmin = 1e-12
+    Vhist = np.zeros((N, n_aug))
+    Vhist[0] = V0
 
-    HH = 1e-3   # finite-diff step for gm/gds (matches get_ss_params, Cadence-calibrated)
-
-    nfail = 0
-    nretry = 0
-    nsubsteps = 0
-    max_retry_subdivisions = int(max_retry_subdivisions or 0)
-    max_step = None if max_step is None else float(max_step)
-    flat_max_step = None if flat_max_step is None else float(flat_max_step)
-    used_grid_numba = False
-    partial_grid_numba = False
-    python_start_idx = 1
-    profile = bool(profile)
-    profile_wall_s = 0.0
-    profile_stats = None
-    numba_grid_error = None
-    numba_grid_failed_index = None
-    numba_grid_failed_substeps = 0
-    numba_grid_failed_profile = None
-    numba_grid_failed_intervals = None
     if edge_mask is None:
         edge_mask_arr = np.empty(0, dtype=np.bool_)
     else:
@@ -1816,9 +2032,11 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
         if len(edge_mask_arr) != N:
             raise ValueError("edge_mask length must match tgrid")
 
-    gear2_done = False
-    gear2_numba_used = False
-    gear2_python_retry_used = False
+    max_retry_subdivisions = int(max_retry_subdivisions or 0)
+    max_step = None if max_step is None else float(max_step)
+    flat_max_step = None if flat_max_step is None else float(flat_max_step)
+    gmin = 1e-12
+    HH = 1e-3   # finite-diff step for gm/gds (matches get_ss_params)
     gear2_retry_requested = (
         integration_method == "gear2" and gear2_be_fallback and
         (max_retry_subdivisions > 0 or
@@ -1826,51 +2044,181 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
          (flat_max_step is not None and flat_max_step > 0.0))
     )
 
-    # Marshalled solve context shared by module-level transient kernels.  It holds
-    # the compiled topology arrays, Python metadata, scalar solver settings, and
-    # the mutable PMOS op-point cache used by the numba Newton kernels.
-    ctx = SimpleNamespace(
+    topology_ctx = _TopologyCtx(
         plan=plan, idx=idx, n=n, n_aug=n_aug, termv=termv, tft=tft,
+        signed_devices=signed_devices)
+    device_ctx = _DeviceCtx(
+        dev_meta=dev_meta, dev_objs=dev_objs,
         dev_d_kind=dev_d_kind, dev_d_ref=dev_d_ref, dev_d_val=dev_d_val,
         dev_g_kind=dev_g_kind, dev_g_ref=dev_g_ref, dev_g_val=dev_g_val,
         dev_s_kind=dev_s_kind, dev_s_ref=dev_s_ref, dev_s_val=dev_s_val,
         dev_di=dev_di, dev_gi=dev_gi, dev_si=dev_si, dev_use_abs=dev_use_abs,
-        dev_objs=dev_objs,
         p_Vfb=p_Vfb, p_Vss=p_Vss, p_Lc=p_Lc, p_lambda=p_lambda,
         p_contact_scale=p_contact_scale, p_exponent=p_exponent,
         p_current_scale=p_current_scale, p_inv_Rleak=p_inv_Rleak,
         p_two_over_pi=p_two_over_pi, p_cap_cgs1=p_cap_cgs1, p_cap_cgd1=p_cap_cgd1,
         p_cap_half_wl_ci=p_cap_half_wl_ci, p_cap_cgs3_base=p_cap_cgs3_base,
         p_cap_cgd3_base=p_cap_cgd3_base, p_k1=p_k1, p_gate_leak_g=p_gate_leak_g,
-        op_cache_valid=op_cache_valid, op_cache_vs1=op_cache_vs1,
-        op_cache_vd1=op_cache_vd1,
+        use_numba_newton=use_numba_newton)
+    passive_ctx = _PassiveCtx(
+        load_meta=load_meta, res_meta=res_meta,
         res_a_kind=res_a_kind, res_a_ref=res_a_ref, res_a_val=res_a_val,
         res_b_kind=res_b_kind, res_b_ref=res_b_ref, res_b_val=res_b_val,
         res_ai=res_ai, res_bi=res_bi, res_g=res_g,
         cap_a_kind=cap_a_kind, cap_a_ref=cap_a_ref, cap_a_val=cap_a_val,
         cap_b_kind=cap_b_kind, cap_b_ref=cap_b_ref, cap_b_val=cap_b_val,
-        cap_ai=cap_ai, cap_bi=cap_bi, cap_value=cap_value,
-        isrc_pi=isrc_pi, isrc_qi=isrc_qi, isrc_value=isrc_value,
-        vccs_pi=vccs_pi, vccs_qi=vccs_qi, vccs_cpi=vccs_cpi, vccs_cni=vccs_cni,
-        vccs_gm=vccs_gm,
-        dyn_pi=dyn_pi, dyn_qi=dyn_qi, dyn_input_idx=dyn_input_idx,
-        dev_meta=dev_meta, load_meta=load_meta, res_meta=res_meta,
+        cap_ai=cap_ai, cap_bi=cap_bi, cap_value=cap_value)
+    source_ctx = _SourceCtx(
         isrc_meta=isrc_meta, vccs_meta=vccs_meta, vs_meta=vs_meta,
         vcvs_meta=vcvs_meta, cccs_meta=cccs_meta, ccvs_meta=ccvs_meta,
         dyn_isrc_meta=dyn_isrc_meta,
+        isrc_pi=isrc_pi, isrc_qi=isrc_qi, isrc_value=isrc_value,
+        vccs_pi=vccs_pi, vccs_qi=vccs_qi, vccs_cpi=vccs_cpi,
+        vccs_cni=vccs_cni, vccs_gm=vccs_gm,
+        dyn_pi=dyn_pi, dyn_qi=dyn_qi, dyn_input_idx=dyn_input_idx)
+    solver_opts = _SolverOptions(
         gmin=gmin, HH=HH, clip_lo=clip_lo, clip_hi=clip_hi, cap_id=_cap_id,
-        use_numba_newton=use_numba_newton, rail_margin=rail_margin,
-        numba_newton_attempts=0, numba_newton_success=0,
-        numba_newton_fallback=0,
+        rail_margin=rail_margin,
         newton_maxit=newton_maxit, newton_step_limit=newton_step_limit,
         newton_vtol=newton_vtol, fallback_full_jacobian=fallback_full_jacobian,
         fallback_least_squares=fallback_least_squares, fallback_tol=fallback_tol,
         max_step=max_step, flat_max_step=flat_max_step,
-        max_retry_subdivisions=max_retry_subdivisions, edge_mask_arr=edge_mask_arr,
-        signed_devices=signed_devices, gear2_be_fallback=gear2_be_fallback,
+        max_retry_subdivisions=max_retry_subdivisions,
+        edge_mask_arr=edge_mask_arr, gear2_be_fallback=gear2_be_fallback,
         integration_method=integration_method,
-        adaptive=adaptive, adaptive_config=adaptive_config,
-    )
+        adaptive=adaptive, adaptive_config=adaptive_config)
+    runtime = _RuntimeCaches(
+        op_cache_valid=op_cache_valid, op_cache_vs1=op_cache_vs1,
+        op_cache_vd1=op_cache_vd1, stats=_NewtonStats())
+    ctx = _TransientCtx(
+        topology=topology_ctx, devices=device_ctx, passives=passive_ctx,
+        sources=source_ctx, solver=solver_opts, runtime=runtime)
+    return _TransientMarshal(
+        ctx=ctx, tgrid=tgrid, input_keys=input_keys, input_values=input_values,
+        inputs=inputs, node_inputs=node_inputs, V0=V0, Vhist=Vhist,
+        edge_mask_arr=edge_mask_arr, profile=bool(profile),
+        gear2_retry_requested=gear2_retry_requested)
+
+
+def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
+              topo=AFE_TOPO, inputs=None, node_inputs=None, current_inputs=None,
+              corner=None,
+              max_step=None, flat_max_step=None,
+              max_retry_subdivisions=0, newton_maxit=30,
+              newton_step_limit=5.0, newton_vtol=1e-8,
+              fallback_full_jacobian=False,
+              fallback_least_squares=False, fallback_tol=1e-9,
+              signed_devices=None, profile=False, edge_mask=None,
+              rail_margin=None, integration_method="be",
+              gear2_be_fallback=True, cap_mode=None, cap_mode_id=None,
+              adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
+              adaptive_iabstol=1e-12, adaptive_max_steps=200000,
+              adaptive_h0=None, adaptive_config=None):
+    """Backward-Euler (default) or gear2/BDF2 transient.
+
+      integration_method : "be" (backward-Euler, 1st order; the default for the
+               raw transient because its numba grid keeps substep subdivision +
+               retry, which hard standalone transients rely on) or "gear2"
+               (variable-step BDF2, 2nd order, numba-accelerated, with maxstep
+               subdivision/retry support and step-ratio limiting). The PSS/chopper periodic path
+               defaults to gear2 (it closes the chopper PAC switch-edge error to
+               <1% and its grid is well-conditioned); raw transient callers can
+               opt in on uniform/well-conditioned grids.
+      tgrid : (N,) time points [s]
+      vip,vin : legacy AFE M7/M8 gate waveforms [V]
+      inputs : generic mapping {input_key: waveform}; device gates are mapped by
+               topo.transient_inputs, e.g. {"M1": "in"}.
+      node_inputs : mapping {node_name: input_key} to drive a (rail) NODE with a
+               waveform — used for a testbench where the stimulus enters at source
+               nodes and propagates through a front-end network, e.g.
+               {"VINP": "vip", "VINN": "vin"}.
+      current_inputs : time-varying ideal current sources. Each entry can be
+               {"p": nplus, "q": nminus, "input": key} or (p, q, key).
+               The waveform current flows p -> q, matching topology.isources.
+      max_step : optional maximum internal step. Intervals larger than this are
+               split linearly between adjacent input samples.
+      flat_max_step : optional maximum internal step for intervals not marked by
+               edge_mask. If omitted, max_step is used everywhere.
+      max_retry_subdivisions : if Newton fails on a step, recursively bisect that
+               step up to this depth before recording a failure.
+      fallback_least_squares : if true, a failed Newton step is retried with a
+               rail-bounded least-squares solve before substepping/failing.
+      fallback_full_jacobian : if true, a failed Newton step is retried with an
+               expensive finite-difference Jacobian of the full residual at the
+               smallest retry subdivision.
+      signed_devices : retained for compatibility. All devices now use the
+               signed Verilog-A drain-terminal current; this argument no longer
+               changes per-device behavior.
+      profile : if true, include transient_profile counters in the result.
+      edge_mask : optional boolean mask over tgrid points; intervals touching a
+               true point are counted as edge work in transient_profile.
+      rail_margin : optional voltage margin around numeric rails for topologies
+               that need physical branch selection. If omitted, topologies with
+               require_dc_in_box use a 2 V margin; other topologies are unbounded.
+      V0    : optional initial solved-node vector.
+    Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
+    fields are included when those nodes exist.
+    """
+    marshalled = _marshal_transient(
+        sizes, bias, tgrid, vip=vip, vin=vin, nf=nf, V0=V0, topo=topo,
+        inputs=inputs, node_inputs=node_inputs, current_inputs=current_inputs,
+        corner=corner, max_step=max_step, flat_max_step=flat_max_step,
+        max_retry_subdivisions=max_retry_subdivisions,
+        newton_maxit=newton_maxit, newton_step_limit=newton_step_limit,
+        newton_vtol=newton_vtol,
+        fallback_full_jacobian=fallback_full_jacobian,
+        fallback_least_squares=fallback_least_squares, fallback_tol=fallback_tol,
+        signed_devices=signed_devices, profile=profile, edge_mask=edge_mask,
+        rail_margin=rail_margin, integration_method=integration_method,
+        gear2_be_fallback=gear2_be_fallback, cap_mode=cap_mode,
+        cap_mode_id=cap_mode_id, adaptive=adaptive,
+        adaptive_reltol=adaptive_reltol, adaptive_vabstol=adaptive_vabstol,
+        adaptive_iabstol=adaptive_iabstol,
+        adaptive_max_steps=adaptive_max_steps, adaptive_h0=adaptive_h0,
+        adaptive_config=adaptive_config)
+    ctx = marshalled.ctx
+    tgrid = marshalled.tgrid
+    input_keys = marshalled.input_keys
+    input_values = marshalled.input_values
+    inputs = marshalled.inputs
+    node_inputs = marshalled.node_inputs
+    V0 = marshalled.V0
+    Vhist = marshalled.Vhist
+    edge_mask_arr = marshalled.edge_mask_arr
+    profile = marshalled.profile
+    N = len(tgrid)
+    adaptive = ctx.adaptive
+    integration_method = ctx.integration_method
+    gear2_be_fallback = ctx.gear2_be_fallback
+    max_retry_subdivisions = ctx.max_retry_subdivisions
+    max_step = ctx.max_step
+    flat_max_step = ctx.flat_max_step
+    newton_maxit = ctx.newton_maxit
+    newton_step_limit = ctx.newton_step_limit
+    newton_vtol = ctx.newton_vtol
+    fallback_full_jacobian = ctx.fallback_full_jacobian
+    fallback_least_squares = ctx.fallback_least_squares
+    fallback_tol = ctx.fallback_tol
+    signed_devices = ctx.signed_devices
+    rail_margin = ctx.rail_margin
+
+    nfail = 0
+    nretry = 0
+    nsubsteps = 0
+    used_grid_numba = False
+    partial_grid_numba = False
+    python_start_idx = 1
+    profile_wall_s = 0.0
+    profile_stats = None
+    numba_grid_error = None
+    numba_grid_failed_index = None
+    numba_grid_failed_substeps = 0
+    numba_grid_failed_profile = None
+    numba_grid_failed_intervals = None
+    gear2_done = False
+    gear2_numba_used = False
+    gear2_python_retry_used = False
+    gear2_retry_requested = marshalled.gear2_retry_requested
 
     fixed_g2 = _solve_fixed_gear2_numba(
         ctx, V0, tgrid, input_values, edge_mask_arr, profile,

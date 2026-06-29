@@ -8,9 +8,6 @@ Two panels:
 Usage:
     python examples/sweep_vin_vout.py
 """
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
 import numpy as np
 from scipy.optimize import fsolve
 import matplotlib.pyplot as plt

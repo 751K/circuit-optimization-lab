@@ -13,7 +13,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from core.corners import corner_table, latch_screen, mismatch_mc
 
 # robust re-size: weak cross-coupled feedback (M12/M13) removes the slow-corner

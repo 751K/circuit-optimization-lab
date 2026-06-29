@@ -25,14 +25,9 @@ os.environ.setdefault("CIRCUIT_USE_NUMBA", "1")
 
 import numpy as np
 
-try:
-    from .ac_solver import ac_solve
-    from .noise_solver import band_rms, noise_analysis
-    from .topology import AFE_TOPO
-except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_solver import ac_solve
-    from noise_solver import band_rms, noise_analysis
-    from topology import AFE_TOPO
+from .ac_solver import ac_solve
+from .noise_solver import band_rms, noise_analysis
+from .topology import AFE_TOPO
 
 # Global process corners (pvt0 = -3·0.0753, pbeta0 = -15·0.036 for slow).
 CORNERS = {

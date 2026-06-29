@@ -16,10 +16,7 @@ recipe (period exactly ``1/fchop``, ``pacmag`` not ``mag``, ``maxsideband>=10``)
 """
 from __future__ import annotations
 
-try:
-    from .topology import AFE_TOPO
-except ImportError:  # pragma: no cover - legacy direct module import
-    from topology import AFE_TOPO
+from .topology import AFE_TOPO
 
 # pmos_TFT model card shared by every device (matches tools/calibrate_switch.py and
 # the AT_4000TG reference netlists). Only W/L/NF vary per instance.

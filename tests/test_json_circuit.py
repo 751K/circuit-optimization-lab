@@ -1,4 +1,5 @@
 import json
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -6,10 +7,14 @@ import pytest
 
 import core.analysis_dispatch as dispatch_mod
 from core.ac_solver import ac_solve
+from core.analysis_options import option_names, schema_properties
 from core.analysis_dispatch import run_analysis_suite
 from core.circuit_loader import circuit_from_dict, load_circuit_json
 from core.corners import CORNERS
 from core.noise_solver import _KB, _TEMP, band_rms, noise_analysis
+from core.pac_solver import pac_solve
+from core.pnoise_solver import pnoise_solve
+from core.pss_solver import pss_solve
 from core.topology import AFE_TOPO
 from core.transient_solver import transient
 
@@ -25,6 +30,29 @@ def test_example_json_matches_schema_when_jsonschema_available():
                  "periodic_rc.json"):
         data = json.loads((ROOT / "examples" / name).read_text())
         jsonschema.validate(data, schema)
+
+
+def test_analysis_option_registry_matches_solver_signatures_and_schema():
+    solver_by_analysis = {
+        "transient": transient,
+        "pss": pss_solve,
+        "pac": pac_solve,
+        "pnoise": pnoise_solve,
+    }
+    for analysis, solver in solver_by_analysis.items():
+        signature_names = set(inspect.signature(solver).parameters)
+        assert option_names(analysis, forwarded_only=True) <= signature_names
+
+    schema = json.loads((ROOT / "schemas" / "circuit.schema.json").read_text())
+    def_name = {
+        "transient": "transientAnalysis",
+        "pss": "pssAnalysis",
+        "pac": "pacAnalysis",
+        "pnoise": "pnoiseAnalysis",
+    }
+    for analysis, name in def_name.items():
+        props = set(schema["$defs"][name]["properties"])
+        assert set(schema_properties(analysis)) <= props
 
 
 def test_load_single_stage_json_runs_all_analyses():
@@ -231,6 +259,37 @@ def test_dispatch_forwards_adaptive_pss_options(monkeypatch):
     assert seen["adaptive_config"].h0 == 1e-6
     assert seen["adaptive_config"].freeze_factor == 5.0
     assert seen["cap_mode"] == "average"
+
+
+def test_dispatch_forwards_pss_registry_options_and_top_level_grid(monkeypatch):
+    spec = load_circuit_json("examples/periodic_rc.json")
+    seen = {}
+
+    def fake_pss_solve(*args, **kwargs):
+        seen.update(kwargs)
+        return {"converged": True, "period": args[2], "corner": kwargs.get("corner")}
+
+    monkeypatch.setattr(dispatch_mod, "pss_solve", fake_pss_solve)
+
+    run_analysis_suite(
+        spec,
+        analyses={
+            "pss": {
+                "n_points": 17,
+                "analytic_jacobian": False,
+                "physical_factor": 3.0,
+                "max_stabilization_periods": 11,
+                "levenberg_marquardt": False,
+                "max_shooting_iters": 0,
+            }
+        },
+    )
+
+    assert len(seen["tgrid"]) == 17
+    assert seen["analytic_jacobian"] is False
+    assert seen["physical_factor"] == 3.0
+    assert seen["max_stabilization_periods"] == 11
+    assert seen["levenberg_marquardt"] is False
 
 
 def test_dispatch_forwards_pac_algorithm_options(monkeypatch):

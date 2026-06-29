@@ -10,40 +10,49 @@ import os
 
 import numpy as np
 
-try:
-    from .adaptive_config import (
-        ADAPTIVE_ACCEPT_WRMS,
-        ADAPTIVE_DONE_ABS,
-        ADAPTIVE_DONE_REL,
-        ADAPTIVE_ERR_FLOOR,
-        ADAPTIVE_GROWTH_MAX,
-        ADAPTIVE_GROWTH_MIN,
-        ADAPTIVE_INITIAL_MIN_DENOM,
-        ADAPTIVE_INPUT_SLOPE_BREAK_FRACTION,
-        ADAPTIVE_LTE_DIVISOR,
-        ADAPTIVE_MIN_H_ABS,
-        ADAPTIVE_MIN_H_REL,
-        ADAPTIVE_SAFETY,
-        ADAPTIVE_SCALE_FLOOR,
-        ADAPTIVE_STEP_ORDER,
-    )
-except ImportError:  # pragma: no cover - legacy direct module import
-    from adaptive_config import (
-        ADAPTIVE_ACCEPT_WRMS,
-        ADAPTIVE_DONE_ABS,
-        ADAPTIVE_DONE_REL,
-        ADAPTIVE_ERR_FLOOR,
-        ADAPTIVE_GROWTH_MAX,
-        ADAPTIVE_GROWTH_MIN,
-        ADAPTIVE_INITIAL_MIN_DENOM,
-        ADAPTIVE_INPUT_SLOPE_BREAK_FRACTION,
-        ADAPTIVE_LTE_DIVISOR,
-        ADAPTIVE_MIN_H_ABS,
-        ADAPTIVE_MIN_H_REL,
-        ADAPTIVE_SAFETY,
-        ADAPTIVE_SCALE_FLOOR,
-        ADAPTIVE_STEP_ORDER,
-    )
+from .transient_profile import (
+    PROFILE_EDGE_NEWTON_ITERS,
+    PROFILE_EDGE_SUBSTEPS,
+    PROFILE_FAILED_EDGE_INTERVALS,
+    PROFILE_FAILED_FLAT_INTERVALS,
+    PROFILE_FAILED_INTERVALS,
+    PROFILE_FAILED_LAST_RESIDUAL_INF,
+    PROFILE_FAILED_LAST_STEP_INF,
+    PROFILE_FAILED_LINEAR_SOLVE_COUNT,
+    PROFILE_FAILED_MAX_RESIDUAL_INF,
+    PROFILE_FAILED_MAX_STEP_INF,
+    PROFILE_FAILED_MAXIT_COUNT,
+    PROFILE_FAILED_STAMP_OR_PREV_COUNT,
+    PROFILE_FAILED_SUBSTEPS,
+    PROFILE_FLAT_NEWTON_ITERS,
+    PROFILE_FLAT_SUBSTEPS,
+    PROFILE_INTERNAL_FD_JAC_FALLBACKS,
+    PROFILE_INTERVALS,
+    PROFILE_LEN,
+    PROFILE_NEWTON_ITERS,
+    PROFILE_PMOS_INTERNAL_NEWTON_ATTEMPTS,
+    PROFILE_PMOS_INTERNAL_NEWTON_ITERS,
+    PROFILE_PMOS_OP_SOLVES,
+    PROFILE_STALLED_RESIDUAL_ACCEPTS,
+    PROFILE_SUBSTEPS,
+    PROFILE_TERMINAL_FD_JAC_FALLBACKS,
+)
+from .adaptive_config import (
+    ADAPTIVE_ACCEPT_WRMS,
+    ADAPTIVE_DONE_ABS,
+    ADAPTIVE_DONE_REL,
+    ADAPTIVE_ERR_FLOOR,
+    ADAPTIVE_GROWTH_MAX,
+    ADAPTIVE_GROWTH_MIN,
+    ADAPTIVE_INITIAL_MIN_DENOM,
+    ADAPTIVE_INPUT_SLOPE_BREAK_FRACTION,
+    ADAPTIVE_LTE_DIVISOR,
+    ADAPTIVE_MIN_H_ABS,
+    ADAPTIVE_MIN_H_REL,
+    ADAPTIVE_SAFETY,
+    ADAPTIVE_SCALE_FLOOR,
+    ADAPTIVE_STEP_ORDER,
+)
 
 
 _FALSE_ENV_VALUES = {"0", "false", "no", "off"}
@@ -837,10 +846,10 @@ def _stamp_transient_system_impl(
             p_lambda[pos], p_contact_scale[pos], p_exponent[pos],
             p_current_scale[pos], p_inv_Rleak[pos])
         if profile_enabled:
-            profile_stats[1] += 1.0
-            profile_stats[2] += op_attempts
-            profile_stats[3] += op_iters
-            profile_stats[4] += op_fd
+            profile_stats[PROFILE_PMOS_OP_SOLVES] += 1.0
+            profile_stats[PROFILE_PMOS_INTERNAL_NEWTON_ATTEMPTS] += op_attempts
+            profile_stats[PROFILE_PMOS_INTERNAL_NEWTON_ITERS] += op_iters
+            profile_stats[PROFILE_INTERNAL_FD_JAC_FALLBACKS] += op_fd
         if not ok:
             return False
         op_cache_valid[pos] = True
@@ -905,7 +914,7 @@ def _stamp_transient_system_impl(
         if (profile_enabled and (need_gm or need_gds) and
                 (abs(Vs - Vs1) < 1e-10 or abs(Vd1 - Vd) < 1e-10 or
                  abs(Vs1 - Vd) < 1e-10)):
-            profile_stats[5] += 1.0
+            profile_stats[PROFILE_TERMINAL_FD_JAC_FALLBACKS] += 1.0
         okd, gm, gds = _terminal_derivatives_from_jac_impl(
             Vs, Vd, Vg, Vs1, Vd1, F0a, F0b, Idc0, j00, j01, j10, j11,
             need_gm, need_gds, dev_use_abs[pos], HH, p_Vfb[pos],
@@ -1058,7 +1067,7 @@ def _transient_newton_impl(
     V = seed.copy()
     R = np.empty(n)
     J = np.empty((n, n))
-    profile_stats = np.zeros(24)
+    profile_stats = np.zeros(PROFILE_LEN)
     prev_vs = np.empty(dev_di.shape[0])
     prev_vd = np.empty(dev_di.shape[0])
     prev_vg = np.empty(dev_di.shape[0])
@@ -1191,7 +1200,7 @@ def _transient_newton_reuse_impl(
         prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv)
     if not ok_prev:
         if profile_enabled:
-            profile_stats[20] += 1.0
+            profile_stats[PROFILE_FAILED_STAMP_OR_PREV_COUNT] += 1.0
         return 0, False, False
     prev = math.inf
     last_rmax = math.inf
@@ -1220,13 +1229,13 @@ def _transient_newton_reuse_impl(
             bdf_a0, bdf_a1, bdf_a2, prev2_cgs, prev2_cgd, cap_prev2_dv)
         if not ok:
             if profile_enabled:
-                profile_stats[20] += 1.0
-                profile_stats[16] = last_rmax
-                if last_rmax > profile_stats[17]:
-                    profile_stats[17] = last_rmax
-                profile_stats[18] = last_mx
-                if last_mx > profile_stats[19]:
-                    profile_stats[19] = last_mx
+                profile_stats[PROFILE_FAILED_STAMP_OR_PREV_COUNT] += 1.0
+                profile_stats[PROFILE_FAILED_LAST_RESIDUAL_INF] = last_rmax
+                if last_rmax > profile_stats[PROFILE_FAILED_MAX_RESIDUAL_INF]:
+                    profile_stats[PROFILE_FAILED_MAX_RESIDUAL_INF] = last_rmax
+                profile_stats[PROFILE_FAILED_LAST_STEP_INF] = last_mx
+                if last_mx > profile_stats[PROFILE_FAILED_MAX_STEP_INF]:
+                    profile_stats[PROFILE_FAILED_MAX_STEP_INF] = last_mx
             return it + 1, False, False
 
         if profile_enabled or fallback_accept:
@@ -1243,13 +1252,13 @@ def _transient_newton_reuse_impl(
         solved, dV = _solve_dense_neg_rhs_inplace_impl(J, R)
         if not solved:
             if profile_enabled:
-                profile_stats[21] += 1.0
-                profile_stats[16] = last_rmax
-                if last_rmax > profile_stats[17]:
-                    profile_stats[17] = last_rmax
-                profile_stats[18] = last_mx
-                if last_mx > profile_stats[19]:
-                    profile_stats[19] = last_mx
+                profile_stats[PROFILE_FAILED_LINEAR_SOLVE_COUNT] += 1.0
+                profile_stats[PROFILE_FAILED_LAST_RESIDUAL_INF] = last_rmax
+                if last_rmax > profile_stats[PROFILE_FAILED_MAX_RESIDUAL_INF]:
+                    profile_stats[PROFILE_FAILED_MAX_RESIDUAL_INF] = last_rmax
+                profile_stats[PROFILE_FAILED_LAST_STEP_INF] = last_mx
+                if last_mx > profile_stats[PROFILE_FAILED_MAX_STEP_INF]:
+                    profile_stats[PROFILE_FAILED_MAX_STEP_INF] = last_mx
             return it + 1, False, True
         mx = 0.0
         for i in range(n):
@@ -1276,7 +1285,7 @@ def _transient_newton_reuse_impl(
                     relaxed_tol = 1e-6
                 if last_rmax < relaxed_tol:
                     if profile_enabled:
-                        profile_stats[23] += 1.0
+                        profile_stats[PROFILE_STALLED_RESIDUAL_ACCEPTS] += 1.0
                     return it + 1, True, True
                 prev = mx
                 continue
@@ -1288,7 +1297,7 @@ def _transient_newton_reuse_impl(
                     relaxed_tol = 1e-6
                 if last_rmax < relaxed_tol:
                     if profile_enabled:
-                        profile_stats[23] += 1.0
+                        profile_stats[PROFILE_STALLED_RESIDUAL_ACCEPTS] += 1.0
                     return it + 1, True, True
                 prev = mx
                 continue
@@ -1296,13 +1305,13 @@ def _transient_newton_reuse_impl(
         prev = mx
 
     if profile_enabled:
-        profile_stats[22] += 1.0
-        profile_stats[16] = last_rmax
-        if last_rmax > profile_stats[17]:
-            profile_stats[17] = last_rmax
-        profile_stats[18] = last_mx
-        if last_mx > profile_stats[19]:
-            profile_stats[19] = last_mx
+        profile_stats[PROFILE_FAILED_MAXIT_COUNT] += 1.0
+        profile_stats[PROFILE_FAILED_LAST_RESIDUAL_INF] = last_rmax
+        if last_rmax > profile_stats[PROFILE_FAILED_MAX_RESIDUAL_INF]:
+            profile_stats[PROFILE_FAILED_MAX_RESIDUAL_INF] = last_rmax
+        profile_stats[PROFILE_FAILED_LAST_STEP_INF] = last_mx
+        if last_mx > profile_stats[PROFILE_FAILED_MAX_STEP_INF]:
+            profile_stats[PROFILE_FAILED_MAX_STEP_INF] = last_mx
     return maxit, False, True
 
 
@@ -1350,7 +1359,7 @@ def _transient_solve_grid_impl(
     prev_cgs = np.empty(dev_di.shape[0])
     prev_cgd = np.empty(dev_di.shape[0])
     cap_prev_dv = np.empty(cap_value.shape[0])
-    profile_stats = np.zeros(24)
+    profile_stats = np.zeros(PROFILE_LEN)
     failed_interval_indices = np.full(N, -1, dtype=np.int64)
     failed_interval_count = 0
     nsubsteps = 0
@@ -1416,17 +1425,17 @@ def _transient_solve_grid_impl(
                 for _retry_pow in range(max_retry_subdivisions):
                     retry_count *= 2
                 if retry_count <= 1:
-                    profile_stats[10] += 1.0
+                    profile_stats[PROFILE_FAILED_SUBSTEPS] += 1.0
                     if fallback_accept:
                         if profile_enabled:
-                            profile_stats[0] += iters
+                            profile_stats[PROFILE_NEWTON_ITERS] += iters
                         return False, Vhist, nsubsteps_before_interval, k, profile_stats, failed_interval_indices
                     if profile_enabled:
-                        profile_stats[0] += iters
+                        profile_stats[PROFILE_NEWTON_ITERS] += iters
                     interval_failed = True
                     break
                 if profile_enabled:
-                    profile_stats[0] += iters
+                    profile_stats[PROFILE_NEWTON_ITERS] += iters
                 retry_ok = True
                 for rr in range(retry_count):
                     retry_frac = (rr + 1.0) / retry_count
@@ -1464,19 +1473,19 @@ def _transient_solve_grid_impl(
                         profile_enabled, profile_stats,
                         1.0, -1.0, 0.0, prev_cgs, prev_cgd, cap_prev_dv)
                     if profile_enabled:
-                        profile_stats[0] += iters_r
+                        profile_stats[PROFILE_NEWTON_ITERS] += iters_r
                     if not ok_r:
                         retry_ok = False
-                        profile_stats[10] += 1.0
+                        profile_stats[PROFILE_FAILED_SUBSTEPS] += 1.0
                         break
                     nsubsteps += 1
                     if profile_enabled:
                         if interval_edge:
-                            profile_stats[6] += 1.0
-                            profile_stats[8] += iters_r
+                            profile_stats[PROFILE_EDGE_SUBSTEPS] += 1.0
+                            profile_stats[PROFILE_EDGE_NEWTON_ITERS] += iters_r
                         else:
-                            profile_stats[7] += 1.0
-                            profile_stats[9] += iters_r
+                            profile_stats[PROFILE_FLAT_SUBSTEPS] += 1.0
+                            profile_stats[PROFILE_FLAT_NEWTON_ITERS] += iters_r
                     for i in range(n):
                         Vp[i] = Vwork[i]
                     for ii in range(ninputs):
@@ -1489,13 +1498,13 @@ def _transient_solve_grid_impl(
             else:
                 nsubsteps += 1
                 if profile_enabled:
-                    profile_stats[0] += iters
+                    profile_stats[PROFILE_NEWTON_ITERS] += iters
                     if interval_edge:
-                        profile_stats[6] += 1.0
-                        profile_stats[8] += iters
+                        profile_stats[PROFILE_EDGE_SUBSTEPS] += 1.0
+                        profile_stats[PROFILE_EDGE_NEWTON_ITERS] += iters
                     else:
-                        profile_stats[7] += 1.0
-                        profile_stats[9] += iters
+                        profile_stats[PROFILE_FLAT_SUBSTEPS] += 1.0
+                        profile_stats[PROFILE_FLAT_NEWTON_ITERS] += iters
                 for i in range(n):
                     Vp[i] = Vwork[i]
                 for ii in range(ninputs):
@@ -1504,19 +1513,19 @@ def _transient_solve_grid_impl(
             # Match the Python fallback's non-throwing transient behavior for
             # non-robust mode: keep the last accepted state, count the failed
             # interval, and continue the trajectory.
-            profile_stats[13] += 1.0
+            profile_stats[PROFILE_FAILED_INTERVALS] += 1.0
             if interval_edge:
-                profile_stats[14] += 1.0
+                profile_stats[PROFILE_FAILED_EDGE_INTERVALS] += 1.0
             else:
-                profile_stats[15] += 1.0
+                profile_stats[PROFILE_FAILED_FLAT_INTERVALS] += 1.0
             if profile_enabled and failed_interval_count < N:
                 failed_interval_indices[failed_interval_count] = k
                 failed_interval_count += 1
         for i in range(n):
             Vhist[k, i] = Vp[i]
     if profile_enabled:
-        profile_stats[11] = N - 1
-        profile_stats[12] = nsubsteps
+        profile_stats[PROFILE_INTERVALS] = N - 1
+        profile_stats[PROFILE_SUBSTEPS] = nsubsteps
     return True, Vhist, nsubsteps, -1, profile_stats, failed_interval_indices
 
 
@@ -1620,7 +1629,7 @@ def _gear2_substep_newton_reuse_impl(
         p2_vs, p2_vd, p2_vg, prev2_cgs, prev2_cgd, cap_prev2_dv)
     if not ok2:
         if profile_enabled:
-            profile_stats[20] += 1.0
+            profile_stats[PROFILE_FAILED_STAMP_OR_PREV_COUNT] += 1.0
         return 0, False, False
     return _transient_newton_reuse_impl(
         seed, Vp, input_now, input_prev, h_n, n, maxit, step_limit, vtol,
@@ -1647,27 +1656,26 @@ def _gear2_substep_newton_reuse_impl(
 
 
 def _transient_solve_adaptive_gear2_impl(
-        V0, tgrid_src, input_values_src, profile_enabled,
-        max_step, adaptive_reltol, adaptive_vabstol, adaptive_iabstol,
-        adaptive_max_steps, adaptive_h0,
-        n, maxit, step_limit, vtol,
-        gmin, fallback_accept, fallback_tol, HH,
-        dev_d_kind, dev_d_ref, dev_d_val,
-        dev_g_kind, dev_g_ref, dev_g_val,
-        dev_s_kind, dev_s_ref, dev_s_val,
-        dev_di, dev_gi, dev_si, dev_use_abs,
-        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
-        p_current_scale, p_inv_Rleak,
-        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
-        p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
-        op_cache_valid, op_cache_vs1, op_cache_vd1,
-        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
-        res_b_val, res_ai, res_bi, res_g,
-        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
-        cap_b_val, cap_ai, cap_bi, cap_value,
-        isrc_pi, isrc_qi, isrc_value,
-        dyn_pi, dyn_qi, dyn_input_idx,
-        cap_mode, clip_lo, clip_hi):
+        run, step, solver, device_terms, device_nodes, model_params,
+        op_cache, passives, sources, cap_clip):
+    V0, tgrid_src, input_values_src, profile_enabled = run
+    (max_step, adaptive_reltol, adaptive_vabstol, adaptive_iabstol,
+     adaptive_max_steps, adaptive_h0) = step
+    (n, maxit, step_limit, vtol, gmin, fallback_accept, fallback_tol,
+     HH) = solver
+    (dev_d_kind, dev_d_ref, dev_d_val, dev_g_kind, dev_g_ref, dev_g_val,
+     dev_s_kind, dev_s_ref, dev_s_val) = device_terms
+    dev_di, dev_gi, dev_si, dev_use_abs = device_nodes
+    (p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+     p_current_scale, p_inv_Rleak, p_two_over_pi, p_cap_cgs1,
+     p_cap_cgd1, p_cap_half_wl_ci, p_cap_cgs3_base, p_cap_cgd3_base,
+     p_k1, p_gate_leak_g) = model_params
+    op_cache_valid, op_cache_vs1, op_cache_vd1 = op_cache
+    (res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref, res_b_val,
+     res_ai, res_bi, res_g, cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind,
+     cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value) = passives
+    isrc_pi, isrc_qi, isrc_value, dyn_pi, dyn_qi, dyn_input_idx = sources
+    cap_mode, clip_lo, clip_hi = cap_clip
     Nsrc = tgrid_src.shape[0]
     ninputs = input_values_src.shape[0]
     max_steps = int(adaptive_max_steps)
@@ -1676,7 +1684,7 @@ def _transient_solve_adaptive_gear2_impl(
     thist = np.empty(max_steps + 1)
     Vhist = np.empty((max_steps + 1, n))
     input_hist = np.empty((max_steps + 1, ninputs))
-    profile_stats = np.zeros(24)
+    profile_stats = np.zeros(PROFILE_LEN)
     for i in range(n):
         Vhist[0, i] = V0[i]
     thist[0] = tgrid_src[0]
@@ -1855,7 +1863,7 @@ def _transient_solve_adaptive_gear2_impl(
 
         nsubsteps += 3
         if profile_enabled:
-            profile_stats[0] += it1 + it2 + it3
+            profile_stats[PROFILE_NEWTON_ITERS] += it1 + it2 + it3
         if ok_full and ok_mid and ok_half2:
             err = _adaptive_error_impl(Vhalf2, Vfull, n, adaptive_reltol,
                                        adaptive_vabstol, adaptive_iabstol)
@@ -1957,7 +1965,7 @@ def _transient_solve_grid_gear2_impl(
     input_next = np.empty(ninputs)
     piece_in0 = np.empty(ninputs)
     piece_in1 = np.empty(ninputs)
-    profile_stats = np.zeros(24)
+    profile_stats = np.zeros(PROFILE_LEN)
     failed = np.full(N, -1, dtype=np.int64)
     failed_interval_count = 0
     nsubsteps = 0
@@ -2033,16 +2041,16 @@ def _transient_solve_grid_gear2_impl(
                 cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
                 profile_enabled, profile_stats)
             if profile_enabled:
-                profile_stats[0] += iters
+                profile_stats[PROFILE_NEWTON_ITERS] += iters
             if ok:
                 nsubsteps += 1
                 if profile_enabled:
                     if interval_edge:
-                        profile_stats[6] += 1.0
-                        profile_stats[8] += iters
+                        profile_stats[PROFILE_EDGE_SUBSTEPS] += 1.0
+                        profile_stats[PROFILE_EDGE_NEWTON_ITERS] += iters
                     else:
-                        profile_stats[7] += 1.0
-                        profile_stats[9] += iters
+                        profile_stats[PROFILE_FLAT_SUBSTEPS] += 1.0
+                        profile_stats[PROFILE_FLAT_NEWTON_ITERS] += iters
                 for i in range(n):
                     Vp2[i] = Vp[i]
                     Vp[i] = Vwork[i]
@@ -2052,7 +2060,7 @@ def _transient_solve_grid_gear2_impl(
                 h_prev_cur = hpiece
                 continue
 
-            profile_stats[10] += 1.0
+            profile_stats[PROFILE_FAILED_SUBSTEPS] += 1.0
             retry_count = 1
             for _retry_pow in range(max_retry_subdivisions):
                 retry_count *= 2
@@ -2100,19 +2108,19 @@ def _transient_solve_grid_gear2_impl(
                     cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
                     profile_enabled, profile_stats)
                 if profile_enabled:
-                    profile_stats[0] += iters_r
+                    profile_stats[PROFILE_NEWTON_ITERS] += iters_r
                 if not ok_r:
                     retry_ok = False
-                    profile_stats[10] += 1.0
+                    profile_stats[PROFILE_FAILED_SUBSTEPS] += 1.0
                     break
                 nsubsteps += 1
                 if profile_enabled:
                     if interval_edge:
-                        profile_stats[6] += 1.0
-                        profile_stats[8] += iters_r
+                        profile_stats[PROFILE_EDGE_SUBSTEPS] += 1.0
+                        profile_stats[PROFILE_EDGE_NEWTON_ITERS] += iters_r
                     else:
-                        profile_stats[7] += 1.0
-                        profile_stats[9] += iters_r
+                        profile_stats[PROFILE_FLAT_SUBSTEPS] += 1.0
+                        profile_stats[PROFILE_FLAT_NEWTON_ITERS] += iters_r
                 for i in range(n):
                     Vp2[i] = Vp[i]
                     Vp[i] = Vwork[i]
@@ -2126,19 +2134,19 @@ def _transient_solve_grid_gear2_impl(
                 interval_failed = True
                 break
         if interval_failed:
-            profile_stats[13] += 1.0
+            profile_stats[PROFILE_FAILED_INTERVALS] += 1.0
             if interval_edge:
-                profile_stats[14] += 1.0
+                profile_stats[PROFILE_FAILED_EDGE_INTERVALS] += 1.0
             else:
-                profile_stats[15] += 1.0
+                profile_stats[PROFILE_FAILED_FLAT_INTERVALS] += 1.0
             if profile_enabled and failed_interval_count < N:
                 failed[failed_interval_count] = k
                 failed_interval_count += 1
         for i in range(n):
             Vhist[k, i] = Vp[i]
     if profile_enabled:
-        profile_stats[11] = N - 1
-        profile_stats[12] = nsubsteps
+        profile_stats[PROFILE_INTERVALS] = N - 1
+        profile_stats[PROFILE_SUBSTEPS] = nsubsteps
     return True, Vhist, nsubsteps, -1, profile_stats, failed
 
 

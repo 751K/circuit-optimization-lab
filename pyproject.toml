@@ -13,6 +13,23 @@ dependencies = [
     "flask>=3.0",
 ]
 
+[project.optional-dependencies]
+numba = [
+    "numba>=0.60",
+]
+test = [
+    "pytest>=8.0",
+    "jsonschema>=4.0",
+]
+dev = [
+    "numba>=0.60",
+    "pytest>=8.0",
+    "jsonschema>=4.0",
+]
+
+[project.scripts]
+circuit-opt = "core.__main__:main"
+
 [tool.setuptools]
 packages = ["core"]
 

@@ -41,13 +41,15 @@ Standalone test: stiff RC + `pmos_chopper_transient` — adaptive reaches a targ
 
 ## Phase 2 — adaptive PSS orbit + monodromy
 
-`pss_solve(adaptive=True)` ([core/pss_solver.py]) and `pmos_chopper_pss(adaptive=…)` ([core/chopper.py]):
+`pss_solve(adaptive=True)` ([core/pss_solver.py]):
 
 - Each shooting iteration integrates one period with the Phase-1 adaptive driver → orbit + **its** grid; residual `x(T)-x0` as today.
 - The analytic gear2 monodromy is built on **that iteration's grid** (the variable-step monodromy already works — the chopper's edge-refined non-uniform grid proves it). **Freeze the grid** once near convergence (use the last accepted iteration's grid for the final orbit + monodromy) so the final Jacobian/orbit are on one stable grid and the shooting Newton isn't perturbed by grid churn. FD-shooting remains valid (re-integrate per perturbation).
 - `pss_result["t"]` is non-uniform → PAC/PNoise consume it unchanged (finding #1). No edits to `pac_solver.py` / `pnoise_solver.py`.
 
-Test: adaptive chopper PSS orbit/PAC/PNoise ≈ the fixed-grid result within tol; SC-LPF adaptive PSS converges (`pss_status`).
+Test: SC-LPF adaptive PSS converges (`pss_status`). The PMOS chopper wrapper now
+rejects `adaptive=True` with `ValueError` and keeps the validated fixed
+edge-refined grid until chopper-specific adaptive stepping is proven.
 
 ## Phase 3 — validate Cadence match + operator unification
 
@@ -63,13 +65,13 @@ Port the adaptive loop to numba: new `_transient_solve_adaptive_gear2_impl` mode
 - [core/transient_solver.py] — Phase 1 adaptive driver + `transient(adaptive=…)`; reuse the gear2 step-coeff + Newton + history.
 - [core/numba_kernels.py] — `rho`/BDF2-coeff block (1578), `_transient_newton_reuse_impl`, `_transient_solve_grid_gear2_impl` (1629, the model); Phase 4 adaptive kernel.
 - [core/pss_solver.py] — Phase 2 adaptive shooting + grid-freeze; `_make_period_grid` (311), `_shooting_monodromy` (variable-step already).
-- [core/chopper.py] — `pmos_chopper_pss(adaptive=…)`; `refine_chopper_tgrid` (795) as the a-priori-edge baseline to compare against.
+- [core/chopper.py] — `pmos_chopper_pss(adaptive=True)` is an explicit error; `refine_chopper_tgrid` remains the validated a-priori-edge baseline.
 - **Unchanged:** [core/pac_solver.py], [core/pnoise_solver.py] — already resample any orbit grid (`_periodic_interp`→`t_uniform`).
 - [tests/test_periodic_solvers.py], [tests/test_chopper.py] — adaptive tests.
 
 ## Verification
 - `RUN_SLOW_CHOPPER=1 CIRCUIT_USE_NUMBA=1 python -m core.calibration --all` → 5/5; fixed-grid default byte-stable for cases that do not opt into adaptive. SC-LPF intentionally opts into `gear2 + adaptive + cap_mode="average"` in `calibration/sc_lpf/metadata.json`.
-- New tests: (a) adaptive 2nd-order + step-economy on a stiff RC (steps ≪ uniform for the same error); (b) adaptive chopper PAC/PNoise ≈ fixed-grid within tol; (c) **adaptive SC-LPF on `average` matches Cadence 3.48 µV** (the unification result) vs the stored `calibration/sc_lpf` ref.
+- New tests: (a) adaptive 2nd-order + step-economy on a stiff RC (steps ≪ uniform for the same error); (b) chopper wrapper rejects unsupported adaptive mode; (c) **adaptive SC-LPF on `average` matches Cadence 3.48 µV** (the unification result) vs the stored `calibration/sc_lpf` ref.
 - Optional server cross-check: rerun SC-LPF/chopper on `flex`, compare our adaptive grid's step distribution to Cadence's (`reltol=1e-4`, ~487 steps/period).
 
 ## Risks

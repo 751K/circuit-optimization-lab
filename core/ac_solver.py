@@ -4,14 +4,9 @@ Solves the full circuit at each frequency, computes gain and BW.
 Includes ALL transistors + load capacitors.
 """
 import numpy as np
-try:
-    from .device_model import create_device, get_default_model_type
-    from .topology import AFE_TOPO
-    from .compiled_topology import CompiledTopology
-except ImportError:  # pragma: no cover - legacy direct module import
-    from device_model import create_device, get_default_model_type
-    from topology import AFE_TOPO
-    from compiled_topology import CompiledTopology
+from .device_model import create_device, get_default_model_type
+from .topology import AFE_TOPO
+from .compiled_topology import CompiledTopology
 
 
 def _dev_corner(corner, name):
@@ -28,10 +23,7 @@ def _dev_corner(corner, name):
     if not corner:
         return {}
     if isinstance(corner, str):
-        try:
-            from .corners import CORNERS
-        except ImportError:  # pragma: no cover - legacy direct module import
-            from corners import CORNERS
+        from .corners import CORNERS
         if corner not in CORNERS:
             raise ValueError(f"Unknown process corner {corner!r}; expected one of {sorted(CORNERS)}")
         return CORNERS[corner]
@@ -485,12 +477,8 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
           for name, *_ in topo.devices}
 
     # ── 3. Build & solve the small-signal MNA (terminals from the topology) ──
-    try:
-        from .ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
-                              _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
-    except ImportError:  # pragma: no cover - legacy direct module import
-        from ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
-                            _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
+    from .ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
+                         _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
     NN = plan.n_aug
     drive = topo.input_drives
     # Normalize the gain by the differential input magnitude. The stimulus is either

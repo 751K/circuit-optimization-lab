@@ -124,7 +124,7 @@ register_pdk("at4000tg", {"pmos": PMOS_TFT}, default=True,
 | `transient()` 函数 ~1220 行，含 9 个嵌套函数 | `transient_solver.py` |
 | `pac_solve()` ~800 行 | `pac_solver.py` |
 | ~~器件创建 dict comprehension 重复 ×7~~ | ~~全部 solver~~ | ✅ 已提取为 `ac_solver.build_devices()`（2026-06-23） |
-| 21 个文件各自写 `try/except ImportError` 样板，~80 行冗余 | 全部 core/*.py |
+| ~~21 个文件各自写 `try/except ImportError` 样板，~80 行冗余~~ | ~~全部 core/*.py~~ | ✅ 已统一为包内相对导入，examples/tools 移除 `sys.path.insert`（2026-06-29；`demo/server.py` 保留） |
 
 ### 🟢 MEDIUM/LOW
 

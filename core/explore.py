@@ -45,16 +45,10 @@ os.environ.setdefault("CIRCUIT_USE_NUMBA", "1")
 
 import numpy as np
 
-try:
-    from .ac_solver import ac_solve
-    from .device_model import create_device, get_default_model_type
-    from .noise_solver import band_rms, noise_analysis
-    from .circuit_loader import circuit_from_dict
-except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_solver import ac_solve
-    from device_model import create_device, get_default_model_type
-    from noise_solver import band_rms, noise_analysis
-    from circuit_loader import circuit_from_dict
+from .ac_solver import ac_solve
+from .device_model import create_device, get_default_model_type
+from .noise_solver import band_rms, noise_analysis
+from .circuit_loader import circuit_from_dict
 
 
 METRICS = ("gain_dB", "gain_peak_dB", "bw_Hz", "irn_uV", "power_uW", "area")

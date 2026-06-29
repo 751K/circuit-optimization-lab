@@ -367,6 +367,8 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
   a sparse Floquet adjoint BVP (`pnoise_time_domain_used=True`). This is exact in
   the conversion sideband index; its remaining numerical error is the time-grid
   discretization, so default-like `n_period_samples < 640` is raised to 768.
+  The returned `method` is `pss_time_domain_floquet_adjoint` on this path and
+  `pss_harmonic_balance_conversion_matrix` on the HB fallback path.
 - HB adjoint solves support `hb_solver="auto" | "dense" | "sparse" |
   "iterative"`. The default keeps small systems on dense BLAS/LAPACK and switches
   large, very sparse HB matrices to SciPy sparse direct solves. Forced

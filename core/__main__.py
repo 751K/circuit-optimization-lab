@@ -30,26 +30,15 @@ import sys
 
 import numpy as np
 
-try:
-    from .analysis_dispatch import run_analysis_suite
-    from .chopper import (chopper_analysis, pmos_chopper_analysis,
-                          pmos_chopper_lptv_analysis, pmos_chopper_pac,
-                          pmos_chopper_pnoise, pmos_chopper_pss,
-                          pmos_chopper_transient)
-    from .circuit_loader import CircuitSpec, load_circuit_json
-    from .corners import CORNERS, corner_table, mismatch_mc
-    from .explore import explore, load_explore_json
-    from .noise_solver import band_rms
-except ImportError:  # pragma: no cover - legacy direct module import
-    from analysis_dispatch import run_analysis_suite
-    from chopper import (chopper_analysis, pmos_chopper_analysis,
-                         pmos_chopper_lptv_analysis, pmos_chopper_pac,
-                         pmos_chopper_pnoise, pmos_chopper_pss,
-                         pmos_chopper_transient)
-    from circuit_loader import CircuitSpec, load_circuit_json
-    from corners import CORNERS, corner_table, mismatch_mc
-    from explore import explore, load_explore_json
-    from noise_solver import band_rms
+from .analysis_dispatch import run_analysis_suite
+from .chopper import (chopper_analysis, pmos_chopper_analysis,
+                      pmos_chopper_lptv_analysis, pmos_chopper_pac,
+                      pmos_chopper_pnoise, pmos_chopper_pss,
+                      pmos_chopper_transient)
+from .circuit_loader import CircuitSpec, load_circuit_json
+from .corners import CORNERS, corner_table, mismatch_mc
+from .explore import explore, load_explore_json
+from .noise_solver import band_rms
 
 _ANALYSIS_NAMES = ["ac", "noise", "transient", "pss", "pac", "pnoise"]
 _SUBCOMMANDS = ["run", "corners", "mc", "chopper", "explore"]

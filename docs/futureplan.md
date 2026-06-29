@@ -308,7 +308,7 @@ create_transistor("nmos", pdk="myproc", W=100, L=10)  # 便捷创建
 - [x] ~~**gear2 grid subdivision/retry 硬化**~~ ✅ 已完成：裸 transient 的 `integration_method="gear2"`
   在 `max_retry_subdivisions` / `max_step` 请求下进入 Numba gear2 grid，维护 rolling 两步历史并做固定二分 retry；
   stiff chopper 边沿不再触发 BE clean rerun，且不再走 Python gear2 retry 热路径。
-- [x] ~~**LTE adaptive gear2 transient/PSS**~~ ✅ 已完成：`transient/pss_solve/pmos_chopper_pss`
+- [x] ~~**LTE adaptive gear2 transient/PSS**~~ ✅ 已完成：`transient/pss_solve`
   增加 opt-in `adaptive=True`，使用 step-doubling LTE 控制非均匀 accepted grid；PSS
   接近收敛后冻结 grid 再生成最终 orbit/monodromy。`n_aug == n` 的 adaptive gear2
   有 Numba kernel，含 vsource branch 的拓扑走 Python adaptive fallback。SC-LPF
@@ -316,6 +316,8 @@ create_transistor("nmos", pdk="myproc", W=100, L=10)  # 便捷创建
   在 clock slope discontinuity 后重启两步历史，避免 BDF2 history 跨边沿污染。
   当前 `calibration/sc_lpf` PASS：PAC gain −0.32%、BW +1.07%、PNoise output +2.82%
   vs Spectre，并用 `pnoise_n_period_samples=512` / `pnoise_max_sideband=20` 守住噪声采样。
+  `pmos_chopper_pss(adaptive=True)` 目前明确抛 `ValueError`，继续使用已验证的固定
+  edge-refined grid；避免调用方误以为 adaptive 已在 hard-switched chopper 上生效。
 
 ### 原则
 

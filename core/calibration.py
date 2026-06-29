@@ -35,18 +35,11 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    from . import psf
-    from .ac_solver import ac_solve
-    from .adaptive_config import resolve_adaptive_config
-    from .noise_solver import band_rms, noise_analysis
-    from .topology import AFE_TOPO
-except ImportError:  # pragma: no cover - legacy direct module import
-    import psf
-    from ac_solver import ac_solve
-    from adaptive_config import resolve_adaptive_config
-    from noise_solver import band_rms, noise_analysis
-    from topology import AFE_TOPO
+from . import psf
+from .ac_solver import ac_solve
+from .adaptive_config import resolve_adaptive_config
+from .noise_solver import band_rms, noise_analysis
+from .topology import AFE_TOPO
 
 # Integrated input-referred-noise band (Hz), matching the AFE spec / Cadence ViVA.
 _IRN_BAND = (0.05, 100.0)
@@ -201,10 +194,7 @@ def _run_local_chopper(sizes, bias, nf, corner, metadata, want):
 def _sc_lpf_topology(c):
     """Build the SC-LPF Topology from the self-describing ``circuit`` block (so the
     engine stays independent of examples/). vsource clocks make it an n_aug circuit."""
-    try:
-        from .topology import Topology
-    except ImportError:  # pragma: no cover
-        from topology import Topology
+    from .topology import Topology
     return Topology(
         devices=[tuple(d) for d in c["devices"]],
         vsources=[tuple(v) for v in c["vsources"]],
@@ -262,14 +252,9 @@ def _run_local_sc_lpf(metadata, want):
     """Switched-capacitor LPF PSS/PAC/PNoise (single-ended LPTV). PSS converges on the
     signed-current device model + LM/best-physical shooting; PAC gives the baseband
     transfer (DC gain + -3 dB BW), PNoise the integrated output noise."""
-    try:
-        from .pac_solver import pac_solve
-        from .pnoise_solver import pnoise_solve
-        from .pss_solver import pss_solve
-    except ImportError:  # pragma: no cover
-        from pac_solver import pac_solve
-        from pnoise_solver import pnoise_solve
-        from pss_solver import pss_solve
+    from .pac_solver import pac_solve
+    from .pnoise_solver import pnoise_solve
+    from .pss_solver import pss_solve
     c = metadata["circuit"]
     s = metadata.get("solver", {})
     sizes = _sizes(metadata)

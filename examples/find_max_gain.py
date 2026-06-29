@@ -4,9 +4,6 @@ Find the VIN bias for max small-signal gain, and plot gain vs VIN for each W/L.
 Usage:
     python examples/find_max_gain.py
 """
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
 import numpy as np
 import matplotlib.pyplot as plt
 from core.circuit_loader import load_circuit_json

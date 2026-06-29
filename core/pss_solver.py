@@ -14,18 +14,11 @@ from __future__ import annotations
 
 import numpy as np
 
-try:
-    from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-    from .ac_solver import ac_solve, _dev_corner, _dev_nf, build_devices, get_ss_params
-    from .adaptive_config import resolve_adaptive_config
-    from .topology import AFE_TOPO
-    from .transient_solver import transient
-except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-    from ac_solver import ac_solve, _dev_corner, _dev_nf, build_devices, get_ss_params
-    from adaptive_config import resolve_adaptive_config
-    from topology import AFE_TOPO
-    from transient_solver import transient
+from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
+from .ac_solver import ac_solve, _dev_corner, _dev_nf, build_devices, get_ss_params
+from .adaptive_config import resolve_adaptive_config
+from .topology import AFE_TOPO
+from .transient_solver import transient
 
 
 def _finite_component_max(a):

@@ -29,18 +29,10 @@ Run directly for an AC + noise + transient summary:
 """
 import numpy as np
 
-try:
-    from core.ac_solver import ac_solve
-    from core.noise_solver import band_rms, noise_analysis
-    from core.topology import AFE_TOPO, Topology
-    from core.transient_solver import transient
-except ImportError:  # pragma: no cover - allow running from inside examples/
-    import os, sys
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from core.ac_solver import ac_solve
-    from core.noise_solver import band_rms, noise_analysis
-    from core.topology import AFE_TOPO, Topology
-    from core.transient_solver import transient
+from core.ac_solver import ac_solve
+from core.noise_solver import band_rms, noise_analysis
+from core.topology import AFE_TOPO, Topology
+from core.transient_solver import transient
 
 
 # "Final locked" AFE design (matches docs/core_overview calibration).

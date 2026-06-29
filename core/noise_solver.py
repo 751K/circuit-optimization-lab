@@ -23,20 +23,12 @@ Ground-truth check (Cadence Spectre, afe_gt/tb_noise.raw/noiseAnal.noise):
   M12=M13=47%, M14=M15=1.7%, M7=M8=1.1%, M9=M10=0.3%.
 """
 import numpy as np
-try:
-    from .device_model import create_device, get_default_model_type
-    from .ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
-                         _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
-    from .ac_solver import ac_solve, _dev_corner, _dev_nf
-    from .topology import AFE_TOPO
-    from .compiled_topology import CompiledTopology
-except ImportError:  # pragma: no cover - legacy direct module import
-    from device_model import create_device, get_default_model_type
-    from ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
-                        _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
-    from ac_solver import ac_solve, _dev_corner, _dev_nf
-    from topology import AFE_TOPO
-    from compiled_topology import CompiledTopology
+from .device_model import create_device, get_default_model_type
+from .ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
+                     _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
+from .ac_solver import ac_solve, _dev_corner, _dev_nf
+from .topology import AFE_TOPO
+from .compiled_topology import CompiledTopology
 
 
 _KB = 1.380649e-23          # Boltzmann constant [J/K]

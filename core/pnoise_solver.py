@@ -22,34 +22,19 @@ except Exception:  # pragma: no cover - scipy is a project dependency
     _sp = None
     _spla = None
 
-try:
-    from .ac_mna import _branch_incidence
-    from .ac_solver import _dev_corner, _dev_nf, build_devices, get_ss_params
-    from .noise_solver import band_rms, noise_analysis
-    from .numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
-    from .pac_solver import (
-        _assemble_pac_linearization_python,
-        _conversion_charge_caps,
-        _freeze_kwargs,
-        _freeze_nf,
-        _freeze_sizes,
-        _is_constant_wave,
-        pac_solve,
-    )
-except ImportError:  # pragma: no cover - legacy direct module import
-    from ac_mna import _branch_incidence
-    from ac_solver import _dev_corner, _dev_nf, build_devices, get_ss_params
-    from noise_solver import band_rms, noise_analysis
-    from numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
-    from pac_solver import (
-        _assemble_pac_linearization_python,
-        _conversion_charge_caps,
-        _freeze_kwargs,
-        _freeze_nf,
-        _freeze_sizes,
-        _is_constant_wave,
-        pac_solve,
-    )
+from .ac_mna import _branch_incidence
+from .ac_solver import _dev_corner, _dev_nf, build_devices, get_ss_params
+from .noise_solver import band_rms, noise_analysis
+from .numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
+from .pac_solver import (
+    _assemble_pac_linearization_python,
+    _conversion_charge_caps,
+    _freeze_kwargs,
+    _freeze_nf,
+    _freeze_sizes,
+    _is_constant_wave,
+    pac_solve,
+)
 
 
 _KB = 1.380649e-23
@@ -530,6 +515,13 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     hb_sparse_min_size = int(hb_sparse_min_size)
     hb_sparse_max_density = float(hb_sparse_max_density)
     hb_sparse_drop_tol = float(hb_sparse_drop_tol)
+    pnoise_warnings = []
+
+    def add_warning(code, message):
+        item = {"code": str(code), "message": str(message)}
+        pnoise_warnings.append(item)
+        warnings.warn(f"PNoise: {message}", RuntimeWarning, stacklevel=2)
+
     tbias = dict(pss_result.get("bias", bias))
     all_sizes, all_nf = _merge_sizes_and_nf(sizes, nf, pss_result)
     if lti_fast_path:
@@ -602,6 +594,9 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         all_noise_sources = lin["noise_sources"]
         n_state = int(lin.get("n_state", Gf.shape[1]))
         n_gate1 = int(lin.get("n_gate1", max(0, n_state - n)))
+        noise_failure_count = int(lin.get("noise_failure_count", 0))
+        noise_failure_devices = tuple(lin.get("noise_failure_devices", ()))
+        noise_failure_reason = str(lin.get("noise_failure_reason", ""))
     else:
         dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
         Gt, Ct, _gdrive, _cdrive, n_gate1 = _assemble_pac_linearization_python(
@@ -614,6 +609,9 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         n_state = Gt.shape[1]
         Sth = np.zeros((len(devices), N))
         Sfl = np.zeros((len(devices), N))
+        noise_failure_count = 0
+        noise_failure_devices = set()
+        noise_failure_reason = ""
         for m in range(N):
             for j, (name, d, g, s) in enumerate(devices):
                 Vs = term_value(s, m)
@@ -632,7 +630,11 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                         S_th, S_fl1 = dev_inst[name].get_noise_psd(
                             Vs, Vd, Vg, frequency=1.0
                         )
-                    except Exception:
+                    except Exception as exc:
+                        noise_failure_count += 1
+                        noise_failure_devices.add(name)
+                        if not noise_failure_reason:
+                            noise_failure_reason = type(exc).__name__
                         S_th, S_fl1 = 0.0, 0.0
                 Sth[j, m] = max(float(S_th), 0.0)
                 Sfl[j, m] = max(float(S_fl1), 0.0)
@@ -665,7 +667,20 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 "noise_sources": all_noise_sources,
                 "n_state": int(n_state),
                 "n_gate1": int(n_gate1),
+                "noise_failure_count": int(noise_failure_count),
+                "noise_failure_devices": tuple(sorted(noise_failure_devices)),
+                "noise_failure_reason": str(noise_failure_reason),
             }
+    noise_failure_devices = tuple(sorted(noise_failure_devices))
+    if noise_failure_count:
+        devices_s = ", ".join(noise_failure_devices)
+        add_warning(
+            "device_noise_unsupported",
+            "device noise evaluation failed for "
+            f"{noise_failure_count} orbit samples on {devices_s}; "
+            "those device noise contributions were set to zero. "
+            "This degradation path is not fully supported yet.",
+        )
     linearization_time_s = time.perf_counter() - t_linear0
 
     noise_sources = [
@@ -694,6 +709,13 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
          _sp is not None and _spla is not None and
          sparse_density_estimate <= hb_sparse_max_density)
     )
+    if hb_solver_requested in {"sparse", "iterative"} and (_sp is None or _spla is None):
+        add_warning(
+            "hb_sparse_unavailable",
+            f"hb_solver={hb_solver_requested!r} requested, but scipy.sparse is "
+            "unavailable; falling back to dense. This sparse/iterative PNoise "
+            "degradation path is not fully supported yet.",
+        )
     t_hb0 = time.perf_counter()
     Y_base = None
     C_block = None
@@ -719,7 +741,13 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                     drop_tol=hb_sparse_drop_tol, charge_caps=charge_caps)
             hb["Y_base_sparse"] = Y_sparse
             hb["C_block_sparse"] = C_sparse
-        except Exception:
+        except Exception as exc:
+            add_warning(
+                "hb_sparse_assembly_failed",
+                "sparse/iterative HB matrix assembly failed "
+                f"({type(exc).__name__}); falling back to dense. This PNoise "
+                "degradation path is not fully supported yet.",
+            )
             Y_sparse = None
             C_sparse = None
     sparse_density = (_sparse_density(Y_sparse)
@@ -747,6 +775,12 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 pass
     if solver_used in {"sparse", "iterative"} and (Y_sparse is None or C_sparse is None):
         solver_used = "dense"
+        add_warning(
+            "hb_sparse_matrix_missing",
+            f"hb_solver={hb_solver_requested!r} could not build a sparse HB "
+            "matrix; falling back to dense. This PNoise degradation path is not "
+            "fully supported yet.",
+        )
     sparse_nnz = int(Y_sparse.nnz) if Y_sparse is not None else 0
     if cache_linearization:
         cache[hb_key] = hb
@@ -869,6 +903,12 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 hb_sparse_direct_count += 1
             if solve_info["dense_fallback"]:
                 hb_dense_fallbacks += 1
+                add_warning(
+                    "hb_dense_fallback",
+                    f"HB adjoint solve at {freq:g} Hz fell back to a dense or "
+                    "least-squares solve. This PNoise degradation path is not "
+                    "fully supported yet.",
+                )
             hb_solve_count += 1
             if cache_linearization:
                 adj_cache[adj_key] = adj
@@ -950,6 +990,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         gains = pac_result["gains"]
     gains = np.asarray(gains, float)
     irn_psd = out_psd / np.maximum(gains ** 2, 1e-300)
+    method = ("pss_time_domain_floquet_adjoint" if pnoise_time_domain_used
+              else "pss_harmonic_balance_conversion_matrix")
     return {
         "freqs": freqs,
         "f_chop": fundamental,
@@ -977,6 +1019,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         "pnoise_numba_hb_used": bool(hb_numba_used),
         "pnoise_numba_fold_used": bool(use_numba_fold),
         "pnoise_time_domain_used": bool(pnoise_time_domain_used),
+        "pnoise_conversion": "time_domain" if pnoise_time_domain_used else "harmonic_balance",
         "pnoise_hb_solver_requested": hb_solver_requested,
         "pnoise_hb_solver": str(solver_used),
         "pnoise_hb_sparse_available": bool(_sp is not None and _spla is not None),
@@ -991,10 +1034,14 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         "pnoise_hb_block_preconditioner_count": int(hb_block_preconditioner_count),
         "pnoise_hb_iterative_infos": tuple(hb_iterative_infos),
         "pnoise_hb_iterative_iterations": tuple(hb_iterative_iterations),
+        "pnoise_noise_failure_count": int(noise_failure_count),
+        "pnoise_noise_failure_devices": tuple(noise_failure_devices),
+        "pnoise_degraded": bool(pnoise_warnings),
+        "pnoise_warnings": tuple(pnoise_warnings),
         "pnoise_linearization_time_s": float(linearization_time_s),
         "pnoise_hb_assembly_time_s": float(hb_assembly_time_s),
         "pnoise_hb_solve_time_s": float(hb_solve_time_s),
         "pnoise_fold_time_s": float(fold_time_s),
         "pnoise_profile_enabled": bool(profile),
-        "method": "pss_harmonic_balance_conversion_matrix",
+        "method": method,
     }

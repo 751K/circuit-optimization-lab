@@ -454,6 +454,11 @@ Optional. Unified analysis-dispatch configuration. Calling
 the fixed order `ac -> noise -> transient -> pss -> pac -> pnoise`; PAC/PNoise
 automatically reuse or create the required PSS result.
 
+The authoritative option registry for `transient` / `pss` / `pac` / `pnoise`
+lives in `core.analysis_options`. `analysis_dispatch.py` derives forwarded
+solver kwargs and defaults from that registry, and the JSON schema is regression
+tested against the same registry so new solver options do not silently drift.
+
 ```json
 "analyses": {
   "pss": {
