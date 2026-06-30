@@ -25,6 +25,26 @@ def test_transient_numba_arg_packers_match_kernel_signatures():
         nk._transient_solve_adaptive_gear2_impl)
 
 
+def test_fixed_grid_numba_boundary_uses_grouped_contract():
+    names = _param_names(nk._transient_solve_grid_impl)
+    assert names == (
+        "run",
+        "step",
+        "solver",
+        "device_terms",
+        "device_nodes",
+        "model_params",
+        "op_cache",
+        "passives",
+        "sources",
+        "cap_clip",
+    )
+    assert names == _param_names(nk._transient_solve_grid_gear2_impl)
+    grouped_names = tuple(name for name, _fields in ts._NUMBA_GRID_ARG_GROUPS)
+    assert grouped_names == names
+    assert all(len(fields) <= 18 for _name, fields in ts._NUMBA_GRID_ARG_GROUPS)
+
+
 def test_adaptive_gear2_numba_boundary_uses_grouped_contract():
     names = _param_names(nk._transient_solve_adaptive_gear2_impl)
     assert names == (

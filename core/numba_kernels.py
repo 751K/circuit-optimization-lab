@@ -1316,27 +1316,25 @@ def _transient_newton_reuse_impl(
 
 
 def _transient_solve_grid_impl(
-        V0, tgrid, input_values, edge_mask, profile_enabled,
-        max_step, flat_max_step, max_retry_subdivisions,
-        n, maxit, step_limit, vtol,
-        gmin, fallback_accept, fallback_tol, HH,
-        dev_d_kind, dev_d_ref, dev_d_val,
-        dev_g_kind, dev_g_ref, dev_g_val,
-        dev_s_kind, dev_s_ref, dev_s_val,
-        dev_di, dev_gi, dev_si, dev_use_abs,
-        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
-        p_current_scale, p_inv_Rleak,
-        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
-        p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
-        op_cache_valid, op_cache_vs1, op_cache_vd1,
-        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
-        res_b_val, res_ai, res_bi, res_g,
-        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
-        cap_b_val, cap_ai, cap_bi, cap_value,
-        isrc_pi, isrc_qi, isrc_value,
-        dyn_pi, dyn_qi, dyn_input_idx,
-        cap_mode,
-        clip_lo, clip_hi):
+        run, step, solver, device_terms, device_nodes, model_params,
+        op_cache, passives, sources, cap_clip):
+    V0, tgrid, input_values, edge_mask, profile_enabled = run
+    max_step, flat_max_step, max_retry_subdivisions = step
+    (n, maxit, step_limit, vtol, gmin, fallback_accept, fallback_tol,
+     HH) = solver
+    (dev_d_kind, dev_d_ref, dev_d_val, dev_g_kind, dev_g_ref, dev_g_val,
+     dev_s_kind, dev_s_ref, dev_s_val) = device_terms
+    dev_di, dev_gi, dev_si, dev_use_abs = device_nodes
+    (p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+     p_current_scale, p_inv_Rleak, p_two_over_pi, p_cap_cgs1,
+     p_cap_cgd1, p_cap_half_wl_ci, p_cap_cgs3_base, p_cap_cgd3_base,
+     p_k1, p_gate_leak_g) = model_params
+    op_cache_valid, op_cache_vs1, op_cache_vd1 = op_cache
+    (res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref, res_b_val,
+     res_ai, res_bi, res_g, cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind,
+     cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value) = passives
+    isrc_pi, isrc_qi, isrc_value, dyn_pi, dyn_qi, dyn_input_idx = sources
+    cap_mode, clip_lo, clip_hi = cap_clip
     N = tgrid.shape[0]
     ninputs = input_values.shape[0]
     Vhist = np.zeros((N, n))
@@ -1909,32 +1907,31 @@ def _transient_solve_adaptive_gear2_impl(
 
 
 def _transient_solve_grid_gear2_impl(
-        V0, tgrid, input_values, edge_mask, profile_enabled,
-        max_step, flat_max_step, max_retry_subdivisions,
-        n, maxit, step_limit, vtol,
-        gmin, fallback_accept, fallback_tol, HH,
-        dev_d_kind, dev_d_ref, dev_d_val,
-        dev_g_kind, dev_g_ref, dev_g_val,
-        dev_s_kind, dev_s_ref, dev_s_val,
-        dev_di, dev_gi, dev_si, dev_use_abs,
-        p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
-        p_current_scale, p_inv_Rleak,
-        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
-        p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
-        op_cache_valid, op_cache_vs1, op_cache_vd1,
-        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
-        res_b_val, res_ai, res_bi, res_g,
-        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
-        cap_b_val, cap_ai, cap_bi, cap_value,
-        isrc_pi, isrc_qi, isrc_value,
-        dyn_pi, dyn_qi, dyn_input_idx,
-        cap_mode, clip_lo, clip_hi):
+        run, step, solver, device_terms, device_nodes, model_params,
+        op_cache, passives, sources, cap_clip):
     """Variable-step BDF2/gear2 grid solver with maxstep slicing and retry.
 
     Each accepted internal substep updates the BDF2 history tuple
     (x[n-1], x[n-2], h[n-1]), so subdivided raw transients keep the same history
     semantics as the Python gear2 solve_chunk path.
     """
+    V0, tgrid, input_values, edge_mask, profile_enabled = run
+    max_step, flat_max_step, max_retry_subdivisions = step
+    (n, maxit, step_limit, vtol, gmin, fallback_accept, fallback_tol,
+     HH) = solver
+    (dev_d_kind, dev_d_ref, dev_d_val, dev_g_kind, dev_g_ref, dev_g_val,
+     dev_s_kind, dev_s_ref, dev_s_val) = device_terms
+    dev_di, dev_gi, dev_si, dev_use_abs = device_nodes
+    (p_Vfb, p_Vss, p_Lc, p_lambda, p_contact_scale, p_exponent,
+     p_current_scale, p_inv_Rleak, p_two_over_pi, p_cap_cgs1,
+     p_cap_cgd1, p_cap_half_wl_ci, p_cap_cgs3_base, p_cap_cgd3_base,
+     p_k1, p_gate_leak_g) = model_params
+    op_cache_valid, op_cache_vs1, op_cache_vd1 = op_cache
+    (res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref, res_b_val,
+     res_ai, res_bi, res_g, cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind,
+     cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value) = passives
+    isrc_pi, isrc_qi, isrc_value, dyn_pi, dyn_qi, dyn_input_idx = sources
+    cap_mode, clip_lo, clip_hi = cap_clip
     N = tgrid.shape[0]
     ninputs = input_values.shape[0]
     ndev = dev_di.shape[0]

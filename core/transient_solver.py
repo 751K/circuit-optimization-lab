@@ -281,38 +281,7 @@ class _TransientMarshal:
     gear2_retry_requested: bool
 
 
-_NUMBA_COMMON_ARG_NAMES = (
-    "n", "maxit", "step_limit", "vtol",
-    "gmin", "fallback_accept", "fallback_tol", "HH",
-    "dev_d_kind", "dev_d_ref", "dev_d_val",
-    "dev_g_kind", "dev_g_ref", "dev_g_val",
-    "dev_s_kind", "dev_s_ref", "dev_s_val",
-    "dev_di", "dev_gi", "dev_si", "dev_use_abs",
-    "p_Vfb", "p_Vss", "p_Lc", "p_lambda", "p_contact_scale", "p_exponent",
-    "p_current_scale", "p_inv_Rleak",
-    "p_two_over_pi", "p_cap_cgs1", "p_cap_cgd1", "p_cap_half_wl_ci",
-    "p_cap_cgs3_base", "p_cap_cgd3_base", "p_k1", "p_gate_leak_g",
-    "op_cache_valid", "op_cache_vs1", "op_cache_vd1",
-    "res_a_kind", "res_a_ref", "res_a_val",
-    "res_b_kind", "res_b_ref", "res_b_val",
-    "res_ai", "res_bi", "res_g",
-    "cap_a_kind", "cap_a_ref", "cap_a_val",
-    "cap_b_kind", "cap_b_ref", "cap_b_val",
-    "cap_ai", "cap_bi", "cap_value",
-    "isrc_pi", "isrc_qi", "isrc_value",
-    "dyn_pi", "dyn_qi", "dyn_input_idx",
-    "cap_mode", "clip_lo", "clip_hi",
-)
-_NUMBA_GRID_ARG_NAMES = (
-    "V0", "tgrid", "input_values", "edge_mask", "profile_enabled",
-    "max_step", "flat_max_step", "max_retry_subdivisions",
-) + _NUMBA_COMMON_ARG_NAMES
-_NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS = (
-    ("run", ("V0", "tgrid_src", "input_values_src", "profile_enabled")),
-    ("step", (
-        "max_step", "adaptive_reltol", "adaptive_vabstol",
-        "adaptive_iabstol", "adaptive_max_steps", "adaptive_h0",
-    )),
+_NUMBA_SHARED_ARG_GROUPS = (
     ("solver", (
         "n", "maxit", "step_limit", "vtol", "gmin",
         "fallback_accept", "fallback_tol", "HH",
@@ -345,6 +314,19 @@ _NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS = (
     )),
     ("cap_clip", ("cap_mode", "clip_lo", "clip_hi")),
 )
+_NUMBA_GRID_ARG_GROUPS = (
+    ("run", ("V0", "tgrid", "input_values", "edge_mask", "profile_enabled")),
+    ("step", ("max_step", "flat_max_step", "max_retry_subdivisions")),
+) + _NUMBA_SHARED_ARG_GROUPS
+_NUMBA_GRID_ARG_NAMES = tuple(
+    group_name for group_name, _field_names in _NUMBA_GRID_ARG_GROUPS)
+_NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS = (
+    ("run", ("V0", "tgrid_src", "input_values_src", "profile_enabled")),
+    ("step", (
+        "max_step", "adaptive_reltol", "adaptive_vabstol",
+        "adaptive_iabstol", "adaptive_max_steps", "adaptive_h0",
+    )),
+) + _NUMBA_SHARED_ARG_GROUPS
 _NUMBA_ADAPTIVE_GEAR2_ARG_NAMES = tuple(
     group_name for group_name, _field_names in _NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS)
 
@@ -365,71 +347,15 @@ def _checked_numba_arg_groups(groups, args):
     return args
 
 
-def _numba_common_kernel_args(ctx):
-    """Shared positional tail for transient Numba kernels.
+def _numba_shared_kernel_arg_groups(ctx):
+    """Shared grouped tail for transient Numba kernels.
 
-    The tuple order is checked against ``core.numba_kernels`` signatures in
-    tests.  Keep all Python-side kernel calls going through this function so a
-    device/source/stamp field cannot be added to only one execution path.
+    Keep all Python-side kernel calls going through this function so a
+    device/source/stamp field cannot be added to only one execution path. The
+    Python/Numba boundary sees semantic groups; individual hot-path kernels may
+    still use positional scalars internally for nopython performance.
     """
-    args = (
-        int(ctx.n), int(ctx.newton_maxit), float(ctx.newton_step_limit),
-        float(ctx.newton_vtol), float(ctx.gmin),
-        bool(ctx.fallback_full_jacobian or ctx.fallback_least_squares),
-        float(ctx.fallback_tol), float(ctx.HH),
-        ctx.dev_d_kind, ctx.dev_d_ref, ctx.dev_d_val,
-        ctx.dev_g_kind, ctx.dev_g_ref, ctx.dev_g_val,
-        ctx.dev_s_kind, ctx.dev_s_ref, ctx.dev_s_val,
-        ctx.dev_di, ctx.dev_gi, ctx.dev_si, ctx.dev_use_abs,
-        ctx.p_Vfb, ctx.p_Vss, ctx.p_Lc, ctx.p_lambda, ctx.p_contact_scale,
-        ctx.p_exponent, ctx.p_current_scale, ctx.p_inv_Rleak,
-        ctx.p_two_over_pi, ctx.p_cap_cgs1, ctx.p_cap_cgd1,
-        ctx.p_cap_half_wl_ci, ctx.p_cap_cgs3_base, ctx.p_cap_cgd3_base,
-        ctx.p_k1, ctx.p_gate_leak_g,
-        ctx.op_cache_valid, ctx.op_cache_vs1, ctx.op_cache_vd1,
-        ctx.res_a_kind, ctx.res_a_ref, ctx.res_a_val,
-        ctx.res_b_kind, ctx.res_b_ref, ctx.res_b_val,
-        ctx.res_ai, ctx.res_bi, ctx.res_g,
-        ctx.cap_a_kind, ctx.cap_a_ref, ctx.cap_a_val,
-        ctx.cap_b_kind, ctx.cap_b_ref, ctx.cap_b_val,
-        ctx.cap_ai, ctx.cap_bi, ctx.cap_value,
-        ctx.isrc_pi, ctx.isrc_qi, ctx.isrc_value,
-        ctx.dyn_pi, ctx.dyn_qi, ctx.dyn_input_idx,
-        int(ctx.cap_id), float(ctx.clip_lo), float(ctx.clip_hi),
-    )
-    return _checked_numba_args(_NUMBA_COMMON_ARG_NAMES, args)
-
-
-def _numba_grid_kernel_args(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
-    max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
-    flat_max_step_arg = -1.0 if ctx.flat_max_step is None else float(ctx.flat_max_step)
-    args = (
-        np.asarray(V0, float), np.asarray(tgrid, float),
-        np.asarray(input_values, float), edge_mask_arr, profile,
-        max_step_arg, flat_max_step_arg, int(ctx.max_retry_subdivisions),
-    ) + _numba_common_kernel_args(ctx)
-    return _checked_numba_args(_NUMBA_GRID_ARG_NAMES, args)
-
-
-def _numba_adaptive_gear2_kernel_args(ctx, V0, tgrid, input_values, profile):
-    max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
-    acfg = ctx.adaptive_config
-    h0_arg = -1.0 if acfg.h0 is None else float(acfg.h0)
-    args = (
-        (
-            np.asarray(V0, float),
-            np.asarray(tgrid, float),
-            np.asarray(input_values, float),
-            bool(profile),
-        ),
-        (
-            max_step_arg,
-            float(acfg.reltol),
-            float(acfg.vabstol),
-            float(acfg.iabstol),
-            int(acfg.max_steps),
-            h0_arg,
-        ),
+    return (
         (
             int(ctx.n),
             int(ctx.newton_maxit),
@@ -514,6 +440,48 @@ def _numba_adaptive_gear2_kernel_args(ctx, V0, tgrid, input_values, profile):
             float(ctx.clip_hi),
         ),
     )
+
+
+def _numba_grid_kernel_args(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
+    max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
+    flat_max_step_arg = -1.0 if ctx.flat_max_step is None else float(ctx.flat_max_step)
+    args = (
+        (
+            np.asarray(V0, float),
+            np.asarray(tgrid, float),
+            np.asarray(input_values, float),
+            edge_mask_arr,
+            bool(profile),
+        ),
+        (
+            max_step_arg,
+            flat_max_step_arg,
+            int(ctx.max_retry_subdivisions),
+        ),
+    ) + _numba_shared_kernel_arg_groups(ctx)
+    return _checked_numba_arg_groups(_NUMBA_GRID_ARG_GROUPS, args)
+
+
+def _numba_adaptive_gear2_kernel_args(ctx, V0, tgrid, input_values, profile):
+    max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
+    acfg = ctx.adaptive_config
+    h0_arg = -1.0 if acfg.h0 is None else float(acfg.h0)
+    args = (
+        (
+            np.asarray(V0, float),
+            np.asarray(tgrid, float),
+            np.asarray(input_values, float),
+            bool(profile),
+        ),
+        (
+            max_step_arg,
+            float(acfg.reltol),
+            float(acfg.vabstol),
+            float(acfg.iabstol),
+            int(acfg.max_steps),
+            h0_arg,
+        ),
+    ) + _numba_shared_kernel_arg_groups(ctx)
     return _checked_numba_arg_groups(_NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS, args)
 
 

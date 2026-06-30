@@ -539,6 +539,8 @@ _CHOP_D3_NF = {"M6": 4, "M7": 128, "M8": 128, "M9": 6, "M10": 6,
 _CHOP_D3_BIAS = {"VDD": 40.0, "VCM": 31.38, "VB": 10.6, "VC": 16.47}
 
 
+@pytest.mark.cadence_regression
+@pytest.mark.slow_regression
 def test_pmos_chopper_pnoise_matches_cadence_band():
     # PSS-based LPTV PNoise vs official chop_tb_d3 slow-corner Cadence reference
     # (IRN=12.4886 uVrms over 0.05-100 Hz; re-run at maxsideband=40 converges to
@@ -571,6 +573,8 @@ def test_pmos_chopper_pnoise_matches_cadence_band():
     assert abs(r["irn_uV_band"] - 12.4886) / 12.4886 < 0.05
 
 
+@pytest.mark.cadence_regression
+@pytest.mark.slow_regression
 def test_pmos_chopper_pnoise_time_domain_is_truncation_free():
     # The time-domain Floquet-adjoint PNoise (sparse BVP solve of F^H zeta = c)
     # computes the adjoint transfer EXACTLY in the sideband index, so its output is
@@ -605,6 +609,8 @@ def test_pmos_chopper_pnoise_time_domain_is_truncation_free():
     assert td_spread < 0.5 * hb_spread
 
 
+@pytest.mark.cadence_regression
+@pytest.mark.slow_regression
 def test_pmos_chopper_pac_matches_cadence_baseband_gain():
     # PSS+PAC vs Cadence design-#3 PSS/PAC reference at f_chop=200 Hz.
     # The official ADE netlist is slow corner. The default chopper PAC path is
@@ -629,6 +635,8 @@ def test_pmos_chopper_pac_matches_cadence_baseband_gain():
     assert abs(g[2] - 2.7305) / 2.7305 < 0.01
 
 
+@pytest.mark.cadence_regression
+@pytest.mark.slow_regression
 def test_pmos_chopper_pac_gear2_matches_cadence_within_1pct():
     # gear2/BDF2 transient closes the backward-Euler switch-edge error: chopper
     # PAC baseband lands within 1% of Cadence (typical corner 13.921 V/V), vs
@@ -648,6 +656,8 @@ def test_pmos_chopper_pac_gear2_matches_cadence_within_1pct():
     assert abs(pac["gains"][0] - 13.921) / 13.921 < 0.01
 
 
+@pytest.mark.cadence_regression
+@pytest.mark.slow_regression
 def test_pmos_chopper_pac_time_domain_matches_cadence():
     # The default time-domain (shooting) PAC integrates the linearized orbit with
     # the Floquet BC x(T)=e^{jwT}x(0): a frequency-independent monodromy + a small

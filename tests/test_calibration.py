@@ -22,6 +22,8 @@ CHOPPERS = [
     "calibration/chopper_design3_fast",
 ]
 
+pytestmark = [pytest.mark.cadence_regression, pytest.mark.slow_regression]
+
 
 def test_psf_parses_amp_reference():
     loaded = load_reference(AMP)

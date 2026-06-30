@@ -235,6 +235,8 @@ def test_vsource_pnoise_resistor_noise_through_short():
         assert "R1" in nz["dev_psd"] and "V1" not in nz["dev_psd"]
 
 
+@pytest.mark.cadence_regression
+@pytest.mark.slow_regression
 def test_sc_lpf_pss_converges_to_physical_orbit():
     # Switched-capacitor LPF (2-phase PMOS switches, vsource clocks): the reverse-
     # biased switch used to pump VMID/VOUT off a thin basin to a spurious ~40 V
@@ -267,6 +269,8 @@ def test_sc_lpf_pss_converges_to_physical_orbit():
     assert abs(bw - 16.96) / 16.96 < 0.12, f"PAC BW {bw:.2f} Hz vs Cadence 16.96 (>12%)"
 
 
+@pytest.mark.cadence_regression
+@pytest.mark.slow_regression
 def test_sc_lpf_pac_is_integration_method_independent():
     # Stiff tau>>T switched-cap PAC must come from the analytic-adjoint HB (built from
     # the continuous small-signal G(t)/C(t) along the orbit), NOT the x0-sensitive

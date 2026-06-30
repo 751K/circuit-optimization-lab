@@ -36,3 +36,7 @@ packages = ["core"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "cadence_regression: tests that compare against archived Cadence/Spectre references",
+    "slow_regression: slower regression tests that still run by default",
+]

@@ -12,6 +12,8 @@ keeps all device/capacitance behavior identical to transient analysis.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
@@ -287,6 +289,511 @@ def _dominant_multiplier(phi):
         return float("nan")
 
 
+@dataclass(frozen=True, slots=True)
+class _Orbit:
+    """A single shooting orbit / one-period run: ``x_end = Phi(x0)`` with
+    ``residual = x_end - x0``.
+
+    *The* representation of a period result everywhere in the solver — there is
+    no competing tuple/dict layout. ``run_period``/``rerun_frozen`` build live
+    orbits (array refs); ``_best_orbit`` builds retained snapshots (copied
+    arrays) for best-so-far and stabilization-converged tracking.
+    """
+    tr: dict
+    x0: np.ndarray
+    x_end: np.ndarray
+    residual: np.ndarray
+    norm: float
+    nfail: int
+
+    @property
+    def score(self) -> float:
+        return _residual_score(self.norm, self.nfail)
+
+
+class _PSSPeriodRunner:
+    """Own one-period transient runs plus adaptive-grid freeze state.
+
+    This isolates the interaction between PSS shooting/stabilization and the
+    transient driver. Shooting logic can request period runs without knowing
+    whether the grid is still adaptive or has been frozen.
+    """
+
+    def __init__(self, *, sizes, bias, period, topo, tgrid, inputs,
+                 transient_kwargs, residual_tol, adaptive, adaptive_config):
+        self.sizes = sizes
+        self.bias = bias
+        self.period = float(period)
+        self.topo = topo
+        self.tgrid = tgrid
+        self.inputs = inputs
+        self.transient_kwargs = dict(transient_kwargs)
+        self.residual_tol = float(residual_tol)
+        self.adaptive = bool(adaptive)
+        self.adaptive_config = adaptive_config
+        self.period_runs = 0
+        self.adaptive_grid_frozen = False
+        self.frozen_tgrid = None
+        self.frozen_inputs = None
+
+    def period_kwargs(self):
+        if self.adaptive_grid_frozen:
+            kw = dict(self.transient_kwargs)
+            kw["adaptive"] = False
+            kw["edge_mask"] = None
+            return self.frozen_tgrid, self.frozen_inputs, kw
+        return self.tgrid, self.inputs, self.transient_kwargs
+
+    def maybe_freeze_grid(self, tr, norm, nfail):
+        if (not self.adaptive or self.adaptive_grid_frozen or nfail != 0 or
+                norm > float(self.adaptive_config.freeze_factor) * self.residual_tol):
+            return
+        tr_t = np.asarray(tr["t"], float)
+        if tr_t.ndim != 1 or len(tr_t) < 2:
+            return
+        self.adaptive_grid_frozen = True
+        self.frozen_tgrid = tr_t.copy()
+        self.frozen_inputs = _resample_inputs(
+            self.inputs, self.tgrid, self.frozen_tgrid, self.period)
+
+    def run_period(self, x0, *, allow_freeze=True, profile=False):
+        self.period_runs += 1
+        run_tgrid, run_inputs, run_kwargs = self.period_kwargs()
+        tr = transient(self.sizes, self.bias, run_tgrid, V0=x0,
+                       profile=bool(profile), inputs=run_inputs, **run_kwargs)
+        if "inputs" not in tr:
+            tr["inputs"] = {
+                key: np.asarray(val, float).copy()
+                for key, val in run_inputs.items()
+            }
+        x_end = _end_vector(tr, self.topo)
+        residual = x_end - x0
+        norm = float(np.linalg.norm(residual, ord=np.inf))
+        nfail = int(tr.get("nfail", 0))
+        if allow_freeze:
+            self.maybe_freeze_grid(tr, norm, nfail)
+        return _Orbit(tr, x0, x_end, residual, norm, nfail)
+
+    def stabilize(self, x0, max_periods, phys_bounds):
+        """Pseudo-transient stabilization with best-physical orbit tracking."""
+        x = x0.copy()
+        best_phys = None       # _Orbit | None (best physical orbit so far)
+        for period_idx in range(max(0, int(max_periods))):
+            x_start = x.copy()
+            run = self.run_period(x_start, allow_freeze=True, profile=False)
+            bounded = (_within(x_start, phys_bounds, self.topo)
+                       and _within(run.x_end, phys_bounds, self.topo))
+            if run.nfail == 0 and bounded and (
+                    best_phys is None or run.norm < best_phys.norm):
+                best_phys = _best_orbit(x_start, run.x_end, run.residual,
+                                        run.norm, run.nfail, run.tr)
+            if run.nfail == 0 and run.norm <= self.residual_tol and bounded:
+                conv = _best_orbit(x_start, run.x_end, run.residual,
+                                   run.norm, run.nfail, run.tr)
+                return conv, best_phys, x_start, False, period_idx + 1
+            diverging = (
+                best_phys is not None and best_phys.norm < 0.5 and
+                run.norm > max(3.0 * best_phys.norm, 5.0 * self.residual_tol)
+            )
+            if (not bounded) or diverging:
+                return None, best_phys, x_start, True, period_idx + 1
+            # Do not clip here: clipping can hide a runaway as a false fixed point.
+            x = run.x_end
+        return None, best_phys, x, False, max(0, int(max_periods))
+
+    def rerun_frozen(self, x, *, profile=False):
+        if not self.adaptive_grid_frozen:
+            return None
+        kw = dict(self.transient_kwargs)
+        kw["adaptive"] = False
+        kw["edge_mask"] = None
+        self.period_runs += 1
+        tr = transient(self.sizes, self.bias, self.frozen_tgrid, V0=x,
+                       profile=bool(profile), inputs=self.frozen_inputs, **kw)
+        if "inputs" not in tr:
+            tr["inputs"] = {
+                key: np.asarray(val, float).copy()
+                for key, val in self.frozen_inputs.items()
+            }
+        x_end = _end_vector(tr, self.topo)
+        residual = x_end - x
+        norm = float(np.linalg.norm(residual, ord=np.inf))
+        nfail = int(tr.get("nfail", 0))
+        return _Orbit(tr, x, x_end, residual, norm, nfail)
+
+
+def _build_shooting_jacobian_fd(x_base, residual_base, *, topo, bias,
+                                rail_margin, fd_step, run_period):
+    out = np.empty((topo.n, topo.n), dtype=float)
+    for col in range(topo.n):
+        h = float(fd_step) * max(1.0, abs(float(x_base[col])))
+        if h == 0.0:
+            h = float(fd_step)
+        xp = x_base.copy()
+        xp[col] += h
+        xp = _rail_clip(xp, topo, bias, rail_margin)
+        delta = float(xp[col] - x_base[col])
+        if abs(delta) < 1e-30:
+            xp = x_base.copy()
+            xp[col] -= h
+            xp = _rail_clip(xp, topo, bias, rail_margin)
+            delta = float(xp[col] - x_base[col])
+        if abs(delta) < 1e-30:
+            out[:, col] = 0.0
+            continue
+        run = run_period(xp, allow_freeze=False)
+        out[:, col] = (run.residual - residual_base) / delta
+    return out
+
+
+def _update_broyden_jacobian(jacobian, step, residual_delta):
+    denom = float(np.dot(step, step))
+    if denom <= 1e-30 or not np.isfinite(denom):
+        return None
+    correction = residual_delta - jacobian @ step
+    if not np.all(np.isfinite(correction)):
+        return None
+    return jacobian + np.outer(correction, step) / denom
+
+
+def _best_orbit(x0, x_end, residual, norm, nfail, tr):
+    """Snapshot a run into a retained :class:`_Orbit`, copying the arrays so a
+    later in-place reuse of the source can't corrupt the best-so-far."""
+    return _Orbit(
+        tr=tr,
+        x0=np.asarray(x0, float).copy(),
+        x_end=np.asarray(x_end, float).copy(),
+        residual=np.asarray(residual, float).copy(),
+        norm=float(norm),
+        nfail=int(nfail),
+    )
+
+
+def _pss_status(converged, converged_stabilization, x, phys_bounds, topo):
+    diverged = not _within(x, phys_bounds, topo)
+    if diverged:
+        return False, True, "diverged"
+    if converged and converged_stabilization is not None:
+        return True, False, "converged_stabilization"
+    if converged:
+        return True, False, "converged_shooting"
+    return False, False, "best_physical"
+
+
+def _finalize_pss_result(cur, runner, stepper, *, converged,
+                         converged_stabilization, stab_runaway, phys_bounds,
+                         iterations, history):
+    """Assemble the public PSS result dict from the final orbit (``cur``) plus
+    the two solver objects — ``runner`` (period grid, prepared inputs, the
+    transient config, period-run count) and ``stepper`` (Jacobian counters,
+    dominant multiplier). Only genuine solve-outcome flags are passed
+    explicitly; everything else is read off those objects."""
+    converged, diverged, pss_status = _pss_status(
+        converged, converged_stabilization, cur.x0, phys_bounds, runner.topo)
+    tr = cur.tr
+    tk = runner.transient_kwargs
+    final_inputs = tr.get("inputs")
+    if final_inputs is None:
+        final_inputs = _resample_inputs(
+            runner.inputs, runner.tgrid, np.asarray(tr["t"], float), runner.period)
+    result = dict(tr)
+    result.update({
+        "converged": bool(converged),
+        "pss_status": pss_status,
+        "diverged": bool(diverged),
+        "dominant_multiplier": float(stepper.dominant_multiplier),
+        "stabilization_runaway": bool(stab_runaway),
+        "period": float(runner.period),
+        "x0": np.asarray(cur.x0, float),
+        "x_end": np.asarray(cur.x_end, float),
+        "residual": np.asarray(cur.residual, float),
+        "residual_norm": float(cur.norm),
+        "residual_tol": float(runner.residual_tol),
+        "shooting_iters": int(iterations),
+        "shooting_history": history,
+        "shooting_period_runs": int(runner.period_runs),
+        "shooting_jacobian_evals": int(stepper.shooting_jacobian_evals),
+        "shooting_jacobian_reuses": int(stepper.shooting_jacobian_reuses),
+        "shooting_jacobian_reuse_enabled": bool(stepper.jacobian_reuse),
+        "shooting_jacobian_rebuild_interval": int(stepper.jacobian_rebuild_interval),
+        "nfail": int(cur.nfail),
+        "topology": runner.topo,
+        "inputs": {key: np.asarray(val, float).copy()
+                   for key, val in final_inputs.items()},
+        "node_inputs": dict(tk["node_inputs"] or {}),
+        "current_inputs": tuple(tk["current_inputs"] or ()),
+        "signed_devices": tuple(tk["signed_devices"] or ()),
+        "transient_max_step": tk["max_step"],
+        "transient_flat_max_step": tk["flat_max_step"],
+        "rail_margin": tk["rail_margin"],
+        "corner": tk["corner"],
+        "adaptive": bool(runner.adaptive),
+        "adaptive_grid_frozen": bool(runner.adaptive_grid_frozen),
+    })
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class _ShootingStepResult:
+    accepted: bool
+    best: _Orbit
+    orbit: _Orbit = None          # the accepted orbit; None when no step was taken
+    accepted_alpha: float = 0.0
+    jacobian_kind: str = None
+    rebuilt_after_reuse_failure: bool = False
+
+
+class _PSSShootingStepper:
+    """Own one shooting Newton/LM update and its Jacobian cache.
+
+    ``pss_solve`` still owns the high-level convergence loop, while this class
+    owns the fragile details: analytic-vs-FD Jacobian selection, Broyden reuse,
+    LM/traditional damping, and trial-period acceptance.
+    """
+
+    def __init__(self, *, sizes, nf, bias, topo, inputs, node_inputs, runner,
+                 adaptive, analytic_jacobian, integration_method, fd_step,
+                 rail_margin, phys_bounds, residual_tol, min_damping,
+                 jacobian_reuse, jacobian_rebuild_interval,
+                 levenberg_marquardt):
+        self.sizes = sizes
+        self.nf = nf
+        self.bias = bias
+        self.topo = topo
+        self.inputs = inputs
+        self.node_inputs = node_inputs or {}
+        self.runner = runner
+        self.adaptive = bool(adaptive)
+        self.analytic_jacobian = bool(analytic_jacobian)
+        self.integration_method = integration_method
+        self.fd_step = float(fd_step)
+        self.rail_margin = rail_margin
+        self.phys_bounds = phys_bounds
+        self.residual_tol = float(residual_tol)
+        self.min_damping = float(min_damping)
+        self.jacobian_reuse = bool(jacobian_reuse)
+        self.jacobian_rebuild_interval = max(0, int(jacobian_rebuild_interval))
+        self.levenberg_marquardt = bool(levenberg_marquardt)
+
+        self.jac = None
+        self.jac_age = 0
+        self.mono_dev_inst = None
+        self.shooting_jacobian_evals = 0
+        self.shooting_jacobian_reuses = 0
+        self.dominant_multiplier = float("nan")
+        # lm_mu == 0 reproduces the plain Newton step exactly; it grows only
+        # after rejected trials and is carried across shooting iterations.
+        self.lm_mu = 0.0
+        self._lm_mu0 = 1e-3
+        self._lm_up = 8.0
+        self._lm_down = 1.0 / 3.0
+        self._lm_mu_max = 1e8
+        self._lm_max_tries = 15
+
+    def _build_or_reuse_jacobian(self, tr, x, residual):
+        rebuild = (
+            self.jac is None or
+            not self.jacobian_reuse or
+            (self.jacobian_rebuild_interval > 0 and
+             self.jac_age >= self.jacobian_rebuild_interval)
+        )
+        if not rebuild:
+            self.shooting_jacobian_reuses += 1
+            return self.jac, "broyden", True
+
+        jac = None
+        if self.analytic_jacobian and (
+                not self.adaptive or self.runner.adaptive_grid_frozen):
+            try:
+                if self.mono_dev_inst is None:
+                    self.mono_dev_inst = build_devices(
+                        self.sizes, nf=self.nf, corner=self.runner.transient_kwargs.get("corner"),
+                        topo=self.topo)
+                phi = _shooting_monodromy(
+                    tr, self.topo, self.sizes, self.nf, self.bias, self.inputs,
+                    self.node_inputs, self.mono_dev_inst,
+                    integration_method=self.integration_method)
+                jac = phi - np.eye(self.topo.n)
+                self.dominant_multiplier = _dominant_multiplier(phi)
+                self.shooting_jacobian_evals += 1
+                self.jac_age = 0
+                self.jac = jac
+                return jac, "analytic_monodromy", False
+            except Exception:
+                jac = None
+
+        if jac is None:
+            self.shooting_jacobian_evals += 1
+            self.jac_age = 0
+            jac = _build_shooting_jacobian_fd(
+                x, residual, topo=self.topo, bias=self.bias,
+                rail_margin=self.rail_margin, fd_step=self.fd_step,
+                run_period=self.runner.run_period)
+            self.jac = jac
+            return jac, "finite_difference", False
+
+    def _try_lm_step(self, x, residual, norm, nfail, jac, best):
+        current_score = _residual_score(norm, nfail)
+        H = grad = diagH = None
+        mu = self.lm_mu
+        for _ in range(self._lm_max_tries):
+            if mu == 0.0:
+                try:
+                    dx = np.linalg.solve(jac, -residual)
+                except np.linalg.LinAlgError:
+                    dx = np.linalg.lstsq(jac, -residual, rcond=None)[0]
+            else:
+                if H is None:
+                    lm_scale = max(
+                        1.0,
+                        _finite_component_max(jac),
+                        _finite_component_max(residual),
+                    )
+                    if not np.isfinite(lm_scale) or lm_scale <= 0.0:
+                        break
+                    jac_lm = np.nan_to_num(
+                        jac / lm_scale, nan=0.0, posinf=0.0, neginf=0.0)
+                    residual_lm = np.nan_to_num(
+                        residual / lm_scale, nan=0.0, posinf=0.0, neginf=0.0)
+                    jac_lm = np.asarray(jac_lm, dtype=float)
+                    residual_lm = np.asarray(residual_lm, dtype=float)
+                    post_scale = _finite_component_max(jac_lm)
+                    if (not np.isfinite(post_scale)) or post_scale <= 0.0:
+                        break
+                    if post_scale > 1.0:
+                        jac_lm = jac_lm / post_scale
+                        residual_lm = residual_lm / post_scale
+                    try:
+                        with np.errstate(over="raise", invalid="raise",
+                                         divide="raise"):
+                            H = jac_lm.T @ jac_lm
+                            grad = jac_lm.T @ residual_lm
+                    except FloatingPointError:
+                        H = grad = None
+                        break
+                    if (not np.all(np.isfinite(H)) or
+                            not np.all(np.isfinite(grad))):
+                        H = grad = None
+                        break
+                    diagH = np.maximum(np.abs(np.diag(H)), 1e-30)
+                A = H + mu * np.diag(diagH)
+                try:
+                    dx = np.linalg.solve(A, -grad)
+                except np.linalg.LinAlgError:
+                    dx = np.linalg.lstsq(A, -grad, rcond=None)[0]
+            xt = x + dx
+            if not _within(xt, self.phys_bounds, self.topo):
+                mu = mu * self._lm_up if mu > 0.0 else self._lm_mu0
+                if mu > self._lm_mu_max:
+                    break
+                continue
+            xt = _rail_clip(xt, self.topo, self.bias, self.rail_margin)
+            trial = self.runner.run_period(xt, allow_freeze=False)
+            score_t = _residual_score(trial.norm, trial.nfail)
+            bounded_t = _within(trial.x_end, self.phys_bounds, self.topo)
+            if bounded_t and (score_t < current_score or
+                              trial.norm <= self.residual_tol):
+                self.lm_mu = mu * self._lm_down
+                return (mu, trial), best
+            if bounded_t and trial.nfail == 0 and score_t < best.score:
+                best = _best_orbit(
+                    xt, trial.x_end, trial.residual, trial.norm,
+                    trial.nfail, trial.tr)
+            mu = mu * self._lm_up if mu > 0.0 else self._lm_mu0
+            if mu > self._lm_mu_max:
+                break
+        return None, best
+
+    def _try_damped_step(self, x, residual, norm, nfail, jac, best):
+        current_score = _residual_score(norm, nfail)
+        try:
+            dx = np.linalg.solve(jac, -residual)
+        except np.linalg.LinAlgError:
+            dx = np.linalg.lstsq(jac, -residual, rcond=None)[0]
+        alpha = 1.0
+        while alpha >= self.min_damping:
+            xt = _rail_clip(x + alpha * dx, self.topo, self.bias, self.rail_margin)
+            trial = self.runner.run_period(xt, allow_freeze=False)
+            score_t = _residual_score(trial.norm, trial.nfail)
+            if score_t < current_score or trial.norm <= self.residual_tol:
+                return (alpha, trial), best
+            if score_t < best.score:
+                best = _best_orbit(
+                    xt, trial.x_end, trial.residual, trial.norm,
+                    trial.nfail, trial.tr)
+            alpha *= 0.5
+        return None, best
+
+    def step(self, cur, best):
+        accepted = None
+        jacobian_kind = None
+        rebuilt_after_reuse_failure = False
+        old_x = cur.x0.copy()
+        old_residual = cur.residual.copy()
+
+        for jac_attempt in range(2):
+            jac, jacobian_kind, used_reused_jac = self._build_or_reuse_jacobian(
+                cur.tr, cur.x0, cur.residual)
+
+            if self.levenberg_marquardt and not np.all(np.isfinite(jac)):
+                self.jac = None
+                self.jac_age = 0
+                if used_reused_jac and jac_attempt == 0:
+                    rebuilt_after_reuse_failure = True
+                    continue
+                break
+
+            if self.levenberg_marquardt:
+                accepted, best = self._try_lm_step(
+                    cur.x0, cur.residual, cur.norm, cur.nfail, jac, best)
+            else:
+                accepted, best = self._try_damped_step(
+                    cur.x0, cur.residual, cur.norm, cur.nfail, jac, best)
+
+            if accepted is not None:
+                break
+            if used_reused_jac and jac_attempt == 0:
+                self.jac = None
+                self.jac_age = 0
+                rebuilt_after_reuse_failure = True
+                continue
+            break
+
+        if accepted is None:
+            return _ShootingStepResult(
+                accepted=False,
+                best=best,
+                jacobian_kind=jacobian_kind,
+                rebuilt_after_reuse_failure=rebuilt_after_reuse_failure,
+            )
+
+        alpha, orbit = accepted
+        self.runner.maybe_freeze_grid(orbit.tr, orbit.norm, orbit.nfail)
+        if orbit.score < best.score:
+            best = _best_orbit(orbit.x0, orbit.x_end, orbit.residual,
+                               orbit.norm, orbit.nfail, orbit.tr)
+        if self.jacobian_reuse and (
+                not self.adaptive or self.runner.adaptive_grid_frozen):
+            self.jac = _update_broyden_jacobian(
+                self.jac, orbit.x0 - old_x, orbit.residual - old_residual)
+            if self.jac is None:
+                self.jac_age = 0
+            else:
+                self.jac_age += 1
+        else:
+            self.jac = None
+            self.jac_age = 0
+
+        return _ShootingStepResult(
+            accepted=True,
+            best=best,
+            orbit=orbit,
+            accepted_alpha=float(alpha),
+            jacobian_kind=jacobian_kind,
+            rebuilt_after_reuse_failure=rebuilt_after_reuse_failure,
+        )
+
+
 def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               n_points=161, inputs=None, node_inputs=None, current_inputs=None,
               corner=None,
@@ -370,483 +877,129 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
     x = _initial_vector(sizes, bias, topo, nf, V0, corner=corner)
     x = _rail_clip(x, topo, bias, rail_margin)
 
-    period_runs = 0
-    shooting_jacobian_evals = 0
-    shooting_jacobian_reuses = 0
     phys_bounds = _physical_span(topo, bias, float(physical_factor))
     stab_runaway = False
-    adaptive_grid_frozen = False
-    frozen_tgrid = None
-    frozen_inputs = None
+    runner = _PSSPeriodRunner(
+        sizes=sizes,
+        bias=bias,
+        period=period,
+        topo=topo,
+        tgrid=tgrid,
+        inputs=inputs,
+        transient_kwargs=transient_kwargs,
+        residual_tol=residual_tol,
+        adaptive=adaptive,
+        adaptive_config=adaptive_config,
+    )
 
-    def _period_kwargs():
-        if adaptive_grid_frozen:
-            kw = dict(transient_kwargs)
-            kw["adaptive"] = False
-            kw["edge_mask"] = None
-            return frozen_tgrid, frozen_inputs, kw
-        return tgrid, inputs, transient_kwargs
-
-    def _maybe_freeze_grid(tr, norm, nfail):
-        nonlocal adaptive_grid_frozen, frozen_tgrid, frozen_inputs
-        if (not adaptive or adaptive_grid_frozen or nfail != 0 or
-                norm > float(adaptive_config.freeze_factor) * float(residual_tol)):
-            return
-        tr_t = np.asarray(tr["t"], float)
-        if tr_t.ndim != 1 or len(tr_t) < 2:
-            return
-        adaptive_grid_frozen = True
-        frozen_tgrid = tr_t.copy()
-        frozen_inputs = _resample_inputs(inputs, tgrid, frozen_tgrid, period)
-
-    def _stabilize(x0, max_periods):
-        """Pseudo-transient stabilization: advance period-by-period, tracking the
-        best *physically bounded* min-residual orbit, and bail on a runaway (a step
-        that leaves the physical box). Returns (converged_tuple_or_None,
-        best_physical_or_None, last_x, hit_runaway, periods_run)."""
-        nonlocal period_runs
-        x = x0.copy()
-        best_phys = None       # (norm, x0, x_end, residual, nfail, tr)
-        for _ in range(max(0, int(max_periods))):
-            x_start = x.copy()
-            period_runs += 1
-            run_tgrid, run_inputs, run_kwargs = _period_kwargs()
-            tr_s = transient(sizes, bias, run_tgrid, V0=x, profile=False,
-                             inputs=run_inputs, **run_kwargs)
-            if "inputs" not in tr_s:
-                tr_s["inputs"] = {key: np.asarray(val, float).copy()
-                                  for key, val in run_inputs.items()}
-            x_end_s = _end_vector(tr_s, topo)
-            residual_s = x_end_s - x_start
-            norm_s = float(np.linalg.norm(residual_s, ord=np.inf))
-            nfail_s = int(tr_s.get("nfail", 0))
-            _maybe_freeze_grid(tr_s, norm_s, nfail_s)
-            bounded = (_within(x_start, phys_bounds, topo)
-                       and _within(x_end_s, phys_bounds, topo))
-            if nfail_s == 0 and bounded and (best_phys is None or norm_s < best_phys[0]):
-                best_phys = (norm_s, x_start.copy(), x_end_s.copy(),
-                             residual_s.copy(), nfail_s, tr_s)
-            if nfail_s == 0 and norm_s <= float(residual_tol) and bounded:
-                conv = (tr_s, x_start.copy(), x_end_s.copy(),
-                        residual_s.copy(), norm_s, nfail_s)
-                return conv, best_phys, x_start, False, _ + 1
-            # Runaway detection: a step out of the physical box, or the period
-            # residual turning back UP past a good minimum (the orbit is drifting
-            # off a thin basin toward a spurious fixed point). Bail to best_phys.
-            diverging = (best_phys is not None and best_phys[0] < 0.5
-                         and norm_s > max(3.0 * best_phys[0], 5.0 * float(residual_tol)))
-            if (not bounded) or diverging:
-                return None, best_phys, x_start, True, _ + 1
-            # Advance WITHOUT rail-clipping: clipping a runaway to the rail forges a
-            # deceptive in-bounds zero-residual fixed point that fools best_phys;
-            # letting the true trajectory run makes the runaway detectable instead.
-            x = x_end_s
-        return None, best_phys, x, False, max(0, int(max_periods))
-
-    converged_stabilization, stab_best, x, stab_runaway, _ = _stabilize(
-        x, tstab_periods)
+    converged_stabilization, stab_best, x, stab_runaway, _ = runner.stabilize(
+        x, tstab_periods, phys_bounds)
     # If the chase drifted out of bounds, roll back to the best physical orbit
     # instead of carrying the runaway state into shooting.
     if converged_stabilization is None and stab_runaway and stab_best is not None:
-        x = stab_best[1].copy()
+        x = stab_best.x0.copy()
 
     history = []
 
-    def run_period(x0, allow_freeze=True):
-        nonlocal period_runs
-        period_runs += 1
-        run_tgrid, run_inputs, run_kwargs = _period_kwargs()
-        tr = transient(sizes, bias, run_tgrid, V0=x0, profile=False,
-                       inputs=run_inputs, **run_kwargs)
-        if "inputs" not in tr:
-            tr["inputs"] = {key: np.asarray(val, float).copy()
-                            for key, val in run_inputs.items()}
-        x_end = _end_vector(tr, topo)
-        residual = x_end - x0
-        norm = float(np.linalg.norm(residual, ord=np.inf))
-        nfail = int(tr.get("nfail", 0))
-        if allow_freeze:
-            _maybe_freeze_grid(tr, norm, nfail)
-        return tr, x_end, residual, norm, nfail
-
     if converged_stabilization is None:
-        tr, x_end, residual, norm, nfail = run_period(x)
+        cur = runner.run_period(x)
     else:
-        tr, x, x_end, residual, norm, nfail = converged_stabilization
-    best = {
-        "x0": x.copy(),
-        "x_end": x_end.copy(),
-        "residual": residual.copy(),
-        "residual_norm": norm,
-        "nfail": nfail,
-        "transient": tr,
-        "score": _residual_score(norm, nfail),
-    }
+        cur = converged_stabilization
+    best = _best_orbit(cur.x0, cur.x_end, cur.residual, cur.norm, cur.nfail, cur.tr)
     history.append({
         "iter": 0,
-        "residual_norm": norm,
-        "nfail": nfail,
+        "residual_norm": cur.norm,
+        "nfail": cur.nfail,
         "accepted_alpha": 0.0,
     })
 
-    converged = (nfail == 0 and norm <= float(residual_tol))
+    converged = (cur.nfail == 0 and cur.norm <= float(residual_tol))
     iterations = 0
-    jac = None
-    jac_age = 0
-    mono_dev_inst = None
     jacobian_reuse = bool(jacobian_reuse)
     jacobian_rebuild_interval = max(0, int(jacobian_rebuild_interval))
-    # Levenberg–Marquardt damping state, carried across shooting iterations.
-    # lm_mu == 0 reproduces the plain Newton step exactly (well-conditioned
-    # circuits unchanged); it grows only when a step is rejected.
-    lm_mu = 0.0
-    lm_mu0, lm_up, lm_down, lm_mu_max, lm_max_tries = 1e-3, 8.0, 1.0 / 3.0, 1e8, 15
-    dominant_multiplier = float("nan")   # max |Floquet multiplier| (stiffness)
-
-    def build_shooting_jacobian(x_base, residual_base):
-        nonlocal shooting_jacobian_evals, jac_age
-        shooting_jacobian_evals += 1
-        jac_age = 0
-        out = np.empty((topo.n, topo.n), dtype=float)
-        for col in range(topo.n):
-            h = float(fd_step) * max(1.0, abs(float(x_base[col])))
-            if h == 0.0:
-                h = float(fd_step)
-            xp = x_base.copy()
-            xp[col] += h
-            xp = _rail_clip(xp, topo, bias, rail_margin)
-            delta = float(xp[col] - x_base[col])
-            if abs(delta) < 1e-30:
-                xp = x_base.copy()
-                xp[col] -= h
-                xp = _rail_clip(xp, topo, bias, rail_margin)
-                delta = float(xp[col] - x_base[col])
-            if abs(delta) < 1e-30:
-                out[:, col] = 0.0
-                continue
-            _, _, rp, _, _ = run_period(xp, allow_freeze=False)
-            out[:, col] = (rp - residual_base) / delta
-        return out
-
-    def update_broyden(jacobian, step, residual_delta):
-        nonlocal jac_age
-        denom = float(np.dot(step, step))
-        if denom <= 1e-30 or not np.isfinite(denom):
-            jac_age = 0
-            return None
-        correction = residual_delta - jacobian @ step
-        if not np.all(np.isfinite(correction)):
-            jac_age = 0
-            return None
-        jac_age += 1
-        return jacobian + np.outer(correction, step) / denom
+    stepper = _PSSShootingStepper(
+        sizes=sizes,
+        nf=nf,
+        bias=bias,
+        topo=topo,
+        inputs=inputs,
+        node_inputs=node_inputs,
+        runner=runner,
+        adaptive=adaptive,
+        analytic_jacobian=analytic_jacobian,
+        integration_method=integration_method,
+        fd_step=fd_step,
+        rail_margin=rail_margin,
+        phys_bounds=phys_bounds,
+        residual_tol=residual_tol,
+        min_damping=min_damping,
+        jacobian_reuse=jacobian_reuse,
+        jacobian_rebuild_interval=jacobian_rebuild_interval,
+        levenberg_marquardt=levenberg_marquardt,
+    )
 
     for iteration in range(1, int(max_shooting_iters) + 1):
         if converged:
             break
         iterations = iteration
 
-        accepted = None
-        jacobian_kind = None
-        rebuilt_after_reuse_failure = False
-        old_x = x.copy()
-        old_residual = residual.copy()
-        for jac_attempt in range(2):
-            rebuild = (
-                jac is None or
-                not jacobian_reuse or
-                (jacobian_rebuild_interval > 0 and
-                 jac_age >= jacobian_rebuild_interval)
-            )
-            used_reused_jac = False
-            if rebuild:
-                jac = None
-                if analytic_jacobian and (not adaptive or adaptive_grid_frozen):
-                    try:
-                        if mono_dev_inst is None:
-                            mono_dev_inst = build_devices(sizes, nf=nf, corner=corner, topo=topo)
-                        phi = _shooting_monodromy(tr, topo, sizes, nf, bias, inputs,
-                                                  node_inputs or {}, mono_dev_inst,
-                                                  integration_method=integration_method)
-                        jac = phi - np.eye(topo.n)
-                        jacobian_kind = "analytic_monodromy"
-                        dominant_multiplier = _dominant_multiplier(phi)
-                        shooting_jacobian_evals += 1
-                        jac_age = 0
-                    except Exception:
-                        jac = None
-                if jac is None:
-                    jac = build_shooting_jacobian(x, residual)
-                    jacobian_kind = "finite_difference"
-            else:
-                shooting_jacobian_reuses += 1
-                used_reused_jac = True
-                jacobian_kind = "broyden"
-
-            current_score = _residual_score(norm, nfail)
-            # A non-finite Jacobian (a diverged trial orbit polluted a Broyden update,
-            # or the monodromy of a failed period) can't yield a usable step — force a
-            # rebuild next attempt instead of forming a NaN J^T J.
-            if levenberg_marquardt and not np.all(np.isfinite(jac)):
-                jac = None
-                jac_age = 0
-                if used_reused_jac and jac_attempt == 0:
-                    rebuilt_after_reuse_failure = True
-                    continue
-                break
-            if levenberg_marquardt:
-                # LM trust region: mu=0 -> the exact Newton step (well-conditioned
-                # circuits, e.g. the chopper, are byte-identical); mu grows only on
-                # rejection, regularizing near-singular (I-M) so a stiff (tau>>T)
-                # orbit's step cannot overshoot the basin into a runaway.
-                H = grad = diagH = None
-                mu = lm_mu
-                for _lm in range(lm_max_tries):
-                    if mu == 0.0:
-                        try:
-                            dx = np.linalg.solve(jac, -residual)
-                        except np.linalg.LinAlgError:
-                            dx = np.linalg.lstsq(jac, -residual, rcond=None)[0]
-                    else:
-                        if H is None:
-                            lm_scale = max(
-                                1.0,
-                                _finite_component_max(jac),
-                                _finite_component_max(residual),
-                            )
-                            if not np.isfinite(lm_scale) or lm_scale <= 0.0:
-                                break
-                            jac_lm = np.nan_to_num(
-                                jac / lm_scale, nan=0.0, posinf=0.0, neginf=0.0)
-                            residual_lm = np.nan_to_num(
-                                residual / lm_scale, nan=0.0, posinf=0.0, neginf=0.0)
-                            jac_lm = np.asarray(jac_lm, dtype=float)
-                            residual_lm = np.asarray(residual_lm, dtype=float)
-                            post_scale = _finite_component_max(jac_lm)
-                            if (not np.isfinite(post_scale)) or post_scale <= 0.0:
-                                break
-                            if post_scale > 1.0:
-                                jac_lm = jac_lm / post_scale
-                                residual_lm = residual_lm / post_scale
-                            try:
-                                with np.errstate(over="raise", invalid="raise",
-                                                 divide="raise"):
-                                    H = jac_lm.T @ jac_lm
-                                    grad = jac_lm.T @ residual_lm
-                            except FloatingPointError:
-                                H = grad = None
-                                break
-                            if (not np.all(np.isfinite(H)) or
-                                    not np.all(np.isfinite(grad))):
-                                H = grad = None
-                                break
-                            diagH = np.maximum(np.abs(np.diag(H)), 1e-30)
-                        A = H + mu * np.diag(diagH)
-                        try:
-                            dx = np.linalg.solve(A, -grad)
-                        except np.linalg.LinAlgError:
-                            dx = np.linalg.lstsq(A, -grad, rcond=None)[0]
-                    xt = x + dx
-                    if not _within(xt, phys_bounds, topo):
-                        mu = mu * lm_up if mu > 0.0 else lm_mu0
-                        if mu > lm_mu_max:
-                            break
-                        continue
-                    xt = _rail_clip(xt, topo, bias, rail_margin)
-                    tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt, allow_freeze=False)
-                    score_t = _residual_score(norm_t, nfail_t)
-                    bounded_t = _within(x_end_t, phys_bounds, topo)
-                    if bounded_t and (score_t < current_score or
-                                      norm_t <= float(residual_tol)):
-                        accepted = (mu, xt, tr_t, x_end_t, residual_t, norm_t,
-                                    nfail_t, score_t)
-                        lm_mu = mu * lm_down
-                        break
-                    if bounded_t and nfail_t == 0 and score_t < best["score"]:
-                        best = {
-                            "x0": xt.copy(), "x_end": x_end_t.copy(),
-                            "residual": residual_t.copy(), "residual_norm": norm_t,
-                            "nfail": nfail_t, "transient": tr_t, "score": score_t,
-                        }
-                    mu = mu * lm_up if mu > 0.0 else lm_mu0
-                    if mu > lm_mu_max:
-                        break
-            else:
-                try:
-                    dx = np.linalg.solve(jac, -residual)
-                except np.linalg.LinAlgError:
-                    dx = np.linalg.lstsq(jac, -residual, rcond=None)[0]
-                alpha = 1.0
-                while alpha >= float(min_damping):
-                    xt = _rail_clip(x + alpha * dx, topo, bias, rail_margin)
-                    tr_t, x_end_t, residual_t, norm_t, nfail_t = run_period(xt, allow_freeze=False)
-                    score_t = _residual_score(norm_t, nfail_t)
-                    if score_t < current_score or norm_t <= float(residual_tol):
-                        accepted = (alpha, xt, tr_t, x_end_t, residual_t, norm_t,
-                                    nfail_t, score_t)
-                        break
-                    if score_t < best["score"]:
-                        best = {
-                            "x0": xt.copy(), "x_end": x_end_t.copy(),
-                            "residual": residual_t.copy(), "residual_norm": norm_t,
-                            "nfail": nfail_t, "transient": tr_t, "score": score_t,
-                        }
-                    alpha *= 0.5
-
-            if accepted is not None:
-                break
-            if used_reused_jac and jac_attempt == 0:
-                jac = None
-                jac_age = 0
-                rebuilt_after_reuse_failure = True
-                continue
-            break
-
-        if accepted is None:
+        step = stepper.step(cur, best)
+        best = step.best
+        if not step.accepted:
             history.append({
                 "iter": iteration,
-                "residual_norm": norm,
-                "nfail": nfail,
+                "residual_norm": cur.norm,
+                "nfail": cur.nfail,
                 "accepted_alpha": 0.0,
-                "jacobian": jacobian_kind,
+                "jacobian": step.jacobian_kind,
                 "stalled": True,
             })
             break
 
-        alpha, x, tr, x_end, residual, norm, nfail, score = accepted
-        _maybe_freeze_grid(tr, norm, nfail)
-        if score < best["score"]:
-            best = {
-                "x0": x.copy(),
-                "x_end": x_end.copy(),
-                "residual": residual.copy(),
-                "residual_norm": norm,
-                "nfail": nfail,
-                "transient": tr,
-                "score": score,
-            }
-        if jacobian_reuse and (not adaptive or adaptive_grid_frozen):
-            jac = update_broyden(jac, x - old_x, residual - old_residual)
-        else:
-            jac = None
-            jac_age = 0
+        cur = step.orbit
         history.append({
             "iter": iteration,
-            "residual_norm": norm,
-            "nfail": nfail,
-            "accepted_alpha": float(alpha),
-            "jacobian": jacobian_kind,
-            "rebuilt_after_reuse_failure": bool(rebuilt_after_reuse_failure),
+            "residual_norm": cur.norm,
+            "nfail": cur.nfail,
+            "accepted_alpha": step.accepted_alpha,
+            "jacobian": step.jacobian_kind,
+            "rebuilt_after_reuse_failure": bool(step.rebuilt_after_reuse_failure),
         })
-        converged = (nfail == 0 and norm <= float(residual_tol))
+        converged = (cur.nfail == 0 and cur.norm <= float(residual_tol))
 
     # A2: adaptive-stabilization fallback. If shooting did not converge but the
     # best orbit is physical (no runaway), extend pseudo-transient stabilization
     # from it up to the budget. Well-conditioned circuits (e.g. the chopper)
     # converge during shooting and never reach here, so their path is unchanged.
     if (not converged and int(max_stabilization_periods) > 0 and not stab_runaway
-            and _within(best["x0"], phys_bounds, topo)):
-        extra = int(max_stabilization_periods) - period_runs
+            and _within(best.x0, phys_bounds, topo)):
+        extra = int(max_stabilization_periods) - runner.period_runs
         if extra > 0:
-            conv2, best2, _, runaway2, _ = _stabilize(best["x0"], extra)
+            conv2, best2, _, runaway2, _ = runner.stabilize(
+                best.x0, extra, phys_bounds)
             if conv2 is not None:
-                tr, x, x_end, residual, norm, nfail = conv2
+                cur = conv2
                 converged = True
                 converged_stabilization = conv2
-            elif best2 is not None and best2[0] < best["residual_norm"]:
-                norm2, x0_2, xend2, res2, nfail2, tr2 = best2
-                best = {"x0": x0_2, "x_end": xend2, "residual": res2,
-                        "residual_norm": norm2, "nfail": nfail2, "transient": tr2,
-                        "score": _residual_score(norm2, nfail2)}
+            elif best2 is not None and best2.norm < best.norm:
+                best = best2
             stab_runaway = stab_runaway or runaway2
 
     if not converged:
-        x = best["x0"]
-        tr = best["transient"]
-        x_end = best["x_end"]
-        residual = best["residual"]
-        norm = best["residual_norm"]
-        nfail = best["nfail"]
-        converged = (nfail == 0 and norm <= float(residual_tol))
+        cur = best
+        converged = (cur.nfail == 0 and cur.norm <= float(residual_tol))
 
-    if adaptive_grid_frozen and bool(tr.get("adaptive", False)):
-        kw = dict(transient_kwargs)
-        kw["adaptive"] = False
-        kw["edge_mask"] = None
-        period_runs += 1
-        tr = transient(sizes, bias, frozen_tgrid, V0=x, profile=False,
-                       inputs=frozen_inputs, **kw)
-        if "inputs" not in tr:
-            tr["inputs"] = {key: np.asarray(val, float).copy()
-                            for key, val in frozen_inputs.items()}
-        x_end = _end_vector(tr, topo)
-        residual = x_end - x
-        norm = float(np.linalg.norm(residual, ord=np.inf))
-        nfail = int(tr.get("nfail", 0))
-        converged = (nfail == 0 and norm <= float(residual_tol))
+    if runner.adaptive_grid_frozen and bool(cur.tr.get("adaptive", False)):
+        cur = runner.rerun_frozen(cur.x0)
+        converged = (cur.nfail == 0 and cur.norm <= float(residual_tol))
 
     if profile:
-        period_runs += 1
-        run_tgrid, run_inputs, run_kwargs = _period_kwargs()
-        tr = transient(sizes, bias, run_tgrid, V0=x, profile=True,
-                       inputs=run_inputs, **run_kwargs)
-        if "inputs" not in tr:
-            tr["inputs"] = {key: np.asarray(val, float).copy()
-                            for key, val in run_inputs.items()}
-        x_end = _end_vector(tr, topo)
-        residual = x_end - x
-        norm = float(np.linalg.norm(residual, ord=np.inf))
-        nfail = int(tr.get("nfail", 0))
-        converged = (nfail == 0 and norm <= float(residual_tol))
+        cur = runner.run_period(cur.x0, allow_freeze=False, profile=True)
+        converged = (cur.nfail == 0 and cur.norm <= float(residual_tol))
 
-    # A4: honest status. A physically-out-of-bounds final orbit is a numerical
-    # runaway, never a steady state — report it as diverged, not converged.
-    diverged = not _within(x, phys_bounds, topo)
-    if diverged:
-        converged = False
-        pss_status = "diverged"
-    elif converged and converged_stabilization is not None:
-        pss_status = "converged_stabilization"
-    elif converged:
-        pss_status = "converged_shooting"
-    else:
-        pss_status = "best_physical"
-
-    final_inputs = tr.get("inputs")
-    if final_inputs is None:
-        final_inputs = _resample_inputs(inputs, tgrid, np.asarray(tr["t"], float), period)
-    result = dict(tr)
-    result.update({
-        "converged": bool(converged),
-        "pss_status": pss_status,
-        "diverged": bool(diverged),
-        "dominant_multiplier": float(dominant_multiplier),
-        "stabilization_runaway": bool(stab_runaway),
-        "period": period,
-        "x0": np.asarray(x, float),
-        "x_end": np.asarray(x_end, float),
-        "residual": np.asarray(residual, float),
-        "residual_norm": float(norm),
-        "residual_tol": float(residual_tol),
-        "shooting_iters": int(iterations),
-        "shooting_history": history,
-        "shooting_period_runs": int(period_runs),
-        "shooting_jacobian_evals": int(shooting_jacobian_evals),
-        "shooting_jacobian_reuses": int(shooting_jacobian_reuses),
-        "shooting_jacobian_reuse_enabled": bool(jacobian_reuse),
-        "shooting_jacobian_rebuild_interval": int(jacobian_rebuild_interval),
-        "nfail": int(nfail),
-        "topology": topo,
-        "inputs": {key: np.asarray(val, float).copy()
-                   for key, val in final_inputs.items()},
-        "node_inputs": dict(node_inputs or {}),
-        "current_inputs": tuple(current_inputs or ()),
-        "signed_devices": tuple(signed_devices or ()),
-        "transient_max_step": max_step,
-        "transient_flat_max_step": flat_max_step,
-        "rail_margin": rail_margin,
-        "corner": corner,
-        "adaptive": bool(adaptive),
-        "adaptive_grid_frozen": bool(adaptive_grid_frozen),
-    })
-    return result
+    return _finalize_pss_result(
+        cur, runner, stepper,
+        converged=converged,
+        converged_stabilization=converged_stabilization,
+        stab_runaway=stab_runaway, phys_bounds=phys_bounds,
+        iterations=iterations, history=history)
