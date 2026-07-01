@@ -22,8 +22,9 @@ The current solver stack covers:
   PSS, PAC, and PNoise behavior.
 
 The implementation is intentionally small and self-contained. It currently has
-22 Python files under `core/`, including `__init__.py`, the CLI entry
-`__main__.py`, calibration/PSF/Cadence-netlist helpers, and the main solver stack.
+26 Python files under `core/`, including `__init__.py`, the CLI entry
+`__main__.py`, calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
+modules, and the main solver stack.
 
 ## File Structure
 
@@ -39,10 +40,14 @@ core/
   ac_solver.py         DC operating point and AC small-signal solver.
   noise_solver.py      Noise propagation and input-referred noise analysis.
   transient_solver.py  Time-domain transient solver.
+  transient_profile.py Shared transient/chopper analysis counter slots.
   pss_solver.py        Transient-shooting periodic steady-state solver.
   pac_solver.py        Generic PSS-assisted PAC solver.
   pnoise_solver.py     Generic PNoise solver (HB + TD adjoint).
+  adaptive_config.py   Shared adaptive-step configuration types and helpers.
   analysis_dispatch.py JSON analysis-configuration dispatch entry point.
+  analysis_options.py  Central solver-option registry for JSON dispatch.
+  diagnostics.py       Thread-safe solver-fallback observer (counters + logging).
   psf.py               PSFASCII parser for Spectre reference data.
   calibration.py       Local-vs-Cadence calibration comparison helpers.
   cadence_netlist.py   Spectre netlist generation helpers for validation runs.
@@ -63,11 +68,15 @@ pmos_tft_model.py    <- optional numba_kernels, device_model
 ac_mna.py            <- no internal dependency
 ac_solver.py         <- topology, compiled_topology, ac_mna, device_model
 noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, device_model
-transient_solver.py  <- ac_solver, compiled_topology, topology, device_model
-pss_solver.py        <- ac_solver, ac_mna, device_model, topology, transient_solver
+transient_solver.py  <- ac_solver, compiled_topology, topology, device_model, transient_profile
+transient_profile.py <- no internal dependency (counter slot constants)
+pss_solver.py        <- ac_solver, ac_mna, device_model, topology, transient_solver, adaptive_config
 pac_solver.py        <- ac_mna, ac_solver, device_model, transient_solver
 pnoise_solver.py     <- ac_solver, noise_solver, pac_solver, device_model, ac_mna
-analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader
+adaptive_config.py   <- no internal dependency (dataclass only)
+analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader, analysis_options
+analysis_options.py  <- no internal dependency (registry)
+diagnostics.py       <- no internal dependency (thread-safe counters)
 psf.py               <- no internal dependency
 calibration.py       <- ac_solver, noise_solver, chopper, psf, circuit_loader
 cadence_netlist.py   <- circuit_loader, topology

@@ -74,6 +74,17 @@ except Exception:  # pragma: no cover - depends on optional dependency
 NUMBA_AVAILABLE = USE_NUMBA and njit is not None
 
 
+def py_impl(kernel):
+    """Pure-Python entry of a single-sourced ``_impl`` kernel.
+
+    Returns the jitted function's ``.py_func`` when Numba is active, or the raw
+    function itself when it is not. Lets a caller run the *one* source interpreted
+    (small problems where JIT dispatch is not worth it, no-Numba installs, or
+    debugging) without keeping a second hand-written Python copy.
+    """
+    return getattr(kernel, "py_func", kernel)
+
+
 def _softplus_py(x):
     if x > 0.0:
         return x + math.log1p(math.exp(-x))

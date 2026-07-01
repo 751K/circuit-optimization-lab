@@ -2,7 +2,7 @@
 
 [English README](README.md) | [中文说明](README_zh.md) | [核心求解器概览](core_overview_zh.md)
 
-## 当前状态（2026-06-28）
+## 当前状态（2026-07-01）
 
 项目是一个成熟的本地模拟电路仿真与设计探索框架，首个应用场景为 AT4000TG PMOS-OTFT ECG AFE，
 已对 Cadence Spectre 24.1 完成校准。核心能力全部落地，正在从"功能开发"转向"生态完善"阶段。
@@ -28,17 +28,17 @@
 | **gear2/BDF2**  | 变步长 BDF2、Numba grid、解析 monodromy、裸 transient retry/subdivision。PAC baseband 三 corner 全部 <1%（BE 时 −2.5%）。PSS/PAC/PNoise 默认 gear2 | ✅ 完成     |
 | **CLI**         | `python -m core <circuit.json>` 全分析 dispatch + exploration 模式 + 结果导出 + CLI 参考手册（`docs/cli_reference.md`）             | ✅ 完成     |
 | **Demo**        | Flask Web 前端 + REST API（`demo/server.py`）                                                                        | ✅ 可用     |
-| **测试**          | 16 个测试文件；最近全量回归 `146 passed, 9 skipped`                                                        | ✅ 覆盖核心路径 |
+| **测试**          | 19 个测试文件；最近全量回归 `191 passed` (0 skipped)                                                             | ✅ 覆盖核心路径 |
 | **文档**          | 英/中双语：README、core_overview、JSON 格式参考、gear2 完成报告、CLI 参考手册                                                     | ✅ 完善     |
 
 ### 代码规模
 
 ```
-core/                     ~13,000 行  (22 个 .py 文件)
-tests/                     ~2,800 行  (16 个 test_*.py 文件)
-benchmarks/                  ~500 行  (4 个 benchmark)
-examples/                    ~400 行  (sc_lpf.py + sc_lpf.json + vcvs_amplifier.json)
-docs/                      ~4,800 行  (12 个 .md 文件)
+core/                     ~14,000 行  (26 个 .py 文件)
+tests/                     ~4,000 行  (19 个 test_*.py 文件)
+benchmarks/                  ~600 行  (5 个 benchmark)
+examples/                    ~800 行  (7 个 JSON + 5 个 Python 脚本)
+docs/                      ~5,700 行  (12 个 .md 文件)
 calibration/                ~450 行  (5 个 case 目录, 含 PSFASCII 参考文件)
 ```
 

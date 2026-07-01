@@ -401,12 +401,13 @@ live. Includes preset designs and DC warm-start logic.
 
 ## Benchmarks
 
-Four fixed benchmarks for performance tracking:
+Five fixed benchmarks for performance tracking:
 
 ```bash
 python3 -m benchmarks.bench_afe --warm-runs 3         # AC+noise+transient
 python3 -m benchmarks.bench_model --warm-runs 3       # Single-device micro
 python3 -m benchmarks.bench_chopper --warm-runs 3     # Chopper: 5 analysis levels
+python3 -m benchmarks.bench_periodic --warm-runs 3    # Periodic solvers (PSS/PAC/PNoise)
 python3 -m benchmarks.bench_sweep --n-candidates 200  # Batch explore workload
 ```
 
@@ -446,8 +447,13 @@ you explicitly need the HB comparison path.
 | `examples/resistor_load_stage.json` | Single transistor with resistive load, demoing `resistors` and `current_sources` fields |
 | `examples/periodic_rc.json` | Passive RC lowpass with PSS/PAC/PNoise dispatch — simplest end-to-end periodic example |
 | `examples/voltage_divider.json` | Ideal voltage source (true MNA) divider with resistors, capacitors — vsource demo |
+| `examples/vcvs_amplifier.json` | VCVS amplifier — linear gain 100×, demoing controlled sources |
+| `examples/sc_lpf.json` | Switched-capacitor low-pass filter (2-phase, single-ended LPTV) |
 | `examples/afe_testbench.py` | Full testbench: dry-electrode front-end (R∥C network) → AFE core → AC + noise + transient |
 | `examples/mc_mismatch.py` | Monte Carlo mismatch driver: corner table + 3-corner MC figure |
+| `examples/find_max_gain.py` | Max gain scan for PMOS inverter amplifier |
+| `examples/sweep_vin_vout.py` | DC transfer curve (VIN→VOUT) for PMOS inverter |
+| `examples/sc_lpf.py` | Switched-capacitor LPF transient simulation |
 
 ---
 

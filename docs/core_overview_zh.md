@@ -19,8 +19,8 @@
 - 工艺角与逐器件 mismatch 扰动。
 - 面向 Cadence/Spectre 的验证，涵盖工作点、AC、噪声、瞬态、PSS、PAC 和 PNoise 行为。
 
-实现刻意保持小而自包含。目前 `core/` 下有 22 个 Python 文件（含 `__init__.py`、CLI 入口 `__main__.py`、
-校准/PSF/Cadence 网表辅助模块和主求解器栈）。
+实现刻意保持小而自包含。目前 `core/` 下有 26 个 Python 文件（含 `__init__.py`、CLI 入口 `__main__.py`、
+校准/PSF/Cadence 网表辅助模块、共享诊断/profiling 模块和主求解器栈）。
 
 ## 文件结构
 
@@ -36,10 +36,14 @@ core/
   ac_solver.py         DC 工作点与 AC 小信号求解器。
   noise_solver.py      噪声传播与等价输入噪声分析。
   transient_solver.py  时域瞬态求解器。
+  transient_profile.py 瞬态/chopper 求解器共享分析计数器槽位。
   pss_solver.py        基于 transient shooting 的 PSS 求解器。
   pac_solver.py        通用 PSS 辅助 PAC 求解器。
   pnoise_solver.py     通用 PNoise 求解器（HB + TD adjoint）。
+  adaptive_config.py   自适应步进配置共享类型和工具函数。
   analysis_dispatch.py JSON 分析配置 dispatch 入口。
+  analysis_options.py  面向 JSON dispatch 的中央求解器选项注册表。
+  diagnostics.py       线程安全的求解器回退观察器（计数器 + 日志）。
   psf.py               Spectre PSFASCII 参考数据解析器。
   calibration.py       本地结果与 Cadence 参考的校准/比较工具。
   cadence_netlist.py   用于验证的 Spectre 网表生成工具。
@@ -60,11 +64,15 @@ pmos_tft_model.py    <- 可选 numba_kernels、device_model
 ac_mna.py            <- 无内部依赖
 ac_solver.py         <- topology, compiled_topology, ac_mna, device_model
 noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, device_model
-transient_solver.py  <- ac_solver, compiled_topology, topology, device_model
-pss_solver.py        <- ac_solver, ac_mna, device_model, topology, transient_solver
+transient_solver.py  <- ac_solver, compiled_topology, topology, device_model, transient_profile
+transient_profile.py <- 无内部依赖（计数器槽位常量）
+pss_solver.py        <- ac_solver, ac_mna, device_model, topology, transient_solver, adaptive_config
 pac_solver.py        <- ac_mna, ac_solver, device_model, transient_solver
 pnoise_solver.py     <- ac_solver, noise_solver, pac_solver, device_model, ac_mna
-analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader
+adaptive_config.py   <- 无内部依赖（仅 dataclass）
+analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader, analysis_options
+analysis_options.py  <- 无内部依赖（注册表）
+diagnostics.py       <- 无内部依赖（线程安全计数器）
 psf.py               <- 无内部依赖
 calibration.py       <- ac_solver, noise_solver, chopper, psf, circuit_loader
 cadence_netlist.py   <- circuit_loader, topology

@@ -23,6 +23,7 @@
 |------|------|
 | `python -m benchmarks.bench_afe` | AFE 固定负载（AC / Noise / Transient） |
 | `python -m benchmarks.bench_model` | PMOS_TFT 单器件微基准（3 偏置区 × 6 操作） |
+| `python -m benchmarks.bench_periodic` | 周期求解器性能（PSS/PAC/PNoise） |
 | `python -m benchmarks.bench_sweep` | 批量扫描吞吐量（AC-only / AC+Noise） |
 | `python -m benchmarks.bench_chopper` | Chopper 分析性能（5 种负载层级） |
 
@@ -34,6 +35,7 @@
 | `python examples/mc_mismatch.py [n] [seed]` | Mismatch MC + 直方图 |
 | `python examples/find_max_gain.py` | PMOS 反相器最大增益扫描 |
 | `python examples/sweep_vin_vout.py` | PMOS 反相器 DC 传输曲线 |
+| `python examples/sc_lpf.py` | 开关电容 LPF 瞬态仿真 |
 | `python tools/calibrate_switch.py gen/parse` | Chopper 开关 Cadence vs 本地校准 |
 
 ---
@@ -242,7 +244,7 @@ python -m core chopper examples/afe_explore.json --level pnoise --f-chop 225
 Cadence/Spectre 校准闭环检查。入口文件 `core/calibration.py`。
 
 ```bash
-# 全部 4 个 case
+# 全部 5 个 case
 python -m core.calibration --all
 
 # 单个 case
@@ -354,7 +356,24 @@ CIRCUIT_USE_NUMBA=0 python -m benchmarks.bench_model --warm-runs 3 --json
 
 ---
 
-### 4.3 `bench_sweep` — 批量扫描吞吐量
+### 4.3 `bench_periodic` — 周期求解器性能
+
+```bash
+python -m benchmarks.bench_periodic --warm-runs 3
+CIRCUIT_USE_NUMBA=0 python -m benchmarks.bench_periodic --warm-runs 3 --json
+```
+
+**参数：** 同 `bench_afe`（仅 `--warm-runs`、`--json`）。
+
+**负载：**
+
+- `pss` — Shooting PSS 周期稳态求解
+- `pac` — 周期 AC（PSS 基础上的频域 HB + 时域 Floquet）
+- `pnoise` — 周期噪声（HB adjoint + TD adjoint）
+
+---
+
+### 4.4 `bench_sweep` — 批量扫描吞吐量
 
 ```bash
 python -m benchmarks.bench_sweep --n-candidates 100 --warm-runs 3
@@ -379,7 +398,7 @@ python -m benchmarks.bench_sweep --n-candidates 200 --seed 42 --json
 
 ---
 
-### 4.4 `bench_chopper` — Chopper 分析性能
+### 4.5 `bench_chopper` — Chopper 分析性能
 
 ```bash
 python -m benchmarks.bench_chopper --warm-runs 3
@@ -448,6 +467,16 @@ python examples/sweep_vin_vout.py
 ```
 
 无参数。PMOS 反相器放大器的完整 VIN→VOUT DC 扫描，跨多个 W/L 组合计算数值小信号增益。保存到 `results/vin_vout_sweep.png`。
+
+---
+
+### 5.5 `sc_lpf.py` — 开关电容 LPF 瞬态仿真
+
+```bash
+python examples/sc_lpf.py
+```
+
+无参数。两相开关电容低通滤波器全瞬态仿真，使用 PMOS 开关 + 理想 vsource 时钟驱动。
 
 ---
 

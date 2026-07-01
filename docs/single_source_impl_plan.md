@@ -1,0 +1,95 @@
+# Single-source the numerical kernels onto the Numba `_impl` functions
+
+## Problem
+
+Each numerical kernel exists **twice**: an object-oriented Python version (readable
+reference + no-Numba fallback) and a flat-array Numba `_impl` (fast). Every math
+change must be made in both and kept bit-identical — the dominant maintenance tax.
+
+Three duplicated families:
+
+| Family | OO Python | Numba `_impl` | Parity guard |
+|---|---|---|---|
+| Device model | `PMOS_TFT._eval_currents / _capacitances_from_op / _capacitance_charges_from_op / _newton_internal` + terminal derivs | `_eval_currents_impl`, `_capacitances_impl`, `_capacitance_charges_impl`, `_newton_internal_impl`, `_terminal_derivatives_impl` | `test_model_kernels` |
+| PAC/PNoise fold/HB | `_assemble_pac_linearization_python`, Python fold | `_pac_linearize_orbit_impl`, `_pnoise_fold_psd_impl`, `_pnoise_hb_blocks_impl` | `test_model_kernels` |
+| Transient stamp/Newton/drivers | `_k_step_residual / _k_build_jac / _k_terminal_derivatives / _k_newton / _k_*` | `_stamp_transient_system_impl`, `_transient_newton_impl`, the 3 drivers | `test_numba_augmented` + byte-gate |
+
+## Approach — single-source onto `_impl`, keep `.py_func` (NOT a hard Numba dep)
+
+The Numba `_impl` functions are already pure-Python (Numba-subset). When jitted they
+expose `.py_func`; when Numba is absent the raw `_impl` *is* pure Python. So one
+source (`_impl`) can serve **both** the compiled and the interpreted path:
+
+```python
+# numba_kernels: _eval_currents_impl is the jitted kernel when Numba is on,
+# the raw function when off — never None.
+def _eval_currents(self, Vs, Vd, Vg, Vs1, Vd1):
+    return _eval_currents_impl(Vs, Vd, Vg, Vs1, Vd1, self.Vfb, ...)   # the ONE formula
+```
+
+We **delete the OO formula bodies** and delegate to `_impl`. We do **not** make Numba a
+hard dependency and do **not** delete the interpreted path: `.py_func` / the raw
+`_impl` keeps debuggability, portability, and JIT-free smoke — at zero maintenance
+cost (it is the same source). Numba stays in `optional-dependencies`.
+
+### Why this is byte-identical (measured, not assumed)
+
+`max |OO(x) − _impl.py_func(x)| = 0.000e+00` across 32 (size, bias) points for
+`_eval_currents`, `_capacitances_impl`, `_capacitance_charges_impl`. Production (Numba
+on) already runs the jitted `_impl`; delegating the OO body to the same `_impl` cannot
+move a single ULP. amp/chopper stay byte-identical; the calibration byte-gate is the
+per-stage gate.
+
+## Stages (each ends with the byte-gate: `calibration --all` 5/5 byte-identical + `pytest -q`)
+
+- **1a — Device model, pure formulas. ✅ DONE.** Deleted the OO bodies of
+  `_eval_currents`, `_capacitances_from_op`, `_capacitance_charges_from_op` (and the
+  now-orphaned `_eval_channel_ich_sorted` helper); each delegates to
+  `_eval_currents_impl` / `_capacitances_impl` / `_capacitance_charges_impl`. Dropped the
+  unused `*_numba` guard names from the import. **84 lines removed**; calibration 5/5
+  **byte-identical**, `pytest` 191 passed, ruff clean, Numba-off interpreted path verified.
+- **1b — Device model, `_newton_internal`. ✅ DONE.** `_newton_internal` now delegates to
+  `_newton_internal_impl` (adapting its `(ok, Vs1, Vd1)` return to the array/`None`
+  contract); the duplicated 2×2 Newton loop + numba-first wrapper deleted, unused
+  `newton_internal_numba` import dropped. Byte-identical (5/5), 191 tests, ruff clean.
+  Total device-model reduction 1a+1b: **−118 lines** (796→678). Note: the
+  `get_ss_params` terminal-derivative path is numba-first (`terminal_derivatives_numba`,
+  already the single source) **plus a genuinely distinct finite-difference fallback** —
+  not an analytic duplicate — so it is left as-is. The device-model family is now
+  effectively single-sourced (remaining OO methods — `_eval_channel`, `_robust_op`
+  fsolve cold-start, `_capacitance_branch_terms_from_op`, small helpers — have no Numba
+  twin).
+- **2 — PAC/PNoise HB blocks. ✅ DONE (partial — by design).** `_hb_blocks` (pnoise) and
+  `_pac_hb_blocks` (pac) now delegate to `_pnoise_hb_blocks_impl` through a shared
+  `numba_kernels.py_impl()` helper (jitted for `(2K+1)·n ≥ 16`, interpreted `.py_func`
+  below) — **3 copies of the HB conversion-block assembly collapsed to 1**. Byte-identical
+  (measured 0.0 over 20 combos; calibration 5/5; 191 tests).
+  **NOT delegated (intentionally):** `_assemble_pac_linearization_python` and the pnoise
+  fold are **supersets** — the Python paths handle cases the numba `_impl` cannot
+  (non-`charge_caps` PAC linearization + retained gate1 state; bordered/vsource fold with
+  `nbr > 0`). Wholesale delegation would drop those cases, and a partial sub-case split is
+  low-value (production already takes the Numba path for the supported cases), so they stay
+  as separate implementations. The remaining meaningful periodic duplication is the
+  per-orbit stamp/fold *math*, which overlaps with the transient stamp (stage 3).
+- **3 — Transient stamp/Newton/drivers.** The biggest and most entangled. Prereq: finish
+  **P4** (Numba BE/grid_gear2 for `n_aug > n`) so `_k_*` no longer uniquely handles
+  those, and decide whether to keep the "numba driver fails mid-solve → resume in Python"
+  recovery (`python_start_idx`). Only then can `_k_*` be reduced to thin adapters/removed.
+
+## CI / rot guard
+
+Add one fast run of the suite (or a smoke subset) with `CIRCUIT_USE_NUMBA=0` so the
+interpreted `_impl` path stays exercised and cannot bit-rot after the OO twins are gone.
+(This also fixes the ~2 tests that currently fail without Numba, since the interpreted
+`_impl` becomes a complete path.)
+
+## Risks
+
+- **Delegation must hit the same `_impl` production already uses.** Import the module-level
+  `_impl` name (jitted when Numba on) — not `.py_func` — so production perf/behaviour is
+  unchanged; the interpreted path falls out automatically when Numba is off.
+- **numba_kernels becomes a hard intra-package import for the device model** (it already is —
+  it is pure-Python importable without Numba). If it ever fails to import, fail loudly
+  rather than silently running a divergent OO twin.
+- **Transient (stage 3) is gated on P4** and on accepting the loss of Python mid-solve
+  recovery; do it last, only if 1–2 don't relieve enough.

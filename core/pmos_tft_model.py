@@ -2,19 +2,21 @@ import math
 import numpy as np
 from scipy.optimize import fsolve
 try:
-    from .numba_kernels import (
-        eval_currents_numba,
-        newton_internal_numba,
-        capacitances_numba,
-        capacitance_charges_numba,
-        terminal_derivatives_numba,
-    )
+    from .numba_kernels import terminal_derivatives_numba
 except Exception:  # pragma: no cover - optional acceleration only
-    eval_currents_numba = None
-    newton_internal_numba = None
-    capacitances_numba = None
-    capacitance_charges_numba = None
     terminal_derivatives_numba = None
+
+# Single source of the device formulas: these Numba `_impl` kernels are the jitted
+# functions when Numba is installed and the raw pure-Python functions otherwise
+# (never None), so the OO methods below delegate to them instead of duplicating the
+# formula. numba_kernels imports without Numba, so a plain import is safe; if it ever
+# fails to import we want to fail loudly, not silently run a divergent second copy.
+from .numba_kernels import (
+    _capacitance_charges_impl,
+    _capacitances_impl,
+    _eval_currents_impl,
+    _newton_internal_impl,
+)
 
 from .device_model import TransistorModel, NumbaParams, register_pdk
 from . import diagnostics
@@ -221,53 +223,16 @@ class PMOS_TFT(TransistorModel):
             "gm": gm,
         }
 
-    def _eval_channel_ich_sorted(self, v_d, v_d1, Vg):
-        """Fast Ich-only channel path for residual evaluations."""
-        arg_d1 = (v_d1 - Vg + self.Vfb) / self.Vss
-        arg_d = (v_d - Vg + self.Vfb) / self.Vss
-        Vods = self.Vss * self._softplus(arg_d1)
-        Vodd = self.Vss * self._softplus(arg_d)
-        exponent = self._channel_exponent
-        chmod = 1 + self.lambda_ * (v_d1 - v_d)
-        return self._current_scale * (Vods**exponent - Vodd**exponent) * chmod
-
     def _eval_currents(self, Vs, Vd, Vg, Vs1, Vd1):
-        """ Evaluates the DC branch currents given external and internal nodes """
-        if eval_currents_numba is not None:
-            return eval_currents_numba(
-                Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self.Vss, self.Lc, self.lambda_,
-                self._contact_scale, self._channel_exponent, self._current_scale,
-                self._inv_Rleak,
-            )
+        """Evaluate the DC branch currents given external and internal nodes.
 
-        # Voltages sorting based on Verilog-A ternary operators.
-        v_s, v_s1, v_d, v_d1 = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
-        
-        # --- Contact Model (between s and s1) ---
-        Vt = -(0.0045 * (v_s - Vg)**2 + 0.7125 * (v_s - Vg) + 0.9625)
-        
-        Vods1 = self.Vss * self._softplus((v_s - Vg + Vt) / self.Vss)
-        Vodd1 = self.Vss * self._softplus((v_s1 - Vg + Vt) / self.Vss)
-        
-        Ecsat = 0.85 * 20 / (abs(v_s - Vg) + 0.1)
-        lambdac = 1 / (self.Lc * Ecsat)
-        cmod = 1 + lambdac * (v_s - v_s1)
-        
-        exponent = self._channel_exponent
-        Icont = self._contact_scale * (Vods1**exponent - Vodd1**exponent) * cmod
-        I_s_s1 = Icont if Vs > Vs1 else -Icont
-        
-        # --- Channel Model (between d1 and d) ---
-        Ich = self._eval_channel_ich_sorted(v_d, v_d1, Vg)
-        
-        I_d1_d_ch = Ich if Vs1 > Vd else -Ich
-        I_d1_d_leak = (Vd1 - Vd + 0.1) * self._inv_Rleak
-        I_d1_d = I_d1_d_ch + I_d1_d_leak
-        
-        # --- Internal resistor (between s1 and d1) ---
-        I_s1_d1 = (Vs1 - Vd1) / 0.1
-        
-        return I_s_s1, I_s1_d1, I_d1_d, Ich, I_d1_d_leak
+        Single-sourced: the formula lives once in ``_eval_currents_impl`` (the jitted
+        kernel under Numba, the raw pure-Python function otherwise). See
+        ``docs/single_source_impl_plan.md``."""
+        return _eval_currents_impl(
+            Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self.Vss, self.Lc, self.lambda_,
+            self._contact_scale, self._channel_exponent, self._current_scale,
+            self._inv_Rleak)
 
     def _eval_ich(self, Vs, Vd, Vg, Vs1, Vd1):
         """Evaluate the Verilog-A Ich expression without branch sign or leakage."""
@@ -286,47 +251,16 @@ class PMOS_TFT(TransistorModel):
     def _newton_internal(self, Vs, Vd, Vg, x0, tol=1e-12, maxit=40):
         """Damped 2x2 Newton on the internal-node KCL, seeded from x0.
 
-        Same residual (_residuals) and acceptance (||res|| < 1e-12) as the old
-        fsolve path, but with an analytic 2x2 inverse and a warm start — so a seed
-        within ~HH of the root converges in 1-2 iterations with no scipy overhead.
-        Returns (Vs1, Vd1) on success, or None to let the robust path take over."""
+        Analytic 2x2 inverse + warm start: a seed within ~HH of the root converges
+        in 1-2 iterations with no scipy overhead. Returns (Vs1, Vd1) on success, or
+        None to let the robust cold fsolve path take over. Single-sourced onto
+        ``_newton_internal_impl`` (see ``docs/single_source_impl_plan.md``)."""
         x0 = np.asarray(x0, float)
-        if newton_internal_numba is not None:
-            try:
-                ok, Vs1, Vd1 = newton_internal_numba(
-                    Vs, Vd, Vg, x0[0], x0[1], tol, maxit,
-                    self.Vfb, self.Vss, self.Lc, self.lambda_,
-                    self._contact_scale, self._channel_exponent,
-                    self._current_scale, self._inv_Rleak)
-                if ok:
-                    return np.array([Vs1, Vd1])
-                return None
-            except Exception as exc:
-                diagnostics.note("model.internal_newton_numba_fallback", exc)
-        Vs1, Vd1 = x0[0], x0[1]
-        hj = 1e-6                                    # finite-diff step for the 2x2 jac
-        for _ in range(maxit):
-            r0a, r0b = self._residuals((Vs1, Vd1), Vs, Vd, Vg)
-            if abs(r0a) + abs(r0b) < tol:
-                return np.array([Vs1, Vd1])
-            r1a, r1b = self._residuals((Vs1 + hj, Vd1), Vs, Vd, Vg)
-            r2a, r2b = self._residuals((Vs1, Vd1 + hj), Vs, Vd, Vg)
-            j00 = (r1a - r0a) / hj; j01 = (r2a - r0a) / hj
-            j10 = (r1b - r0b) / hj; j11 = (r2b - r0b) / hj
-            det = j00 * j11 - j01 * j10
-            if det == 0.0 or not np.isfinite(det):
-                return None
-            d0 = -(j11 * r0a - j01 * r0b) / det
-            d1 = -(-j10 * r0a + j00 * r0b) / det
-            mx = max(abs(d0), abs(d1))
-            if mx > 2.0:                             # branch-safety: cap the jump
-                s = 2.0 / mx; d0 *= s; d1 *= s
-            Vs1 += d0; Vd1 += d1
-            if max(abs(d0), abs(d1)) < 1e-13:        # stalled at the numeric floor
-                if abs(r0a) + abs(r0b) < 1e-9:
-                    return np.array([Vs1, Vd1])
-                return None
-        return None
+        ok, Vs1, Vd1 = _newton_internal_impl(
+            Vs, Vd, Vg, x0[0], x0[1], tol, maxit, self.Vfb, self.Vss, self.Lc,
+            self.lambda_, self._contact_scale, self._channel_exponent,
+            self._current_scale, self._inv_Rleak)
+        return np.array([Vs1, Vd1]) if ok else None
 
     def _robust_op(self, Vs, Vd, Vg):
         """Cold multi-guess fsolve — the original, branch-robust internal solve.
@@ -470,31 +404,14 @@ class PMOS_TFT(TransistorModel):
     # ── Private helpers ──────────────────────────────────────────────────
 
     def _capacitances_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
-        """Capacitance equations evaluated from an already-solved internal OP."""
-        if capacitances_numba is not None:
-            try:
-                return capacitances_numba(
-                    Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
-                    self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
-                    self._cap_cgs3_base, self._cap_cgd3_base, self.k1)
-            except Exception as exc:
-                diagnostics.note("model.caps_numba_fallback", exc)
-        v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
+        """Capacitance equations from an already-solved internal OP.
 
-        Cgs1 = self._cap_cgs1
-        Cgd1 = self._cap_cgd1
-
-        arg_gs = v_s - Vg + self.Vfb
-        Cgs2 = 1.43 * self._cap_half_wl_ci * (self._two_over_pi * np.arctan(arg_gs * 0.6) + 1)
-        Cgd2 = 0.33 * self._cap_half_wl_ci * (self._two_over_pi * np.arctan(arg_gs * 2.01) + 1)
-
-        arg_gd = -Vg + self.Vfb + v_d
-        Cgs3 = 0.34 * self._cap_cgs3_base * (self._two_over_pi * np.arctan(arg_gd * 0.21) + 1)
-        Cgd3 = 0.52 * self._cap_cgd3_base * (self._two_over_pi * np.arctan(arg_gd * 0.42) + 1)
-
-        Cgss = self.k1 * (Cgs1 + Cgs2 + Cgs3) * 1e4 * 1e-12
-        Cgdd = self.k1 * (Cgd1 + Cgd2 + Cgd3) * 1e4 * 1e-12
-        return Cgss, Cgdd
+        Single-sourced onto ``_capacitances_impl`` (see
+        ``docs/single_source_impl_plan.md``)."""
+        return _capacitances_impl(
+            Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
+            self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
+            self._cap_cgs3_base, self._cap_cgd3_base, self.k1)
 
     @staticmethod
     def _atan_cap_integral(y, scale, two_over_pi):
@@ -511,49 +428,14 @@ class PMOS_TFT(TransistorModel):
         are kept for diagnostics and charge-oriented experiments; production
         transient uses a step-integrated displacement-current companion based on
         the same local Cgss/Cgdd equations.
+
+        Single-sourced onto ``_capacitance_charges_impl`` (see
+        ``docs/single_source_impl_plan.md``).
         """
-        if capacitance_charges_numba is not None:
-            try:
-                return capacitance_charges_numba(
-                    Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
-                    self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
-                    self._cap_cgs3_base, self._cap_cgd3_base, self.k1)
-            except Exception as exc:
-                diagnostics.note("model.cap_charges_numba_fallback", exc)
-
-        v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
-        y_s = v_s - Vg + self.Vfb
-        y_d = v_d - Vg + self.Vfb
-        x_gs = Vg - Vs
-        x_gd = Vg - Vd
-
-        cgs2_coeff = 1.43 * self._cap_half_wl_ci
-        cgd2_coeff = 0.33 * self._cap_half_wl_ci
-        cgs3_coeff = 0.34 * self._cap_cgs3_base
-        cgd3_coeff = 0.52 * self._cap_cgd3_base
-
-        f_s_060 = self._two_over_pi * math.atan(y_s * 0.6) + 1.0
-        f_s_201 = self._two_over_pi * math.atan(y_s * 2.01) + 1.0
-        f_d_021 = self._two_over_pi * math.atan(y_d * 0.21) + 1.0
-        f_d_042 = self._two_over_pi * math.atan(y_d * 0.42) + 1.0
-
-        cgs_cross = cgs3_coeff * f_d_021
-        cgd_cross = cgd2_coeff * f_s_201
-        qscale = self.k1 * 1e4 * 1e-12
-
-        qgs = qscale * (
-            self._cap_cgs1 * x_gs
-            - cgs2_coeff * self._atan_cap_integral(y_s, 0.6, self._two_over_pi)
-            + cgs_cross * x_gs
-        )
-        qgd = qscale * (
-            self._cap_cgd1 * x_gd
-            + cgd_cross * x_gd
-            - cgd3_coeff * self._atan_cap_integral(y_d, 0.42, self._two_over_pi)
-        )
-        Cgss = qscale * (self._cap_cgs1 + cgs2_coeff * f_s_060 + cgs_cross)
-        Cgdd = qscale * (self._cap_cgd1 + cgd_cross + cgd3_coeff * f_d_042)
-        return qgs, qgd, Cgss, Cgdd
+        return _capacitance_charges_impl(
+            Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
+            self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
+            self._cap_cgs3_base, self._cap_cgd3_base, self.k1)
 
     def _capacitance_branch_terms_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
         """Branch self-charge terms for step-integrated C(V)*dV experiments.

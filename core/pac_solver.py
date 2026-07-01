@@ -15,8 +15,9 @@ from scipy.sparse import linalg as _spla
 
 from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
 from .ac_solver import _bw_from_gain, _dev_corner, _dev_nf, ac_solve, build_devices, get_ss_params
-from .numba_kernels import (pac_hb_blocks_numba, pac_linearize_orbit_numba,
-                            pac_linearize_orbit_gate1_numba)
+from .numba_kernels import (_pnoise_hb_blocks_impl, pac_hb_blocks_numba,
+                            pac_linearize_orbit_numba,
+                            pac_linearize_orbit_gate1_numba, py_impl)
 from .topology import Topology
 from .transient_solver import transient
 from . import diagnostics
@@ -526,33 +527,19 @@ def _assemble_pac_linearization_python(
 
 
 def _pac_hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
+    """Dense HB conversion blocks (same kernel as pnoise). Single-sourced onto
+    ``_pnoise_hb_blocks_impl`` (jitted for large systems, interpreted `.py_func`
+    below the JIT-worthwhile size). See ``docs/single_source_impl_plan.md``."""
     use_numba = (
         pac_hb_blocks_numba is not None and
         (2 * int(K) + 1) * int(n) >= 16
     )
-    if use_numba:
-        return pac_hb_blocks_numba(
-            np.asarray(Gf, dtype=np.complex128),
-            np.asarray(Cf, dtype=np.complex128),
-            int(K),
-            float(fundamental),
-            bool(charge_caps),
-        ) + (True,)
-
-    nb = 2 * K + 1
-    Y_base = np.zeros((nb * n, nb * n), dtype=complex)
-    C_block = np.zeros_like(Y_base)
-    for kr in range(-K, K + 1):
-        br = (kr + K) * n
-        for kc in range(-K, K + 1):
-            bc = (kc + K) * n
-            sideband = kr if charge_caps else kc
-            sideband_omega = 2j * np.pi * sideband * fundamental
-            g = Gf[(kr - kc) % N]
-            c = Cf[(kr - kc) % N]
-            Y_base[br:br + n, bc:bc + n] = g + sideband_omega * c
-            C_block[br:br + n, bc:bc + n] = c
-    return Y_base, C_block, False
+    kernel = _pnoise_hb_blocks_impl if use_numba else py_impl(_pnoise_hb_blocks_impl)
+    Y_base, C_block = kernel(
+        np.asarray(Gf, dtype=np.complex128),
+        np.asarray(Cf, dtype=np.complex128),
+        int(K), float(fundamental), bool(charge_caps))
+    return Y_base, C_block, use_numba
 
 
 def _term_arrays(terms):

@@ -25,7 +25,8 @@ except Exception:  # pragma: no cover - scipy is a project dependency
 from .ac_mna import _branch_incidence
 from .ac_solver import _dev_corner, _dev_nf, build_devices, get_ss_params
 from .noise_solver import band_rms, noise_analysis
-from .numba_kernels import pnoise_fold_psd_numba, pnoise_hb_blocks_numba
+from .numba_kernels import (_pnoise_hb_blocks_impl, pnoise_fold_psd_numba,
+                            pnoise_hb_blocks_numba, py_impl)
 from .pac_solver import (
     _assemble_pac_linearization_python,
     _conversion_charge_caps,
@@ -164,33 +165,19 @@ def _try_lti_noise_fast_path(sizes, bias, freqs, *, pss_result, nf, corner,
 
 
 def _hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
+    """Dense HB conversion blocks. Single-sourced onto ``_pnoise_hb_blocks_impl``
+    (jitted for large systems, interpreted `.py_func` below the JIT-worthwhile
+    size). See ``docs/single_source_impl_plan.md``."""
     use_numba = (
         pnoise_hb_blocks_numba is not None and
         (2 * int(K) + 1) * int(n) >= 16
     )
-    if use_numba:
-        return pnoise_hb_blocks_numba(
-            np.asarray(Gf, dtype=np.complex128),
-            np.asarray(Cf, dtype=np.complex128),
-            int(K),
-            float(fundamental),
-            bool(charge_caps),
-        ) + (True,)
-
-    nb = 2 * K + 1
-    Y_base = np.zeros((nb * n, nb * n), dtype=complex)
-    C_block = np.zeros_like(Y_base)
-    for kr in range(-K, K + 1):
-        br = (kr + K) * n
-        for kc in range(-K, K + 1):
-            sideband = kr if charge_caps else kc
-            sideband_omega = 2j * np.pi * sideband * fundamental
-            bc = (kc + K) * n
-            g_coeff = Gf[(kr - kc) % N]
-            c_coeff = Cf[(kr - kc) % N]
-            Y_base[br:br + n, bc:bc + n] = g_coeff + sideband_omega * c_coeff
-            C_block[br:br + n, bc:bc + n] = c_coeff
-    return Y_base, C_block, False
+    kernel = _pnoise_hb_blocks_impl if use_numba else py_impl(_pnoise_hb_blocks_impl)
+    Y_base, C_block = kernel(
+        np.asarray(Gf, dtype=np.complex128),
+        np.asarray(Cf, dtype=np.complex128),
+        int(K), float(fundamental), bool(charge_caps))
+    return Y_base, C_block, use_numba
 
 
 def _hb_blocks_sparse(Gf, Cf, K, N, n, fundamental, drop_tol=0.0,

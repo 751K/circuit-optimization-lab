@@ -568,6 +568,7 @@ examples/single_stage.json        # Single-transistor common-source (PMOS_TFT)
 examples/resistor_load_stage.json # PMOS + resistive load + output cap + current source
 examples/voltage_divider.json     # Ideal voltage source (true MNA) — resistor divider
 examples/vcvs_amplifier.json      # VCVS amplifier — linear gain 100×
+examples/sc_lpf.json              # Switched-capacitor LPF (2-phase, PMOS switches + vsource clocks)
 examples/afe_explore.json         # 10-transistor AFE with explore config
 examples/periodic_rc.json         # Passive RC with PSS/PAC/PNoise dispatch
 ```

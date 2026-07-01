@@ -382,12 +382,13 @@ python3 demo/server.py
 
 ## 性能基准
 
-四个固定性能基准，用于性能回归跟踪：
+五个固定性能基准，用于性能回归跟踪：
 
 ```bash
 python3 -m benchmarks.bench_afe --warm-runs 3         # AC+noise+transient
 python3 -m benchmarks.bench_model --warm-runs 3       # 单管微基准
 python3 -m benchmarks.bench_chopper --warm-runs 3     # Chopper: 5 个分析层级
+python3 -m benchmarks.bench_periodic --warm-runs 3    # 周期求解器（PSS/PAC/PNoise）
 python3 -m benchmarks.bench_sweep --n-candidates 200  # 批量 explore 负载
 ```
 
@@ -425,8 +426,13 @@ HB 对照时才设置 `time_domain=False`。
 | `examples/resistor_load_stage.json` | 带电阻负载的单管电路，演示 `resistors` 和 `current_sources` 字段         |
 | `examples/periodic_rc.json`         | 无源 RC 低通，带 PSS/PAC/PNoise dispatch——最简单的端到端周期示例           |
 | `examples/voltage_divider.json`     | 理想电压源（真·MNA）分压器，含电阻电容——vsource 演示                          |
+| `examples/vcvs_amplifier.json`      | VCVS 放大器，线性增益 100×——受控源演示                          |
+| `examples/sc_lpf.json`              | 开关电容低通滤波器（两相，单端 LPTV）                          |
 | `examples/afe_testbench.py`         | 完整 testbench：干电极前端（R∥C 网络）→ AFE 核心 → AC + 噪声 + 瞬态 |
 | `examples/mc_mismatch.py`           | Monte Carlo mismatch 驱动：工艺角表 + 3-corner MC 图      |
+| `examples/find_max_gain.py`         | PMOS 反相器最大增益扫描      |
+| `examples/sweep_vin_vout.py`        | PMOS 反相器 DC VIN→VOUT 传输曲线      |
+| `examples/sc_lpf.py`                | 开关电容 LPF 瞬态仿真      |
 
 ---
 

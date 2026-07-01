@@ -513,6 +513,8 @@ examples/single_stage.json        # 单管共源级（PMOS_TFT）
 examples/resistor_load_stage.json # PMOS + 电阻负载 + 输出电容 + 电流源
 examples/voltage_divider.json     # 理想电压源（真·MNA）— 电阻分压器
 examples/vcvs_amplifier.json      # VCVS 放大器 — 线性增益 100×
+examples/sc_lpf.json              # 开关电容低通（两相，PMOS 开关 + vsource 时钟）
+examples/afe_explore.json         # 10 管 AFE 含 explore 配置
 examples/periodic_rc.json         # 纯 RC 周期 PSS/PAC/PNoise dispatch
 ```
 
