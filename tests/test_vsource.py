@@ -87,12 +87,12 @@ def test_vsource_carries_no_thermal_noise():
 # ── Transient ─────────────────────────────────────────────────────────────--
 
 def test_vsource_transient_constant_divider():
-    # Static source -> output sits at the divider value at every timestep (Python n_aug
-    # path; the numba grid is bypassed when sources are present).
+    # Static source -> output sits at the divider value at every timestep. Since P4 the
+    # numba gear2 grid handles the augmented (n_aug>n) vsource system directly.
     tr = transient({}, {}, np.linspace(0, 1e-3, 51), topo=_divider(E=2.0),
                    integration_method="gear2")
     assert tr["nfail"] == 0
-    assert tr["numba_grid_solver"] is False
+    assert tr["numba_grid_solver"] is True
     assert np.allclose(tr["output"], 1.0, atol=1e-6)
 
 
@@ -106,7 +106,7 @@ def test_vsource_transient_timevarying_rc_step():
     t = np.linspace(0, 5e-3, N)
     tr = transient({}, {}, t, topo=topo, inputs={"vsrc": np.ones(N)},
                    integration_method="be")
-    assert tr["nfail"] == 0 and tr["numba_grid_solver"] is False
+    assert tr["nfail"] == 0 and tr["numba_grid_solver"] is True
     expected = 1.0 - np.exp(-t / 1e-3)
     assert np.max(np.abs(tr["output"] - expected)) < 2e-3
 

@@ -1,8 +1,7 @@
 import numpy as np
 import pytest
 
-from core.numba_kernels import (pac_hb_blocks_numba, pac_linearize_orbit_numba,
-                                transient_solve_adaptive_gear2_numba)
+from core.numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_numba
 from core.adaptive_config import AdaptiveConfig, adaptive_lte_wrms, adaptive_next_h
 import core.numba_kernels as nk
 from core.pac_solver import pac_solve
@@ -459,60 +458,6 @@ def test_adaptive_pss_inputs_match_orbit_grid():
                     input_drive={"vin": 1.0}, lti_fast_path=False,
                     analytic=True, max_sideband=1, n_period_samples=16)
     assert np.isfinite(pac["gains"][0])
-
-
-@pytest.mark.skipif(transient_solve_adaptive_gear2_numba is None,
-                    reason="numba adaptive gear2 kernel unavailable")
-def test_numba_adaptive_gear2_matches_python(monkeypatch):
-    import core.transient_solver as ts
-
-    R = 1e5
-    C = 1e-9
-    f = 100.0
-    w = 2 * np.pi * f
-    period = 1.0 / f
-    t_stop = 2.0 * period
-    topo = _rc_lowpass_topology(R, C)
-    t = np.linspace(0.0, t_stop, 401)
-    vin = np.sin(w * t)
-    kw = dict(
-        topo=topo, inputs={"vin": vin}, node_inputs={"VIN": "vin"},
-        V0=np.array([0.0]), integration_method="gear2", adaptive=True,
-        adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
-        adaptive_h0=period / 20, max_step=period / 5,
-    )
-    nb = transient({}, {"VIN": 0.0}, t, **kw)
-    assert nb["numba_adaptive_solver"] is True
-
-    monkeypatch.setattr(ts, "transient_solve_adaptive_gear2_numba", None)
-    py = transient({}, {"VIN": 0.0}, t, **kw)
-    assert py["numba_adaptive_solver"] is False
-    np.testing.assert_allclose(nb["t"], py["t"], rtol=0, atol=1e-12)
-    np.testing.assert_allclose(nb["nodes"]["OUT"], py["nodes"]["OUT"], rtol=0, atol=1e-8)
-
-
-@pytest.mark.skipif(transient_solve_adaptive_gear2_numba is None,
-                    reason="numba adaptive gear2 kernel unavailable")
-def test_numba_adaptive_gear2_matches_python_at_input_kinks(monkeypatch):
-    import core.transient_solver as ts
-
-    topo = _rc_lowpass_topology(1e5, 1e-9)
-    t = np.array([0.0, 1e-3, 2e-3, 4e-3])
-    vin = np.array([0.0, 1.0, 0.0, 0.0])
-    kw = dict(
-        topo=topo, inputs={"vin": vin}, node_inputs={"VIN": "vin"},
-        V0=np.array([0.0]), integration_method="gear2", adaptive=True,
-        adaptive_config=AdaptiveConfig(reltol=1e-4, vabstol=1e-6, h0=0.8e-3),
-        max_step=2e-3,
-    )
-    nb = transient({}, {"VIN": 0.0}, t, **kw)
-    assert nb["numba_adaptive_solver"] is True
-
-    monkeypatch.setattr(ts, "transient_solve_adaptive_gear2_numba", None)
-    py = transient({}, {"VIN": 0.0}, t, **kw)
-    assert py["numba_adaptive_solver"] is False
-    np.testing.assert_allclose(nb["t"], py["t"], rtol=0, atol=1e-12)
-    np.testing.assert_allclose(nb["nodes"]["OUT"], py["nodes"]["OUT"], rtol=0, atol=1e-8)
 
 
 def test_reverse_biased_pass_switch_restores_not_pumps():

@@ -1442,8 +1442,9 @@ def _transient_solve_grid_impl(
     cap_mode, clip_lo, clip_hi = cap_clip
     N = tgrid.shape[0]
     ninputs = input_values.shape[0]
-    Vhist = np.zeros((N, n))
-    for i in range(n):
+    n_aug = V0.shape[0]                       # nodes + ideal-source branch unknowns
+    Vhist = np.zeros((N, n_aug))
+    for i in range(n_aug):
         Vhist[0, i] = V0[i]
 
     input_start = np.empty(ninputs)
@@ -1453,9 +1454,9 @@ def _transient_solve_grid_impl(
     piece_in0 = np.empty(ninputs)
     piece_in1 = np.empty(ninputs)
     Vp = V0.copy()
-    Vwork = np.empty(n)
-    R = np.empty(n)
-    J = np.empty((n, n))
+    Vwork = np.empty(n_aug)
+    R = np.empty(n_aug)
+    J = np.empty((n_aug, n_aug))
     prev_vs = np.empty(dev_di.shape[0])
     prev_vd = np.empty(dev_di.shape[0])
     prev_vg = np.empty(dev_di.shape[0])
@@ -1589,7 +1590,7 @@ def _transient_solve_grid_impl(
                         else:
                             profile_stats[PROFILE_FLAT_SUBSTEPS] += 1.0
                             profile_stats[PROFILE_FLAT_NEWTON_ITERS] += iters_r
-                    for i in range(n):
+                    for i in range(n_aug):
                         Vp[i] = Vwork[i]
                     for ii in range(ninputs):
                         in0[ii] = in1[ii]
@@ -1608,7 +1609,7 @@ def _transient_solve_grid_impl(
                     else:
                         profile_stats[PROFILE_FLAT_SUBSTEPS] += 1.0
                         profile_stats[PROFILE_FLAT_NEWTON_ITERS] += iters
-                for i in range(n):
+                for i in range(n_aug):
                     Vp[i] = Vwork[i]
                 for ii in range(ninputs):
                     in0[ii] = in1[ii]
@@ -1624,7 +1625,7 @@ def _transient_solve_grid_impl(
             if profile_enabled and failed_interval_count < N:
                 failed_interval_indices[failed_interval_count] = k
                 failed_interval_count += 1
-        for i in range(n):
+        for i in range(n_aug):
             Vhist[k, i] = Vp[i]
     if profile_enabled:
         profile_stats[PROFILE_INTERVALS] = N - 1
@@ -2042,14 +2043,15 @@ def _transient_solve_grid_gear2_impl(
     ninputs = input_values.shape[0]
     ndev = dev_di.shape[0]
     ncap = cap_value.shape[0]
-    Vhist = np.zeros((N, n))
-    for i in range(n):
+    n_aug = V0.shape[0]                       # nodes + ideal-source branch unknowns
+    Vhist = np.zeros((N, n_aug))
+    for i in range(n_aug):
         Vhist[0, i] = V0[i]
     Vp = V0.copy()
     Vp2 = V0.copy()
-    Vwork = np.empty(n)
-    R = np.empty(n)
-    J = np.empty((n, n))
+    Vwork = np.empty(n_aug)
+    R = np.empty(n_aug)
+    J = np.empty((n_aug, n_aug))
     prev_vs = np.empty(ndev); prev_vd = np.empty(ndev); prev_vg = np.empty(ndev)
     prev_cgs = np.empty(ndev); prev_cgd = np.empty(ndev)
     cap_prev_dv = np.empty(ncap)
@@ -2081,19 +2083,19 @@ def _transient_solve_grid_gear2_impl(
             input_start[ii] = input_values[ii, k - 1]
             input_end[ii] = input_values[ii, k]
             input_cur[ii] = input_start[ii]
-        for i in range(n):
+        for i in range(n_aug):
             Vp[i] = Vhist[k - 1, i]
         if k >= 2:
             h_prev_cur = tgrid[k - 1] - tgrid[k - 2]
             for ii in range(ninputs):
                 input_cur2[ii] = input_values[ii, k - 2]
-            for i in range(n):
+            for i in range(n_aug):
                 Vp2[i] = Vhist[k - 2, i]
         else:
             h_prev_cur = 0.0
             for ii in range(ninputs):
                 input_cur2[ii] = input_start[ii]
-            for i in range(n):
+            for i in range(n_aug):
                 Vp2[i] = Vp[i]
         interval_edge = False
         if edge_mask.shape[0] == N:
@@ -2154,7 +2156,7 @@ def _transient_solve_grid_gear2_impl(
                     else:
                         profile_stats[PROFILE_FLAT_SUBSTEPS] += 1.0
                         profile_stats[PROFILE_FLAT_NEWTON_ITERS] += iters
-                for i in range(n):
+                for i in range(n_aug):
                     Vp2[i] = Vp[i]
                     Vp[i] = Vwork[i]
                 for ii in range(ninputs):
@@ -2224,7 +2226,7 @@ def _transient_solve_grid_gear2_impl(
                     else:
                         profile_stats[PROFILE_FLAT_SUBSTEPS] += 1.0
                         profile_stats[PROFILE_FLAT_NEWTON_ITERS] += iters_r
-                for i in range(n):
+                for i in range(n_aug):
                     Vp2[i] = Vp[i]
                     Vp[i] = Vwork[i]
                 for ii in range(ninputs):
@@ -2245,7 +2247,7 @@ def _transient_solve_grid_gear2_impl(
             if profile_enabled and failed_interval_count < N:
                 failed[failed_interval_count] = k
                 failed_interval_count += 1
-        for i in range(n):
+        for i in range(n_aug):
             Vhist[k, i] = Vp[i]
     if profile_enabled:
         profile_stats[PROFILE_INTERVALS] = N - 1

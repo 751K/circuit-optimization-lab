@@ -71,10 +71,47 @@ per-stage gate.
   low-value (production already takes the Numba path for the supported cases), so they stay
   as separate implementations. The remaining meaningful periodic duplication is the
   per-orbit stamp/fold *math*, which overlaps with the transient stamp (stage 3).
-- **3 — Transient stamp/Newton/drivers.** The biggest and most entangled. Prereq: finish
-  **P4** (Numba BE/grid_gear2 for `n_aug > n`) so `_k_*` no longer uniquely handles
-  those, and decide whether to keep the "numba driver fails mid-solve → resume in Python"
-  recovery (`python_start_idx`). Only then can `_k_*` be reduced to thin adapters/removed.
+- **P4 (transient stage-3 prerequisite). ✅ DONE.** Sized the two fixed-grid Numba
+  drivers `_transient_solve_grid_impl` (BE) and `_transient_solve_grid_gear2_impl`
+  (fixed gear2) at `n_aug` (Vhist/Vwork/R/J + every full-vector copy/store loop; kept `n`
+  for the stamp/substep node-count args — same pattern P5 used for the adaptive driver)
+  and relaxed the two guards `_solve_fixed_gear2_numba` / `_solve_be_numba` to
+  `n_aug >= n`. The stamp/Newton kernels already handled `n_aug` (P2/P3). Effect,
+  measured with a solver-path probe across the transient/PSS test suite: **full-Python
+  transient solves 160/345 (46%) → 2/345 (0.6%)**; pure-Numba 184 → 342. amp/chopper/
+  sc_lpf byte-identical (they are `n_aug==n` or use the adaptive path); the two vsource
+  transient tests re-baselined onto the Numba path (`numba_grid_solver` now `True`, RC
+  step / divider numerics still pass); 191 tests, ruff clean.
+- **3 — Transient stamp/Newton/drivers.** Unlike 1–2 this is a *delete + rewire*, not a
+  delegate (the OO path is ctx/object-based, numba is flat-array), done in two gated steps:
+  - **3A — Reroute. ✅ DONE.** The three `_solve_*_numba` now call the module-level
+    `_transient_solve_{grid,grid_gear2,adaptive_gear2}_impl` directly (jitted when Numba is
+    on → **byte-identical**; raw pure-Python when off), instead of the `*_numba` public name
+    gated on `is not None`. So the **no-Numba transient path now runs the single `_impl`
+    interpreted** (validated: numba-off `test_controlled_sources` 22 + `test_vsource` 19
+    pass), making the OO `_k_*`/`_solve_*_python` production-dead (only the debug toggle
+    `CIRCUIT_GEAR2_NUMBA=0` + the 1/345 resume still reach them). The two
+    `test_numba_adaptive_gear2_matches_python[_at_input_kinks]` parity tests were deleted
+    (their monkeypatch-numba-to-None mechanism no longer gates anything after the reroute).
+    Byte-gate 5/5, 189 tests, ruff clean.
+  - **3B — Delete. ✅ DONE.** Rewired the `transient()` dispatch to drop the three
+    `_solve_*_python` fallbacks + the mid-solve resume (numba failure now accepts the
+    partial trajectory), then deleted the OO `_k_*` block (578–1384) + the three
+    `_solve_*_python` (~230 lines) + the `CIRCUIT_GEAR2_NUMBA` debug toggle + the dead
+    `python_start_idx`, and removed `tests/test_numba_augmented.py`.
+    **transient_solver.py 2464 → 1412 lines (−1052).** Byte-gate 5/5 **byte-identical**;
+    full suite 183 passed (189 − 6 deleted parity tests); numba-off transient validated
+    (runs the interpreted `_impl`); ruff clean. The numba transient `_impl` is now the
+    single source, validated by the Cadence byte-gate + physics tests (RC step / controlled
+    sources) — no independent hand-written Python reference. Minor residue: a dead
+    `use_numba_newton` ctx field (computed, never read) left in place as harmless.
+
+## Result
+
+All three families single-sourced. Device model −118, HB blocks 3→1, transient −1052.
+The numba `_impl` kernels are the one source; the interpreted path is their `.py_func` /
+raw form (kept, free). Numba stays optional. Cadence byte-gate 5/5 byte-identical
+throughout.
 
 ## CI / rot guard
 
