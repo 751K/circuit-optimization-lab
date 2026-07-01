@@ -9,7 +9,7 @@ import pytest
 
 from core.ac_solver import ac_solve
 from core.circuit_loader import circuit_from_dict, load_circuit_json
-from core.noise_solver import _KB, _TEMP, band_rms, noise_analysis
+from core.noise_solver import _KB, _TEMP, noise_analysis
 from core.topology import Topology
 from core.transient_solver import transient
 

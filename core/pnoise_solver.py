@@ -35,6 +35,7 @@ from .pac_solver import (
     _is_constant_wave,
     pac_solve,
 )
+from . import diagnostics
 
 
 _KB = 1.380649e-23
@@ -304,8 +305,8 @@ def _block_jacobi_preconditioner(Gf, Cf, K, n, fundamental, freq):
             try:
                 factors.append(("lu", _la.lu_factor(block)))
                 continue
-            except Exception:
-                pass
+            except Exception as exc:
+                diagnostics.note("pnoise.lu_factor_fail", exc)
         factors.append(("dense", block))
 
     def apply(rhs):
@@ -320,7 +321,8 @@ def _block_jacobi_preconditioner(Gf, Cf, K, n, fundamental, freq):
                     out[lo:hi] = _la.lu_solve(data, rhs[lo:hi])
                 else:
                     out[lo:hi] = np.linalg.solve(data, rhs[lo:hi])
-            except Exception:
+            except Exception as exc:
+                diagnostics.note("pnoise.block_solve_lstsq", exc)
                 mat = data if mode != "lu" else (
                     G0 + (2.0j * np.pi * (float(freq) + (ki - K) * fundamental)) * C0
                 ).T
@@ -384,7 +386,8 @@ def _solve_hb_adjoint(Y_base, C_block, Y_sparse, C_sparse, freq, e, solver,
             info["iterative_iterations"] = int(iter_count["n"])
             if gmres_info == 0 and np.all(np.isfinite(adj)):
                 return adj, info
-        except Exception:
+        except Exception as exc:
+            diagnostics.note("pnoise.gmres_fail", exc)
             info["iterative_info"] = -1
         info["iterative_fallback"] = True
 
@@ -392,8 +395,8 @@ def _solve_hb_adjoint(Y_base, C_block, Y_sparse, C_sparse, freq, e, solver,
         adj = _spla.spsolve(A, e)
         if np.all(np.isfinite(adj)):
             return adj, info
-    except Exception:
-        pass
+    except Exception as exc:
+        diagnostics.note("pnoise.spsolve_fail", exc)
     info["dense_fallback"] = True
     if Y_base is None or C_block is None:
         dense = Y.toarray()
@@ -631,6 +634,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                             Vs, Vd, Vg, frequency=1.0
                         )
                     except Exception as exc:
+                        diagnostics.note("pnoise.device_noise_zeroed", exc)
                         noise_failure_count += 1
                         noise_failure_devices.add(name)
                         if not noise_failure_reason:
@@ -742,6 +746,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
             hb["Y_base_sparse"] = Y_sparse
             hb["C_block_sparse"] = C_sparse
         except Exception as exc:
+            diagnostics.note("pnoise.sparse_assembly_failed", exc)
             add_warning(
                 "hb_sparse_assembly_failed",
                 "sparse/iterative HB matrix assembly failed "
@@ -771,8 +776,8 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 solver_used = _resolve_hb_solver(
                     hb_solver_requested, hb_size, sparse_density,
                     hb_sparse_min_size, hb_sparse_max_density)
-            except Exception:
-                pass
+            except Exception as exc:
+                diagnostics.note("pnoise.to_sparse_fail", exc)
     if solver_used in {"sparse", "iterative"} and (Y_sparse is None or C_sparse is None):
         solver_used = "dense"
         add_warning(

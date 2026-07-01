@@ -216,7 +216,7 @@ lap = SLiCAP.doLaplace(circuit, source='V_INP', detector='V_out', transfer='gain
 H_raw = lap.laplace
 
 # ── Symbolic simplification ────────────────────────────────────────────
-from sympy import I, pi, simplify, fraction, Poly, degree, symbols as sp_symbols
+from sympy import I, pi, symbols as sp_symbols
 
 subs_dict = {}
 if SYMBOLIC:
@@ -231,7 +231,7 @@ if SYMBOLIC:
 
     # DC gain closed-form (substitute s=0 without full simplify — fast)
     H0_sym = H.subs(s_sym, 0)
-    print(f"\n=== DC Gain (symbolic) ===")
+    print("\n=== DC Gain (symbolic) ===")
     print(f"H(0) = {H0_sym}")
 
     # Build substitution dict for numeric evaluation
@@ -253,13 +253,13 @@ else:
 print(f"\nH(s) length: {len(str(H))} chars")
 
 # Pole-zero
-print(f"\n--- Pole-Zero ---")
+print("\n--- Pole-Zero ---")
 pz = SLiCAP.doPZ(circuit, source='V_INP', detector='V_out', transfer='gain')
 print(f"Poles: {pz.poles}")
 print(f"Zeros: {pz.zeros}")
 
 # Frequency sweep
-print(f"\n--- Frequency response ---")
+print("\n--- Frequency response ---")
 H_eval = H.subs(subs_dict) if SYMBOLIC else H
 
 for f in [0.01, 1.0, 100.0, 1000.0, 10000.0]:

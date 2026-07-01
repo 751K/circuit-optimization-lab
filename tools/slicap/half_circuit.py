@@ -251,12 +251,12 @@ if SYMBOLIC:
 
     # DC gain H(0)
     H0_sym = simplify(H_simple.subs(s, 0))
-    print(f"\n=== DC Gain (symbolic) ===")
+    print("\n=== DC Gain (symbolic) ===")
     print(f"H(0) = {H0_sym}")
 
     # Collect denominator coefficients for pole expressions
     den_coeffs = Poly(den, s).all_coeffs()
-    print(f"\nDenominator coefficients (a2*s^2 + a1*s + a0):")
+    print("\nDenominator coefficients (a2*s^2 + a1*s + a0):")
     for i, c in enumerate(den_coeffs):
         print(f"  a{len(den_coeffs)-1-i} = {c}")
 
@@ -283,7 +283,7 @@ print(f"\nPoles: {pz.poles}")
 print(f"Zeros: {pz.zeros}")
 
 # ── Frequency response ────────────────────────────────────────────────────
-print(f"\n--- Frequency response ---")
+print("\n--- Frequency response ---")
 
 # For symbolic mode, substitute numeric defaults before frequency sweep
 if SYMBOLIC:

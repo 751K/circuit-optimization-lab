@@ -56,7 +56,7 @@ from .adaptive_config import (
     resolve_adaptive_config,
 )
 from .topology import AFE_TOPO
-from .ac_solver import ac_solve, build_devices, _dev_corner, _dev_nf
+from .ac_solver import ac_solve, build_devices
 from .transient_profile import (
     PROFILE_EDGE_NEWTON_ITERS,
     PROFILE_EDGE_SUBSTEPS,
@@ -85,6 +85,7 @@ from .transient_profile import (
     PROFILE_TERMINAL_FD_JAC_FALLBACKS,
 )
 from .compiled_topology import CompiledTopology
+from . import diagnostics
 
 try:
     from .numba_kernels import (
@@ -371,11 +372,11 @@ def _checked_numba_args(names, args):
 
 def _checked_numba_arg_groups(groups, args):
     _checked_numba_args(tuple(name for name, _fields in groups), args)
-    for (name, fields), values in zip(groups, args):
-        if len(values) != len(fields):
+    for (name, field_names), values in zip(groups, args):
+        if len(values) != len(field_names):
             raise AssertionError(
                 f"numba arg group {name!r} produced {len(values)} fields "
-                f"for {len(fields)} names")
+                f"for {len(field_names)} names")
     return args
 
 
@@ -579,7 +580,10 @@ def _k_device_states(ctx, V, input_vals):
             Idc = -I_d1_d
             Cgs, Cgd = dev._capacitances_from_op(Vs, Vd, Vg, Vs1, Vd1)
             I = I_d1_d if signed else abs(Idc)   # signed (always; see dev_meta)
-        except Exception:
+        except Exception as exc:
+            diagnostics.note_critical(
+                "model.device_state_zeroed", exc,
+                detail="transient device I/Cgs/Cgd -> 0 (op solve failed)")
             I = Cgs = Cgd = 0.0
             Vs1 = Vd1 = 0.0
         out[pos] = (dev, signed, di, gi, si, Vs, Vd, Vg, Vs1, Vd1, I, Cgs, Cgd)
@@ -601,7 +605,8 @@ def _k_device_prev_cap_terms(ctx, V, input_vals):
                 Vs, Vd, Vg, Vs1, Vd1)
             if _cap_id == 1:
                 qgs, qgd = Cgs, Cgd
-        except Exception:
+        except Exception as exc:
+            diagnostics.note("model.device_prev_cap_zeroed", exc)
             qgs = qgd = 0.0
         out.append((Vs, Vd, Vg, qgs, qgd))
     return out
@@ -750,8 +755,8 @@ def _k_terminal_derivatives(ctx, dev, signed, Vs, Vd, Vg, Vs1, Vd1,
                 dev._channel_exponent, dev._current_scale, dev._inv_Rleak)
             if ok:
                 return gm, gds
-        except Exception:
-            pass
+        except Exception as exc:
+            diagnostics.note("model.terminal_deriv_numba_fallback", exc)
     hx = 1e-6
 
     def eval_at(vs, vd, vg, xs1, xd1):
@@ -802,7 +807,8 @@ def _k_build_jac(ctx, V, states, prev_dev_terms, h, cap_a0=1.0):
         try:
             gm, gds = _k_terminal_derivatives(
                 ctx, dev, signed, Vs, Vd, Vg, Vs1, Vd1, need_gm, need_gds)
-        except Exception:
+        except Exception as exc:
+            diagnostics.note("model.terminal_deriv_fd_fallback", exc)
             try:
                 current = (lambda vs, vd, vg: -get_idc(vs, vd, vg)) if signed else (
                     lambda vs, vd, vg: abs(get_idc(vs, vd, vg)))
@@ -812,7 +818,10 @@ def _k_build_jac(ctx, V, states, prev_dev_terms, h, cap_a0=1.0):
                 gds = ((current(Vs, Vd + ctx.HH, Vg) -
                         current(Vs, Vd - ctx.HH, Vg)) / (2 * ctx.HH)
                        if need_gds else 0.0)
-            except Exception:
+            except Exception as exc2:
+                diagnostics.note_critical(
+                    "model.jac_deriv_zeroed", exc2,
+                    detail="Jacobian gm/gds -> 0/1e-12 (both analytic and FD failed)")
                 gm, gds = 0.0, 1e-12 if need_gds else 0.0
         dI_dVs = -(gm + gds)
         if di is not None:
@@ -989,8 +998,8 @@ def _k_newton(ctx, seed, Vp, input_now, input_prev, h, maxit=None, vtol=1e-8):
                 return Vn, int(iters), True
             if usable:
                 seed = Vn
-        except Exception:
-            pass
+        except Exception as exc:
+            diagnostics.note("transient.numba_newton_fallback", exc)
         ctx.stats.fallback += 1
 
     V = np.array(seed, float)
@@ -1202,7 +1211,8 @@ def _k_gear2_try_step(ctx, Vp, Vp2, input_prev, input_prev2, input_now,
         V, _, ok = _k_gear2_step(ctx, Vp, Vp, Vp2, input_now, input_prev,
                                  input_prev2, h_n, h_prev, ctx.newton_maxit,
                                  ctx.newton_step_limit, float(ctx.newton_vtol))
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("transient.gear2_step_raised", exc)
         V, ok, raised = Vp, False, True
     if ok:
         return V, True, raised
@@ -1217,7 +1227,8 @@ def _k_gear2_try_step(ctx, Vp, Vp2, input_prev, input_prev2, input_now,
                     vtol=float(ctx.newton_vtol))
                 if okn:
                     return Vn, True, raised
-            except Exception:
+            except Exception as exc:
+                diagnostics.note("transient.gear2_fulljac_raised", exc)
                 raised = True
     if not ctx.fallback_least_squares:
         return V, False, raised
@@ -1248,7 +1259,8 @@ def _k_gear2_try_step(ctx, Vp, Vp2, input_prev, input_prev2, input_now,
         if norm < ctx.fallback_tol:
             return sol.x, True, raised
         return Vp, False, raised
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("transient.gear2_lsq_raised", exc)
         return Vp, False, True
 
 
@@ -1289,7 +1301,8 @@ def _k_try_step(ctx, Vp, input_prev, input_now, h, use_fallback=True):
     try:
         V, _, ok = _k_newton(ctx, Vp, Vp, input_now, input_prev, h,
                              vtol=float(ctx.newton_vtol))
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("transient.step_newton_raised", exc)
         raised = True
     if ok:
         return V, True, raised
@@ -1304,7 +1317,8 @@ def _k_try_step(ctx, Vp, input_prev, input_now, h, use_fallback=True):
                     vtol=float(ctx.newton_vtol))
                 if okn:
                     return Vn, True, raised
-            except Exception:
+            except Exception as exc:
+                diagnostics.note("transient.step_fulljac_raised", exc)
                 raised = True
     if not ctx.fallback_least_squares:
         return V, bool(ok), raised
@@ -1334,7 +1348,8 @@ def _k_try_step(ctx, Vp, input_prev, input_now, h, use_fallback=True):
         if norm < ctx.fallback_tol:
             return sol.x, True, raised
         return Vp, False, raised
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("transient.step_lsq_raised", exc)
         return Vp, False, True
 
 
@@ -1394,6 +1409,7 @@ def _solve_fixed_gear2_numba(ctx, V0, tgrid, input_values, edge_mask_arr,
                 None if _rfi is None else np.asarray(_rfi, int))
     except Exception as exc:
         out.numba_grid_error = f"gear2: {type(exc).__name__}: {exc}"
+        diagnostics.note("transient.numba_grid_gear2_error", exc)
     return out
 
 
@@ -1426,6 +1442,7 @@ def _solve_adaptive_gear2_numba(ctx, V0, tgrid, input_values, profile):
             out.handled = True
     except Exception as exc:
         out.numba_grid_error = f"adaptive_gear2: {type(exc).__name__}: {exc}"
+        diagnostics.note("transient.numba_adaptive_error", exc)
     return out
 
 
@@ -1472,6 +1489,7 @@ def _solve_be_numba(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
                 out.python_start_idx = int(out.numba_grid_failed_index)
     except Exception as exc:
         out.numba_grid_error = f"{type(exc).__name__}: {exc}"
+        diagnostics.note("transient.numba_be_grid_error", exc)
     return out
 
 

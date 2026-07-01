@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover - optional acceleration only
     terminal_derivatives_numba = None
 
 from .device_model import TransistorModel, NumbaParams, register_pdk
+from . import diagnostics
 
 class PMOS_TFT(TransistorModel):
     """
@@ -300,8 +301,8 @@ class PMOS_TFT(TransistorModel):
                 if ok:
                     return np.array([Vs1, Vd1])
                 return None
-            except Exception:
-                pass
+            except Exception as exc:
+                diagnostics.note("model.internal_newton_numba_fallback", exc)
         Vs1, Vd1 = x0[0], x0[1]
         hj = 1e-6                                    # finite-diff step for the 2x2 jac
         for _ in range(maxit):
@@ -448,8 +449,8 @@ class PMOS_TFT(TransistorModel):
                 Cgss, Cgdd = self._capacitances_from_op(Vs, Vd, Vg, s1, d1)
                 Ich = self._eval_channel(Vs, Vd, Vg, s1, d1)["Ich"]
                 return {"gm": gm, "gds": gds, "Cgs": Cgss, "Cgd": Cgdd, "Ich": Ich}
-            except Exception:
-                pass
+            except Exception as exc:
+                diagnostics.note("model.ss_params_numba_fallback", exc)
 
         # Finite-difference fallback (pure Python)
         try:
@@ -460,7 +461,10 @@ class PMOS_TFT(TransistorModel):
             s1, d1 = self.get_op(Vs, Vd, Vg)
             Ich = self._eval_channel(Vs, Vd, Vg, s1, d1)["Ich"]
             return {"gm": gm, "gds": gds, "Cgs": Cgss, "Cgd": Cgdd, "Ich": Ich}
-        except Exception:
+        except Exception as exc:
+            diagnostics.note_critical(
+                "model.ss_params_zeroed", exc,
+                detail="gm/gds/Cgs/Cgd/Ich -> 0/1e-12 (small-signal params fabricated)")
             return {"gm": 0.0, "gds": 1e-12, "Cgs": 0.0, "Cgd": 0.0, "Ich": 0.0}
 
     # ── Private helpers ──────────────────────────────────────────────────
@@ -473,8 +477,8 @@ class PMOS_TFT(TransistorModel):
                     Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
                     self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
                     self._cap_cgs3_base, self._cap_cgd3_base, self.k1)
-            except Exception:
-                pass
+            except Exception as exc:
+                diagnostics.note("model.caps_numba_fallback", exc)
         v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
 
         Cgs1 = self._cap_cgs1
@@ -514,8 +518,8 @@ class PMOS_TFT(TransistorModel):
                     Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
                     self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
                     self._cap_cgs3_base, self._cap_cgd3_base, self.k1)
-            except Exception:
-                pass
+            except Exception as exc:
+                diagnostics.note("model.cap_charges_numba_fallback", exc)
 
         v_s, _, v_d, _ = self._va_sorted_nodes(Vs, Vd, Vs1, Vd1)
         y_s = v_s - Vg + self.Vfb

@@ -29,6 +29,7 @@ from .ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
 from .ac_solver import ac_solve, _dev_corner, _dev_nf
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
+from . import diagnostics
 
 
 _KB = 1.380649e-23          # Boltzmann constant [J/K]
@@ -40,7 +41,10 @@ def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1):
     t = create_device(get_default_model_type(), W=W, L=L, NF=nf, **(corner or {}))
     try:
         S_th, S_fl_1 = t.get_noise_psd(Vs, Vd, Vg, frequency=1.0)
-    except Exception:
+    except Exception as exc:
+        diagnostics.note_critical(
+            "model.noise_psd_zeroed", exc,
+            detail="device noise PSD -> 0 (thermal+flicker fabricated)")
         return np.zeros_like(freqs), 0.0, 0.0
     return S_th + S_fl_1 / freqs, S_th, S_fl_1
 
@@ -148,7 +152,10 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
         "dev_psd": dev_psd,          # per-device output PSD
         "Hmag": Hmag,                # |amplifier gain|
         "response": ac.get("response"),
-        "irn_psd": out_psd / Hmag ** 2,
+        # Floor |H|^2 so a zero-gain frequency (e.g. an AC-coupled response at
+        # f->0) yields a large-but-finite input-referred PSD instead of a
+        # divide-by-zero inf/nan. Matches pnoise_solver/chopper's convention.
+        "irn_psd": out_psd / np.maximum(Hmag ** 2, 1e-300),
         "psd_split": psd_split,
         "dc": dc,
     }

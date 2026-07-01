@@ -5,7 +5,6 @@ under mismatch, the worst-case latch_screen catches it, and a weak-feedback re-s
 removes it.
 """
 import numpy as np
-import pytest
 
 import core.corners as corners_mod
 from core.corners import (

@@ -35,8 +35,8 @@ from .chopper import (chopper_analysis, pmos_chopper_analysis,
                       pmos_chopper_lptv_analysis, pmos_chopper_pac,
                       pmos_chopper_pnoise, pmos_chopper_pss,
                       pmos_chopper_transient)
-from .circuit_loader import CircuitSpec, load_circuit_json
-from .corners import CORNERS, corner_table, mismatch_mc
+from .circuit_loader import load_circuit_json
+from .corners import corner_table, mismatch_mc
 from .explore import explore, load_explore_json
 from .noise_solver import band_rms
 
@@ -496,7 +496,7 @@ def _cmd_chopper(args):
         if gain is not None and np.isfinite(gain):
             print(f"  gain: {gain:.2f} dB  BW: {bw:.1f} Hz")
         else:
-            print(f"  PAC: computed")
+            print("  PAC: computed")
 
     # ── PNoise ──
     elif level == "pnoise":
@@ -528,7 +528,7 @@ def _cmd_chopper(args):
         if irn is not None:
             print(f"  IRN: {irn:.2f} µVrms")
         else:
-            print(f"  PNoise: computed")
+            print("  PNoise: computed")
 
     # ── transient ──
     elif level == "transient":
@@ -576,11 +576,9 @@ def main(argv=None):
     # If it's a subcommand, route to the subparser chain.
     # Otherwise, fall back to the legacy "run" path for backward compatibility.
     subcmd = None
-    subcmd_idx = None
-    for i, a in enumerate(argv):
+    for a in argv:
         if not a.startswith("-") and _is_subcommand(a):
             subcmd = a
-            subcmd_idx = i
             break
 
     # ── build the full parser ──

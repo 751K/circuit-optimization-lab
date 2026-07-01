@@ -17,10 +17,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-from .ac_solver import ac_solve, _dev_corner, _dev_nf, build_devices, get_ss_params
+from .ac_solver import ac_solve, _dev_nf, build_devices, get_ss_params
 from .adaptive_config import resolve_adaptive_config
 from .topology import AFE_TOPO
 from .transient_solver import transient
+from . import diagnostics
 
 
 def _finite_component_max(a):
@@ -226,8 +227,8 @@ def _initial_vector(sizes, bias, topo, nf, V0, corner=None):
                       corner=corner)
         if ac is not None and "dc_op" in ac:
             return np.asarray([ac["dc_op"][node] for node in topo.solved], float)
-    except Exception:
-        pass
+    except Exception as exc:
+        diagnostics.note("pss.dc_seed_fail", exc)
 
     guesses = topo.dc_guess_vectors(bias)
     if not guesses:
@@ -285,7 +286,8 @@ def _dominant_multiplier(phi):
     map is (near-)unstable at this orbit; tau>>T circuits sit near 1."""
     try:
         return float(np.max(np.abs(np.linalg.eigvals(np.asarray(phi, float)))))
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("pss.dominant_multiplier_fail", exc)
         return float("nan")
 
 
@@ -619,7 +621,8 @@ class _PSSShootingStepper:
                 self.jac_age = 0
                 self.jac = jac
                 return jac, "analytic_monodromy", False
-            except Exception:
+            except Exception as exc:
+                diagnostics.note("pss.analytic_monodromy_fail", exc)
                 jac = None
 
         if jac is None:

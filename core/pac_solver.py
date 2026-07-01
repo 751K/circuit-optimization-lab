@@ -19,6 +19,7 @@ from .numba_kernels import (pac_hb_blocks_numba, pac_linearize_orbit_numba,
                             pac_linearize_orbit_gate1_numba)
 from .topology import Topology
 from .transient_solver import transient
+from . import diagnostics
 
 
 def _periodic_average(t, values):
@@ -207,7 +208,8 @@ def _freeze_sizes(sizes):
             (str(key), float(value[0]), float(value[1]))
             for key, value in sorted(sizes.items())
         )
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("pac.freeze_sizes_fail", exc)
         return repr(sizes)
 
 
@@ -335,7 +337,8 @@ def _stamp_pmos_dynamic_cap_terms(G, d, g, s, dev, Vs, Vd, Vg,
         return
     try:
         derivs = _cap_derivatives_fd(dev, Vs, Vd, Vg, step=fd_step)
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("pac.cap_deriv_fd_fail", exc)
         return
     controls = (s, d, g)
     for ctrl, (dCgs, dCgd) in zip(controls, derivs):
@@ -393,7 +396,8 @@ def _stamp_pmos_gate1_dynamic_cap_terms(
         return
     try:
         derivs = _cap_derivatives_fd(dev, Vs, Vd, Vg, step=fd_step)
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("pac.cap_deriv_fd_gate1_fail", exc)
         return
     controls = (s, d, g)
     for ctrl, (dCgs, dCgd) in zip(controls, derivs):
@@ -702,7 +706,8 @@ def _try_numba_pac_linearization(
         Ginf = np.fft.fft(gdrive, axis=0) / N
         Cinf = np.fft.fft(cdrive, axis=0) / N
         return Gf, Cf, Ginf, Cinf
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("pac.numba_linearization_fail", exc)
         return None
 
 
@@ -819,7 +824,8 @@ def _try_numba_pac_linearization_gate1(
         Ginf = np.fft.fft(gdrive, axis=0) / N
         Cinf = np.fft.fft(cdrive, axis=0) / N
         return Gf, Cf, Ginf, Cinf, ndev
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("pac.numba_linearization_gate1_fail", exc)
         return None
 
 
@@ -1154,7 +1160,8 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         if compute_condition:
             try:
                 conditions[fi] = float(np.linalg.cond(Ybuf))
-            except Exception:
+            except Exception as exc:
+                diagnostics.note("pac.condition_number_fail", exc)
                 conditions[fi] = np.inf
         try:
             adj = np.linalg.solve(Ybuf.T, e)
@@ -1681,7 +1688,8 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
         if compute_condition:
             try:
                 cond = float(np.linalg.cond(mat))
-            except Exception:
+            except Exception as exc:
+                diagnostics.note("pac.boundary_condition_number_fail", exc)
                 cond = np.inf
         else:
             cond = np.nan

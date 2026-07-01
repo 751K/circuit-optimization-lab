@@ -39,7 +39,6 @@ from . import psf
 from .ac_solver import ac_solve
 from .adaptive_config import resolve_adaptive_config
 from .noise_solver import band_rms, noise_analysis
-from .topology import AFE_TOPO
 
 # Integrated input-referred-noise band (Hz), matching the AFE spec / Cadence ViVA.
 _IRN_BAND = (0.05, 100.0)

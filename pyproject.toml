@@ -25,6 +25,7 @@ dev = [
     "numba>=0.60",
     "pytest>=8.0",
     "jsonschema>=4.0",
+    "ruff>=0.6",
 ]
 
 [project.scripts]
@@ -40,3 +41,24 @@ markers = [
     "cadence_regression: tests that compare against archived Cadence/Spectre references",
     "slow_regression: slower regression tests that still run by default",
 ]
+
+[tool.ruff]
+# Lightweight lint: catch real bugs, not style. The numerical kernels
+# intentionally run long lines and dense expressions, so formatting rules
+# (E501 line length, whitespace) are deliberately NOT enabled -- this is a
+# bug-catcher that backstops the manual pytest gate, not a reformatter.
+#   ruff check .          # scan
+#   ruff check --fix .    # apply the safe auto-fixes (unused imports, etc.)
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# F  = pyflakes: unused imports/variables, undefined names, f-strings without
+#      placeholders, redefinitions, import shadowing -- the high-signal,
+#      low-false-positive rules that find actual mistakes.
+# E9 = syntax errors (IOError/tokenizer failures).
+select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# __init__.py re-exports names for the public API; "unused import" is intended.
+"__init__.py" = ["F401"]

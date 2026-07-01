@@ -49,6 +49,7 @@ from .ac_solver import ac_solve
 from .device_model import create_device, get_default_model_type
 from .noise_solver import band_rms, noise_analysis
 from .circuit_loader import circuit_from_dict
+from . import diagnostics
 
 
 METRICS = ("gain_dB", "gain_peak_dB", "bw_Hz", "irn_uV", "power_uW", "area")
@@ -280,7 +281,8 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
     irn_uV = float("nan")
     try:
         power_uW = float(_supply_power_uW(topo, bias, ac["ss"]))
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("explore.power_eval_fail", exc)
         power_uW = float("nan")
     metrics = {
         "gain_dB": float(ac["Av_dc_dB"]),          # gain at the lowest analysis freq
@@ -300,7 +302,8 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
                 metrics["irn_uV"] = float(band_rms(freqs, noise["irn_psd"],
                                                    band[0], band[1]) * 1e6)
             metrics["_noise_evaluated"] = True
-        except Exception:
+        except Exception as exc:
+            diagnostics.note("explore.irn_eval_fail", exc)
             metrics["irn_uV"] = float("nan")
     return metrics
 

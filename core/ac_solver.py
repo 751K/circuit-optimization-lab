@@ -7,6 +7,7 @@ import numpy as np
 from .device_model import create_device, get_default_model_type
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
+from . import diagnostics
 
 
 def _dev_corner(corner, name):
@@ -130,7 +131,8 @@ def _is_pairwise_symmetric_afe(sizes, nf, topo):
 def _dc_residual_ok(residuals, x, tol=1e-9):
     try:
         return np.linalg.norm(residuals(x), ord=np.inf) < tol
-    except Exception:
+    except Exception as exc:
+        diagnostics.note("dc.residual_eval_fail", exc)
         return False
 
 
@@ -166,8 +168,8 @@ def _bounded_least_squares_dc(residuals, guesses, topo, bias, tol=_DC_FALLBACK_T
             if norm < best_norm:
                 best_norm = norm
                 best_x = sol.x
-        except Exception:
-            pass
+        except Exception as exc:
+            diagnostics.note("dc.bounded_lsq_fail", exc)
     if best_x is not None and best_norm < tol:
         return best_x
     return None
@@ -205,8 +207,8 @@ def _symmetric_seed(sizes, bias, Id, gmin, seeds=None):
                 n2, vop, vfb, n20 = sol
                 return {"VOP": vop, "VON": vop, "VFBP": vfb, "VFBN": vfb,
                         "NET20": n20, "NET2": n2}
-        except Exception:
-            pass
+        except Exception as exc:
+            diagnostics.note("dc.symmetric_seed_fail", exc)
     return None
 
 
@@ -239,8 +241,8 @@ def _symmetric_continuation(sizes, bias, Id, gmin):
                                           full_output=True, xtol=1e-12, maxfev=4000)
                     if _dc_residual_ok(lambda z: f(z, sc), s, tol=_DC_FALLBACK_TOL):
                         u = s; ok = True; break
-                except Exception:
-                    pass
+                except Exception as exc:
+                    diagnostics.note("dc.continuation_step_fail", exc)
             if not ok:
                 return None
         n2, vop, vfb, n20 = u
@@ -307,7 +309,10 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     def Id(name, Vs, Vd, Vg):
         try:
             return abs(_dev_inst[name].get_Idc(Vs, Vd, Vg))
-        except Exception:
+        except Exception as exc:
+            diagnostics.note_critical(
+                "model.idc_eval_zeroed", exc,
+                detail=f"{name} drain current -> 1e-18 (device eval failed)")
             return 1e-18
 
     # ── 1. DC solve (residuals built from the topology) ──
@@ -349,8 +354,8 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
                 sol, _, ier, _ = fsolve(residuals, x0, full_output=True, xtol=1e-12, maxfev=3000)
                 if _dc_residual_ok(residuals, sol, tol=dc_tol) or (per_dev and ier == 1):
                     break
-            except Exception:
-                pass
+            except Exception as exc:
+                diagnostics.note("dc.fsolve_guess_fail", exc)
         else:
             # ── FALLBACK (runs ONLY when every standard guess failed; never alters
             # already-converged points). Goal: pick the SAME physical branch Spectre
@@ -365,7 +370,8 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
                                           maxfev=4000)
                     return s if (_dc_residual_ok(rfun, s, tol=dc_tol) or
                                  (per_dev and ier == 1)) else None
-                except Exception:
+                except Exception as exc:
+                    diagnostics.note("dc.fallback_solve_fail", exc)
                     return None
 
             sol = None
@@ -442,7 +448,8 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
             try:
                 s2, _, ier, _ = fsolve(residuals, topo.guess_vector(g),
                                        full_output=True, xtol=1e-12, maxfev=4000)
-            except Exception:
+            except Exception as exc:
+                diagnostics.note("dc.box_guess_fail", exc)
                 continue
             if (_dc_residual_ok(residuals, s2, tol=_DC_FALLBACK_TOL) and
                     topo.in_voltage_box(topo.node_vals(s2), bias)):
@@ -572,7 +579,7 @@ if __name__ == "__main__":
         print(f"DC gain: {result['Av_dc_dB']:.1f} dB   peak: {result['peak_dB']:.1f} dB  (Cadence 19.96 dB)")
         print(f"-3dB BW: {result['bw_Hz']:.1f} Hz  (Cadence 52.3 Hz)")
         print(f"DC op: net2={result['dc_op']['net2']:.1f}V VOP={result['dc_op']['VOP']:.1f}V vfb={result['dc_op']['vfb']:.1f}V")
-        print(f"")
+        print("")
         for name in ["M7","M9","M12","M14"]:
             s = result["ss"][name]
             print(f"{name}: gm={s['gm']*1e9:.0f}nS gds={s['gds']*1e9:.2f}nS Cgs={s['Cgs']*1e12:.1f}pF Cgd={s['Cgd']*1e12:.1f}pF")

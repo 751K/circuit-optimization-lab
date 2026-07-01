@@ -28,6 +28,7 @@ import numpy as np
 from .ac_solver import ac_solve
 from .noise_solver import band_rms, noise_analysis
 from .topology import AFE_TOPO
+from . import diagnostics
 
 # Global process corners (pvt0 = -3·0.0753, pbeta0 = -15·0.036 for slow).
 CORNERS = {
@@ -115,7 +116,8 @@ def metrics(sizes, bias, nf=None, corner=None, topo=AFE_TOPO, x0_guess=None,
                                 x0_guess=ac["dc_op"])
             out["irn_uV"] = band_rms(freqs, nz["irn_psd"], *band) * 1e6 if nz else float("nan")
             out["_noise_evaluated"] = True
-        except Exception:
+        except Exception as exc:
+            diagnostics.note("corners.irn_eval_fail", exc)
             out["irn_uV"] = float("nan")
     return out
 

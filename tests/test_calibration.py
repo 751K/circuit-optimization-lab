@@ -9,10 +9,8 @@ these are the regression guards that catch a model/solver change drifting off Ca
 import json
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-from core import psf
 from core.calibration import format_report, load_reference, run_calibration
 
 AMP = "calibration/amp_design3_typical"
