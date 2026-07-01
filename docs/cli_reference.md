@@ -14,6 +14,7 @@
 | `python -m core corners <circuit.json>` | 工艺角扫描（typ/slow/fast） |
 | `python -m core mc <circuit.json> -n 300` | 逐器件 mismatch Monte Carlo |
 | `python -m core chopper <circuit.json> --level pss` | Chopper 分析（7 个层级） |
+| `python -m core plot [all\|transient\|bode\|afe\|chopper\|ac\|pac]` | 出图：瞬态波形 + AC/PAC Bode（PNG） |
 | `python -m core.calibration --all` | Cadence 校准回归检查 |
 | `python demo/server.py` | Web 前端（Flask，端口 5100） |
 
@@ -32,6 +33,8 @@
 | 命令 | 用途 |
 |------|------|
 | `python examples/afe_testbench.py` | 干电极 AFE 全链路（AC + Noise + Transient） |
+| `python -m examples.plot_transient [--afe\|--chopper]` | 瞬态波形出图（AFE 正弦放大 / chopper 斩波轨道） |
+| `python -m examples.plot_bode [--ac\|--pac]` | AC/PAC 增益相位 Bode 出图 |
 | `python examples/mc_mismatch.py [n] [seed]` | Mismatch MC + 直方图 |
 | `python examples/find_max_gain.py` | PMOS 反相器最大增益扫描 |
 | `python examples/sweep_vin_vout.py` | PMOS 反相器 DC 传输曲线 |
@@ -42,7 +45,7 @@
 
 ## 1. 主 CLI：`python -m core`
 
-入口文件 `core/__main__.py`，支持 5 个子命令。默认兼容旧用法（无子命令时自动路由到 `run`）。
+入口文件 `core/__main__.py`，支持 6 个子命令。默认兼容旧用法（无子命令时自动路由到 `run`）。
 
 ### 1.1 `run` — 分析调度（默认子命令）
 
@@ -236,6 +239,40 @@ python -m core chopper examples/afe_explore.json --level pnoise --f-chop 225
 | `-o`, `--output` | path | — | 写出 JSON |
 | `--no-numba` | flag | — | 禁用 Numba |
 | `--quiet` | flag | — | 不打印进度 |
+
+### 1.6 `plot` — 信号出图
+
+把瞬态波形和 AC/PAC Bode 渲染成 PNG（默认写到 `results/`）。绘制的是已标定的 AFE/chopper
+参考设计（`calibration/` 下的 case），不需要传 circuit JSON。需要 `matplotlib`（可选依赖）。
+
+```bash
+python -m core plot                      # 全部 4 张：AFE 瞬态 + chopper 轨道 + AC + PAC Bode
+python -m core plot transient            # 只瞬态两张（afe + chopper）
+python -m core plot bode                 # 只 Bode 两张（ac + pac）
+python -m core plot afe --f0 20 --amp 1e-3        # 单张：AFE 正弦放大
+python -m core plot chopper --f-chop 200 --input-diff 2e-3
+python -m core plot pac --npts 121 --out-dir /tmp/plots
+```
+
+| 位置参数 `kind` | 产出 |
+|------|------|
+| `all`（默认） | `transient_afe.png` `transient_chopper.png` `bode_ac.png` `bode_pac.png` |
+| `transient` / `bode` | 瞬态两张 / Bode 两张 |
+| `afe` / `chopper` / `ac` / `pac` | 对应单张 |
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `--f0` | float | `10` | AFE 瞬态正弦频率 (Hz) |
+| `--amp` | float | `5e-4` | AFE 瞬态差分半幅 (V) |
+| `--f-chop` | float | `225` | chopper/pac 斩波频率 (Hz) |
+| `--input-diff` | float | `1e-3` | chopper 瞬态 DC 差分输入 (V) |
+| `--npts` | int | 各图默认 | Bode 频点数 |
+| `--out-dir` | path | `results` | 输出目录 |
+| `--no-numba` | flag | — | 禁用 Numba |
+| `--quiet` | flag | — | 不打印汇总行 |
+
+> 独立脚本 `python -m examples.plot_transient` / `python -m examples.plot_bode` 提供同样的绘图，
+> 参数更细（`--periods` `--case` `--fmin` `--fmax` `--ac-case` `--pac-case` 等）。
 
 ---
 
@@ -541,6 +578,8 @@ python -m core.pmos_tft_model     # 打印单管 Id / Cgss / Cgdd / 噪声 PSD
 ### Numba
 
 默认启用 Numba JIT 加速。`--no-numba` 强制走纯 Python 路径（调试 / 基准对比用）。环境变量 `CIRCUIT_USE_NUMBA=0` 等效。
+
+> ⚠️ `CIRCUIT_USE_NUMBA=1` 只是**允许**用 Numba；解释器里 import 不到 Numba 时会**静默回落**到解释版内核（结果一致但 chopper 慢约 28×）。跑性能必须用装了 Numba 的 conda `daily` 环境，详见 [`environment_performance.md`](environment_performance.md)（含实测基准与验证方法）。
 
 ### 退出码
 

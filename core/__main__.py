@@ -41,7 +41,7 @@ from .explore import explore, load_explore_json
 from .noise_solver import band_rms
 
 _ANALYSIS_NAMES = ["ac", "noise", "transient", "pss", "pac", "pnoise"]
-_SUBCOMMANDS = ["run", "corners", "mc", "chopper", "explore"]
+_SUBCOMMANDS = ["run", "corners", "mc", "chopper", "explore", "plot"]
 _CHOPPER_LEVELS = ["ideal", "pmos", "lptv", "pss", "pac", "pnoise", "transient"]
 
 
@@ -560,6 +560,64 @@ def _cmd_chopper(args):
     return result
 
 
+# ── subcommand: plot ─────────────────────────────────────────────────────────
+
+_PLOT_KINDS = ["all", "transient", "bode", "afe", "chopper", "ac", "pac"]
+
+
+def _add_plot_parser(subparsers):
+    p = subparsers.add_parser(
+        "plot", help="Render signal plots (transient waveforms, AC/PAC Bode) to PNG")
+    p.add_argument("kind", nargs="?", default="all", choices=_PLOT_KINDS,
+                   help="what to plot (default: all). transient=afe+chopper waveforms, "
+                        "bode=ac+pac; or a single one: afe/chopper/ac/pac")
+    p.add_argument("--f0", type=float, default=10.0,
+                   help="AFE transient sine frequency [Hz] (default: 10)")
+    p.add_argument("--amp", type=float, default=0.5e-3,
+                   help="AFE transient differential half-amplitude [V] (default: 5e-4)")
+    p.add_argument("--f-chop", type=float, default=225.0,
+                   help="chopper frequency [Hz] for chopper/pac plots (default: 225)")
+    p.add_argument("--input-diff", type=float, default=1e-3,
+                   help="chopper transient DC differential input [V] (default: 1e-3)")
+    p.add_argument("--npts", type=int, default=None,
+                   help="Bode frequency points (per-plot default when omitted)")
+    p.add_argument("--out-dir", default="results", help="output directory (default: results)")
+    p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
+    p.add_argument("--quiet", action="store_true", help="Suppress the summary line")
+    return p
+
+
+def _cmd_plot(args):
+    if args.no_numba:
+        os.environ["CIRCUIT_USE_NUMBA"] = "0"
+    try:
+        from examples import plot_bode as pbd
+        from examples import plot_transient as ptr
+    except ImportError as exc:                          # matplotlib is an optional dep
+        raise SystemExit(f"plotting needs matplotlib ({exc}); pip install matplotlib")
+
+    kind = args.kind
+    outs = []
+    if kind in ("all", "transient", "afe"):
+        outs.append(ptr.plot_afe(f0=args.f0, amp=args.amp, out_dir=args.out_dir))
+    if kind in ("all", "transient", "chopper"):
+        outs.append(ptr.plot_chopper(f_chop=args.f_chop, input_diff=args.input_diff,
+                                     out_dir=args.out_dir))
+    if kind in ("all", "bode", "ac"):
+        kw = {"out_dir": args.out_dir}
+        if args.npts:
+            kw["npts"] = args.npts
+        outs.append(pbd.plot_ac(**kw))
+    if kind in ("all", "bode", "pac"):
+        kw = {"f_chop": args.f_chop, "out_dir": args.out_dir}
+        if args.npts:
+            kw["npts"] = args.npts
+        outs.append(pbd.plot_pac(**kw))
+    if not args.quiet:
+        print(f"wrote {len(outs)} figure(s) to {args.out_dir}/")
+    return outs
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def _is_subcommand(arg):
@@ -592,6 +650,7 @@ def main(argv=None):
     _add_corners_parser(sub)
     _add_mc_parser(sub)
     _add_chopper_parser(sub)
+    _add_plot_parser(sub)
 
     # If --help/-h is the only argument, show the full subcommand listing
     if set(argv) <= {"--help", "-h"}:
@@ -626,6 +685,8 @@ def main(argv=None):
         return _cmd_mc(args)
     elif cmd == "chopper":
         return _cmd_chopper(args)
+    elif cmd == "plot":
+        return _cmd_plot(args)
     else:
         ap.print_help()
         return None

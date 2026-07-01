@@ -97,7 +97,7 @@
   },
   "solver": {
     "integration_method": "gear2",
-    "analytic_jacobian": false,
+    "analytic_jacobian": true,
     "n_points": 321,
     "tstab_periods": 2,
     "max_shooting_iters": 5

@@ -103,8 +103,9 @@ per-stage gate.
     full suite 183 passed (189 − 6 deleted parity tests); numba-off transient validated
     (runs the interpreted `_impl`); ruff clean. The numba transient `_impl` is now the
     single source, validated by the Cadence byte-gate + physics tests (RC step / controlled
-    sources) — no independent hand-written Python reference. Minor residue: a dead
-    `use_numba_newton` ctx field (computed, never read) left in place as harmless.
+    sources) — no independent hand-written Python reference. Follow-up cleanup also
+    removed the now-dead `use_numba_newton` ctx field + its computation and the five
+    unused `*_numba` public imports (`transient_solver.py` → 1392 lines).
 
 ## Result
 

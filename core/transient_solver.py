@@ -78,21 +78,6 @@ from .transient_profile import (
 from .compiled_topology import CompiledTopology
 from . import diagnostics
 
-try:
-    from .numba_kernels import (
-        terminal_derivatives_numba,
-        transient_newton_numba,
-        transient_solve_grid_numba,
-        transient_solve_grid_gear2_numba,
-        transient_solve_adaptive_gear2_numba,
-    )
-except Exception:  # pragma: no cover - optional acceleration only
-    terminal_derivatives_numba = None
-    transient_newton_numba = None
-    transient_solve_grid_numba = None
-    transient_solve_grid_gear2_numba = None
-    transient_solve_adaptive_gear2_numba = None
-
 # Single source of the transient drivers: these `_impl` kernels are the jitted
 # functions when Numba is installed and the raw pure-Python functions otherwise
 # (never None), so the no-Numba transient path runs the *same* kernels interpreted
@@ -178,7 +163,6 @@ class _DeviceCtx:
     p_inv_Rleak: np.ndarray; p_two_over_pi: np.ndarray; p_cap_cgs1: np.ndarray
     p_cap_cgd1: np.ndarray; p_cap_half_wl_ci: np.ndarray; p_cap_cgs3_base: np.ndarray
     p_cap_cgd3_base: np.ndarray; p_k1: np.ndarray; p_gate_leak_g: np.ndarray
-    use_numba_newton: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1039,9 +1023,6 @@ def _marshal_transient(
             clip_lo = min(rails) - float(rail_margin)
             clip_hi = max(rails) + float(rail_margin)
 
-    # Ideal voltage sources add branch-current unknowns (n_aug > n); the numba
-    # kernels are fixed at n nodes, so those circuits run on the Python path.
-    use_numba_newton = transient_newton_numba is not None and n_aug == n
 
     if V0 is None:
         ac = ac_solve(sizes, bias, np.array([1.0]), nf=nf, topo=topo,
@@ -1099,8 +1080,7 @@ def _marshal_transient(
         p_current_scale=p_current_scale, p_inv_Rleak=p_inv_Rleak,
         p_two_over_pi=p_two_over_pi, p_cap_cgs1=p_cap_cgs1, p_cap_cgd1=p_cap_cgd1,
         p_cap_half_wl_ci=p_cap_half_wl_ci, p_cap_cgs3_base=p_cap_cgs3_base,
-        p_cap_cgd3_base=p_cap_cgd3_base, p_k1=p_k1, p_gate_leak_g=p_gate_leak_g,
-        use_numba_newton=use_numba_newton)
+        p_cap_cgd3_base=p_cap_cgd3_base, p_k1=p_k1, p_gate_leak_g=p_gate_leak_g)
     passive_ctx = _PassiveCtx(
         load_meta=load_meta, res_meta=res_meta,
         res_a_kind=res_a_kind, res_a_ref=res_a_ref, res_a_val=res_a_val,
