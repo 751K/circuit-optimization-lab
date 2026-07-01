@@ -819,13 +819,15 @@ def _stamp_transient_system_impl(
         cap_mode,
         prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv,
         R, J, profile_enabled, profile_stats,
-        bdf_a0, bdf_a1, bdf_a2, prev2_cgs, prev2_cgd, cap_prev2_dv):
+        bdf_a0, bdf_a1, bdf_a2, prev2_cgs, prev2_cgd, cap_prev2_dv,
+        vsources, vcvs, cccs, ccvs):
     # cap history weights: backward-Euler = (1, -1, 0); variable-step BDF2/gear2
     # passes (a0, a1, a2) with prev2_* the n-2 charges/dv. Only the charge-mode
     # (cap_mode 0) device caps and the linear/load caps use the BDF2 form.
-    for i in range(n):
+    n_aug = R.shape[0]
+    for i in range(n_aug):
         R[i] = 0.0
-        for j in range(n):
+        for j in range(n_aug):
             J[i, j] = 0.0
     inv_h = 1.0 / h
 
@@ -1041,6 +1043,96 @@ def _stamp_transient_system_impl(
                 if ai >= 0:
                     J[bi, ai] += gc
 
+    # Branch elements (augmented n_aug > n): mirror the Python _k_step_residual /
+    # _k_build_jac branch stamping. pi/qi are both the KCL incidence rows and the
+    # branch-equation node derivatives; branch currents are algebraic (no C/h
+    # history). All loops are empty for n_aug == n.
+    (vs_a_kind, vs_a_ref, vs_a_val, vs_b_kind, vs_b_ref, vs_b_val,
+     vs_pi, vs_qi, vs_bi, vs_e_const, vs_e_idx) = vsources
+    for pos in range(vs_bi.shape[0]):
+        pi = vs_pi[pos]
+        qi = vs_qi[pos]
+        bi = vs_bi[pos]
+        ibr = V[bi]
+        if pi >= 0:
+            R[pi] -= ibr
+            J[pi, bi] -= 1.0
+            J[bi, pi] += 1.0
+        if qi >= 0:
+            R[qi] += ibr
+            J[qi, bi] += 1.0
+            J[bi, qi] -= 1.0
+        e_idx = vs_e_idx[pos]
+        E = vs_e_const[pos] if e_idx < 0 else input_now[e_idx]
+        va = _term_value_impl(vs_a_kind[pos], vs_a_ref[pos], vs_a_val[pos], V, input_now)
+        vb = _term_value_impl(vs_b_kind[pos], vs_b_ref[pos], vs_b_val[pos], V, input_now)
+        R[bi] = va - vb - E
+
+    (vcvs_a_kind, vcvs_a_ref, vcvs_a_val, vcvs_b_kind, vcvs_b_ref, vcvs_b_val,
+     vcvs_cp_kind, vcvs_cp_ref, vcvs_cp_val, vcvs_cn_kind, vcvs_cn_ref, vcvs_cn_val,
+     vcvs_pi, vcvs_qi, vcvs_cpi, vcvs_cni, vcvs_bi, vcvs_mu) = vcvs
+    for pos in range(vcvs_bi.shape[0]):
+        pi = vcvs_pi[pos]
+        qi = vcvs_qi[pos]
+        bi = vcvs_bi[pos]
+        cpi = vcvs_cpi[pos]
+        cni = vcvs_cni[pos]
+        mu = vcvs_mu[pos]
+        ibr = V[bi]
+        if pi >= 0:
+            R[pi] -= ibr
+            J[pi, bi] -= 1.0
+            J[bi, pi] += 1.0
+        if qi >= 0:
+            R[qi] += ibr
+            J[qi, bi] += 1.0
+            J[bi, qi] -= 1.0
+        vcp = _term_value_impl(vcvs_cp_kind[pos], vcvs_cp_ref[pos], vcvs_cp_val[pos], V, input_now)
+        vcn = _term_value_impl(vcvs_cn_kind[pos], vcvs_cn_ref[pos], vcvs_cn_val[pos], V, input_now)
+        va = _term_value_impl(vcvs_a_kind[pos], vcvs_a_ref[pos], vcvs_a_val[pos], V, input_now)
+        vb = _term_value_impl(vcvs_b_kind[pos], vcvs_b_ref[pos], vcvs_b_val[pos], V, input_now)
+        R[bi] = va - vb - mu * (vcp - vcn)
+        if cpi >= 0:
+            J[bi, cpi] -= mu
+        if cni >= 0:
+            J[bi, cni] += mu
+
+    cccs_pi, cccs_qi, cccs_ctrl_bi, cccs_beta = cccs
+    for pos in range(cccs_ctrl_bi.shape[0]):
+        pi = cccs_pi[pos]
+        qi = cccs_qi[pos]
+        ctrl_bi = cccs_ctrl_bi[pos]
+        beta = cccs_beta[pos]
+        i_out = beta * V[ctrl_bi]
+        if pi >= 0:
+            R[pi] += i_out
+            J[pi, ctrl_bi] += beta
+        if qi >= 0:
+            R[qi] -= i_out
+            J[qi, ctrl_bi] -= beta
+
+    (ccvs_a_kind, ccvs_a_ref, ccvs_a_val, ccvs_b_kind, ccvs_b_ref, ccvs_b_val,
+     ccvs_pi, ccvs_qi, ccvs_bi, ccvs_ctrl_bi, ccvs_gamma) = ccvs
+    for pos in range(ccvs_bi.shape[0]):
+        pi = ccvs_pi[pos]
+        qi = ccvs_qi[pos]
+        bi = ccvs_bi[pos]
+        ctrl_bi = ccvs_ctrl_bi[pos]
+        gamma = ccvs_gamma[pos]
+        ibr = V[bi]
+        if pi >= 0:
+            R[pi] -= ibr
+            J[pi, bi] -= 1.0
+            J[bi, pi] += 1.0
+        if qi >= 0:
+            R[qi] += ibr
+            J[qi, bi] += 1.0
+            J[bi, qi] -= 1.0
+        va = _term_value_impl(ccvs_a_kind[pos], ccvs_a_ref[pos], ccvs_a_val[pos], V, input_now)
+        vb = _term_value_impl(ccvs_b_kind[pos], ccvs_b_ref[pos], ccvs_b_val[pos], V, input_now)
+        R[bi] = va - vb - gamma * V[ctrl_bi]
+        J[bi, ctrl_bi] -= gamma
+
     return True
 
 
@@ -1063,10 +1155,11 @@ def _transient_newton_impl(
         isrc_pi, isrc_qi, isrc_value,
         dyn_pi, dyn_qi, dyn_input_idx,
         cap_mode,
-        clip_lo, clip_hi):
+        clip_lo, clip_hi, vsources, vcvs, cccs, ccvs):
     V = seed.copy()
-    R = np.empty(n)
-    J = np.empty((n, n))
+    n_aug = seed.shape[0]
+    R = np.empty(n_aug)
+    J = np.empty((n_aug, n_aug))
     profile_stats = np.zeros(PROFILE_LEN)
     prev_vs = np.empty(dev_di.shape[0])
     prev_vd = np.empty(dev_di.shape[0])
@@ -1112,13 +1205,13 @@ def _transient_newton_impl(
             cap_mode,
             prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv,
             R, J, False, profile_stats,
-            1.0, -1.0, 0.0, prev_cgs, prev_cgd, cap_prev_dv)
+            1.0, -1.0, 0.0, prev_cgs, prev_cgd, cap_prev_dv, vsources, vcvs, cccs, ccvs)
         if not ok:
             return V, it + 1, False, False
 
         if fallback_accept:
             rmax = 0.0
-            for i in range(n):
+            for i in range(n_aug):
                 val = abs(R[i])
                 if val > rmax:
                     rmax = val
@@ -1129,16 +1222,16 @@ def _transient_newton_impl(
         if not solved:
             return V, it + 1, False, True
         mx = 0.0
-        for i in range(n):
+        for i in range(n_aug):
             val = abs(dV[i])
             if val > mx:
                 mx = val
         if mx > step_limit:
             scale = step_limit / mx
-            for i in range(n):
+            for i in range(n_aug):
                 dV[i] *= scale
             mx = step_limit
-        for i in range(n):
+        for i in range(n_aug):
             V[i] += dV[i]
             if clip_lo <= clip_hi:
                 if V[i] < clip_lo:
@@ -1181,8 +1274,9 @@ def _transient_newton_reuse_impl(
         clip_lo, clip_hi,
         V, R, J, prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv,
         profile_enabled, profile_stats,
-        bdf_a0, bdf_a1, bdf_a2, prev2_cgs, prev2_cgd, cap_prev2_dv):
-    for i in range(n):
+        bdf_a0, bdf_a1, bdf_a2, prev2_cgs, prev2_cgd, cap_prev2_dv, vsources, vcvs, cccs, ccvs):
+    n_aug = seed.shape[0]
+    for i in range(n_aug):
         V[i] = seed[i]
     ok_prev = _fill_prev_terms_impl(
         Vp, input_prev,
@@ -1226,7 +1320,7 @@ def _transient_newton_reuse_impl(
             cap_mode,
             prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv,
             R, J, profile_enabled, profile_stats,
-            bdf_a0, bdf_a1, bdf_a2, prev2_cgs, prev2_cgd, cap_prev2_dv)
+            bdf_a0, bdf_a1, bdf_a2, prev2_cgs, prev2_cgd, cap_prev2_dv, vsources, vcvs, cccs, ccvs)
         if not ok:
             if profile_enabled:
                 profile_stats[PROFILE_FAILED_STAMP_OR_PREV_COUNT] += 1.0
@@ -1240,7 +1334,7 @@ def _transient_newton_reuse_impl(
 
         if profile_enabled or fallback_accept:
             last_rmax = 0.0
-            for i in range(n):
+            for i in range(n_aug):
                 val = abs(R[i])
                 if val > last_rmax:
                     last_rmax = val
@@ -1261,17 +1355,17 @@ def _transient_newton_reuse_impl(
                     profile_stats[PROFILE_FAILED_MAX_STEP_INF] = last_mx
             return it + 1, False, True
         mx = 0.0
-        for i in range(n):
+        for i in range(n_aug):
             val = abs(dV[i])
             if val > mx:
                 mx = val
         last_mx = mx
         if mx > step_limit:
             scale = step_limit / mx
-            for i in range(n):
+            for i in range(n_aug):
                 dV[i] *= scale
             mx = step_limit
-        for i in range(n):
+        for i in range(n_aug):
             V[i] += dV[i]
             if clip_lo <= clip_hi:
                 if V[i] < clip_lo:
@@ -1317,7 +1411,7 @@ def _transient_newton_reuse_impl(
 
 def _transient_solve_grid_impl(
         run, step, solver, device_terms, device_nodes, model_params,
-        op_cache, passives, sources, cap_clip):
+        op_cache, passives, sources, cap_clip, vsources, vcvs, cccs, ccvs):
     V0, tgrid, input_values, edge_mask, profile_enabled = run
     max_step, flat_max_step, max_retry_subdivisions = step
     (n, maxit, step_limit, vtol, gmin, fallback_accept, fallback_tol,
@@ -1417,7 +1511,7 @@ def _transient_solve_grid_impl(
                 Vwork, R, J, prev_vs, prev_vd, prev_vg,
                 prev_cgs, prev_cgd, cap_prev_dv,
                 profile_enabled, profile_stats,
-                1.0, -1.0, 0.0, prev_cgs, prev_cgd, cap_prev_dv)
+                1.0, -1.0, 0.0, prev_cgs, prev_cgd, cap_prev_dv, vsources, vcvs, cccs, ccvs)
             if not ok:
                 retry_count = 1
                 for _retry_pow in range(max_retry_subdivisions):
@@ -1469,7 +1563,7 @@ def _transient_solve_grid_impl(
                         Vwork, R, J, prev_vs, prev_vd, prev_vg,
                         prev_cgs, prev_cgd, cap_prev_dv,
                         profile_enabled, profile_stats,
-                        1.0, -1.0, 0.0, prev_cgs, prev_cgd, cap_prev_dv)
+                        1.0, -1.0, 0.0, prev_cgs, prev_cgd, cap_prev_dv, vsources, vcvs, cccs, ccvs)
                     if profile_enabled:
                         profile_stats[PROFILE_NEWTON_ITERS] += iters_r
                     if not ok_r:
@@ -1601,7 +1695,7 @@ def _gear2_substep_newton_reuse_impl(
         Vwork, R, J, prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd,
         cap_prev_dv, p2_vs, p2_vd, p2_vg, prev2_cgs, prev2_cgd,
         cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
-        profile_enabled, profile_stats):
+        profile_enabled, profile_stats, vsources, vcvs, cccs, ccvs):
     if h_prev <= 0.0 or h_n / h_prev > 2.0:
         a0 = 1.0
         a1 = -1.0
@@ -1650,12 +1744,12 @@ def _gear2_substep_newton_reuse_impl(
         cap_mode, clip_lo, clip_hi,
         Vwork, R, J, prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd,
         cap_prev_dv, profile_enabled, profile_stats,
-        a0, a1, a2, prev2_cgs, prev2_cgd, cap_prev2_dv)
+        a0, a1, a2, prev2_cgs, prev2_cgd, cap_prev2_dv, vsources, vcvs, cccs, ccvs)
 
 
 def _transient_solve_adaptive_gear2_impl(
         run, step, solver, device_terms, device_nodes, model_params,
-        op_cache, passives, sources, cap_clip):
+        op_cache, passives, sources, cap_clip, vsources, vcvs, cccs, ccvs):
     V0, tgrid_src, input_values_src, profile_enabled = run
     (max_step, adaptive_reltol, adaptive_vabstol, adaptive_iabstol,
      adaptive_max_steps, adaptive_h0) = step
@@ -1680,10 +1774,11 @@ def _transient_solve_adaptive_gear2_impl(
     if max_steps < 1:
         max_steps = 1
     thist = np.empty(max_steps + 1)
-    Vhist = np.empty((max_steps + 1, n))
+    n_aug = V0.shape[0]
+    Vhist = np.empty((max_steps + 1, n_aug))
     input_hist = np.empty((max_steps + 1, ninputs))
     profile_stats = np.zeros(PROFILE_LEN)
-    for i in range(n):
+    for i in range(n_aug):
         Vhist[0, i] = V0[i]
     thist[0] = tgrid_src[0]
 
@@ -1691,12 +1786,12 @@ def _transient_solve_adaptive_gear2_impl(
     ncap = cap_value.shape[0]
     Vp = V0.copy()
     Vp2 = V0.copy()
-    Vfull = np.empty(n)
-    Vmid = np.empty(n)
-    Vhalf2 = np.empty(n)
-    Vwork = np.empty(n)
-    R = np.empty(n)
-    J = np.empty((n, n))
+    Vfull = np.empty(n_aug)
+    Vmid = np.empty(n_aug)
+    Vhalf2 = np.empty(n_aug)
+    Vwork = np.empty(n_aug)
+    R = np.empty(n_aug)
+    J = np.empty((n_aug, n_aug))
     prev_vs = np.empty(ndev); prev_vd = np.empty(ndev); prev_vg = np.empty(ndev)
     prev_cgs = np.empty(ndev); prev_cgd = np.empty(ndev)
     cap_prev_dv = np.empty(ncap)
@@ -1812,8 +1907,8 @@ def _transient_solve_adaptive_gear2_impl(
             cap_mode, clip_lo, clip_hi, Vwork, R, J, prev_vs, prev_vd, prev_vg,
             prev_cgs, prev_cgd, cap_prev_dv, p2_vs, p2_vd, p2_vg,
             prev2_cgs, prev2_cgd, cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
-            profile_enabled, profile_stats)
-        for i in range(n):
+            profile_enabled, profile_stats, vsources, vcvs, cccs, ccvs)
+        for i in range(n_aug):
             Vfull[i] = Vwork[i]
 
         it2, ok_mid, _ = _gear2_substep_newton_reuse_impl(
@@ -1832,8 +1927,8 @@ def _transient_solve_adaptive_gear2_impl(
             cap_mode, clip_lo, clip_hi, Vwork, R, J, prev_vs, prev_vd, prev_vg,
             prev_cgs, prev_cgd, cap_prev_dv, p2_vs, p2_vd, p2_vg,
             prev2_cgs, prev2_cgd, cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
-            profile_enabled, profile_stats)
-        for i in range(n):
+            profile_enabled, profile_stats, vsources, vcvs, cccs, ccvs)
+        for i in range(n_aug):
             Vmid[i] = Vwork[i]
 
         ok_half2 = False
@@ -1855,8 +1950,8 @@ def _transient_solve_adaptive_gear2_impl(
                 cap_mode, clip_lo, clip_hi, Vwork, R, J, prev_vs, prev_vd, prev_vg,
                 prev_cgs, prev_cgd, cap_prev_dv, p2_vs, p2_vd, p2_vg,
                 prev2_cgs, prev2_cgd, cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
-                profile_enabled, profile_stats)
-            for i in range(n):
+                profile_enabled, profile_stats, vsources, vcvs, cccs, ccvs)
+            for i in range(n_aug):
                 Vhalf2[i] = Vwork[i]
 
         nsubsteps += 3
@@ -1871,7 +1966,7 @@ def _transient_solve_adaptive_gear2_impl(
             tt += h
             accepted += 1
             thist[accepted] = tt
-            for i in range(n):
+            for i in range(n_aug):
                 Vhist[accepted, i] = Vhalf2[i]
                 Vp2[i] = Vp[i]
                 Vp[i] = Vhalf2[i]
@@ -1908,7 +2003,7 @@ def _transient_solve_adaptive_gear2_impl(
 
 def _transient_solve_grid_gear2_impl(
         run, step, solver, device_terms, device_nodes, model_params,
-        op_cache, passives, sources, cap_clip):
+        op_cache, passives, sources, cap_clip, vsources, vcvs, cccs, ccvs):
     """Variable-step BDF2/gear2 grid solver with maxstep slicing and retry.
 
     Each accepted internal substep updates the BDF2 history tuple
@@ -2036,7 +2131,7 @@ def _transient_solve_grid_gear2_impl(
                 prev_cgs, prev_cgd, cap_prev_dv,
                 p2_vs, p2_vd, p2_vg, prev2_cgs, prev2_cgd,
                 cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
-                profile_enabled, profile_stats)
+                profile_enabled, profile_stats, vsources, vcvs, cccs, ccvs)
             if profile_enabled:
                 profile_stats[PROFILE_NEWTON_ITERS] += iters
             if ok:
@@ -2103,7 +2198,7 @@ def _transient_solve_grid_gear2_impl(
                     prev_cgs, prev_cgd, cap_prev_dv,
                     p2_vs, p2_vd, p2_vg, prev2_cgs, prev2_cgd,
                     cap_prev2_dv, op2_valid, op2_vs1, op2_vd1,
-                    profile_enabled, profile_stats)
+                    profile_enabled, profile_stats, vsources, vcvs, cccs, ccvs)
                 if profile_enabled:
                     profile_stats[PROFILE_NEWTON_ITERS] += iters_r
                 if not ok_r:

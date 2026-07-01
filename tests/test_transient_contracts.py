@@ -38,6 +38,10 @@ def test_fixed_grid_numba_boundary_uses_grouped_contract():
         "passives",
         "sources",
         "cap_clip",
+        "vsources",
+        "vcvs",
+        "cccs",
+        "ccvs",
     )
     assert names == _param_names(nk._transient_solve_grid_gear2_impl)
     grouped_names = tuple(name for name, _fields in ts._NUMBA_GRID_ARG_GROUPS)
@@ -58,8 +62,12 @@ def test_adaptive_gear2_numba_boundary_uses_grouped_contract():
         "passives",
         "sources",
         "cap_clip",
+        "vsources",
+        "vcvs",
+        "cccs",
+        "ccvs",
     )
-    assert len(names) <= 12
+    assert len(names) <= 16
 
     grouped_names = tuple(name for name, _fields in ts._NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS)
     assert grouped_names == names

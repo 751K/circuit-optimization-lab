@@ -40,7 +40,7 @@ pulses can be supplied through current_inputs.
 """
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 from .adaptive_config import (
@@ -210,6 +210,24 @@ class _SourceCtx:
     vccs_pi: np.ndarray; vccs_qi: np.ndarray; vccs_cpi: np.ndarray
     vccs_cni: np.ndarray; vccs_gm: np.ndarray
     dyn_pi: np.ndarray; dyn_qi: np.ndarray; dyn_input_idx: np.ndarray
+    # Branch-element arrays for the Numba augmented (n_aug > n) path; empty when
+    # n_aug == n (amp/chopper) so the Numba node path is unaffected.
+    vs_a_kind: np.ndarray; vs_a_ref: np.ndarray; vs_a_val: np.ndarray
+    vs_b_kind: np.ndarray; vs_b_ref: np.ndarray; vs_b_val: np.ndarray
+    vs_pi: np.ndarray; vs_qi: np.ndarray; vs_bi: np.ndarray
+    vs_e_const: np.ndarray; vs_e_idx: np.ndarray
+    vcvs_a_kind: np.ndarray; vcvs_a_ref: np.ndarray; vcvs_a_val: np.ndarray
+    vcvs_b_kind: np.ndarray; vcvs_b_ref: np.ndarray; vcvs_b_val: np.ndarray
+    vcvs_cp_kind: np.ndarray; vcvs_cp_ref: np.ndarray; vcvs_cp_val: np.ndarray
+    vcvs_cn_kind: np.ndarray; vcvs_cn_ref: np.ndarray; vcvs_cn_val: np.ndarray
+    vcvs_pi: np.ndarray; vcvs_qi: np.ndarray; vcvs_cpi: np.ndarray
+    vcvs_cni: np.ndarray; vcvs_bi: np.ndarray; vcvs_mu: np.ndarray
+    cccs_pi: np.ndarray; cccs_qi: np.ndarray
+    cccs_ctrl_bi: np.ndarray; cccs_beta: np.ndarray
+    ccvs_a_kind: np.ndarray; ccvs_a_ref: np.ndarray; ccvs_a_val: np.ndarray
+    ccvs_b_kind: np.ndarray; ccvs_b_ref: np.ndarray; ccvs_b_val: np.ndarray
+    ccvs_pi: np.ndarray; ccvs_qi: np.ndarray; ccvs_bi: np.ndarray
+    ccvs_ctrl_bi: np.ndarray; ccvs_gamma: np.ndarray
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,35 +252,31 @@ class _RuntimeCaches:
     stats: _NewtonStats
 
 
-@dataclass(frozen=True, slots=True)
 class _TransientCtx:
-    """Immutable marshalled solve context shared by transient kernels.
+    """Immutable marshalled solve context shared by the transient kernels.
 
-    Built once by :func:`_marshal_transient`; holds only compiled problem data
-    and solver options.  Running state such as ``Vhist`` and path flags lives in
-    the driver and flows through :class:`_PathOutcome`.  The grouped subcontexts
-    keep topology, device arrays, passive stamps, source stamps, scalar options,
-    and mutable runtime caches from growing into one flat field bag.
+    Built once by :func:`_marshal_transient` from the grouped sub-contexts
+    (:class:`_TopologyCtx`, :class:`_DeviceCtx`, ...).  Their fields are
+    **flattened onto this object at construction**, so the hot kernels read
+    ``ctx.dev_d_kind`` as a direct instance-dict lookup.  (An earlier
+    ``__getattr__`` proxy resolved each flat name by linear-searching the six
+    groups on *every* access — ~half of transient runtime, since the inner
+    kernels touch dozens of fields per step.)  The grouped objects stay
+    reachable as ``ctx.topology`` etc.
 
-    Existing kernels still read ``ctx.<field>`` through the compatibility proxy
-    below; new code should prefer the grouped attributes.
+    Treated as immutable: nothing rebinds a field after construction; the
+    op-cache arrays and the ``stats`` counter are mutated in place.
     """
-    topology: _TopologyCtx
-    devices: _DeviceCtx
-    passives: _PassiveCtx
-    sources: _SourceCtx
-    solver: _SolverOptions
-    runtime: _RuntimeCaches
+    _GROUPS = ("topology", "devices", "passives", "sources", "solver", "runtime")
 
-    def __getattr__(self, name):
-        for group_name in ("topology", "devices", "passives", "sources",
-                           "solver", "runtime"):
-            group = object.__getattribute__(self, group_name)
-            try:
-                return getattr(group, name)
-            except AttributeError:
-                pass
-        raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
+    def __init__(self, *, topology, devices, passives, sources, solver, runtime):
+        d = self.__dict__
+        for name, group in zip(
+                self._GROUPS,
+                (topology, devices, passives, sources, solver, runtime)):
+            d[name] = group
+            for f in fields(group):
+                d[f.name] = getattr(group, f.name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +327,24 @@ _NUMBA_SHARED_ARG_GROUPS = (
         "dyn_pi", "dyn_qi", "dyn_input_idx",
     )),
     ("cap_clip", ("cap_mode", "clip_lo", "clip_hi")),
+    ("vsources", (
+        "vs_a_kind", "vs_a_ref", "vs_a_val",
+        "vs_b_kind", "vs_b_ref", "vs_b_val",
+        "vs_pi", "vs_qi", "vs_bi", "vs_e_const", "vs_e_idx",
+    )),
+    ("vcvs", (
+        "vcvs_a_kind", "vcvs_a_ref", "vcvs_a_val",
+        "vcvs_b_kind", "vcvs_b_ref", "vcvs_b_val",
+        "vcvs_cp_kind", "vcvs_cp_ref", "vcvs_cp_val",
+        "vcvs_cn_kind", "vcvs_cn_ref", "vcvs_cn_val",
+        "vcvs_pi", "vcvs_qi", "vcvs_cpi", "vcvs_cni", "vcvs_bi", "vcvs_mu",
+    )),
+    ("cccs", ("cccs_pi", "cccs_qi", "cccs_ctrl_bi", "cccs_beta")),
+    ("ccvs", (
+        "ccvs_a_kind", "ccvs_a_ref", "ccvs_a_val",
+        "ccvs_b_kind", "ccvs_b_ref", "ccvs_b_val",
+        "ccvs_pi", "ccvs_qi", "ccvs_bi", "ccvs_ctrl_bi", "ccvs_gamma",
+    )),
 )
 _NUMBA_GRID_ARG_GROUPS = (
     ("run", ("V0", "tgrid", "input_values", "edge_mask", "profile_enabled")),
@@ -438,6 +470,24 @@ def _numba_shared_kernel_arg_groups(ctx):
             int(ctx.cap_id),
             float(ctx.clip_lo),
             float(ctx.clip_hi),
+        ),
+        (
+            ctx.vs_a_kind, ctx.vs_a_ref, ctx.vs_a_val,
+            ctx.vs_b_kind, ctx.vs_b_ref, ctx.vs_b_val,
+            ctx.vs_pi, ctx.vs_qi, ctx.vs_bi, ctx.vs_e_const, ctx.vs_e_idx,
+        ),
+        (
+            ctx.vcvs_a_kind, ctx.vcvs_a_ref, ctx.vcvs_a_val,
+            ctx.vcvs_b_kind, ctx.vcvs_b_ref, ctx.vcvs_b_val,
+            ctx.vcvs_cp_kind, ctx.vcvs_cp_ref, ctx.vcvs_cp_val,
+            ctx.vcvs_cn_kind, ctx.vcvs_cn_ref, ctx.vcvs_cn_val,
+            ctx.vcvs_pi, ctx.vcvs_qi, ctx.vcvs_cpi, ctx.vcvs_cni, ctx.vcvs_bi, ctx.vcvs_mu,
+        ),
+        (ctx.cccs_pi, ctx.cccs_qi, ctx.cccs_ctrl_bi, ctx.cccs_beta),
+        (
+            ctx.ccvs_a_kind, ctx.ccvs_a_ref, ctx.ccvs_a_val,
+            ctx.ccvs_b_kind, ctx.ccvs_b_ref, ctx.ccvs_b_val,
+            ctx.ccvs_pi, ctx.ccvs_qi, ctx.ccvs_bi, ctx.ccvs_ctrl_bi, ctx.ccvs_gamma,
         ),
     )
 
@@ -919,6 +969,20 @@ def _k_newton(ctx, seed, Vp, input_now, input_prev, h, maxit=None, vtol=1e-8):
                 ctx.dyn_pi, ctx.dyn_qi, ctx.dyn_input_idx,
                 int(ctx.cap_id),
                 float(ctx.clip_lo), float(ctx.clip_hi),
+                (ctx.vs_a_kind, ctx.vs_a_ref, ctx.vs_a_val,
+                 ctx.vs_b_kind, ctx.vs_b_ref, ctx.vs_b_val,
+                 ctx.vs_pi, ctx.vs_qi, ctx.vs_bi, ctx.vs_e_const, ctx.vs_e_idx),
+                (ctx.vcvs_a_kind, ctx.vcvs_a_ref, ctx.vcvs_a_val,
+                 ctx.vcvs_b_kind, ctx.vcvs_b_ref, ctx.vcvs_b_val,
+                 ctx.vcvs_cp_kind, ctx.vcvs_cp_ref, ctx.vcvs_cp_val,
+                 ctx.vcvs_cn_kind, ctx.vcvs_cn_ref, ctx.vcvs_cn_val,
+                 ctx.vcvs_pi, ctx.vcvs_qi, ctx.vcvs_cpi,
+                 ctx.vcvs_cni, ctx.vcvs_bi, ctx.vcvs_mu),
+                (ctx.cccs_pi, ctx.cccs_qi, ctx.cccs_ctrl_bi, ctx.cccs_beta),
+                (ctx.ccvs_a_kind, ctx.ccvs_a_ref, ctx.ccvs_a_val,
+                 ctx.ccvs_b_kind, ctx.ccvs_b_ref, ctx.ccvs_b_val,
+                 ctx.ccvs_pi, ctx.ccvs_qi, ctx.ccvs_bi,
+                 ctx.ccvs_ctrl_bi, ctx.ccvs_gamma),
             )
             if ok:
                 ctx.stats.success += 1
@@ -1337,7 +1401,7 @@ def _solve_adaptive_gear2_numba(ctx, V0, tgrid, input_values, profile):
     out = _PathOutcome()
     if not (ctx.adaptive and ctx.integration_method == "gear2" and
             _GEAR2_NUMBA_GRID and transient_solve_adaptive_gear2_numba is not None and
-            ctx.n_aug == ctx.n):
+            ctx.n_aug >= ctx.n):
         return out
     try:
         t_profile0 = time.perf_counter()
@@ -1956,6 +2020,41 @@ def _marshal_transient(
     dyn_qi = _index_array(item[1] for item in dyn_isrc_meta)
     dyn_input_idx = np.array([item[2] for item in dyn_isrc_meta], dtype=np.int64)
 
+    # Branch-element Numba arrays (augmented n_aug > n path). Mirror the Python
+    # _k_step_residual / _k_build_jac branch stamping; built unconditionally and
+    # empty for n_aug == n circuits.
+    vs_a_kind, vs_a_ref, vs_a_val = _term_arrays([item[0] for item in vs_meta])
+    vs_b_kind, vs_b_ref, vs_b_val = _term_arrays([item[1] for item in vs_meta])
+    vs_pi = _index_array(item[2] for item in vs_meta)
+    vs_qi = _index_array(item[3] for item in vs_meta)
+    vs_bi = _index_array(item[4] for item in vs_meta)
+    vs_e_const = np.array([item[5] for item in vs_meta], dtype=float)
+    vs_e_idx = _index_array(item[6] for item in vs_meta)
+
+    vcvs_a_kind, vcvs_a_ref, vcvs_a_val = _term_arrays([item[0] for item in vcvs_meta])
+    vcvs_b_kind, vcvs_b_ref, vcvs_b_val = _term_arrays([item[1] for item in vcvs_meta])
+    vcvs_cp_kind, vcvs_cp_ref, vcvs_cp_val = _term_arrays([item[2] for item in vcvs_meta])
+    vcvs_cn_kind, vcvs_cn_ref, vcvs_cn_val = _term_arrays([item[3] for item in vcvs_meta])
+    vcvs_pi = _index_array(item[4] for item in vcvs_meta)
+    vcvs_qi = _index_array(item[5] for item in vcvs_meta)
+    vcvs_cpi = _index_array(item[6] for item in vcvs_meta)
+    vcvs_cni = _index_array(item[7] for item in vcvs_meta)
+    vcvs_bi = _index_array(item[8] for item in vcvs_meta)
+    vcvs_mu = np.array([item[9] for item in vcvs_meta], dtype=float)
+
+    cccs_pi = _index_array(item[0] for item in cccs_meta)
+    cccs_qi = _index_array(item[1] for item in cccs_meta)
+    cccs_ctrl_bi = _index_array(item[2] for item in cccs_meta)
+    cccs_beta = np.array([item[3] for item in cccs_meta], dtype=float)
+
+    ccvs_a_kind, ccvs_a_ref, ccvs_a_val = _term_arrays([item[0] for item in ccvs_meta])
+    ccvs_b_kind, ccvs_b_ref, ccvs_b_val = _term_arrays([item[1] for item in ccvs_meta])
+    ccvs_pi = _index_array(item[2] for item in ccvs_meta)
+    ccvs_qi = _index_array(item[3] for item in ccvs_meta)
+    ccvs_bi = _index_array(item[4] for item in ccvs_meta)
+    ccvs_ctrl_bi = _index_array(item[5] for item in ccvs_meta)
+    ccvs_gamma = np.array([item[6] for item in ccvs_meta], dtype=float)
+
     if rail_margin is None and getattr(topo, "require_dc_in_box", False):
         rail_margin = 2.0
     clip_lo = np.inf
@@ -2043,7 +2142,23 @@ def _marshal_transient(
         isrc_pi=isrc_pi, isrc_qi=isrc_qi, isrc_value=isrc_value,
         vccs_pi=vccs_pi, vccs_qi=vccs_qi, vccs_cpi=vccs_cpi,
         vccs_cni=vccs_cni, vccs_gm=vccs_gm,
-        dyn_pi=dyn_pi, dyn_qi=dyn_qi, dyn_input_idx=dyn_input_idx)
+        dyn_pi=dyn_pi, dyn_qi=dyn_qi, dyn_input_idx=dyn_input_idx,
+        vs_a_kind=vs_a_kind, vs_a_ref=vs_a_ref, vs_a_val=vs_a_val,
+        vs_b_kind=vs_b_kind, vs_b_ref=vs_b_ref, vs_b_val=vs_b_val,
+        vs_pi=vs_pi, vs_qi=vs_qi, vs_bi=vs_bi,
+        vs_e_const=vs_e_const, vs_e_idx=vs_e_idx,
+        vcvs_a_kind=vcvs_a_kind, vcvs_a_ref=vcvs_a_ref, vcvs_a_val=vcvs_a_val,
+        vcvs_b_kind=vcvs_b_kind, vcvs_b_ref=vcvs_b_ref, vcvs_b_val=vcvs_b_val,
+        vcvs_cp_kind=vcvs_cp_kind, vcvs_cp_ref=vcvs_cp_ref, vcvs_cp_val=vcvs_cp_val,
+        vcvs_cn_kind=vcvs_cn_kind, vcvs_cn_ref=vcvs_cn_ref, vcvs_cn_val=vcvs_cn_val,
+        vcvs_pi=vcvs_pi, vcvs_qi=vcvs_qi, vcvs_cpi=vcvs_cpi,
+        vcvs_cni=vcvs_cni, vcvs_bi=vcvs_bi, vcvs_mu=vcvs_mu,
+        cccs_pi=cccs_pi, cccs_qi=cccs_qi,
+        cccs_ctrl_bi=cccs_ctrl_bi, cccs_beta=cccs_beta,
+        ccvs_a_kind=ccvs_a_kind, ccvs_a_ref=ccvs_a_ref, ccvs_a_val=ccvs_a_val,
+        ccvs_b_kind=ccvs_b_kind, ccvs_b_ref=ccvs_b_ref, ccvs_b_val=ccvs_b_val,
+        ccvs_pi=ccvs_pi, ccvs_qi=ccvs_qi, ccvs_bi=ccvs_bi,
+        ccvs_ctrl_bi=ccvs_ctrl_bi, ccvs_gamma=ccvs_gamma)
     solver_opts = _SolverOptions(
         gmin=gmin, HH=HH, clip_lo=clip_lo, clip_hi=clip_hi, cap_id=_cap_id,
         rail_margin=rail_margin,
