@@ -15,6 +15,7 @@
 | `python -m core mc <circuit.json> -n 300` | 逐器件 mismatch Monte Carlo |
 | `python -m core chopper <circuit.json> --level pss` | Chopper 分析（7 个层级） |
 | `python -m core plot [all\|transient\|bode\|afe\|chopper\|ac\|pac]` | 出图：瞬态波形 + AC/PAC Bode（PNG） |
+| `python -m core dataset <circuit.json> -n 500 --out ds/run1` | 生成 surrogate 训练集（provenance + 失败样本保留） |
 | `python -m core.calibration --all` | Cadence 校准回归检查 |
 | `python demo/server.py` | Web 前端（Flask，端口 5100） |
 
@@ -45,7 +46,7 @@
 
 ## 1. 主 CLI：`python -m core`
 
-入口文件 `core/__main__.py`，支持 6 个子命令。默认兼容旧用法（无子命令时自动路由到 `run`）。
+入口文件 `core/__main__.py`，支持 7 个子命令。默认兼容旧用法（无子命令时自动路由到 `run`）。
 
 ### 1.1 `run` — 分析调度（默认子命令）
 
@@ -273,6 +274,62 @@ python -m core plot pac --npts 121 --out-dir /tmp/plots
 
 > 独立脚本 `python -m examples.plot_transient` / `python -m examples.plot_bode` 提供同样的绘图，
 > 参数更细（`--periods` `--case` `--fmin` `--fmax` `--ac-case` `--pac-case` 等）。
+
+---
+
+### 1.7 `dataset` — Surrogate 训练集生成
+
+对电路 JSON 的 `"explore"` 块采样，把每个候选点跑过已标定的求解器，产出带 provenance 的
+`(设计参数 → 指标)` 标注数据集。与 `explore` 的区别：**不做约束/Pareto 过滤**（每个样本都保留，
+DC 失败样本作为分类/边界标签，不丢弃），**总是评估噪声**（每个收敛点都带完整标签），并写出 manifest
+记录 schema 版本、solver commit、拓扑 hash、corner、参数范围——供下游 surrogate 判断泛化边界。
+是 ML surrogate 路线（`docs/futureplan.md` §7）的数据生成前置。
+
+```bash
+python -m core dataset examples/single_stage.json -n 500 --out ds/run1
+python -m core dataset examples/afe_explore.json -n 1000 --corner slow --seed 7 --out ds/slow
+python -m core dataset examples/single_stage.json -n 200 --no-npz --quiet
+```
+
+产出三个文件（`--out <prefix>`）：
+
+| 文件 | 内容 |
+|------|------|
+| `<prefix>.jsonl` | 每行一个样本：`{idx, design, metrics, status}`（可读、可调试；NaN→null） |
+| `<prefix>.manifest.json` | provenance：schema 版本、solver commit(+dirty)、拓扑 hash、PDK、corner、采样 seed/method、变量范围、label_groups、counts |
+| `<prefix>.npz` | 稠密 `X`(n×变量) / `Y`(n×标签，缺失为 NaN) + `dc_converged`/`metrics_finite` 掩码，直接喂回归器 |
+| `<prefix>.parquet` | 扁平表(`--parquet`,需 pyarrow)：`design_*` 输入 + 裸标签列 + status 布尔 |
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `circuit` | path | (必需) | 含 `"explore"` 块的电路 JSON |
+| `-n` | int | `200` | 样本数 |
+| `--seed` | int | `0` | RNG 种子（同 config+seed+commit ⇒ 同数据集） |
+| `--method` | lhs/random | `lhs` | 采样方法 |
+| `--corner` | str | `typical` | 工艺角：typical / slow / fast |
+| `--labels` | str | `ac_noise` | 标签组(逗号分隔)：`ac_noise` / `transient`(后者需 `periodic` 块) |
+| `--out` | path | — | 输出前缀（不给则只在内存计算，不落盘） |
+| `--no-npz` | flag | — | 跳过 `.npz` 稠密输出 |
+| `--parquet` | flag | — | 额外写 `.parquet`（需可选依赖 pyarrow） |
+| `--no-numba` | flag | — | 禁用 Numba |
+| `--quiet` | flag | — | 不打印进度 |
+
+**标签组**（`--labels`，schema 1.1）：
+
+- `ac_noise`（默认）：`gain_dB` `gain_peak_dB` `bw_Hz` `irn_uV` `power_uW` `area`
+- `transient`：`out_pp` `out_mean` `out_rms` `slew_rate` `final_value` — **激励无关**的波形特征，
+  复用配置里已验证的 `periodic` transient（无 `periodic` 块则报错；不假设阶跃语义，故不给 settling/overshoot）
+- `pss`：`pss_converged` `pss_residual` `pss_iters` `pss_out_pp` `pss_out_mean` — 周期稳态质量 + 轨道输出特征，
+  复用 `pss_solve`（需 `periodic` 块）。`pss_converged`(1/0) 是可信标志；diverged 样本保留标签由它区分。
+  **相位裕度**（AC 环路指标）和 **settling**（阶跃响应）不属于 PSS，不在此组。
+
+`transient` / `pss` 组每候选各跑一次周期分析，比纯 `ac_noise` 慢；按需 `--labels ac_noise,transient,pss`。
+
+**设计轴（`explore.variables` 目标语法）**：除 `DEV.W/.L/.NF`（器件尺寸）和裸 bias key 外，dataset
+还支持两类**结构/激励轴**（这些候选会**逐个重建电路**，manifest 里 `kind="structural"`）：
+
+- `<CapName>.C` — 某个具名电容（`capacitors` 列表里带 `name` 的项）的容值，用于扫 load
+- `periodic.frequency` — 周期激励（transient/PSS）的时钟频率，用于扫 clock（只影响 periodic 标签）
 
 ---
 

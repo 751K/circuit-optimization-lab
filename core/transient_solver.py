@@ -1023,7 +1023,6 @@ def _marshal_transient(
             clip_lo = min(rails) - float(rail_margin)
             clip_hi = max(rails) + float(rail_margin)
 
-
     if V0 is None:
         ac = ac_solve(sizes, bias, np.array([1.0]), nf=nf, topo=topo,
                       corner=corner)

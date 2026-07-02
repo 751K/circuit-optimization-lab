@@ -41,7 +41,7 @@ from .explore import explore, load_explore_json
 from .noise_solver import band_rms
 
 _ANALYSIS_NAMES = ["ac", "noise", "transient", "pss", "pac", "pnoise"]
-_SUBCOMMANDS = ["run", "corners", "mc", "chopper", "explore", "plot"]
+_SUBCOMMANDS = ["run", "corners", "mc", "chopper", "explore", "plot", "dataset"]
 _CHOPPER_LEVELS = ["ideal", "pmos", "lptv", "pss", "pac", "pnoise", "transient"]
 
 
@@ -245,6 +245,60 @@ def _cmd_explore(args):
         write_jsonl(results, args.output + ".jsonl")
         print(f"wrote {args.output}.csv and {args.output}.jsonl")
     return results
+
+
+# ── subcommand: dataset ──────────────────────────────────────────────────────
+
+def _add_dataset_parser(subparsers):
+    p = subparsers.add_parser(
+        "dataset", help="Build a labeled surrogate dataset from an 'explore' config")
+    p.add_argument("circuit", help="Path to circuit JSON file (must contain 'explore' block)")
+    p.add_argument("-n", "--n", type=int, default=200, help="Number of samples (default: 200)")
+    p.add_argument("--seed", type=int, default=0, help="RNG seed")
+    p.add_argument("--method", choices=("lhs", "random"), default="lhs",
+                   help="Sampling method (default: lhs)")
+    p.add_argument("--corner", default="typical",
+                   help="Process corner: typical | slow | fast (default: typical)")
+    p.add_argument("--labels", default="ac_noise",
+                   help="Comma list of label groups: ac_noise, transient "
+                        "(transient needs a 'periodic' block; default: ac_noise)")
+    p.add_argument("--out", default=None,
+                   help="Output path prefix (writes <prefix>.jsonl/.manifest.json/.npz)")
+    p.add_argument("--no-npz", action="store_true", help="Skip the dense .npz output")
+    p.add_argument("--parquet", action="store_true",
+                   help="Also write a .parquet table (needs the optional pyarrow dep)")
+    p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
+    p.add_argument("--quiet", action="store_true", help="Suppress per-sample progress")
+    return p
+
+
+def _cmd_dataset(args):
+    if args.no_numba:
+        os.environ["CIRCUIT_USE_NUMBA"] = "0"
+    from .dataset import _format_summary, run_from_config
+
+    def progress(done, total):
+        if not args.quiet:
+            print(f"\r  evaluating {done}/{total}", end="", flush=True)
+
+    if not args.quiet:
+        print(f"Building dataset from {args.circuit}  "
+              f"(n={args.n}, method={args.method}, corner={args.corner}, labels={args.labels})")
+    groups = tuple(g.strip() for g in args.labels.split(",") if g.strip())
+    try:
+        dataset = run_from_config(args.circuit, n=args.n, seed=args.seed, method=args.method,
+                                  corner=args.corner, label_groups=groups, out=args.out,
+                                  npz=not args.no_npz, parquet=args.parquet, progress=progress)
+    except ImportError as exc:                          # e.g. --parquet without pyarrow
+        raise SystemExit(str(exc))
+    except ValueError as exc:                           # e.g. transient labels w/o periodic
+        raise SystemExit(str(exc))
+    if not args.quiet:
+        print()
+    print(_format_summary(dataset))
+    if args.out:
+        print("wrote " + ", ".join(dataset["_paths"].values()))
+    return dataset
 
 
 # ── subcommand: corners ──────────────────────────────────────────────────────
@@ -651,6 +705,7 @@ def main(argv=None):
     _add_mc_parser(sub)
     _add_chopper_parser(sub)
     _add_plot_parser(sub)
+    _add_dataset_parser(sub)
 
     # If --help/-h is the only argument, show the full subcommand listing
     if set(argv) <= {"--help", "-h"}:
@@ -687,6 +742,8 @@ def main(argv=None):
         return _cmd_chopper(args)
     elif cmd == "plot":
         return _cmd_plot(args)
+    elif cmd == "dataset":
+        return _cmd_dataset(args)
     else:
         ap.print_help()
         return None

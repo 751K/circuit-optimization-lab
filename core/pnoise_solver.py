@@ -395,7 +395,8 @@ def _solve_hb_adjoint(Y_base, C_block, Y_sparse, C_sparse, freq, e, solver,
         return np.linalg.lstsq(dense.T, e, rcond=None)[0], info
 
 
-def _time_domain_pnoise_adjoint(Gf, Cf, e, freqs, K, n_state, fundamental):
+def _time_domain_pnoise_adjoint(Gf, Cf, e, freqs, K, n_state, fundamental,
+                                *, _force_direct=False):
     """Truncation-free pnoise adjoint via the Floquet BVP (dual of the TD-PAC).
 
     The cyclostationary fold only needs the per-device per-sideband adjoint
@@ -466,18 +467,22 @@ def _time_domain_pnoise_adjoint(Gf, Cf, e, freqs, K, n_state, fundamental):
             adjs[fi, j * ns:(j + 1) * ns] = Fh[(-rr) % N]
 
     # Factor F(γ0) once (γ0 = median in-band freq); reuse it across all frequencies.
+    # ``_force_direct`` (tests/parity) skips the factor-once shortcut so every
+    # frequency takes the reference ``_zeta_direct`` splu — the exact path the
+    # per-frequency fallback uses, letting a test assert Woodbury == direct.
     lu = None
-    try:
-        ref = len(freqs) // 2
-        g0 = np.exp(1j * 2.0 * np.pi * float(freqs[ref]) * period); inv_g0 = 1.0 / g0
-        Vall0 = np.concatenate([VA, (-BT[0] * inv_g0).ravel()])
-        lu = _spla.splu(_sp.csc_matrix((Vall0, (Rall, Call)), shape=(N * ns, N * ns)))
-        U = np.zeros((N * ns, ns), dtype=complex)              # corner block-row N-1 = e_{N-1} ⊗ I
-        U[(N - 1) * ns + np.arange(ns), np.arange(ns)] = 1.0
-        Z = lu.solve(U); M0 = Z[:ns]; Ins = np.eye(ns, dtype=complex)
-    except Exception as exc:                                   # pragma: no cover
-        diagnostics.note("pnoise.td_woodbury_setup_fail", exc)
-        lu = None
+    if not _force_direct:
+        try:
+            ref = len(freqs) // 2
+            g0 = np.exp(1j * 2.0 * np.pi * float(freqs[ref]) * period); inv_g0 = 1.0 / g0
+            Vall0 = np.concatenate([VA, (-BT[0] * inv_g0).ravel()])
+            lu = _spla.splu(_sp.csc_matrix((Vall0, (Rall, Call)), shape=(N * ns, N * ns)))
+            U = np.zeros((N * ns, ns), dtype=complex)              # corner block-row N-1 = e_{N-1} ⊗ I
+            U[(N - 1) * ns + np.arange(ns), np.arange(ns)] = 1.0
+            Z = lu.solve(U); M0 = Z[:ns]; Ins = np.eye(ns, dtype=complex)
+        except Exception as exc:                                   # pragma: no cover
+            diagnostics.note("pnoise.td_woodbury_setup_fail", exc)
+            lu = None
 
     n_fallback = 0
     for fi, f in enumerate(freqs):
