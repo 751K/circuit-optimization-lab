@@ -260,8 +260,9 @@ def _add_dataset_parser(subparsers):
     p.add_argument("--corner", default="typical",
                    help="Process corner: typical | slow | fast (default: typical)")
     p.add_argument("--labels", default="ac_noise",
-                   help="Comma list of label groups: ac_noise, transient "
-                        "(transient needs a 'periodic' block; default: ac_noise)")
+                   help="Comma list of label groups: ac_noise, transient, pss, pac, "
+                        "pnoise (periodic groups need a 'periodic' block; pac/pnoise "
+                        "also need their 'analyses' blocks; default: ac_noise)")
     p.add_argument("--freqs-start", type=float, default=-2.0,
                    help="AC grid start decade (log10 Hz) when --freqs-stop is given")
     p.add_argument("--freqs-stop", type=float, default=None,

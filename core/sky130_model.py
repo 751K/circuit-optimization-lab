@@ -45,19 +45,29 @@ def _ngspice():
     return _RUN_NGSPICE if os.path.exists(_RUN_NGSPICE) else os.environ.get("NGSPICE_BIN", "ngspice")
 
 
+_card_memo: Dict[tuple, Dict[str, float]] = {}
+
+
 def extract_sky130_card(polarity: str, W: float, L: float,
                         corner: str = "tt") -> Dict[str, float]:
     """Resolved BSIM4 model params for a SKY130 FET at (W, L)[µm], via ngspice.
 
     Instantiates the SKY130 subckt at the given size/corner, runs an op, and parses
-    ``showmod``'s fully-resolved card. Cached to ``data/pdk/sky130/*.json``.
+    ``showmod``'s fully-resolved card. Cached to ``data/pdk/sky130/*.json`` on disk
+    and memoised in-process (device rebuilds during a sweep skip the JSON re-read).
     """
+    memo_key = (polarity, float(W), float(L), corner)
+    memo = _card_memo.get(memo_key)
+    if memo is not None:
+        return dict(memo)
     subckt = _SUBCKT[polarity]
     os.makedirs(_CARD_DIR, exist_ok=True)
     cache = os.path.join(_CARD_DIR, f"{subckt}_{corner}_W{W:g}_L{L:g}.json")
     if os.path.exists(cache):
         with open(cache) as fh:
-            return json.load(fh)
+            card = json.load(fh)
+        _card_memo[memo_key] = card
+        return dict(card)
     if not os.path.exists(_NGSPICE_LIB):
         raise RuntimeError(f"SKY130 PDK ngspice lib not found at {_NGSPICE_LIB}; set PDK_ROOT")
     # SKY130 ngspice models set `.option scale=1u`, so W/L are bare numbers in µm.
@@ -86,7 +96,8 @@ def extract_sky130_card(polarity: str, W: float, L: float,
         raise RuntimeError(f"SKY130 param extraction failed for {subckt}:\n...{out[-600:]}")
     with open(cache, "w") as fh:
         json.dump(card, fh, indent=1, sort_keys=True)
-    return card
+    _card_memo[memo_key] = card
+    return dict(card)
 
 
 class _Sky130Fet(OsdiDevice):

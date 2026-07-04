@@ -19,10 +19,14 @@ Run standalone to introspect a model::
 from __future__ import annotations
 
 import ctypes as C
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import numpy as np
+
+from . import diagnostics
+from .numba_kernels import _osdi_op_solve_impl, _osdi_schur_impl
 
 # ── OSDI 0.4 flag constants (osdi_0_4.h) ─────────────────────────────────
 OSDI_VERSION_MAJOR_CURR = 0
@@ -334,6 +338,12 @@ class OsdiInitInfo(C.Structure):
 
 
 _ACCESS_T = C.CFUNCTYPE(C.c_void_p, C.c_void_p, C.c_void_p, C.c_uint32, C.c_uint32)
+# void*-only twins of eval/load for the numba op-solve kernel: numba calls
+# ctypes fn pointers natively when every arg is a plain word (addresses passed
+# as runtime ints — nothing process-specific is baked into the cached code).
+_EVAL_VP_T = C.CFUNCTYPE(C.c_uint32, C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p)
+_LOAD_RESID_VP_T = C.CFUNCTYPE(None, C.c_void_p, C.c_void_p, C.c_void_p)
+_LOAD_JAC_VP_T = C.CFUNCTYPE(None, C.c_void_p, C.c_void_p)
 _SETUP_MODEL_T = C.CFUNCTYPE(None, C.c_void_p, C.c_void_p, C.POINTER(OsdiSimParas),
                              C.POINTER(OsdiInitInfo))
 _SETUP_INST_T = C.CFUNCTYPE(None, C.c_void_p, C.c_void_p, C.c_void_p, C.c_double, C.c_uint32,
@@ -379,6 +389,12 @@ class Device:
         self._c_load_jac_react = _LOAD_JAC_REACT_T(d.load_jacobian_react)
         self._c_load_resid_react = _LOAD_RESID_T(d.load_residual_react)
         self._c_load_noise = _LOAD_NOISE_T(d.load_noise)
+        # void*-signature twins for the numba op-solve / transient kernels
+        self._k_eval = _EVAL_VP_T(d.eval)
+        self._k_load_resid = _LOAD_RESID_VP_T(d.load_residual_resist)
+        self._k_load_jac = _LOAD_JAC_VP_T(d.load_jacobian_resist)
+        self._k_load_resid_react = _LOAD_RESID_VP_T(d.load_residual_react)
+        self._k_load_jac_react = _LOAD_JAC_REACT_T(d.load_jacobian_react)
         self.num_noise_src = int(d.num_noise_src)
         self._noise_type = ([int(d.noise_source_type[i]) for i in range(self.num_noise_src)]
                             if self.num_noise_src and d.noise_source_type else [])
@@ -423,6 +439,12 @@ class Device:
         # scratch reused across evals
         self._v = np.zeros(self.n_nodes, dtype=np.float64)
         self._resid = np.zeros(self.n_nodes, dtype=np.float64)
+        self._build_scatter()
+        self._info_cache: Dict[int, OsdiSimInfo] = {}
+        self._last_redv: Optional[np.ndarray] = None
+        self._op_memo: "OrderedDict[tuple, tuple]" = OrderedDict()
+        self._lin_memo: "OrderedDict[tuple, tuple]" = OrderedDict()
+        self._solve_args: Optional[tuple] = None
 
     # ── setup ────────────────────────────────────────────────────────────
     def _set_model_param(self, name: str, val) -> None:
@@ -517,62 +539,105 @@ class Device:
                     rbase + k * C.sizeof(C.c_double)
         self._jac_entries = d.jacobian_entries
         self._n_jac = n
+        # numpy views over the ctypes value stores (shared memory, zero-copy)
+        self._jac_np = (np.ctypeslib.as_array(self._jac_vals) if n
+                        else np.zeros(0, dtype=np.float64))
+        self._react_np = (np.ctypeslib.as_array(self._react_vals) if n
+                          else np.zeros(0, dtype=np.float64))
+
+    def _build_scatter(self) -> None:
+        """Precompute the node/Jacobian scatter index arrays used by every eval.
+
+        The per-entry ctypes walks (``jacobian_entries[k].nodes.node_1`` …) are
+        the dominant Python overhead when done per call; resolving them once into
+        flat numpy index arrays turns each eval's scatter into a few ``bincount``s.
+        """
+        nred = self._n_red
+        nmap = np.array(self._nmap, dtype=np.int64)
+        valid = nmap != _U32_MAX
+        self._node_sel = np.nonzero(valid)[0]                 # device nodes kept
+        self._node_red_idx = nmap[valid].astype(np.intp)      # → reduced ids
+        n = self._n_jac
+        rows = np.empty(n, dtype=np.int64)
+        cols = np.empty(n, dtype=np.int64)
+        react = np.empty(n, dtype=np.int64)
+        for k in range(n):
+            e = self._jac_entries[k]
+            # entry (node_1, node_2) is d(residual@node_1)/d(V@node_2):
+            # node_1 = equation row, node_2 = variable column.
+            rows[k] = self._nmap[e.nodes.node_1]
+            cols[k] = self._nmap[e.nodes.node_2]
+            react[k] = int(e.react_ptr_off)
+        ok = (rows != _U32_MAX) & (cols != _U32_MAX)
+        self._jac_sel = np.nonzero(ok)[0].astype(np.intp)
+        self._jac_flat = (rows[ok] * nred + cols[ok]).astype(np.intp)
+        rok = ok & (react != _U32_MAX)
+        self._react_sel = np.nonzero(rok)[0].astype(np.intp)
+        self._react_flat = (rows[rok] * nred + cols[rok]).astype(np.intp)
+        ni = nred - self.n_term
+        self._eye_int = np.eye(ni) if ni > 0 else None   # internal-block identity
 
     # ── eval ─────────────────────────────────────────────────────────────
     def _eval_reduced(self, redv: np.ndarray):
-        """Eval at reduced node voltages → (R_reduced, J_reduced) dense."""
-        nmap = self._nmap
-        v = self._v
-        for i in range(self.n_nodes):
-            m = nmap[i]
-            v[i] = 0.0 if m == _U32_MAX else redv[m]
-        info = OsdiSimInfo(
-            paras=self._sp, abstime=0.0,
-            prev_solve=v.ctypes.data_as(C.POINTER(C.c_double)),
-            prev_state=None, next_state=None, flags=_DC_OP_FLAGS,
-            history_ctx=None, query_past_state=None)
+        """Eval at reduced node voltages → (R_reduced, J_reduced) dense.
+
+        Readable single-eval reference; ``operating_point``'s hot loop runs the
+        same per-eval body inside ``numba_kernels._osdi_op_solve_impl`` — keep
+        the two in lockstep when touching either.
+        """
+        self._set_nodes(redv)
+        info = self._sim_info(_DC_OP_FLAGS)
         ret = self._c_eval(self._handle_p, self._inst, self._model, C.byref(info))
         if ret & EVAL_RET_FLAG_FATAL:
             raise RuntimeError("OSDI eval returned $fatal")
         # load_* functions STAMP (+=) into their destinations, SPICE-style, so
         # clear both before each load or values accumulate across evals/calls.
         self._resid.fill(0.0)
-        C.memset(C.addressof(self._jac_vals), 0, C.sizeof(self._jac_vals))
+        self._jac_np[:] = 0.0
         self._c_load_resid(self._inst, self._model,
                            self._resid.ctypes.data_as(C.POINTER(C.c_double)))
         self._c_load_jac(self._inst, self._model)
         nred = self._n_red
-        R = np.zeros(nred)
-        J = np.zeros((nred, nred))
-        for i in range(self.n_nodes):
-            m = nmap[i]
-            if m != _U32_MAX:
-                R[m] += self._resid[i]
-        jv = self._jac_vals
-        for k in range(self._n_jac):
-            e = self._jac_entries[k]
-            # entry (node_1, node_2) is d(residual@node_1)/d(V@node_2):
-            # node_1 = equation row, node_2 = variable column.
-            row = nmap[e.nodes.node_1]
-            col = nmap[e.nodes.node_2]
-            if col == _U32_MAX or row == _U32_MAX:
-                continue
-            J[row, col] += jv[k]
+        R = np.bincount(self._node_red_idx, weights=self._resid[self._node_sel],
+                        minlength=nred)
+        J = np.bincount(self._jac_flat, weights=self._jac_np[self._jac_sel],
+                        minlength=nred * nred).reshape(nred, nred)
         return R, J
 
     def _set_nodes(self, redv: np.ndarray) -> None:
-        nmap = self._nmap
         v = self._v
-        for i in range(self.n_nodes):
-            m = nmap[i]
-            v[i] = 0.0 if m == _U32_MAX else redv[m]
+        v.fill(0.0)
+        v[self._node_sel] = redv[self._node_red_idx]
 
     def _sim_info(self, flags: int) -> "OsdiSimInfo":
-        return OsdiSimInfo(
-            paras=self._sp, abstime=0.0,
-            prev_solve=self._v.ctypes.data_as(C.POINTER(C.c_double)),
-            prev_state=None, next_state=None, flags=flags,
-            history_ctx=None, query_past_state=None)
+        # reused across evals: self._v never reallocates, so prev_solve is stable
+        info = self._info_cache.get(flags)
+        if info is None:
+            info = OsdiSimInfo(
+                paras=self._sp, abstime=0.0,
+                prev_solve=self._v.ctypes.data_as(C.POINTER(C.c_double)),
+                prev_state=None, next_state=None, flags=flags,
+                history_ctx=None, query_past_state=None)
+            self._info_cache[flags] = info
+        return info
+
+    def _op_solve_args(self) -> tuple:
+        """Marshalling tuple for the numba op-solve kernel (built once).
+
+        Everything is a runtime value — fn-pointer objects, buffer addresses,
+        index arrays — so the jitted kernel stays process-portable (cacheable).
+        """
+        args = self._solve_args
+        if args is None:
+            info = self._sim_info(_DC_OP_FLAGS)
+            args = (self._k_eval, self._k_load_resid, self._k_load_jac,
+                    self._handle_p.value, self._inst.value, self._model.value,
+                    C.addressof(info), self._resid.ctypes.data,
+                    self._v, self._resid, self._jac_np,
+                    self._node_sel, self._node_red_idx,
+                    self._jac_sel, self._jac_flat)
+            self._solve_args = args
+        return args
 
     def _eval_react(self, redv: np.ndarray) -> np.ndarray:
         """Reduced reactive Jacobian (dQ/dV) at the given reduced voltages."""
@@ -581,19 +646,11 @@ class Device:
         if self._c_eval(self._handle_p, self._inst, self._model,
                         C.byref(info)) & EVAL_RET_FLAG_FATAL:
             raise RuntimeError("OSDI reactive eval returned $fatal")
-        C.memset(C.addressof(self._react_vals), 0, C.sizeof(self._react_vals))
+        self._react_np[:] = 0.0
         self._c_load_jac_react(self._inst, self._model, 1.0)
-        nmap, rv = self._nmap, self._react_vals
-        Cm = np.zeros((self._n_red, self._n_red))
-        for k in range(self._n_jac):
-            e = self._jac_entries[k]
-            if int(e.react_ptr_off) == _U32_MAX:
-                continue
-            row = nmap[e.nodes.node_1]
-            col = nmap[e.nodes.node_2]
-            if row != _U32_MAX and col != _U32_MAX:
-                Cm[row, col] += rv[k]
-        return Cm
+        nred = self._n_red
+        return np.bincount(self._react_flat, weights=self._react_np[self._react_sel],
+                           minlength=nred * nred).reshape(nred, nred)
 
     def charges(self, redv: np.ndarray) -> np.ndarray:
         """Reduced-node reactive charges Q [C] at the given voltages (for transient
@@ -606,12 +663,8 @@ class Device:
         self._resid.fill(0.0)
         self._c_load_resid_react(self._inst, self._model,
                                  self._resid.ctypes.data_as(C.POINTER(C.c_double)))
-        Q = np.zeros(self._n_red)
-        for i in range(self.n_nodes):
-            m = self._nmap[i]
-            if m != _U32_MAX:
-                Q[m] += self._resid[i]
-        return Q
+        return np.bincount(self._node_red_idx, weights=self._resid[self._node_sel],
+                           minlength=self._n_red)
 
     def noise_psd(self, freq: float) -> np.ndarray:
         """Per-noise-source output current PSD [A^2/Hz] at the last op point.
@@ -641,9 +694,11 @@ class Device:
                 thermal += psd[i]
         return float(thermal), float(flicker)
 
+    _OP_MEMO_MAX = 128
+
     def operating_point(self, vd: float, vg: float, vs: float, vb: float,
                         *, tol: float = 1e-12, max_iter: int = 100,
-                        gmin: float = 1e-12) -> Dict[str, float]:
+                        gmin: float = 1e-12, with_caps: bool = True) -> Dict[str, float]:
         """Solve internal nodes at fixed terminal V; return Id, gm, gds, gmb.
 
         Terminal order is the descriptor's (bsim4va: d, g, s, b). Id is the
@@ -651,55 +706,146 @@ class Device:
         complement of the reduced resistive Jacobian onto the 4 terminals. A small
         ``gmin`` regularises the internal block (some BSIM4 internal nodes are
         DC-floating, so the raw internal Jacobian is singular — the SPICE fix).
+
+        Repeated calls at the *exact* same bias return a memoised result (so e.g.
+        a per-frequency noise sweep pays one Newton solve, and re-solves are
+        bit-reproducible). The returned dict is shared with the memo — callers
+        must treat it as read-only. New biases warm-start the internal-node Newton from the
+        previous solution — during a circuit DC solve the same device is evaluated
+        at nearby biases, cutting iterations — with a cold vs-fill restart if the
+        warm start fails, and one extra "polish" step after hitting ``tol`` so the
+        converged point is path-independent to ~1e-16.
+
+        ``with_caps=False`` skips the reactive (dQ/dV) eval and omits the C* keys —
+        the DC root-finder only needs Id, so its inner loop shouldn't pay for
+        capacitances. A later ``with_caps=True`` call at the same bias upgrades the
+        memoised entry with one reactive eval (no re-solve).
         """
+        key = (float(vd), float(vg), float(vs), float(vb), tol, max_iter, gmin)
+        memo = self._op_memo.get(key)
+        if memo is not None:
+            self._op_memo.move_to_end(key)
+            op, redv_m, has_caps = memo
+            self._last_redv = redv_m         # noise_psd re-eval stays consistent
+            if with_caps and not has_caps:
+                Cm = self._eval_react(redv_m)
+                di, gi, si = 0, 1, 2
+                op.update(Cgg=float(Cm[gi, gi]), Cgs=float(-Cm[gi, si]),
+                          Cgd=float(-Cm[gi, di]), Cdd=float(Cm[di, di]))
+                self._op_memo[key] = (op, redv_m, True)
+            return op                    # shared with the memo — treat as read-only
         T = self.n_term
         nred = self._n_red
         ni = nred - T
-        eye = np.eye(ni) if ni else None
-        redv = np.full(nred, vs, dtype=np.float64)
-        redv[:T] = [vd, vg, vs, vb][:T]
-        R = J = None
-        for _ in range(max_iter):
-            R, J = self._eval_reduced(redv)
-            if ni == 0:
+        eye = self._eye_int
+        term = [vd, vg, vs, vb][:T]
+        starts = []
+        if ni and self._last_redv is not None and self._last_redv.shape[0] == nred:
+            starts.append(self._last_redv[T:].copy())     # warm: last solve's internals
+        starts.append(np.full(ni, vs, dtype=np.float64))  # cold: legacy vs-fill
+        R = J = redv = None
+        solve_args = self._op_solve_args()
+        for attempt, internals in enumerate(starts):
+            redv = np.empty(nred, dtype=np.float64)
+            redv[:T] = term
+            redv[T:] = internals
+            # a warm start either pays off within a few steps or won't at all —
+            # cap it so a bad hint falls through to the cold restart cheaply
+            iters = min(20, max_iter) if attempt < len(starts) - 1 else max_iter
+            # whole internal Newton (polish / unphysical-bias bail / singular
+            # rescue) runs inside the jitted kernel, OSDI eval called in-loop
+            status, R, J = _osdi_op_solve_impl(*solve_args, redv, T, iters,
+                                               float(tol), float(gmin))
+            if status == 3:
+                raise RuntimeError("OSDI eval returned $fatal")
+            if status == 0 or attempt == len(starts) - 1:
+                if status != 0:
+                    # budget exhausted / bailed / diverged on the final start:
+                    # keep legacy behavior (report via converged_resid), no raise
+                    diagnostics.note("osdi.op_not_converged",
+                                     detail=f"{self.info.name} bias={key[:4]}")
                 break
-            rin = R[T:]
-            if np.max(np.abs(rin)) < tol:
-                break
-            Jii = J[T:, T:] + gmin * eye
-            try:
-                dv = np.linalg.solve(Jii, -rin)
-            except np.linalg.LinAlgError:
-                dv = np.linalg.lstsq(Jii, -rin, rcond=None)[0]
-            step = np.max(np.abs(dv))
-            if step > 2.0:                       # damp large Newton steps
-                dv *= 2.0 / step
-            redv[T:] += dv
+            diagnostics.note("osdi.warm_start_fallback",
+                             detail=f"{self.info.name}: warm-start Newton failed, "
+                                    f"cold restart at bias={key[:4]}")
         # Schur complement onto terminals: G = Jtt - Jti (Jii+gmin)^-1 Jit
-        Jtt = J[:T, :T]
         if ni:
-            Jti, Jit = J[:T, T:], J[T:, :T]
-            G = Jtt - Jti @ np.linalg.solve(J[T:, T:] + gmin * eye, Jit)
+            ok, G = _osdi_schur_impl(J, T, gmin)
+            if not ok:
+                G = J[:T, :T] - J[:T, T:] @ np.linalg.solve(
+                    J[T:, T:] + gmin * eye, J[T:, :T])
         else:
-            G = Jtt
+            G = J[:T, :T]
         self._last_redv = redv.copy()    # for noise_psd re-eval at this bias
         di, gi, si, bi = 0, 1, 2, 3
-        # terminal capacitances from the reactive Jacobian dQ/dV at the op point
-        Cm = self._eval_react(redv)
-        return {
+        op = {
             "Id": float(R[di]),
             "gm": float(G[di, gi]),           # dId/dVg = d(resid@drain)/dV(gate)
             "gds": float(G[di, di]),          # dId/dVd
             "gmb": float(G[di, bi]) if T > 3 else 0.0,
-            "Cgg": float(Cm[gi, gi]),
-            "Cgs": float(-Cm[gi, si]),
-            "Cgd": float(-Cm[gi, di]),
-            "Cdd": float(Cm[di, di]),
             "vth_bias": vg - vs,
             "converged_resid": float(np.max(np.abs(R[T:]))) if nred > T else 0.0,
             "n_internal": nred - T,
             "unknown_params": list(self._unknown),
         }
+        if with_caps:
+            # terminal capacitances from the reactive Jacobian dQ/dV at the op point
+            Cm = self._eval_react(redv)
+            op.update(Cgg=float(Cm[gi, gi]), Cgs=float(-Cm[gi, si]),
+                      Cgd=float(-Cm[gi, di]), Cdd=float(Cm[di, di]))
+        self._op_memo[key] = (op, self._last_redv, with_caps)
+        while len(self._op_memo) > self._OP_MEMO_MAX:
+            self._op_memo.popitem(last=False)
+        return op                        # shared with the memo — treat as read-only
+
+    _LIN_MEMO_MAX = 1024
+
+    def terminal_linearization(self, vd: float, vg: float, vs: float, vb: float,
+                               *, gmin: float = 1e-12):
+        """Quasi-static terminal small-signal ``(G4, C4)`` at a bias (memoised).
+
+        First-order elimination of the internal nodes from the full linearized
+        device (rows/cols ordered d, g, s, b):
+
+            G = Jtt − Jti·X,                 X = (Jii + gmin·I)⁻¹ Jit
+            C = Ctt − Cti·X − Jti·(W − V·X), W = (…)⁻¹ Cit,  V = (…)⁻¹ Cii
+
+        valid for analysis frequencies far below the internal-node poles
+        (~THz for BSIM4's rds/charge nodes). This is what the periodic
+        (PAC/PNoise) linearization along a PSS orbit stamps per time sample.
+        The returned arrays are shared with the memo — treat as read-only.
+        """
+        key = (float(vd), float(vg), float(vs), float(vb))
+        memo = self._lin_memo.get(key)
+        if memo is not None:
+            self._lin_memo.move_to_end(key)
+            return memo
+        self.operating_point(vd, vg, vs, vb, with_caps=False)
+        redv = self._last_redv
+        _, J = self._eval_reduced(redv)
+        Cm = self._eval_react(redv)
+        T = self.n_term
+        ni = self._n_red - T
+        if ni:
+            Aii = J[T:, T:] + gmin * self._eye_int
+            try:
+                X = np.linalg.solve(Aii, J[T:, :T])
+                W = np.linalg.solve(Aii, Cm[T:, :T])
+                V = np.linalg.solve(Aii, Cm[T:, T:])
+            except np.linalg.LinAlgError:
+                X = np.linalg.lstsq(Aii, J[T:, :T], rcond=None)[0]
+                W = np.linalg.lstsq(Aii, Cm[T:, :T], rcond=None)[0]
+                V = np.linalg.lstsq(Aii, Cm[T:, T:], rcond=None)[0]
+            G4 = J[:T, :T] - J[:T, T:] @ X
+            C4 = Cm[:T, :T] - Cm[:T, T:] @ X - J[:T, T:] @ (W - V @ X)
+        else:
+            G4 = J[:T, :T].copy()
+            C4 = Cm[:T, :T].copy()
+        out = (G4, C4)
+        self._lin_memo[key] = out
+        while len(self._lin_memo) > self._LIN_MEMO_MAX:
+            self._lin_memo.popitem(last=False)
+        return out
 
 
 def _main(argv: List[str]) -> int:

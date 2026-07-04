@@ -34,6 +34,29 @@ def _stamp_adm(Y, RHS, P, Q, y):
             RHS[Q[1]] += y * P[1]
 
 
+def _stamp_dense_lti(G, C, RHS_G, RHS_C, terms, G4, C4):
+    """Dense multi-terminal small-signal stamp (silicon/OSDI devices).
+
+    ``terms`` is a tuple of terminal encodings matching the rows/cols of the
+    dense conductance ``G4`` and capacitance ``C4`` blocks (e.g. (d, g, s, b)
+    from :meth:`OsdiDevice.get_terminal_linearization`). Solved-node terminals
+    stamp ``Y[row, col] += block[i, j]``; known-voltage columns move to the
+    RHS; known-voltage rows have no KCL equation and drop.
+    """
+    for i, ti in enumerate(terms):
+        if ti[0] != "n":
+            continue
+        r = ti[1]
+        for j, tj in enumerate(terms):
+            if tj[0] == "n":
+                c = tj[1]
+                G[r, c] += G4[i, j]
+                C[r, c] += C4[i, j]
+            else:
+                RHS_G[r] -= G4[i, j] * tj[1]
+                RHS_C[r] -= C4[i, j] * tj[1]
+
+
 def _stamp_vccs(Y, RHS, d, g, s, gm):
     """Transconductance VCCS: drain current i_d = gm*(Vg-Vs) flows from drain
     to source through the device. Canonical MNA stamp:

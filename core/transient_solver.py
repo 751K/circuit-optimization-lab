@@ -806,7 +806,8 @@ def _assemble_result(ctx, tgrid, Vhist, input_values, input_keys,
 def _marshal_transient(
         sizes, bias, tgrid, *, vip=None, vin=None, nf=None, V0=None,
         topo=AFE_TOPO, inputs=None, node_inputs=None, current_inputs=None,
-        corner=None, max_step=None, flat_max_step=None,
+        corner=None, model_types=None, device_kwargs=None,
+        max_step=None, flat_max_step=None,
         max_retry_subdivisions=0, newton_maxit=30,
         newton_step_limit=5.0, newton_vtol=1e-8,
         fallback_full_jacobian=False, fallback_least_squares=False,
@@ -833,7 +834,8 @@ def _marshal_transient(
         if int(cap_mode_id) != int(requested):
             raise ValueError("cap_mode and cap_mode_id disagree")
 
-    tft = build_devices(sizes, nf=nf, corner=corner, topo=topo)
+    tft = build_devices(sizes, nf=nf, corner=corner, topo=topo,
+                        model_types=model_types, device_kwargs=device_kwargs)
     tgrid = np.asarray(tgrid, float)
     N = len(tgrid)
 
@@ -1025,7 +1027,8 @@ def _marshal_transient(
 
     if V0 is None:
         ac = ac_solve(sizes, bias, np.array([1.0]), nf=nf, topo=topo,
-                      corner=corner)
+                      corner=corner, model_types=model_types,
+                      device_kwargs=device_kwargs)
         dc = ac["dc_op"]
         V0 = np.array([dc[name] for name in topo.solved])
     V0 = np.asarray(V0, float)
@@ -1136,9 +1139,20 @@ def _marshal_transient(
         gear2_retry_requested=gear2_retry_requested)
 
 
+def _osdi_model_names(model_types):
+    """Names in a ``model_types`` map bound to OSDI (compiled-VA) devices."""
+    if not model_types:
+        return ()
+    from .device_model import _model_registry
+    from .osdi_device import OsdiDevice
+    return tuple(name for name, mt in model_types.items()
+                 if isinstance(_model_registry.get(mt), type)
+                 and issubclass(_model_registry[mt], OsdiDevice))
+
+
 def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
               topo=AFE_TOPO, inputs=None, node_inputs=None, current_inputs=None,
-              corner=None,
+              corner=None, model_types=None, device_kwargs=None,
               max_step=None, flat_max_step=None,
               max_retry_subdivisions=0, newton_maxit=30,
               newton_step_limit=5.0, newton_vtol=1e-8,
@@ -1192,13 +1206,40 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                that need physical branch selection. If omitted, topologies with
                require_dc_in_box use a 2 V margin; other topologies are unbounded.
       V0    : optional initial solved-node vector.
+      model_types / device_kwargs : optional per-device model binding (silicon).
+               Circuits whose transistors are OSDI (compiled Verilog-A) devices
+               are routed to :func:`core.osdi_transient.transient_osdi` — the
+               default (OTFT) path is untouched when these are None.
     Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
     fields are included when those nodes exist.
     """
+    if _osdi_model_names(model_types):
+        from .osdi_transient import transient_osdi
+        _inputs = inputs
+        if _inputs is None:
+            _inputs = {}
+            if vip is not None:
+                _inputs["vip"] = vip
+            if vin is not None:
+                _inputs["vin"] = vin
+        _acfg = resolve_adaptive_config(
+            adaptive_config, adaptive_reltol=adaptive_reltol,
+            adaptive_vabstol=adaptive_vabstol, adaptive_iabstol=adaptive_iabstol,
+            adaptive_max_steps=adaptive_max_steps, adaptive_h0=adaptive_h0)
+        return transient_osdi(
+            sizes, bias, tgrid, topo=topo, nf=nf, V0=V0, inputs=_inputs,
+            node_inputs=node_inputs, current_inputs=current_inputs,
+            corner=corner, model_types=model_types, device_kwargs=device_kwargs,
+            integration_method=integration_method, newton_maxit=newton_maxit,
+            newton_vtol=newton_vtol, newton_step_limit=newton_step_limit,
+            adaptive=bool(adaptive), adaptive_reltol=_acfg.reltol,
+            adaptive_vabstol=_acfg.vabstol, adaptive_iabstol=_acfg.iabstol,
+            adaptive_max_steps=_acfg.max_steps)
     marshalled = _marshal_transient(
         sizes, bias, tgrid, vip=vip, vin=vin, nf=nf, V0=V0, topo=topo,
         inputs=inputs, node_inputs=node_inputs, current_inputs=current_inputs,
-        corner=corner, max_step=max_step, flat_max_step=flat_max_step,
+        corner=corner, model_types=model_types, device_kwargs=device_kwargs,
+        max_step=max_step, flat_max_step=flat_max_step,
         max_retry_subdivisions=max_retry_subdivisions,
         newton_maxit=newton_maxit, newton_step_limit=newton_step_limit,
         newton_vtol=newton_vtol,

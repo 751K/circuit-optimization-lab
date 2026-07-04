@@ -210,7 +210,8 @@ def _resample_inputs(inputs, t_src, t_dst, period):
     return out
 
 
-def _initial_vector(sizes, bias, topo, nf, V0, corner=None):
+def _initial_vector(sizes, bias, topo, nf, V0, corner=None,
+                    model_types=None, device_kwargs=None):
     if V0 is not None:
         if isinstance(V0, dict):
             default = topo.default_guess_value(bias)
@@ -224,7 +225,8 @@ def _initial_vector(sizes, bias, topo, nf, V0, corner=None):
 
     try:
         ac = ac_solve(sizes, bias, np.array([1.0]), topo=topo, nf=nf,
-                      corner=corner)
+                      corner=corner, model_types=model_types,
+                      device_kwargs=device_kwargs)
         if ac is not None and "dc_op" in ac:
             return np.asarray([ac["dc_op"][node] for node in topo.solved], float)
     except Exception as exc:
@@ -525,6 +527,8 @@ def _finalize_pss_result(cur, runner, stepper, *, converged,
         "node_inputs": dict(tk["node_inputs"] or {}),
         "current_inputs": tuple(tk["current_inputs"] or ()),
         "signed_devices": tuple(tk["signed_devices"] or ()),
+        "model_types": tk.get("model_types"),
+        "device_kwargs": tk.get("device_kwargs"),
         "transient_max_step": tk["max_step"],
         "transient_flat_max_step": tk["flat_max_step"],
         "rail_margin": tk["rail_margin"],
@@ -799,7 +803,7 @@ class _PSSShootingStepper:
 
 def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               n_points=161, inputs=None, node_inputs=None, current_inputs=None,
-              corner=None,
+              corner=None, model_types=None, device_kwargs=None,
               V0=None, tstab_periods=0, max_step=None, flat_max_step=None,
               max_retry_subdivisions=0, newton_maxit=30,
               newton_step_limit=5.0, newton_vtol=1e-8,
@@ -848,6 +852,16 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         if len(edge_mask) != len(tgrid):
             raise ValueError("edge_mask length must match tgrid")
 
+    if model_types:
+        from .transient_solver import _osdi_model_names
+        if _osdi_model_names(model_types) and analytic_jacobian:
+            # the analytic monodromy rebuilds G/C from the OTFT compact model —
+            # silicon (OSDI) circuits shoot with the FD Jacobian instead
+            analytic_jacobian = False
+            diagnostics.note("pss.osdi_fd_jacobian",
+                             detail="silicon circuit: analytic monodromy is "
+                                    "OTFT-only, using FD shooting Jacobian")
+
     step_fallback_tol = min(float(fallback_tol), 0.1 * float(residual_tol))
     transient_kwargs = dict(
         topo=topo,
@@ -855,6 +869,8 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         current_inputs=current_inputs,
         nf=nf,
         corner=corner,
+        model_types=model_types,
+        device_kwargs=device_kwargs,
         max_step=max_step,
         flat_max_step=flat_max_step,
         max_retry_subdivisions=max_retry_subdivisions,
@@ -877,7 +893,8 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
         gear2_be_fallback=False,
     )
 
-    x = _initial_vector(sizes, bias, topo, nf, V0, corner=corner)
+    x = _initial_vector(sizes, bias, topo, nf, V0, corner=corner,
+                        model_types=model_types, device_kwargs=device_kwargs)
     x = _rail_clip(x, topo, bias, rail_margin)
 
     phys_bounds = _physical_span(topo, bias, float(physical_factor))

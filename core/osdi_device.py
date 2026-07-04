@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
 from .device_model import TransistorModel
@@ -29,6 +30,39 @@ _OSDI_CACHE_DIR = os.environ.get(
 
 _lib_cache: Dict[str, object] = {}       # va_path -> OsdiLibrary
 _lib_lock = threading.Lock()
+
+# LRU of fully-set-up osdi_host.Device instances, keyed by everything that
+# determines device behavior (card incl. W/L/NF + temperature). Setting up a
+# Device applies the whole ~800-param BSIM4 card through ctypes (~1 ms); the
+# solvers rebuild their device instances on every ac_solve/noise_analysis call,
+# so identical candidates re-created within a run hit this cache instead.
+# Sharing one Device across wrappers is safe: its only cross-call state is the
+# bias-keyed op memo and the (bias-consistent) warm-start hint.
+_dev_cache: "OrderedDict[tuple, object]" = OrderedDict()
+_dev_lock = threading.Lock()
+_DEV_CACHE_MAX = int(os.environ.get("OSDI_DEVICE_CACHE_SIZE", "64"))
+
+
+def _shared_device(va_path: str, module: Optional[str], card: Dict[str, float],
+                   temperature: float):
+    """Return a cached (or new) osdi_host.Device for this exact card."""
+    from .osdi_host import Device
+    if _DEV_CACHE_MAX <= 0:
+        return Device(load_model(va_path), card, model_name=module,
+                      temperature=temperature)
+    key = (va_path, module, float(temperature), tuple(sorted(card.items())))
+    with _dev_lock:
+        dev = _dev_cache.get(key)
+        if dev is not None:
+            _dev_cache.move_to_end(key)
+            return dev
+    dev = Device(load_model(va_path), card, model_name=module,
+                 temperature=temperature)
+    with _dev_lock:
+        _dev_cache[key] = dev
+        while len(_dev_cache) > _DEV_CACHE_MAX:
+            _dev_cache.popitem(last=False)
+    return dev
 
 
 def compile_va(va_path: str, *, cache_dir: Optional[str] = None) -> str:
@@ -73,7 +107,6 @@ class OsdiDevice(TransistorModel):
 
     def __init__(self, W: float = 1.0, L: float = 0.15, NF: int = 1, *,
                  vb: float = 0.0, temperature: float = 300.15, **corner):
-        from .osdi_host import Device
         card = dict(self.BASE_CARD)
         card["type"] = self.TYPE             # polarity is authoritative, not the card
         card["l"] = float(L) * 1e-6          # µm -> m
@@ -86,16 +119,22 @@ class OsdiDevice(TransistorModel):
         # NMOS (TYPE=+1): source-low, drain current leaves the drain → kcl_sign=-1.
         # PMOS (TYPE=-1): source-high, sources current into the drain → kcl_sign=+1.
         self.kcl_sign = -1.0 if self.TYPE > 0 else 1.0
-        self._dev = Device(load_model(self.VA_PATH), card,
-                           model_name=self.MODULE, temperature=temperature)
+        self._dev = _shared_device(self.VA_PATH, self.MODULE, card, temperature)
+        # resolved card kept for consumers that need a *dedicated* (non-shared)
+        # host Device, e.g. the transient marshal which rebinds its buffers
+        self._osdi_card = dict(card)
+        self._osdi_temperature = float(temperature)
         self._op_cache: Dict[Tuple[float, float, float], Dict[str, float]] = {}
 
     # ── operating point (cached per bias) ────────────────────────────────
-    def _op(self, Vs: float, Vd: float, Vg: float) -> Dict[str, float]:
+    def _op(self, Vs: float, Vd: float, Vg: float,
+            want_caps: bool = False) -> Dict[str, float]:
+        # the DC root-finder's inner loop only reads Id — skip the reactive
+        # (dQ/dV) eval there; cap consumers upgrade the same memoised bias
         key = (Vs, Vd, Vg)
         op = self._op_cache.get(key)
-        if op is None:
-            op = self._dev.operating_point(Vd, Vg, Vs, self.vb)
+        if op is None or (want_caps and "Cgs" not in op):
+            op = self._dev.operating_point(Vd, Vg, Vs, self.vb, with_caps=want_caps)
             self._op_cache[key] = op
         return op
 
@@ -109,25 +148,32 @@ class OsdiDevice(TransistorModel):
     def id_and_drain_charge(self, Vs: float, Vd: float, Vg: float):
         """(drain current [A], drain reactive charge [C]) at a bias — for transient
         backward-Euler (dQ/dt). Solves internals, then reads the reactive residual."""
-        op = self._dev.operating_point(Vd, Vg, Vs, self.vb)
+        op = self._dev.operating_point(Vd, Vg, Vs, self.vb, with_caps=False)
         Q = self._dev.charges(self._dev._last_redv)
         return op["Id"], float(Q[0])          # reduced node 0 = drain
 
     # ── small-signal (AC / PSS / PAC / PNoise) ───────────────────────────
     def get_ss_params(self, Vs: float, Vd: float, Vg: float) -> Dict[str, float]:
-        op = self._op(Vs, Vd, Vg)
+        op = self._op(Vs, Vd, Vg, want_caps=True)
         return {"gm": max(op["gm"], 0.0), "gds": max(op["gds"], 1e-12),
                 "Cgs": op["Cgs"], "Cgd": op["Cgd"], "Ich": abs(op["Id"])}
 
     def get_capacitances(self, Vs: float, Vd: float, Vg: float) -> Tuple[float, float]:
-        op = self._op(Vs, Vd, Vg)
+        op = self._op(Vs, Vd, Vg, want_caps=True)
         return op["Cgs"], op["Cgd"]
+
+    def get_terminal_linearization(self, Vs: float, Vd: float, Vg: float):
+        """Quasi-static 4×4 terminal (G, C), rows/cols (d, g, s, b) — the full
+        small-signal stamp for the periodic (PAC/PNoise) linearization along a
+        PSS orbit. Read-only (shared with the host's memo)."""
+        return self._dev.terminal_linearization(Vd, Vg, Vs, self.vb)
 
     # ── noise ────────────────────────────────────────────────────────────
     def get_noise_psd(self, Vs: float, Vd: float, Vg: float,
                       frequency: float) -> Tuple[float, float]:
         # re-solve at this bias so Device's noise re-eval uses the right op point
-        self._dev.operating_point(Vd, Vg, Vs, self.vb)
+        # (memo-hit after the first frequency of a sweep; caps not needed)
+        self._dev.operating_point(Vd, Vg, Vs, self.vb, with_caps=False)
         return self._dev.noise_by_type(frequency)   # (S_thermal, S_flicker@f)
 
     # ── transient-only hooks: deferred Phase B ───────────────────────────

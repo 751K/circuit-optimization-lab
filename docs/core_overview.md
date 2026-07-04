@@ -577,8 +577,13 @@ accelerates the *screening* of a large candidate pool.
   consumer can reject out-of-domain designs) + `.npz` (dense `X`/`Y` matrices, NaN where
   a label is missing) + optional `.parquet`. **Label groups** (`--labels`, opt-in beyond
   the default `ac_noise`): `transient` (stimulus-agnostic waveform features from the
-  config's validated periodic transient) and `pss` (periodic-steady-state quality +
-  orbit output). **Design-axis grammar** extends beyond `DEV.W/.L/.NF`/bias:
+  config's validated periodic transient), `pss` (periodic-steady-state quality + orbit
+  output), `pac` (baseband conversion gain + PAC-grid −3 dB corner) and `pnoise`
+  (band-integrated output / input-referred periodic noise — the chopper figures of
+  merit). The `pss`/`pac`/`pnoise` groups run one shared `run_analysis_suite` chain per
+  candidate, so the config's validated `analyses` solver settings (`time_domain`,
+  drive, band, shooting tolerances) apply exactly; `pac`/`pnoise` require their
+  `analyses` blocks. **Design-axis grammar** extends beyond `DEV.W/.L/.NF`/bias:
   `<Cap>.C` / `<Res>.R` (named passive values — *structural*, rebuilds the circuit per
   candidate via `candidate_circuit()`), `periodic.frequency` (clock), and `pvt0`/`pbeta0`
   (continuous global process shift — sampling this turns the discrete corner sweep into

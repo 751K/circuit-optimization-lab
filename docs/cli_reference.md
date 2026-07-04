@@ -311,23 +311,36 @@ python -m core dataset examples/single_stage.json -n 200 --no-npz --quiet
 | `--seed` | int | `0` | RNG 种子（同 config+seed+commit ⇒ 同数据集） |
 | `--method` | lhs/random | `lhs` | 采样方法 |
 | `--corner` | str | `typical` | 工艺角：typical / slow / fast |
-| `--labels` | str | `ac_noise` | 标签组(逗号分隔)：`ac_noise` / `transient`(后者需 `periodic` 块) |
+| `--labels` | str | `ac_noise` | 标签组(逗号分隔)：`ac_noise` / `transient` / `pss` / `pac` / `pnoise`(周期组需 `periodic` 块；`pac`/`pnoise` 另需对应 `analyses` 块) |
 | `--out` | path | — | 输出前缀（不给则只在内存计算，不落盘） |
 | `--no-npz` | flag | — | 跳过 `.npz` 稠密输出 |
 | `--parquet` | flag | — | 额外写 `.parquet`（需可选依赖 pyarrow） |
 | `--no-numba` | flag | — | 禁用 Numba |
 | `--quiet` | flag | — | 不打印进度 |
 
-**标签组**（`--labels`，schema 1.1）：
+**标签组**（`--labels`，schema 1.2）：
 
 - `ac_noise`（默认）：`gain_dB` `gain_peak_dB` `bw_Hz` `irn_uV` `power_uW` `area`
 - `transient`：`out_pp` `out_mean` `out_rms` `slew_rate` `final_value` — **激励无关**的波形特征，
   复用配置里已验证的 `periodic` transient（无 `periodic` 块则报错；不假设阶跃语义，故不给 settling/overshoot）
-- `pss`：`pss_converged` `pss_residual` `pss_iters` `pss_out_pp` `pss_out_mean` — 周期稳态质量 + 轨道输出特征，
-  复用 `pss_solve`（需 `periodic` 块）。`pss_converged`(1/0) 是可信标志；diverged 样本保留标签由它区分。
+- `pss`：`pss_converged` `pss_residual` `pss_iters` `pss_out_pp` `pss_out_mean` — 周期稳态质量 + 轨道输出特征
+  （需 `periodic` 块）。`pss_converged`(1/0) 是可信标志；diverged 样本保留标签由它区分。
   **相位裕度**（AC 环路指标）和 **settling**（阶跃响应）不属于 PSS，不在此组。
+- `pac`：`pac_gain` `pac_gain_dB` `pac_bw_Hz` — LPTV 小信号传递：最低分析频点的基带转换增益（斩波的
+  解调增益）+ PAC 网格内的 −3dB 角频率（带内未跌 3dB 则为 null）。**需配置带 `analyses.pac` 块**。
+- `pnoise`：`pnoise_out_uV` `pnoise_irn_uV` — 折叠周期噪声在 `analyses.pnoise.band` 上的积分输出噪声
+  与（经 PAC 0 阶边带增益折算的）等效输入噪声——斩波 AFE 的核心指标。**需配置带 `analyses.pnoise` 块**。
 
-`transient` / `pss` 组每候选各跑一次周期分析，比纯 `ac_noise` 慢；按需 `--labels ac_noise,transient,pss`。
+`pss`/`pac`/`pnoise` 三组每候选走一次 `run_analysis_suite`：配置 `analyses` 块里**已验证的求解设置**
+（gear2/tstab/容差、`time_domain`、drive、band）原样生效，PSS 轨道只算一次共享，PNoise 复用 PAC 增益；
+数据集级 corner 覆盖 `analyses` 块内的 corner，保证一行标签同属一个工艺点。硬开关电路（斩波/SC）的
+`analyses.pac`/`analyses.pnoise` 记得 `time_domain: true`（HB 边带截断在方波电导上收敛很慢）。
+`transient` 组保持直连 `periodic` 上下文。周期组比纯 `ac_noise` 慢；按需
+`--labels ac_noise,transient,pss` 或（硅斩波）`--labels pss,pac,pnoise`，例如：
+
+```bash
+python -m core dataset examples/sky130_chopper.json --labels pss,pac,pnoise -n 200 --out chopper_ds
+```
 
 **设计轴（`explore.variables` 目标语法）**：除 `DEV.W/.L/.NF`（器件尺寸）和裸 bias key 外，dataset
 还支持三类扩展轴（manifest 每个变量记 `kind`）：

@@ -345,7 +345,8 @@ def _run_pss(spec, pss_cfg, periodic):
         spec.sizes, spec.bias, context["period"], topo=spec.topology, nf=spec.nf,
         tgrid=context["tgrid"], inputs=context["inputs"],
         node_inputs=context["node_inputs"], current_inputs=context["current_inputs"],
-        signed_devices=context["signed_devices"], **kwargs,
+        signed_devices=context["signed_devices"],
+        model_types=spec.model_types, device_kwargs=spec.device_kwargs, **kwargs,
     )
 
 
@@ -375,7 +376,8 @@ def _run_transient(spec, cfg):
             spec.sizes, spec.bias, tgrid, topo=spec.topology, nf=spec.nf,
             inputs=context["inputs"], node_inputs=context["node_inputs"],
             current_inputs=context["current_inputs"],
-            signed_devices=context["signed_devices"], **kwargs,
+            signed_devices=context["signed_devices"],
+            model_types=spec.model_types, device_kwargs=spec.device_kwargs, **kwargs,
         )
     tgrid = _time_grid(cfg.get("tgrid", cfg), default_stop=cfg.get("tstop", cfg.get("duration")),
                        default_points=int(cfg.get("n_points", 101)))
@@ -384,7 +386,8 @@ def _run_transient(spec, cfg):
         kwargs["corner"] = _corner_from_cfg(cfg)
     return transient(
         spec.sizes, spec.bias, tgrid, topo=spec.topology, nf=spec.nf,
-        signed_devices=tuple(cfg.get("signed_devices", ()) or ()), **kwargs,
+        signed_devices=tuple(cfg.get("signed_devices", ()) or ()),
+        model_types=spec.model_types, device_kwargs=spec.device_kwargs, **kwargs,
     )
 
 

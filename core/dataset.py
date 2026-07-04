@@ -45,10 +45,9 @@ from .corners import CORNERS
 from .device_model import get_default_model_type
 from .explore import (METRICS, SKY130_CORNERS, apply_silicon_corner, apply_variables,
                       evaluate, parse_explore, sample)
-from .pss_solver import pss_solve
 from .transient_solver import transient
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
 # Label groups: each is an opt-in bundle of columns. The default is the AC/noise
 # group (unchanged from schema 1.0). The transient group adds stimulus-agnostic
@@ -63,9 +62,18 @@ TRANSIENT_LABELS = ("out_pp", "out_mean", "out_rms", "slew_rate", "final_value")
 # (an AC loop-gain metric) and settling (a step-response metric) are *not* PSS and
 # stay out of this group.
 PSS_LABELS = ("pss_converged", "pss_residual", "pss_iters", "pss_out_pp", "pss_out_mean")
+# pac / pnoise groups: the LPTV small-signal transfer and folded periodic noise
+# around the PSS orbit — the chopper's actual figures of merit (conversion gain,
+# band-integrated input-referred noise). Both require the config's validated
+# ``analyses.pac`` / ``analyses.pnoise`` blocks (drive, freqs, time_domain, band):
+# a hard-switched circuit measured with the wrong PAC settings converges to a
+# silently wrong gain, so these are never fabricated.
+PAC_LABELS = ("pac_gain", "pac_gain_dB", "pac_bw_Hz")
+PNOISE_LABELS = ("pnoise_out_uV", "pnoise_irn_uV")
 LABEL_GROUPS = {"ac_noise": AC_NOISE_LABELS, "transient": TRANSIENT_LABELS,
-                "pss": PSS_LABELS}
-_PERIODIC_LABELS = frozenset(TRANSIENT_LABELS) | frozenset(PSS_LABELS)
+                "pss": PSS_LABELS, "pac": PAC_LABELS, "pnoise": PNOISE_LABELS}
+_PERIODIC_LABELS = (frozenset(TRANSIENT_LABELS) | frozenset(PSS_LABELS) |
+                    frozenset(PAC_LABELS) | frozenset(PNOISE_LABELS))
 DEFAULT_GROUPS = ("ac_noise",)
 LABELS = AC_NOISE_LABELS                   # back-compat alias (default group's labels)
 
@@ -205,43 +213,102 @@ def _pss_features(res):
     }
 
 
-def _run_transient_features(base_spec, periodic, sizes, bias, nf, corner_shift):
+def _pac_features(res):
+    """LPTV small-signal transfer features from a ``pac_solve`` result.
+
+    ``pac_gain`` is |H| at the *lowest* analysis frequency — for a chopper, the
+    demodulated baseband conversion gain; ``pac_gain_dB`` is its dB value and
+    ``pac_bw_Hz`` the −3 dB corner within the PAC grid (NaN when the response
+    never drops 3 dB inside the grid — an informative "band not clipped" label)."""
+    gains = np.asarray(res.get("gains", ()), float)
+    g0 = float(gains[0]) if gains.size else float("nan")
+    return {
+        "pac_gain": g0,
+        "pac_gain_dB": float(res.get("Av_dc_dB", float("nan"))),
+        "pac_bw_Hz": float(res.get("bw_Hz", float("nan"))),
+    }
+
+
+def _pnoise_features(res):
+    """Band-integrated periodic noise from a ``pnoise_solve`` result.
+
+    ``pnoise_out_uV`` integrates the folded output PSD over the config's analysis
+    band; ``pnoise_irn_uV`` refers it to the input through the PAC sideband-0
+    gain — the chopper AFE's headline metric."""
+    return {
+        "pnoise_out_uV": float(res.get("out_uV_band", float("nan"))),
+        "pnoise_irn_uV": float(res.get("irn_uV_band", float("nan"))),
+    }
+
+
+def _candidate_spec(base_spec, sizes, bias, nf, model_types, device_kwargs):
+    """The base spec re-pointed at one candidate's sizes/bias/models.
+
+    ``model_types``/``device_kwargs`` override the spec's own bindings when given —
+    they carry the dataset-level silicon corner baked by ``apply_silicon_corner``,
+    which the config's ``models`` block does not know about."""
+    return dataclasses.replace(
+        base_spec, sizes=sizes, bias=bias, nf=nf,
+        model_types=model_types or base_spec.model_types,
+        device_kwargs=device_kwargs or base_spec.device_kwargs)
+
+
+def _run_transient_features(base_spec, periodic, sizes, bias, nf, corner_shift,
+                            model_types=None, device_kwargs=None):
     """Run the config's *validated* periodic transient for one candidate → features.
 
     The stimulus waveforms/grid come straight from :func:`build_periodic_context`
     (the same path ``run -a transient`` uses), so the transient is never fabricated
     — only the device sizes/bias vary."""
     from .analysis_dispatch import build_periodic_context   # lazy: avoids import cost
-    spec = dataclasses.replace(base_spec, sizes=sizes, bias=bias, nf=nf)
+    spec = _candidate_spec(base_spec, sizes, bias, nf, model_types, device_kwargs)
     ctx = build_periodic_context(spec, periodic)           # waveforms may read bias
     corner_kw = {} if corner_shift is None else {"corner": corner_shift}
     tr = transient(sizes, bias, ctx["tgrid"], topo=base_spec.topology, nf=nf,
                    inputs=ctx["inputs"], node_inputs=ctx["node_inputs"],
                    current_inputs=ctx["current_inputs"],
-                   signed_devices=ctx["signed_devices"], **corner_kw)
+                   signed_devices=ctx["signed_devices"],
+                   model_types=spec.model_types, device_kwargs=spec.device_kwargs,
+                   **corner_kw)
     return _transient_features(tr)
 
 
-def _run_pss_features(base_spec, periodic, sizes, bias, nf, corner_shift):
-    """Run the config's periodic PSS for one candidate → :func:`_pss_features`.
+# Direct periodic label groups: run one validated periodic analysis straight on the
+# candidate. Needs the config's ``periodic`` block.
+_PERIODIC_RUNNERS = {"transient": _run_transient_features}
 
-    Same reused, validated periodic path as the transient runner
-    (:func:`build_periodic_context` → shared orbit inputs/grid), differing only in
-    the solver (:func:`core.pss_solver.pss_solve` for the steady-state orbit)."""
-    from .analysis_dispatch import build_periodic_context   # lazy: avoids import cost
-    spec = dataclasses.replace(base_spec, sizes=sizes, bias=bias, nf=nf)
-    ctx = build_periodic_context(spec, periodic)
-    corner_kw = {} if corner_shift is None else {"corner": corner_shift}
-    res = pss_solve(sizes, bias, ctx["period"], topo=base_spec.topology, nf=nf,
-                    tgrid=ctx["tgrid"], inputs=ctx["inputs"], node_inputs=ctx["node_inputs"],
-                    current_inputs=ctx["current_inputs"],
-                    signed_devices=ctx["signed_devices"], **corner_kw)
-    return _pss_features(res)
+# Suite label groups: the PSS→PAC→PNoise chain, routed through
+# ``run_analysis_suite`` so the config's ``analyses`` solver settings (integration
+# method, shooting tolerances, ``time_domain``, drive, band) apply exactly as in
+# ``run -a pss,pac,pnoise``; the PSS orbit is computed once and shared, and PNoise
+# reuses the PAC gains for input referral.
+_SUITE_GROUPS = ("pss", "pac", "pnoise")
+_SUITE_FEATURES = {"pss": _pss_features, "pac": _pac_features,
+                   "pnoise": _pnoise_features}
 
 
-# Periodic label groups: each runs a validated periodic analysis on the candidate's
-# circuit and returns its label→value features. Both need a ``periodic`` block.
-_PERIODIC_RUNNERS = {"transient": _run_transient_features, "pss": _run_pss_features}
+def _run_suite_features(base_spec, groups, sizes, bias, nf, corner_shift,
+                        model_types=None, device_kwargs=None):
+    """Run the validated PSS/PAC/PNoise chain once for one candidate → features.
+
+    The dataset's per-candidate corner (``corner_shift``) overwrites any
+    per-analysis corner from the config so every label in a row describes the same
+    process point as the AC/noise labels. The PSS config is always threaded in
+    (even when the ``pss`` group itself is off) because PAC/PNoise hang off it."""
+    from .analysis_dispatch import run_analysis_suite       # lazy: avoids import cost
+    spec = _candidate_spec(base_spec, sizes, bias, nf, model_types, device_kwargs)
+    base_analyses = spec.analyses or {}
+    analyses = {}
+    for name in _SUITE_GROUPS:
+        if name in groups or name == "pss":
+            cfg = dict(base_analyses.get(name) or {})
+            cfg["corner"] = corner_shift
+            analyses[name] = cfg
+    results = run_analysis_suite(spec, analyses, selected=list(groups))
+    feats = {}
+    for g in groups:
+        feats.update(_SUITE_FEATURES[g](results[g]))
+    return feats
 
 
 # ── structural / stimulus / corner design axes (extend the DEV.attr grammar) ──
@@ -383,7 +450,9 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
         corner_name = si_corner
     groups = tuple(label_groups)
     labels = _labels_for(groups)
-    periodic_groups = [g for g in groups if g in _PERIODIC_RUNNERS]     # transient / pss
+    direct_groups = [g for g in groups if g in _PERIODIC_RUNNERS]       # transient
+    suite_groups = [g for g in groups if g in _SUITE_GROUPS]            # pss/pac/pnoise
+    periodic_groups = direct_groups + suite_groups
     # Structural axes (``<Cap>.C`` / ``periodic.frequency``) change the topology or
     # stimulus, so those candidates get the circuit rebuilt from a patched config;
     # pure size/bias axes keep the fast fixed-topology path.
@@ -395,6 +464,19 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
     if periodic_groups and not (config_dict and config_dict.get("periodic")):
         raise ValueError(f"label group(s) {periodic_groups} require a 'periodic' "
                          "stimulus block in the config")
+    # PAC/PNoise labels are only meaningful under the config's validated analysis
+    # settings (drive, freqs, time_domain, band) — fail fast rather than label 5000
+    # candidates with a fabricated setup.
+    for g in ("pac", "pnoise"):
+        if g in groups:
+            acfg = (config_dict.get("analyses") or {}).get(g)
+            if not isinstance(acfg, dict):
+                raise ValueError(f"label group {g!r} requires an 'analyses.{g}' block "
+                                 "(freqs / input_drive / solver settings) in the config")
+            if ("input_drive" not in acfg and
+                    len(config_dict.get("periodic", {}).get("inputs", {})) != 1):
+                raise ValueError(f"'analyses.{g}' needs an explicit input_drive when "
+                                 "the periodic block has multiple inputs")
     if corner_vars:                       # sampled corner ⇒ dataset spans PVT, not one point
         corner_name = "sampled"
     # Fixed-topology fast path builds the spec once; structural axes rebuild per candidate.
@@ -421,12 +503,20 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
                            model_types=model_types, device_kwargs=device_kwargs)
         extra = {}
         if periodic_groups and metrics is not None and spec is not None:  # DC converged
-            for g in periodic_groups:                      # transient / pss
+            for g in direct_groups:                        # transient
                 try:
                     extra.update(_PERIODIC_RUNNERS[g](spec, periodic, sizes, bias,
-                                                      cand_nf, eff_shift))
+                                                      cand_nf, eff_shift,
+                                                      model_types, device_kwargs))
                 except Exception as exc:
                     diagnostics.note(f"dataset.{g}_eval_fail", exc)
+            if suite_groups:                               # pss/pac/pnoise, one chain
+                try:
+                    extra.update(_run_suite_features(spec, suite_groups, sizes, bias,
+                                                     cand_nf, eff_shift,
+                                                     model_types, device_kwargs))
+                except Exception as exc:
+                    diagnostics.note(f"dataset.{'+'.join(suite_groups)}_eval_fail", exc)
         rows.append(_row(i, var_values, metrics, extra or None, labels))
         if progress is not None:
             progress(i + 1, n)
@@ -609,8 +699,9 @@ def main(argv=None):
                    help="process corner: OTFT typical|slow|fast, or SKY130 tt|ss|ff|sf|fs "
                         "for silicon configs (default: typical)")
     p.add_argument("--labels", default="ac_noise",
-                   help="comma list of label groups: ac_noise, transient "
-                        "(transient needs a 'periodic' block; default: ac_noise)")
+                   help="comma list of label groups: ac_noise, transient, pss, pac, "
+                        "pnoise (periodic groups need a 'periodic' block; pac/pnoise "
+                        "also need their 'analyses' blocks; default: ac_noise)")
     p.add_argument("--freqs-start", type=float, default=-2.0,
                    help="AC grid start decade (log10 Hz) when --freqs-stop is given")
     p.add_argument("--freqs-stop", type=float, default=None,

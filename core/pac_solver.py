@@ -13,8 +13,9 @@ from scipy import sparse as _sp
 from scipy.linalg import lu_factor, lu_solve
 from scipy.sparse import linalg as _spla
 
-from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
+from .ac_mna import _stamp_adm, _stamp_dense_lti, _stamp_mos_lti, _branch_incidence
 from .ac_solver import _bw_from_gain, _dev_corner, _dev_nf, ac_solve, build_devices, get_ss_params
+from .osdi_device import OsdiDevice
 from .numba_kernels import (_pnoise_hb_blocks_impl, pac_hb_blocks_numba,
                             pac_linearize_orbit_numba,
                             pac_linearize_orbit_gate1_numba, py_impl)
@@ -358,8 +359,10 @@ def _has_gate1_dynamics(dev):
     )
 
 
-def _resolve_gate1_instances(all_sizes, all_nf, corner, topo):
-    dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
+def _resolve_gate1_instances(all_sizes, all_nf, corner, topo,
+                             model_types=None, device_kwargs=None):
+    dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo,
+                             model_types=model_types, device_kwargs=device_kwargs)
     internal_gate_states = any(
         _has_gate1_dynamics(dev_inst.get(name))
         for name, *_ in topo.devices
@@ -411,14 +414,22 @@ def _stamp_pmos_gate1_dynamic_cap_terms(
 def _assemble_pac_linearization_python(
         all_sizes, all_nf, corner, topo, tbias, t_uniform,
         node_wave, input_wave, node_inputs, drive_list, drive_amps, *,
-        charge_caps, internal_gate_states=True, dev_inst=None):
-    """Build time-sampled PAC G/C matrices, optionally retaining PMOS gate1."""
+        charge_caps, internal_gate_states=True, dev_inst=None,
+        model_types=None, device_kwargs=None):
+    """Build time-sampled PAC G/C matrices, optionally retaining PMOS gate1.
+
+    Devices bound to OSDI (compiled Verilog-A) models stamp their full 4×4
+    quasi-static terminal (G, C) — see
+    :meth:`OsdiDevice.get_terminal_linearization`; OTFT devices keep the
+    original gm/gds/Cgs/Cgd (+gate1/dynamic-cap) stamps unchanged.
+    """
     N = len(t_uniform)
     n = topo.n
     idx = topo.idx
     rails = topo.rail_values(tbias)
     if dev_inst is None:
-        dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
+        dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo,
+                                 model_types=model_types, device_kwargs=device_kwargs)
 
     gate1_idx = {}
     if internal_gate_states:
@@ -489,6 +500,16 @@ def _assemble_pac_linearization_python(
             Vs = term_value(s, m)
             Vd = term_value(d, m)
             Vg = term_value(g, m)
+            if isinstance(dev_inst[name], OsdiDevice):
+                # silicon: full quasi-static 4×4 terminal stamp (bulk is a
+                # constant bias -> known-voltage term, drops). The OTFT
+                # dynamic-cap corrections below are model-specific; the OSDI
+                # C(V) block is the dQ/dV operator at the orbit point.
+                G4, C4 = dev_inst[name].get_terminal_linearization(Vs, Vd, Vg)
+                _stamp_dense_lti(Gt_full[m], Ct_full[m], rg, rc,
+                                 (term(d), term(g), term(s), ("v", 0.0)),
+                                 G4, C4)
+                continue
             p = get_ss_params(
                 all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
                 corner=_dev_corner(corner, name),
@@ -568,7 +589,8 @@ def _stamp_arrays(terms):
 
 def _try_numba_pac_linearization(
         all_sizes, all_nf, corner, topo, tbias, t_uniform, node_wave,
-        input_wave, node_inputs, drive_list, drive_amps, *, charge_caps):
+        input_wave, node_inputs, drive_list, drive_amps, *, charge_caps,
+        dev_inst=None):
     if pac_linearize_orbit_numba is None or not charge_caps:
         return None
     if (
@@ -577,6 +599,11 @@ def _try_numba_pac_linearization(
         getattr(topo, "cccs", ()) or
         getattr(topo, "ccvs", ())
     ):
+        return None
+    # the kernel evaluates the OTFT compact model; silicon (OSDI) devices go
+    # through the Python assembler's dense terminal stamp instead
+    if dev_inst is not None and any(
+            isinstance(dev_inst.get(name), OsdiDevice) for name, *_ in topo.devices):
         return None
 
     try:
@@ -619,7 +646,8 @@ def _try_numba_pac_linearization(
         else:
             input_wave_arr = np.empty((0, N), dtype=float)
 
-        dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
+        if dev_inst is None:
+            dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
         params = [dev_inst[name].get_numba_params() for name, *_ in topo.devices]
         p_Vfb = np.array([p.Vfb for p in params], dtype=float)
         p_Vss = np.array([p.Vss for p in params], dtype=float)
@@ -818,7 +846,8 @@ def _try_numba_pac_linearization_gate1(
 
 def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
                           corner=None,
-                          compute_condition=False):
+                          compute_condition=False,
+                          model_types=None, device_kwargs=None):
     """Use ordinary AC when the supplied PSS orbit is time invariant.
 
     This is an exact reduction for static operating points.  It is deliberately
@@ -905,6 +934,7 @@ def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
     ac = ac_solve(
         sizes, tbias, freqs, topo=fast_topo, nf=nf, corner=corner,
         x0_guess=dict(zip(topo.solved, np.asarray(pss_result["x0"], float))),
+        model_types=model_types, device_kwargs=device_kwargs,
     )
     if ac is None:
         return None
@@ -940,7 +970,8 @@ def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
 def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
                           all_nf, corner=None, n_period_samples=384,
                           max_sideband=10, cache=True, pacmag=1.0,
-                          compute_condition=False):
+                          compute_condition=False,
+                          model_types=None, device_kwargs=None):
     """Analytic-adjoint PAC from the PSS-orbit small-signal matrices.
 
     Samples the periodic small-signal G(t)/C(t) (and the input-coupling columns
@@ -1015,7 +1046,8 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
 
     cache_store = pss_result.setdefault("_pac_analytic_cache", {}) if cache else {}
     internal_gate_states, lin_dev_inst = _resolve_gate1_instances(
-        all_sizes, all_nf, corner, topo)
+        all_sizes, all_nf, corner, topo,
+        model_types=model_types, device_kwargs=device_kwargs)
     charge_caps = _conversion_charge_caps(pss_result, internal_gate_states)
     lin_key = (
         "pac_analytic_lin_gate1_v1", tuple(topo.solved), tuple(topo.devices),
@@ -1042,7 +1074,7 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             fast_lin = _try_numba_pac_linearization(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
-                charge_caps=charge_caps,
+                charge_caps=charge_caps, dev_inst=lin_dev_inst,
             )
         elif not charge_caps:
             gate1_fast = _try_numba_pac_linearization_gate1(
@@ -1191,7 +1223,8 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
 
 def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
                      all_nf, corner=None, n_period_samples=768,
-                     integration="gear2", cache=True, pacmag=1.0):
+                     integration="gear2", cache=True, pacmag=1.0,
+                     model_types=None, device_kwargs=None):
     """Time-domain (shooting) PAC — the formulation Spectre uses, ~10-20x cheaper
     than the harmonic-balance kernel and truncation-free.
 
@@ -1253,7 +1286,8 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
 
     cache_store = pss_result.setdefault("_pac_td_cache", {}) if cache else {}
     internal_gate_states, lin_dev_inst = _resolve_gate1_instances(
-        all_sizes, all_nf, corner, topo)
+        all_sizes, all_nf, corner, topo,
+        model_types=model_types, device_kwargs=device_kwargs)
     charge_caps = _conversion_charge_caps(pss_result, internal_gate_states)
     lin_key = (
         "pac_td_lin_gate1_v1", tuple(topo.solved), tuple(topo.devices),
@@ -1274,7 +1308,7 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             fast_lin = _try_numba_pac_linearization(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
-                charge_caps=charge_caps)
+                charge_caps=charge_caps, dev_inst=lin_dev_inst)
         elif not charge_caps:
             gate1_fast = _try_numba_pac_linearization_gate1(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
@@ -1492,6 +1526,9 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
     transient_kwargs = dict(transient_kwargs or {})
     if corner is None:
         corner = pss_result.get("corner")
+    # per-device model binding (silicon) travels with the PSS result
+    model_types = pss_result.get("model_types")
+    device_kwargs = pss_result.get("device_kwargs")
     compute_condition = _resolve_compute_condition(
         compute_condition, profile=profile, debug=debug)
 
@@ -1526,7 +1563,9 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
     if lti_fast_path:
         fast = _try_lti_ac_fast_path(all_sizes, tbias, freqs, pss_result,
                                      input_drive, all_nf, corner=corner,
-                                     compute_condition=compute_condition)
+                                     compute_condition=compute_condition,
+                                     model_types=model_types,
+                                     device_kwargs=device_kwargs)
         if fast is not None:
             fast["pacmag"] = float(pacmag)
             return fast
@@ -1536,7 +1575,8 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
             all_sizes, tbias, freqs, pss_result=pss_result,
             input_drive=input_drive, all_nf=all_nf, corner=corner,
             n_period_samples=td_n_period_samples, integration=td_integration,
-            cache=cache_linearization, pacmag=pacmag)
+            cache=cache_linearization, pacmag=pacmag,
+            model_types=model_types, device_kwargs=device_kwargs)
         if td is not None:
             return td
 
@@ -1546,7 +1586,8 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
             input_drive=input_drive, all_nf=all_nf, corner=corner,
             n_period_samples=n_period_samples, max_sideband=max_sideband,
             cache=cache_linearization, pacmag=pacmag,
-            compute_condition=compute_condition)
+            compute_condition=compute_condition,
+            model_types=model_types, device_kwargs=device_kwargs)
         if ana is not None:
             return ana
 
@@ -1557,6 +1598,8 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
         current_inputs=current_inputs,
         nf=all_nf,
         corner=corner,
+        model_types=model_types,
+        device_kwargs=device_kwargs,
         V0=x0,
         max_step=pss_result.get("transient_max_step"),
         flat_max_step=pss_result.get("transient_flat_max_step"),

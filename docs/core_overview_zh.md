@@ -481,8 +481,11 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   `.manifest.json`（provenance：schema 版本、solver git commit(+dirty)、拓扑 hash、PDK、`models` 绑定、
   corner、采样 seed/method、变量范围——供下游拒绝域外样本）+ `.npz`（稠密 `X`/`Y` 矩阵，缺失标签为
   NaN）+ 可选 `.parquet`。**标签组**（`--labels`，在默认 `ac_noise` 之外可选加）：`transient`（复用配置
-  已验证的 `periodic` 瞬态得到的、激励无关的波形特征）和 `pss`（周期稳态质量 + 轨道输出）。**设计轴
-  语法**在 `DEV.W/.L/.NF`/bias 之外还支持：`<Cap>.C` / `<Res>.R`（具名无源器件值——`structural`，通过
+  已验证的 `periodic` 瞬态得到的、激励无关的波形特征）、`pss`（周期稳态质量 + 轨道输出）、`pac`（基带
+  转换增益 + PAC 网格内 −3dB 角）和 `pnoise`（带内积分输出/等效输入周期噪声——斩波的核心指标）。
+  `pss`/`pac`/`pnoise` 三组每候选共享一次 `run_analysis_suite` 调用，配置 `analyses` 块里已验证的求解
+  设置（`time_domain`、drive、band、打靶容差）原样生效；`pac`/`pnoise` 要求配置带对应 `analyses` 块。
+  **设计轴语法**在 `DEV.W/.L/.NF`/bias 之外还支持：`<Cap>.C` / `<Res>.R`（具名无源器件值——`structural`，通过
   `candidate_circuit()` 逐候选重建电路）、`periodic.frequency`（clock）、`pvt0`/`pbeta0`（连续全局工艺
   偏移——采样它就把离散 corner 扫描变成一个连续 PVT 训练轴）。
 - **`surrogate.py`** ——`HistGradientBoostingRegressor`（可选 `scikit-learn` 依赖）逐标签独立训练，对跨

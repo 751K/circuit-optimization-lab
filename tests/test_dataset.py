@@ -183,8 +183,12 @@ def test_labels_for_groups():
     assert ds._labels_for(("ac_noise",)) == ds.AC_NOISE_LABELS
     assert ds._labels_for(("ac_noise", "transient")) == ds.AC_NOISE_LABELS + ds.TRANSIENT_LABELS
     assert ds._labels_for(("pss",)) == ds.PSS_LABELS
+    assert ds._labels_for(("pac",)) == ds.PAC_LABELS
+    assert ds._labels_for(("pnoise",)) == ds.PNOISE_LABELS
     assert (ds._labels_for(("ac_noise", "transient", "pss"))
             == ds.AC_NOISE_LABELS + ds.TRANSIENT_LABELS + ds.PSS_LABELS)
+    assert (ds._labels_for(("pss", "pac", "pnoise"))
+            == ds.PSS_LABELS + ds.PAC_LABELS + ds.PNOISE_LABELS)
     with pytest.raises(ValueError):
         ds._labels_for(("bogus",))
 
@@ -193,7 +197,7 @@ def test_transient_group_end_to_end(tmp_path):
     config = _write_tran_config(tmp_path)
     dataset = ds.run_from_config(config, n=3, seed=0, label_groups=("ac_noise", "transient"))
     m = dataset["manifest"]
-    assert m["schema_version"] == "1.1"
+    assert m["schema_version"] == ds.SCHEMA_VERSION
     assert m["label_groups"] == ["ac_noise", "transient"]
     assert set(ds.TRANSIENT_LABELS) <= set(m["labels"])
     for r in dataset["rows"]:
@@ -239,6 +243,69 @@ def test_pss_group_requires_periodic():
     with pytest.raises(ValueError, match="periodic"):
         build_dataset(topo, sizes, bias, nf, cfg, n=2, label_groups=("pss",),
                       config_dict=data, config_path=CONFIG)
+
+
+# ── pac / pnoise label groups (schema 1.2) ───────────────────────────────────
+
+def test_pac_features_math():
+    res = {"gains": np.array([2.0, 1.9, 0.2]), "Av_dc_dB": 6.02, "bw_Hz": 55.0}
+    f = ds._pac_features(res)
+    assert f["pac_gain"] == 2.0                       # |H| at the lowest analysis freq
+    assert f["pac_gain_dB"] == 6.02 and f["pac_bw_Hz"] == 55.0
+    empty = ds._pac_features({})                      # missing keys -> NaN, never raises
+    assert set(empty) == set(ds.PAC_LABELS) and all(np.isnan(v) for v in empty.values())
+
+
+def test_pnoise_features_math():
+    f = ds._pnoise_features({"out_uV_band": 12.5, "irn_uV_band": 4.5})
+    assert f["pnoise_out_uV"] == 12.5 and f["pnoise_irn_uV"] == 4.5
+    empty = ds._pnoise_features({})
+    assert set(empty) == set(ds.PNOISE_LABELS) and all(np.isnan(v) for v in empty.values())
+
+
+def test_pac_group_requires_analyses_block(tmp_path):
+    config = _write_tran_config(tmp_path)             # periodic, but no analyses.pac
+    with pytest.raises(ValueError, match="analyses.pac"):
+        ds.run_from_config(config, n=1, label_groups=("pac",))
+    with pytest.raises(ValueError, match="analyses.pnoise"):
+        ds.run_from_config(config, n=1, label_groups=("pnoise",))
+
+
+def test_pac_group_requires_drive_for_multi_input(tmp_path):
+    c = json.loads(json.dumps(_TRAN_CONFIG))
+    c["periodic"]["inputs"]["vaux"] = {"type": "constant", "value": 0.0}
+    c["analyses"] = {"pac": {"freqs": {"start": 1, "stop": 100, "num": 3}}}
+    p = tmp_path / "multi.json"
+    p.write_text(json.dumps(c))
+    with pytest.raises(ValueError, match="input_drive"):
+        ds.run_from_config(str(p), n=1, label_groups=("pac",))
+
+
+def test_pac_pnoise_groups_end_to_end(tmp_path):
+    # single periodic input -> input_drive defaults to {vin: 1.0}; the analyses
+    # blocks carry the (HB) PAC/PNoise settings exactly as `run -a pss,pac,pnoise`.
+    c = json.loads(json.dumps(_TRAN_CONFIG))
+    c["analyses"] = {
+        "pac": {"freqs": {"start": 1.0, "stop": 100.0, "num": 5, "scale": "log"}},
+        "pnoise": {"freqs": {"start": 1.0, "stop": 100.0, "num": 5, "scale": "log"},
+                   "band": [1.0, 100.0]},
+    }
+    p = tmp_path / "pp.json"
+    p.write_text(json.dumps(c))
+    dataset = ds.run_from_config(str(p), n=2, seed=0,
+                                 label_groups=("pss", "pac", "pnoise"))
+    m = dataset["manifest"]
+    assert m["label_groups"] == ["pss", "pac", "pnoise"]
+    assert m["labels"] == list(ds.PSS_LABELS + ds.PAC_LABELS + ds.PNOISE_LABELS)
+    labeled = 0
+    for r in dataset["rows"]:
+        assert set(r["metrics"]) == set(m["labels"])
+        if r["status"]["dc_converged"] and r["metrics"]["pss_converged"] == 1.0:
+            assert r["metrics"]["pac_gain"] is not None and r["metrics"]["pac_gain"] > 0.0
+            assert (r["metrics"]["pnoise_irn_uV"] is not None
+                    and r["metrics"]["pnoise_irn_uV"] > 0.0)
+            labeled += 1
+    assert labeled > 0                                # guards against silent all-fail
 
 
 # ── structural / stimulus design axes (Cap.C, periodic.frequency) ────────────

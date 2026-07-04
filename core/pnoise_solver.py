@@ -110,7 +110,8 @@ def _static_bias_from_pss(topo, tbias, pss_result):
 
 def _try_lti_noise_fast_path(sizes, bias, freqs, *, pss_result, nf, corner,
                              band, gains, pac_result, input_drive,
-                             noise_devices, gds_noise_devices):
+                             noise_devices, gds_noise_devices,
+                             model_types=None, device_kwargs=None):
     if noise_devices is not None or gds_noise_devices:
         return None
     topo = pss_result["topology"]
@@ -120,6 +121,7 @@ def _try_lti_noise_fast_path(sizes, bias, freqs, *, pss_result, nf, corner,
     x0_guess = dict(zip(topo.solved, np.asarray(pss_result["x0"], float)))
     noise = noise_analysis(
         sizes, tbias, freqs, corner=corner, x0_guess=x0_guess, topo=topo, nf=nf,
+        model_types=model_types, device_kwargs=device_kwargs,
     )
     if noise is None:
         return None
@@ -581,12 +583,16 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
 
     tbias = dict(pss_result.get("bias", bias))
     all_sizes, all_nf = _merge_sizes_and_nf(sizes, nf, pss_result)
+    # per-device model binding (silicon) travels with the PSS result
+    model_types = pss_result.get("model_types")
+    device_kwargs = pss_result.get("device_kwargs")
     if lti_fast_path:
         fast = _try_lti_noise_fast_path(
             all_sizes, tbias, freqs, pss_result=pss_result, nf=all_nf,
             corner=corner, band=band, gains=gains, pac_result=pac_result,
             input_drive=input_drive, noise_devices=noise_devices,
             gds_noise_devices=gds_noise_devices,
+            model_types=model_types, device_kwargs=device_kwargs,
         )
         if fast is not None:
             fast["f_chop"] = fundamental
@@ -655,7 +661,9 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
         noise_failure_devices = tuple(lin.get("noise_failure_devices", ()))
         noise_failure_reason = str(lin.get("noise_failure_reason", ""))
     else:
-        dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
+        dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo,
+                                 model_types=model_types,
+                                 device_kwargs=device_kwargs)
         Gt, Ct, _gdrive, _cdrive, n_gate1 = _assemble_pac_linearization_python(
             all_sizes, all_nf, corner, topo, tbias, t_uniform,
             node_wave, input_wave, node_inputs, (), np.empty(0, dtype=complex),
