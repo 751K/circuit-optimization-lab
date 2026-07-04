@@ -1,0 +1,81 @@
+{
+  "name": "sky130_fd_ota",
+  "description": "Fully differential telescopic-cascode OTA in SKY130 (1.8V) with continuous-time dual-differential-pair CMFB and AC-coupled inputs. Signal path: VINP/VINN -> Rs=1k (source resistance) -> Cc=5pF coupling -> G1/G2; gate DC set by RB=1M to VCMI. Core: NMOS tail M0 -> input pair M1/2 (weak inversion, gm/Id~23 for power efficiency) -> NMOS cascodes M3/4 -> OUTP/OUTN <- PMOS cascodes M5/6 <- PMOS loads M7/8 (gates driven by CMFB CTRL). CMFB: two NMOS sense pairs (MS1/MS2 on OUTP vs VCM_REF, MS3/MS4 on OUTN vs VCM_REF, tails MT1/2) steer current into diode PMOS MD at CTRL; mirror ratio-matched W_MD=2*W_LOAD*W_MT/W_TAIL. Output CM regulates to VCM_REF (tunable rail). Sizes are the screen-and-verify optimized design (1200-sample GBT surrogate screen + solver-verified polish): A0=63.0dB, UGBW=102.8MHz, PM=78deg, 60.5uW at CL=0.5pF/side, output CM offset -23mV. PVT (tt/ss/ff x VDD+-10% x 30/60/90C) with a constant-gm tail bias holds UGBW in [100.5,102.2]MHz, A0>60dB, P in [53.5,80.9]uW; a fixed VB_N instead lets UGBW fall to 67MHz at ss. Multistable DC: always seed from dc_guesses (see docs/sky130_fd_ota_design.md).",
+  "solved": ["G1", "G2", "VSP", "VSN", "TAIL", "X1", "X2", "P1", "P2",
+             "OUTP", "OUTN", "CTRL", "CMT1", "CMT2"],
+  "rails": {"GND": 0.0, "VDD": "VDD", "VINP": "VINP", "VINN": "VINN",
+            "VCMI": "VCMI", "VCM_REF": "VCM_REF", "VB_N": "VB_N",
+            "VB_CN": "VB_CN", "VB_CP": "VB_CP"},
+  "bias": {"VDD": 1.8, "VINP": 0.9, "VINN": 0.9, "VCMI": 1.0, "VCM_REF": 1.0,
+           "VB_N": 0.778, "VB_CN": 1.204, "VB_CP": 0.277},
+  "devices": [
+    {"name": "M0",  "drain": "TAIL", "gate": "VB_N",  "source": "GND",  "W": 12.1, "L": 1.0},
+    {"name": "M1",  "drain": "X1",   "gate": "G1",    "source": "TAIL", "W": 58.4, "L": 0.5},
+    {"name": "M2",  "drain": "X2",   "gate": "G2",    "source": "TAIL", "W": 58.4, "L": 0.5},
+    {"name": "M3",  "drain": "OUTP", "gate": "VB_CN", "source": "X1",   "W": 18.7, "L": 0.5},
+    {"name": "M4",  "drain": "OUTN", "gate": "VB_CN", "source": "X2",   "W": 18.7, "L": 0.5},
+    {"name": "M5",  "drain": "OUTP", "gate": "VB_CP", "source": "P1",   "W": 37.3, "L": 0.5},
+    {"name": "M6",  "drain": "OUTN", "gate": "VB_CP", "source": "P2",   "W": 37.3, "L": 0.5},
+    {"name": "M7",  "drain": "P1",   "gate": "CTRL",  "source": "VDD",  "W": 95.5, "L": 0.8},
+    {"name": "M8",  "drain": "P2",   "gate": "CTRL",  "source": "VDD",  "W": 95.5, "L": 0.8},
+    {"name": "MS1", "drain": "VDD",  "gate": "OUTP",  "source": "CMT1", "W": 1.0,  "L": 0.5},
+    {"name": "MS2", "drain": "CTRL", "gate": "VCM_REF", "source": "CMT1", "W": 1.0, "L": 0.5},
+    {"name": "MS3", "drain": "VDD",  "gate": "OUTN",  "source": "CMT2", "W": 1.0,  "L": 0.5},
+    {"name": "MS4", "drain": "CTRL", "gate": "VCM_REF", "source": "CMT2", "W": 1.0, "L": 0.5},
+    {"name": "MT1", "drain": "CMT1", "gate": "VB_N",  "source": "GND",  "W": 1.5,  "L": 1.0},
+    {"name": "MT2", "drain": "CMT2", "gate": "VB_N",  "source": "GND",  "W": 1.5,  "L": 1.0},
+    {"name": "MD",  "drain": "CTRL", "gate": "CTRL",  "source": "VDD",  "W": 23.8, "L": 0.8}
+  ],
+  "models": {
+    "M0": {"type": "sky130.nmos"}, "M1": {"type": "sky130.nmos"},
+    "M2": {"type": "sky130.nmos"}, "M3": {"type": "sky130.nmos"},
+    "M4": {"type": "sky130.nmos"},
+    "M5": {"type": "sky130.pmos", "vb": 1.8}, "M6": {"type": "sky130.pmos", "vb": 1.8},
+    "M7": {"type": "sky130.pmos", "vb": 1.8}, "M8": {"type": "sky130.pmos", "vb": 1.8},
+    "MS1": {"type": "sky130.nmos"}, "MS2": {"type": "sky130.nmos"},
+    "MS3": {"type": "sky130.nmos"}, "MS4": {"type": "sky130.nmos"},
+    "MT1": {"type": "sky130.nmos"}, "MT2": {"type": "sky130.nmos"},
+    "MD": {"type": "sky130.pmos", "vb": 1.8}
+  },
+  "resistors": [
+    {"name": "RS1", "a": "VINP", "b": "VSP", "R": 1000.0},
+    {"name": "RS2", "a": "VINN", "b": "VSN", "R": 1000.0},
+    {"name": "RB1", "a": "G1", "b": "VCMI", "R": 1000000.0},
+    {"name": "RB2", "a": "G2", "b": "VCMI", "R": 1000000.0}
+  ],
+  "capacitors": [
+    {"name": "CC1", "a": "VSP", "b": "G1", "C": 5e-12},
+    {"name": "CC2", "a": "VSN", "b": "G2", "C": 5e-12},
+    {"name": "CL1", "a": "OUTP", "b": "GND", "C": 5e-13},
+    {"name": "CL2", "a": "OUTN", "b": "GND", "C": 5e-13}
+  ],
+  "outputs": ["OUTP", "OUTN"],
+  "ac_drives": {"VINP": 0.5, "VINN": -0.5},
+  "dc_guesses": [
+    {"G1": 1.0, "G2": 1.0, "VSP": 0.9, "VSN": 0.9, "TAIL": 0.15,
+     "X1": 0.4, "X2": 0.4, "P1": 1.55, "P2": 1.55,
+     "OUTP": 1.0, "OUTN": 1.0, "CTRL": 0.55, "CMT1": 0.2, "CMT2": 0.2},
+    {"G1": 1.0, "G2": 1.0, "VSP": 0.9, "VSN": 0.9, "TAIL": 0.2,
+     "X1": 0.5, "X2": 0.5, "P1": 1.5, "P2": 1.5,
+     "OUTP": 0.9, "OUTN": 0.9, "CTRL": 0.6, "CMT1": 0.25, "CMT2": 0.25}
+  ],
+  "analyses": {
+    "ac": {"freqs": {"start": 1000.0, "stop": 10000000000.0, "num": 141, "scale": "log"}},
+    "noise": {"freqs": {"start": 1000.0, "stop": 100000000.0, "num": 51, "scale": "log"},
+              "band": [10000.0, 10000000.0]}
+  },
+  "explore": {
+    "variables": {
+      "W_IN": {"min": 16, "max": 96, "targets": ["M1.W", "M2.W"]},
+      "W_NCAS": {"min": 8, "max": 32, "targets": ["M3.W", "M4.W"]},
+      "W_PCAS": {"min": 16, "max": 96, "targets": ["M5.W", "M6.W"]},
+      "W_LOAD": {"min": 16, "max": 96, "targets": ["M7.W", "M8.W"]},
+      "W_TAIL": {"min": 8, "max": 32, "targets": ["M0.W"]},
+      "VB_N": {"min": 0.70, "max": 0.85}
+    },
+    "objectives": {"power_uW": "min"},
+    "constraints": {"gain_peak_dB": {"min": 42.0}},
+    "band": [10000.0, 10000000.0],
+    "freqs": {"start": 3, "stop": 10, "num": 71}
+  }
+}

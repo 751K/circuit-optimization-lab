@@ -616,6 +616,22 @@ Plugs a **second, industry-standard device physics model (BSIM4)** into the same
 PDK (SKY130 today) runs through the *same* DC/AC/noise solver engine, additively
 (`default=False`; the OTFT PDK is untouched and remains byte-identical).
 
+A **third PDK, FreePDK45** (`ngspice_char.py` / `ngspice_device.py` /
+`freepdk45_model.py`), plugs into the *same* `TransistorModel` interface but with a
+different **evaluator**. FreePDK45's BSIM4 cards declare `version = 4.0`; our
+OpenVAF BSIM4.8 VA has no version switch and computes ~30 % different I-V on these
+45 nm cards (version-independently — proven by mutating the card version), so the
+OSDI host cannot reproduce FreePDK45's intended behaviour. Its oracle is therefore
+**ngspice-C itself**: `ngspice_char.characterize()` runs one batch `.dc` sweep per
+`(model, W, L, corner)` (~0.03 s / 1000 points) into a cached Id/gm/gds/Cgs/Cgd grid,
+and `NgspiceDevice` interpolates it (µs/eval, exact ngspice-C at nodes). Validated
+model==oracle: single-device op bit-exact vs ngspice `.op`, a 5T OTA through
+`ac_solve` within 0.05 dB / 0.3 % of ngspice's own `.ac`, and output noise within
+~5 % of ngspice `.noise`. Noise is also exact ngspice-C — `characterize_noise` runs a
+`.noise` per coarse-grid bias (CCVS transimpedance → drain-noise PSD, fit S_id=A+B/f
+→ S_thermal + S_flicker@1Hz, log-space interpolated). DC+AC+noise; no transient/PSS on
+this path.
+
 - **`osdi_host.py`** — a ctypes host for the **OSDI 0.4 ABI**, the simulator-independent
   C interface [OpenVAF](https://github.com/pascalkuthe/OpenVAF) compiles Verilog-A
   compact models into (`.osdi`, a native shared library). `load_osdi()` introspects the

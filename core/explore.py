@@ -55,28 +55,33 @@ from . import diagnostics
 METRICS = ("gain_dB", "gain_peak_dB", "bw_Hz", "irn_uV", "power_uW", "area")
 NOISE_METRICS = frozenset({"irn_uV"})
 
-# SKY130 discrete process corners are baked into the extracted device card (a
+# Silicon discrete process corners are baked into the extracted device card (a
 # per-device constructor kwarg), a different mechanism from the OTFT continuous PVT
 # shift the solvers apply via ``corner=``. :func:`apply_silicon_corner` keeps the two
 # separate: a silicon corner name is routed onto silicon devices, an OTFT corner is
-# left for the solver shift path.
+# left for the solver shift path. SKY130 uses tt/ss/ff/sf/fs; FreePDK45 ships
+# nom/ss/ff card directories (nom == typical).
 SKY130_CORNERS = frozenset({"tt", "ss", "ff", "sf", "fs"})
+SILICON_CORNERS = SKY130_CORNERS | {"nom"}
+_SILICON_PREFIXES = ("sky130", "freepdk45")
 
 
 def apply_silicon_corner(model_types, device_kwargs, corner):
-    """Route a SKY130 corner onto silicon devices; leave OTFT corners for the solver.
+    """Route a silicon corner onto silicon devices; leave OTFT corners for the solver.
 
-    Returns ``(device_kwargs, solver_corner)``. When ``corner`` names a SKY130 corner
-    (``tt/ss/ff/sf/fs``), it is stamped as ``corner=<name>`` on every ``sky130.*``
-    device's kwargs and the solver corner is cleared (``None``) — silicon ignores the
-    OTFT PVT shift. Otherwise (an OTFT corner name / shift-map / ``None``) the device
-    kwargs pass through unchanged and ``corner`` is returned for the solver path."""
-    if not isinstance(corner, str) or corner not in SKY130_CORNERS:
+    Returns ``(device_kwargs, solver_corner)``. When ``corner`` names a silicon corner
+    (SKY130 ``tt/ss/ff/sf/fs`` or FreePDK45 ``nom/ss/ff``), it is stamped as
+    ``corner=<name>`` on every ``sky130.*`` / ``freepdk45.*`` device's kwargs and the
+    solver corner is cleared (``None``) — silicon ignores the OTFT PVT shift. Otherwise
+    (an OTFT corner name / shift-map / ``None``) the device kwargs pass through unchanged
+    and ``corner`` is returned for the solver path. A circuit is single-process, so the
+    shared ``ss``/``ff`` names route onto whichever silicon family the devices declare."""
+    if not isinstance(corner, str) or corner not in SILICON_CORNERS:
         return device_kwargs, corner
     mt = model_types or {}
     dk = {name: dict(kw) for name, kw in (device_kwargs or {}).items()}
     for name, model in mt.items():
-        if str(model).startswith("sky130"):
+        if str(model).startswith(_SILICON_PREFIXES):
             dk.setdefault(name, {})["corner"] = corner
     return dk, None
 

@@ -431,18 +431,23 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
         if name not in analysis_cfg or not want(name):
             continue
         cfg = dict(analysis_cfg.get(name) or {})
+        # Seed the (possibly multistable) DC from the config's first dc_guess, and
+        # bind any non-default per-device models (e.g. silicon sky130/freepdk45) —
+        # both default to the old behaviour (None) for OTFT configs without them.
+        dc_seed = next((g for g in spec.topology.dc_guesses if isinstance(g, dict)), None)
         if name == "ac":
             freqs = _frequency_grid(cfg.get("freqs"))
             corner = _corner_from_cfg(cfg)
             results[name] = ac_solve(
                 spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf,
-                corner=corner,
+                corner=corner, x0_guess=dc_seed,
+                model_types=spec.model_types, device_kwargs=spec.device_kwargs,
             )
         elif name == "noise":
             freqs = _frequency_grid(cfg.get("freqs"))
             corner_default = (analysis_cfg.get("ac") or {}).get("corner")
             corner = _corner_from_cfg(cfg, default=corner_default)
-            x0_guess = None
+            x0_guess = dc_seed
             ac_result = None
             if "ac" in results and results["ac"] is not None:
                 same_corner = results["ac"].get("corner") == corner
@@ -455,6 +460,7 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
             noise = noise_analysis(
                 spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf,
                 corner=corner, x0_guess=x0_guess, ac_result=ac_result,
+                model_types=spec.model_types, device_kwargs=spec.device_kwargs,
             )
             if noise is not None and "band" in cfg:
                 lo, hi = map(float, cfg["band"])

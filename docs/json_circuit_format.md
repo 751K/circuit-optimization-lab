@@ -166,16 +166,31 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
 ```
 
 - `type` — a model-registry key, `"<pdk>.<polarity>"` (e.g. `"sky130.nmos"`,
-  `"sky130.pmos"`, `"at4000tg.pmos"`). See `core.device_model.register_pdk`.
+  `"sky130.pmos"`, `"freepdk45.nmos"`, `"at4000tg.pmos"`). See
+  `core.device_model.register_pdk`.
 - Remaining keys are forwarded to the device constructor. For SKY130 devices:
   `vb` (bulk bias, volts; default 0), `corner` (SKY130 process corner —
   `tt`/`ss`/`ff`/`sf`/`fs`; default `tt`), `extract_w` (µm — resolve the SKY130
   parameter card once at this reference width and let the compact model scale the
   actual `W`, avoiding a per-candidate re-extraction during a design sweep),
   `temperature` (kelvin; default 300.15), `NF` (int).
+- **FreePDK45** (`"freepdk45.nmos"` / `"freepdk45.pmos"`) is a second silicon PDK
+  with a *different* evaluator. Its BSIM4 cards declare `version = 4.0`; our OpenVAF
+  BSIM4.8 VA carries no version switch and computes ~30 % different I-V on these
+  45 nm cards (version-independently), so FreePDK45 cannot use the SKY130 OSDI path.
+  Instead the oracle is **ngspice-C itself**: each device characterises its
+  `(model, W, L, corner)` once via a batch ngspice `.dc` sweep into a cached
+  Id/gm/gds/Cgs/Cgd grid (`core.ngspice_char` / `core.ngspice_device`) and
+  interpolates it — so every value is exact ngspice-C at the grid nodes. Noise is
+  likewise exact ngspice-C (a `.noise` characterisation per bias → S_thermal +
+  S_flicker@1Hz, log-space interpolated; validated within ~5 % of ngspice `.noise`
+  on the 5T OTA). Device keys: `vb` (0 for NMOS, `VDD`=1.0 for PMOS), `corner`
+  (`nom`/`ss`/`ff`, shipped as separate card files; default `nom`), `NF`. DC + AC +
+  noise (no transient/PSS on this path). Cards live under `PDK_ROOT/freepdk45/`; see
+  `examples/freepdk45_5t_ota.json`.
 - A mixed circuit (some devices OTFT, some silicon) is valid — e.g. a complementary
   silicon OTA binds NMOS/PMOS devices independently. See `examples/sky130_5t_ota.json`.
-- The SKY130 PDK needs an external toolchain (OpenVAF + ngspice + the SKY130 PDK
+- The SKY130 / FreePDK45 PDKs need an external toolchain (OpenVAF + ngspice + the PDK
   files); solver calls raise a clear error if it is not installed. See the
   "Silicon PDK / OSDI layer" section in [Core Solver Overview](core_overview.md).
 
