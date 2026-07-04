@@ -19,6 +19,8 @@ class CircuitSpec:
     nf: dict | int | None = None
     periodic: dict | None = None
     analyses: dict | None = None
+    model_types: dict | None = None      # device name -> model-registry key (e.g. "sky130.nmos")
+    device_kwargs: dict | None = None    # device name -> extra ctor kwargs (vb, corner, ...)
 
 
 def _as_number(value, field):
@@ -55,6 +57,57 @@ def _load_devices(raw_devices):
             raise ValueError(f"{where} must be a device object or [name, drain, gate, source]")
         devices.append((str(name), str(drain), str(gate), str(source)))
     return devices, sizes, nf
+
+
+# Per-device constructor kwargs accepted in a ``models`` entry (besides ``type``).
+# Restricted to a known set so a typo raises instead of being silently dropped by the
+# device constructor's ``**kwargs``. ``vb``/``extract_w``/``temperature`` are floats,
+# ``corner`` a SKY130 corner name, ``NF`` an integer finger count.
+_MODEL_KWARGS = ("vb", "corner", "extract_w", "temperature", "NF")
+
+
+def _load_models(raw_models, devices):
+    """Parse the optional ``models`` block: per-device PDK model type + ctor kwargs.
+
+    ``{"M1": {"type": "sky130.nmos", "vb": 1.8}}`` becomes
+    ``({"M1": "sky130.nmos"}, {"M1": {"vb": 1.8}})``. ``type`` names a model-registry
+    key (see :func:`core.device_model.register_pdk`); the remaining keys are forwarded
+    to the device constructor. Devices absent from the block fall back to the default
+    PDK, so the block is purely additive (an OTFT config omits it entirely)."""
+    model_types, device_kwargs = {}, {}
+    if raw_models is None:
+        return model_types, device_kwargs
+    if not isinstance(raw_models, dict):
+        raise ValueError("models must be an object mapping device name to {type, ...kwargs}")
+    dev_names = {name for name, *_ in devices}
+    for name, spec in raw_models.items():
+        if name not in dev_names:
+            raise ValueError(f"models[{name!r}]: unknown device {name!r}")
+        if not isinstance(spec, dict):
+            raise ValueError(f"models[{name!r}] must be an object with a 'type' and/or kwargs")
+        kwargs = {}
+        for key, value in spec.items():
+            if key == "type":
+                model_types[str(name)] = str(value)
+            elif key in _MODEL_KWARGS:
+                kwargs[key] = int(value) if key == "NF" else value
+            else:
+                raise ValueError(f"models[{name!r}]: unknown key {key!r}; known: 'type', "
+                                 + ", ".join(repr(k) for k in _MODEL_KWARGS))
+        if kwargs:
+            device_kwargs[str(name)] = kwargs
+    return model_types, device_kwargs
+
+
+def models_from_config(data):
+    """``(model_types, device_kwargs)`` from a parsed circuit dict's ``models`` block.
+
+    A thin accessor so CLI drivers (dataset / optimize / explore) can pull the model
+    mapping without re-running the full :func:`circuit_from_dict` parse."""
+    if not isinstance(data, dict) or "devices" not in data:
+        raise ValueError("circuit dict must carry a 'devices' list")
+    devices, _, _ = _load_devices(data["devices"])
+    return _load_models(data.get("models"), devices)
 
 
 def _load_sizes(raw_sizes, embedded_sizes):
@@ -391,10 +444,12 @@ def circuit_from_dict(data):
     analyses = data.get("analyses")
     if analyses is not None and not isinstance(analyses, dict):
         raise ValueError("analyses must be an object")
+    model_types, device_kwargs = _load_models(data.get("models"), devices)
     return CircuitSpec(
         name=name, topology=topo, sizes=sizes, bias=bias, nf=nf,
         periodic=dict(periodic) if periodic is not None else None,
         analyses=dict(analyses) if analyses is not None else None,
+        model_types=model_types or None, device_kwargs=device_kwargs or None,
     )
 
 

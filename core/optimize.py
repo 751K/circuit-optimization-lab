@@ -22,8 +22,10 @@ import time
 import numpy as np
 
 from . import surrogate as sg
-from .dataset import load_dataset_config
-from .explore import apply_variables, evaluate, is_feasible, pareto_front, sample
+from .circuit_loader import models_from_config
+from .dataset import candidate_circuit, load_dataset_config, split_variables
+from .explore import (apply_silicon_corner, evaluate, is_feasible,
+                      pareto_front, sample)
 
 
 def _design_matrix(samples, var_names):
@@ -49,6 +51,10 @@ def optimize(config_path, surrogate_path, *, n_screen=100000, top_k=20, seed=0,
     Constraints / objectives come from the config's ``explore`` block. ``freqs``
     should match the surrogate's training grid (default: the wide 0.01 Hz–10 kHz grid)."""
     config_dict, topo, base_sizes, base_bias, nf, cfg = load_dataset_config(config_path)
+    model_types, device_kwargs = models_from_config(config_dict)
+    # A SKY130 corner routes onto the silicon devices (verify pass); an OTFT corner
+    # stays on the solver's PVT shift path.
+    device_kwargs, corner = apply_silicon_corner(model_types, device_kwargs, corner)
     if freqs is None:
         freqs = np.logspace(-2, 4, 101)          # match the surrogate's training grid
     cfg.freqs = np.asarray(freqs, float)
@@ -80,12 +86,17 @@ def optimize(config_path, surrogate_path, *, n_screen=100000, top_k=20, seed=0,
         return report
 
     # ── verify: run the calibrated solver on the shortlist ──
+    # Every variable kind (size/bias + structural cap/resistor/clock) is applied via
+    # the shared candidate_circuit builder, so a swept passive value is honored in the
+    # verify pass (not silently held at its base value).
+    size_vars, struct_vars, _ = split_variables(cfg.variables)
     t0 = time.time()
     for i in picks:
-        sizes, bias, cand_nf = apply_variables(cfg.variables, samples[i],
-                                               base_sizes, base_bias, base_nf=nf)
-        true = evaluate(topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
-                        corner=corner, require_noise=True)
+        cand_topo, sizes, bias, cand_nf = candidate_circuit(
+            config_dict, topo, base_sizes, base_bias, nf, size_vars, struct_vars, samples[i])
+        true = evaluate(cand_topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
+                        corner=corner, require_noise=True,
+                        model_types=model_types, device_kwargs=device_kwargs)
         pred = metric_rows[i]
         entry = {"design": samples[i], "surrogate": pred, "solver": None,
                  "solver_feasible": None}
@@ -147,11 +158,15 @@ def main(argv=None):
     p.add_argument("-n", "--n-screen", type=int, default=100000, help="candidate pool size")
     p.add_argument("--top-k", type=int, default=20, help="Pareto points to verify on the solver")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--corner", default=None,
+                   help="verify-pass process corner: OTFT typical|slow|fast or SKY130 "
+                        "tt|ss|ff|sf|fs (screen uses the surrogate's training corner)")
     p.add_argument("--no-verify", action="store_true", help="skip the solver verification pass")
     args = p.parse_args(argv)
     try:
         report = optimize(args.config, args.surrogate, n_screen=args.n_screen,
-                          top_k=args.top_k, seed=args.seed, verify=not args.no_verify)
+                          top_k=args.top_k, seed=args.seed, corner=args.corner,
+                          verify=not args.no_verify)
     except ImportError as exc:
         raise SystemExit(str(exc))
     print(_format_report(report))

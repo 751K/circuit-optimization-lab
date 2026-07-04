@@ -6,7 +6,9 @@
 
 Local Python solvers for analog circuit design-space exploration, calibrated against
 Cadence/Spectre. The first use case is an **AT4000TG PMOS thin-film transistor
-ECG AFE** (analog front-end amplifier with chopper).
+ECG AFE** (analog front-end amplifier with chopper). A second, industry-standard
+process — **silicon SKY130** (via an OpenVAF-compiled BSIM4) — plugs into the same
+solver engine and design-optimization pipeline.
 
 What you can do with this:
 - **DC/AC/Noise/Transient** — standard circuit analysis without a simulator license.
@@ -16,6 +18,11 @@ What you can do with this:
   constraints (gain, BW, noise, power, area), find Pareto-optimal designs.
 - **Corners & mismatch** — process corners, per-device mismatch Monte Carlo, latch
   screening.
+- **ML-surrogate design optimization** — build a labeled dataset from the solvers,
+  train a fast surrogate, screen a large candidate pool, and verify the shortlist
+  on the calibrated solver (thousands of times faster than a brute-force sweep).
+- **Silicon PDK (SKY130)** — a real 130 nm CMOS process (NMOS + PMOS), running
+  through the exact same DC/AC/noise/design-optimization pipeline as the OTFT.
 
 For solver internals, see [Core Solver Overview](core_overview.md).
 
@@ -330,6 +337,72 @@ print(f"Latch rate: {mc['latch_rate']*100:.1f}%,  "
       f"IRN: {mc['irn_mean']:.2f} ± {mc['irn_std']:.2f} µVrms")
 ```
 
+### 6. ML-Surrogate Design Optimization
+
+The calibrated solvers are the "teacher"; a fast surrogate learns their metrics and
+lets you screen orders of magnitude more candidates than a brute-force solver sweep.
+The loop is one CLI command chain — build a labeled dataset, train a surrogate, then
+screen-and-verify:
+
+```bash
+# 1. Build a labeled dataset from the config's "explore" block (every sample kept,
+#    including DC failures — a training set, not a filtered search result)
+python -m core dataset examples/single_stage.json -n 500 --out ds/run1
+
+# 2. Train a metric surrogate (gradient-boosted trees; needs `pip install -r requirements-ml.txt`)
+python -m core.surrogate train ds/run1.npz --out ds/run1.pkl
+
+# 3. Screen a large pool with the surrogate, Pareto-select, and verify the
+#    shortlist on the actual calibrated solver
+python -m core.optimize examples/single_stage.json ds/run1.pkl -n 100000 --top-k 20
+# → screened 100000 designs with the surrogate in 1.64s (60,802/s)
+# →   feasible: 89038   Pareto front: 19
+# → verified top-19 on the solver in 0.45s (23.6 ms/design)
+# →   solver-confirmed feasible: 18/19   (speedup: ~1,436× vs. solving all 100000)
+```
+
+The solver, not the surrogate, always has the final word: only the small verified
+shortlist is trusted for a real design decision. `--filter label:lo:hi` on
+`surrogate train` restricts training to a region of interest (e.g. drop railed/
+collapsed designs that would otherwise dominate the fit). See
+[CLI Reference §1.7–1.8](cli_reference.md) for the full dataset/surrogate/optimize
+option reference, and `docs/futureplan.md` §7 for the surrogate roadmap and honest
+accuracy numbers.
+
+### 7. Silicon PDK (SKY130)
+
+A circuit's `models` field binds specific devices to a non-default PDK — e.g. real
+silicon SKY130 transistors (NMOS + PMOS, via an OpenVAF-compiled BSIM4 running
+through the same `TransistorModel` interface as the OTFT). This is purely additive:
+devices without a `models` entry use the default OTFT PDK.
+
+```json
+"models": {
+  "M1": {"type": "sky130.nmos", "extract_w": 24.0},
+  "M3": {"type": "sky130.pmos", "vb": 1.8, "extract_w": 12.0}
+}
+```
+
+Silicon devices run through the exact same DC/AC/noise pipeline — including the
+ML-surrogate design loop above and cross-corner (`tt`/`ss`/`ff`/`sf`/`fs`) verification:
+
+```bash
+python -m core dataset examples/sky130_5t_ota.json -n 400 --out ds/ota          # build a silicon dataset
+python -m core.surrogate train ds/ota.npz --filter gain_dB:0:60 --out ds/ota.pkl # train on the operating region
+python -m core.optimize examples/sky130_5t_ota.json ds/ota.pkl -n 50000 --top-k 10          # screen + verify (typical corner)
+python -m core.optimize examples/sky130_5t_ota.json ds/ota.pkl -n 50000 --corner ss          # re-verify at the slow corner
+```
+
+On the complementary 5T OTA example, this screens 50,000 designs ~6,000× faster
+than the solver, confirms 9/10 shortlisted designs feasible on the solver, and the
+same designs hold (9/10) when re-verified at the slow (`ss`) corner. Needs the
+SKY130 PDK + OpenVAF + ngspice toolchain (see `docs/futureplan.md` §9); solvers
+raise a clear error if it isn't installed. **Design note:** like any single-stage
+silicon amplifier, this example uses an active current-mirror load (for the DC
+operating point / gain) plus a capacitive load (for bandwidth) — a resistor-loaded
+common-source stage isn't representative of on-chip design and rails easily under a
+size/bias sweep, which is why no such example is included.
+
 ---
 
 ## JSON Circuit Format
@@ -446,6 +519,7 @@ you explicitly need the HB comparison path.
 | `examples/voltage_divider.json` | Ideal voltage source (true MNA) divider with resistors, capacitors — vsource demo |
 | `examples/vcvs_amplifier.json` | VCVS amplifier — linear gain 100×, demoing controlled sources |
 | `examples/sc_lpf.json` | Switched-capacitor low-pass filter (2-phase, single-ended LPTV) |
+| `examples/sky130_5t_ota.json` | Silicon SKY130 complementary 5T OTA — `models` block + full dataset/surrogate/optimize design loop |
 | `examples/afe_testbench.py` | Full testbench: dry-electrode front-end (R∥C network) → AFE core → AC + noise + transient |
 | `examples/mc_mismatch.py` | Monte Carlo mismatch driver: corner table + 3-corner MC figure |
 | `examples/find_max_gain.py` | Max gain scan for PMOS inverter amplifier |
@@ -515,6 +589,14 @@ frequency solves are the dominant cost: about 24–25 s for 61 points and
 47–48 s for 121 points. Further HB-only speed work should target factorization
 reuse or batched linear solves.
 
+**A `models`/silicon device raises a toolchain error.**
+The SKY130 PDK needs an external toolchain (OpenVAF + ngspice + the SKY130 PDK
+files) that isn't a pip dependency — install it and point `PDK_ROOT`/
+`OPENVAF_ROOT`/`NGSPICE_BIN` at it (see `docs/futureplan.md` §9). Without it, any
+circuit using a `sky130.*` model type raises a clear error at first use; every
+other PDK (the default AT4000TG OTFT) is unaffected. Tests gated on the toolchain
+(`tests/test_sky130*.py`, `tests/test_osdi_host.py`) skip cleanly when it's absent.
+
 ---
 
 ## Further Reading
@@ -523,6 +605,7 @@ reuse or batched linear solves.
 |----------|----------------|
 | [Core Solver Overview](core_overview.md) | Understand how each solver works, import dependencies, and calibration data |
 | [JSON Circuit Format](json_circuit_format.md) | Full field-by-field reference for writing your own circuit JSON |
+| [CLI Reference](cli_reference.md) | Every subcommand and flag, including `dataset`/`surrogate`/`optimize` and the `models`/silicon-corner options |
 | [Future Plan](futureplan.md) | What's done, what's next, and the execution roadmap |
 | `tests/` directory | Working examples of every API call with expected outputs |
 | `benchmarks/` directory | Performance baselines and how the hardware-accelerated paths compare |

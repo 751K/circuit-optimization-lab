@@ -1,0 +1,51 @@
+{
+  "name": "sky130_5t_ota",
+  "solved": ["tail", "n1", "vout"],
+  "rails": {
+    "VDD": "VDD",
+    "GND": 0.0,
+    "vinp": "VCM",
+    "vinn": "VCM",
+    "vbias": "VB"
+  },
+  "devices": [
+    {"name": "M1", "drain": "n1",   "gate": "vinp",  "source": "tail", "W": 24.0, "L": 0.5},
+    {"name": "M2", "drain": "vout", "gate": "vinn",  "source": "tail", "W": 24.0, "L": 0.5},
+    {"name": "M3", "drain": "n1",   "gate": "n1",    "source": "VDD",  "W": 12.0, "L": 0.5},
+    {"name": "M4", "drain": "vout", "gate": "n1",    "source": "VDD",  "W": 12.0, "L": 0.5},
+    {"name": "M5", "drain": "tail", "gate": "vbias", "source": "GND",  "W": 40.0, "L": 0.5}
+  ],
+  "bias": {
+    "VDD": 1.8,
+    "VCM": 0.9,
+    "VB": 0.78
+  },
+  "outputs": ["vout"],
+  "input_drives": {"M1": 1.0, "M2": -1.0},
+  "load_caps": [
+    ["vout", "GND", 2e-12]
+  ],
+  "dc_guesses": [
+    {"tail": 0.30, "n1": 0.95, "vout": 0.90},
+    {"tail": 0.25, "n1": 1.00, "vout": 0.80},
+    {"tail": 0.35, "n1": 0.90, "vout": 1.00}
+  ],
+  "models": {
+    "M1": {"type": "sky130.nmos", "extract_w": 24.0},
+    "M2": {"type": "sky130.nmos", "extract_w": 24.0},
+    "M3": {"type": "sky130.pmos", "vb": 1.8, "extract_w": 12.0},
+    "M4": {"type": "sky130.pmos", "vb": 1.8, "extract_w": 12.0},
+    "M5": {"type": "sky130.nmos", "extract_w": 40.0}
+  },
+  "explore": {
+    "variables": {
+      "pair_W": {"min": 12.0, "max": 36.0, "round": 1, "targets": ["M1.W", "M2.W"]},
+      "load_W": {"min": 6.0,  "max": 22.0, "round": 1, "targets": ["M3.W", "M4.W"]},
+      "tail_W": {"min": 24.0, "max": 56.0, "round": 1, "targets": ["M5.W"]}
+    },
+    "constraints": {"gain_dB": {"min": 25.0}},
+    "objectives": {"power_uW": "min", "bw_Hz": "max"},
+    "band": [1000.0, 1000000.0],
+    "freqs": {"start": 1, "stop": 8, "num": 71}
+  }
+}

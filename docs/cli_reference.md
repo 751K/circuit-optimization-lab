@@ -19,6 +19,7 @@
 | `python -m core.surrogate train <ds>.npz --test <ds>.npz --out m.pkl` | 训练指标 surrogate（GBT，可选 sklearn 依赖） |
 | `python -m core.optimize <circuit.json> m.pkl -n 100000 --top-k 20` | 筛选 → Pareto → solver 校验闭环 |
 | `python -m core.surrogate_torch optimize <circuit.json> m.pt --verify` | 可微 surrogate 梯度设计优化（torch/MPS） |
+| `python -m core dataset examples/sky130_5t_ota.json -n 400 --out ds/ota` | 硅（SKY130）设计闭环：`models` 块绑 PDK，跨工艺角 `--corner ss`（见 §1.8） |
 | `python -m core.calibration --all` | Cadence 校准回归检查 |
 | `python demo/server.py` | Web 前端（Flask，端口 5100） |
 
@@ -332,10 +333,41 @@ python -m core dataset examples/single_stage.json -n 200 --no-npz --quiet
 还支持三类扩展轴（manifest 每个变量记 `kind`）：
 
 - `<CapName>.C` — 具名电容（`capacitors` 里带 `name` 的项）容值，扫 load（`structural`，逐候选重建电路）
+- `<ResName>.R` — 具名电阻（`resistors` 里带 `name` 的项）阻值，扫无源负载（`structural`，逐候选重建电路）
 - `periodic.frequency` — 周期激励的时钟频率，扫 clock（`structural`，只影响 periodic 标签）
 - `pvt0` / `pbeta0` — 连续全局工艺偏移（`corner`），逐候选路由进 `evaluate(corner=...)`。**采样它 = 全局
   process MC**，让一个 surrogate 覆盖连续 PVT 空间并内插到任意工艺点（manifest `corner="sampled"`）。
   离散 corner 签核用 `--corner`；连续统计/良率用 `pvt0/pbeta0` 轴。
+
+`structural` 轴（cap/resistor/clock）在 `dataset` **和** `optimize` 校验阶段都逐候选重建电路
+（共享 `dataset.candidate_circuit()`），扫到的无源值在最终 solver 校验里也生效。
+
+### 1.8 硅 PDK 器件绑定 `models` 块 + 硅设计闭环
+
+配置里的 **`models` 块**把某个器件绑到非默认 PDK 模型（如硅 SKY130），其余器件仍用默认 OTFT
+（纯增量，OTFT 数值 byte-identical）。`type` 是模型注册键，其余键透传给器件构造：
+
+```json
+"models": {
+  "M1": {"type": "sky130.nmos", "extract_w": 24.0},
+  "M3": {"type": "sky130.pmos", "vb": 1.8, "extract_w": 12.0}
+}
+```
+
+- `extract_w`（µm）在参考 W 处解析一次 SKY130 卡片、实际 W 交给 bsim4va 缩放 → ~2 ms/eval、平滑，扫 W 不触发逐候选 ngspice。
+- **硅工艺角**用 `--corner tt|ss|ff|sf|fs`：路由进硅器件的 `corner=` 卡片（与 OTFT 的连续 PVT `pvt0/pbeta0` 分开）。
+
+完整闭环（`examples/sky130_5t_ota.json`，SKY130 互补 5T OTA）：
+
+```bash
+python -m core dataset examples/sky130_5t_ota.json -n 400 --out ds/ota          # 造硅数据集
+python -m core.surrogate train ds/ota.npz --filter gain_dB:0:60 --out ota.pkl   # 训练（--filter 只学工作区，剔除甩轨角）
+python -m core.optimize examples/sky130_5t_ota.json ota.pkl -n 50000 --top-k 10 # 筛选→Pareto→solver 校验
+python -m core.optimize examples/sky130_5t_ota.json ota.pkl -n 50000 --corner ss # 跨工艺角复验（慢角）
+```
+
+需外置盘的 OpenVAF/ngspice/SKY130 工具链（见 `silicon-pdk-openvaf` 记忆）。工作区 surrogate 精度
+（gain/power/bw/irn/area 中位误差 ≈1%）；筛选比 solver 快约 6000×，solver 校验保证入围设计真实可行。
 
 ---
 

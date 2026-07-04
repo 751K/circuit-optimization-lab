@@ -40,10 +40,11 @@ from datetime import datetime, timezone
 import numpy as np
 
 from . import diagnostics
-from .circuit_loader import circuit_from_dict
+from .circuit_loader import circuit_from_dict, models_from_config
 from .corners import CORNERS
 from .device_model import get_default_model_type
-from .explore import METRICS, apply_variables, evaluate, parse_explore, sample
+from .explore import (METRICS, SKY130_CORNERS, apply_silicon_corner, apply_variables,
+                      evaluate, parse_explore, sample)
 from .pss_solver import pss_solve
 from .transient_solver import transient
 
@@ -262,11 +263,13 @@ def _target_kind(target):
         return "clock"
     if "." in target and target.rsplit(".", 1)[1] == "C":
         return "cap"
+    if "." in target and target.rsplit(".", 1)[1] == "R":
+        return "resistor"
     return "size_bias"                                     # DEV.W/.L/.NF or a bias key
 
 
 def _var_is_structural(var):
-    return any(_target_kind(t) in ("cap", "clock") for t in var.targets)
+    return any(_target_kind(t) in ("cap", "clock", "resistor") for t in var.targets)
 
 
 def _var_is_corner(var):
@@ -291,12 +294,26 @@ def _set_named_cap(config, name, value):
         if isinstance(c, dict) and c.get("name") == name:
             c["C"] = float(value)
             return
+        if isinstance(c, list) and len(c) == 3 and c[0] == name:   # [a, b, C] has no name
+            break
     raise ValueError(f"capacitor variable {name!r}.C: no named capacitor {name!r} "
                      "in the config's 'capacitors' list")
 
 
+def _set_named_resistor(config, name, value):
+    for r in config.get("resistors", []) or []:
+        if isinstance(r, dict) and r.get("name") == name:
+            r["R"] = float(value)
+            return
+        if isinstance(r, list) and len(r) == 4 and r[0] == name:   # [name, a, b, R]
+            r[3] = float(value)
+            return
+    raise ValueError(f"resistor variable {name!r}.R: no named resistor {name!r} "
+                     "in the config's 'resistors' list")
+
+
 def _patch_structural(config_dict, struct_vars, var_values):
-    """Deep-copy the config and apply this candidate's cap-value / clock variables."""
+    """Deep-copy the config and apply this candidate's cap/resistor-value / clock vars."""
     patched = copy.deepcopy(config_dict)
     for var in struct_vars:
         value = var_values[var.name]
@@ -309,30 +326,68 @@ def _patch_structural(config_dict, struct_vars, var_values):
                 per["frequency"] = float(value)
             elif kind == "cap":
                 _set_named_cap(patched, target.rsplit(".", 1)[0], value)
+            elif kind == "resistor":
+                _set_named_resistor(patched, target.rsplit(".", 1)[0], value)
     return patched
+
+
+def split_variables(variables):
+    """Partition explore variables into ``(size_bias, structural, corner)`` groups.
+
+    Structural vars (``<Cap>.C`` / ``<Res>.R`` / ``periodic.frequency``) rebuild the
+    circuit from a patched config; corner vars drive the PVT shift; the rest are the
+    fast fixed-topology size/bias path."""
+    corner_vars = [v for v in variables if _var_is_corner(v)]
+    struct_vars = [v for v in variables if _var_is_structural(v)]
+    size_vars = [v for v in variables
+                 if not (_var_is_corner(v) or _var_is_structural(v))]
+    return size_vars, struct_vars, corner_vars
+
+
+def candidate_circuit(config_dict, topo, base_sizes, base_bias, nf,
+                      size_vars, struct_vars, var_values):
+    """``(topo, sizes, bias, nf)`` for one candidate design.
+
+    Size/bias vars write into a copy of ``base_sizes``/``base_bias``; structural vars
+    (cap/resistor/clock) rebuild the topology from a patched config. Shared by the
+    dataset builder and the optimizer so both apply *every* variable kind identically."""
+    size_names = {v.name for v in size_vars}
+    size_vals = {k: v for k, v in var_values.items() if k in size_names}
+    sizes, bias, cand_nf = apply_variables(size_vars, size_vals, base_sizes,
+                                           base_bias, base_nf=nf)
+    if struct_vars:
+        patched = _patch_structural(config_dict, struct_vars, var_values)
+        return circuit_from_dict(patched).topology, sizes, bias, cand_nf
+    return topo, sizes, bias, cand_nf
 
 
 def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
                   method="lhs", corner=None, label_groups=DEFAULT_GROUPS,
-                  seed_fn=None, progress=None, config_dict=None, config_path=None):
+                  seed_fn=None, progress=None, config_dict=None, config_path=None,
+                  model_types=None, device_kwargs=None):
     """Sample the design space and evaluate every candidate → dataset dict.
 
     Returns ``{"manifest": {...}, "rows": [row, ...]}`` where each ``row`` is a
     :func:`_row`. Unlike :func:`core.explore.explore` this applies **no** constraint
     or Pareto filtering and always evaluates noise, so the result is a complete,
     failure-retaining teacher dataset. ``seed_fn(sizes, bias) -> x0`` optionally
-    provides a per-candidate DC seed (as for the AC-coupled AFE testbench)."""
-    shift, corner_name = _resolve_corner(corner)
+    provides a per-candidate DC seed (as for the AC-coupled AFE testbench).
+    ``model_types`` / ``device_kwargs`` bind non-default per-device models (silicon);
+    a SKY130 ``corner`` is routed onto those devices rather than an OTFT PVT shift."""
+    # A SKY130 corner is baked into each silicon device's card (a device kwarg); an
+    # OTFT corner name/shift-map stays on the solver's continuous PVT path.
+    device_kwargs, otft_corner = apply_silicon_corner(model_types, device_kwargs, corner)
+    si_corner = corner if (isinstance(corner, str) and corner in SKY130_CORNERS) else None
+    shift, corner_name = _resolve_corner(otft_corner)
+    if si_corner:
+        corner_name = si_corner
     groups = tuple(label_groups)
     labels = _labels_for(groups)
     periodic_groups = [g for g in groups if g in _PERIODIC_RUNNERS]     # transient / pss
     # Structural axes (``<Cap>.C`` / ``periodic.frequency``) change the topology or
     # stimulus, so those candidates get the circuit rebuilt from a patched config;
     # pure size/bias axes keep the fast fixed-topology path.
-    corner_vars = [v for v in cfg.variables if _var_is_corner(v)]
-    struct_vars = [v for v in cfg.variables if _var_is_structural(v)]
-    size_vars = [v for v in cfg.variables
-                 if not (_var_is_corner(v) or _var_is_structural(v))]
+    size_vars, struct_vars, corner_vars = split_variables(cfg.variables)
     size_names = {v.name for v in size_vars}
     if struct_vars and not config_dict:
         raise ValueError("capacitor/clock design variables need the source config "
@@ -362,7 +417,8 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
             periodic = config_dict.get("periodic") if config_dict else None
         x0 = seed_fn(sizes, bias) if seed_fn is not None else None
         metrics = evaluate(cand_topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
-                           x0_guess=x0, corner=eff_shift, require_noise=True)
+                           x0_guess=x0, corner=eff_shift, require_noise=True,
+                           model_types=model_types, device_kwargs=device_kwargs)
         extra = {}
         if periodic_groups and metrics is not None and spec is not None:  # DC converged
             for g in periodic_groups:                      # transient / pss
@@ -389,6 +445,7 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
         "config_path": config_path,
         "topology_hash": _topology_hash(config_dict) if config_dict else None,
         "pdk": get_default_model_type(),
+        "models": dict(model_types or {}),     # per-device non-default bindings (silicon)
         "corner": corner_name,
         "sampling": {"n": int(n), "seed": int(seed), "method": method},
         "variables": {v.name: {"min": v.lo, "max": v.hi, "targets": list(v.targets),
@@ -517,11 +574,13 @@ def run_from_config(config_path, *, n=200, seed=0, method="lhs", corner=None,
     ``freqs`` (an array) overrides the config's AC/noise analysis grid — e.g. to
     push the top decade up so ``bw_Hz`` isn't clipped at the grid ceiling."""
     config_dict, topo, sizes, bias, nf, cfg = load_dataset_config(config_path)
+    model_types, device_kwargs = models_from_config(config_dict)
     if freqs is not None:
         cfg.freqs = np.asarray(freqs, float)
     dataset = build_dataset(topo, sizes, bias, nf, cfg, n=n, seed=seed, method=method,
                             corner=corner, label_groups=label_groups, progress=progress,
-                            config_dict=config_dict, config_path=config_path)
+                            config_dict=config_dict, config_path=config_path,
+                            model_types=model_types, device_kwargs=device_kwargs)
     if out:
         dataset["_paths"] = write_dataset(dataset, out, npz=npz, parquet=parquet)
     return dataset
@@ -547,7 +606,8 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--method", choices=("lhs", "random"), default="lhs")
     p.add_argument("--corner", default="typical",
-                   help="process corner: typical | slow | fast (default: typical)")
+                   help="process corner: OTFT typical|slow|fast, or SKY130 tt|ss|ff|sf|fs "
+                        "for silicon configs (default: typical)")
     p.add_argument("--labels", default="ac_noise",
                    help="comma list of label groups: ac_noise, transient "
                         "(transient needs a 'periodic' block; default: ac_noise)")

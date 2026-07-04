@@ -152,6 +152,33 @@ Per-device:
 
 Device-level `NF` in the device object is overridden by top-level `nf` when both exist.
 
+### `models`
+
+Optional. Binds specific devices to a non-default PDK model type (e.g. silicon
+SKY130) instead of the default `"pmos_tft"` (AT4000TG OTFT). Devices not listed here
+use the default PDK — this is purely additive, so an OTFT-only config never needs it.
+
+```json
+"models": {
+  "M1": {"type": "sky130.nmos", "extract_w": 24.0},
+  "M3": {"type": "sky130.pmos", "vb": 1.8, "extract_w": 12.0}
+}
+```
+
+- `type` — a model-registry key, `"<pdk>.<polarity>"` (e.g. `"sky130.nmos"`,
+  `"sky130.pmos"`, `"at4000tg.pmos"`). See `core.device_model.register_pdk`.
+- Remaining keys are forwarded to the device constructor. For SKY130 devices:
+  `vb` (bulk bias, volts; default 0), `corner` (SKY130 process corner —
+  `tt`/`ss`/`ff`/`sf`/`fs`; default `tt`), `extract_w` (µm — resolve the SKY130
+  parameter card once at this reference width and let the compact model scale the
+  actual `W`, avoiding a per-candidate re-extraction during a design sweep),
+  `temperature` (kelvin; default 300.15), `NF` (int).
+- A mixed circuit (some devices OTFT, some silicon) is valid — e.g. a complementary
+  silicon OTA binds NMOS/PMOS devices independently. See `examples/sky130_5t_ota.json`.
+- The SKY130 PDK needs an external toolchain (OpenVAF + ngspice + the SKY130 PDK
+  files); solver calls raise a clear error if it is not installed. See the
+  "Silicon PDK / OSDI layer" section in [Core Solver Overview](core_overview.md).
+
 ### `bias`
 
 Optional but usually needed. Supplies numeric values for `rails` string references.
@@ -544,22 +571,50 @@ required.
 
 Optional. Design-space exploration configuration — variables to sweep with ranges,
 feasibility constraints (gain, BW, IRN, power, area), and optimization objectives.
+Consumed by `core.explore` (sample → evaluate → constrain → Pareto-select),
+`core.dataset` (sample → evaluate every candidate, no filtering — a labeled training
+set), and `core.optimize` (screen a trained surrogate → verify the shortlist on the
+solver).
 
 ```json
 "explore": {
   "variables": {
-    "W6": [500, 5000],
-    "L6": [40, 200],
-    "VB": [8.0, 12.0]
+    "in_pair_W": {"min": 40000, "max": 90000, "targets": ["M7.W", "M8.W"]},
+    "VCM":       {"min": 28.0,  "max": 33.0}
   },
-  "constraints": {
-    "gain_dB": {">": 20.0},
-    "bw_Hz": {">": 300.0},
-    "irn_uV": {"<": 50.0}
-  },
-  "objectives": ["area", "power_uW"]
+  "constraints": {"gain_dB": {"min": 20}, "bw_Hz": {"min": 100},
+                  "irn_uV": {"max": 44.5}},
+  "objectives":  {"area": "min", "power_uW": "min"},
+  "band":  [0.05, 100.0],
+  "freqs": {"start": -2, "stop": 3, "num": 81}
 }
 ```
+
+- `variables` — each entry needs numeric `min`/`max`. `targets` lets one variable
+  drive several keys at once (matched/symmetric device pairs); it defaults to
+  `[<variable name>]`. `round` (decimals) snaps sampled values to a grid; `int`
+  rounds to a whole number (handy for W/L/NF).
+- `constraints` — each metric needs a `min` and/or `max` bound. Known metrics:
+  `gain_dB`, `gain_peak_dB`, `bw_Hz`, `irn_uV`, `power_uW`, `area`.
+- `objectives` — `{metric: "min" | "max"}`; at least one is required.
+- `band` — `[f_lo, f_hi]` (Hz) for the band-integrated `irn_uV` metric.
+- `freqs` — the AC/noise analysis grid: `{"start": <log10 Hz>, "stop": <log10 Hz>,
+  "num": <points>}` (logarithmic).
+
+**Target syntax** — beyond `"DEV.W"` / `"DEV.L"` / `"DEV.NF"` (device sizes) and a
+bare bias key, `targets` supports structural design axes (each rebuilds the circuit
+per candidate; consumed by `core.dataset`/`core.optimize`, not by `core.explore`):
+
+| Target | Axis | Notes |
+|--------|------|-------|
+| `"<CapName>.C"` | a named capacitor's value (F) | the `capacitors` entry needs a `"name"` |
+| `"<ResName>.R"` | a named resistor's value (Ω) | the `resistors` entry needs a `"name"` |
+| `"periodic.frequency"` | the periodic stimulus clock frequency | needs a `periodic` block |
+| `"pvt0"` / `"pbeta0"` | continuous global process shift | routes into `evaluate(corner=...)`; sampling this turns a discrete corner sweep into continuous-PVT training data |
+
+See the `models` field above for binding a variable's target device to a non-default
+PDK (e.g. sweeping a SKY130 device's `W`); the `explore` block itself doesn't change
+— `models` and `explore.variables` compose freely.
 
 ## Complete Examples
 
@@ -571,6 +626,7 @@ examples/vcvs_amplifier.json      # VCVS amplifier — linear gain 100×
 examples/sc_lpf.json              # Switched-capacitor LPF (2-phase, PMOS switches + vsource clocks)
 examples/afe_explore.json         # 10-transistor AFE with explore config
 examples/periodic_rc.json         # Passive RC with PSS/PAC/PNoise dispatch
+examples/sky130_5t_ota.json       # Silicon SKY130 complementary 5T OTA — `models` block + explore/dataset/optimize
 ```
 
 Load and run:
@@ -627,12 +683,16 @@ Supported (model abstraction):
 
 - Device model registry (`core/device_model.py`) — ``TransistorModel`` ABC + factory.
   New model types can be added without modifying solver code.
+- NMOS and PMOS, both PDKs: the AT4000TG OTFT (PMOS-only) and silicon SKY130
+  (nmos + pmos, via an OpenVAF-compiled BSIM4 through an OSDI host).
+- Per-device model binding via the ``models`` field — mixed OTFT/silicon circuits
+  (default PDK stays ``"at4000tg.pmos"`` unless overridden).
+- Silicon DC/AC/noise, plus a foundational (backward-Euler) silicon transient.
 
 Not yet supported:
 
-- NMOS or other compact model implementations (interface is ready, implementations pending).
-- Switched / time‑varying elements.
+- Switched / time‑varying elements on silicon devices (SKY130's ``.osdi`` model can't
+  run inside the numba transient/PSS/PAC/PNoise loop — chopper analyses stay OTFT-only).
 - Multi-output simultaneous analysis.
 - Hierarchical subcircuits.
 - SPICE syntax parsing.
-- Per-device ``"model"`` field in JSON (currently defaults to ``"pmos_tft"``).

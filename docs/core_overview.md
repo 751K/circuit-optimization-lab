@@ -22,9 +22,12 @@ The current solver stack covers:
   PSS, PAC, and PNoise behavior.
 
 The implementation is intentionally small and self-contained. It currently has
-26 Python files under `core/`, including `__init__.py`, the CLI entry
+34 Python files under `core/`, including `__init__.py`, the CLI entry
 `__main__.py`, calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
-modules, and the main solver stack.
+modules, the main solver stack, an ML-surrogate layer (dataset builder, surrogate
+training, screen-and-verify optimizer), and a second PDK — silicon SKY130, via an
+OpenVAF/OSDI bridge — plugged into the same `TransistorModel` interface as the
+original AT4000TG OTFT model.
 
 ## File Structure
 
@@ -54,6 +57,14 @@ core/
   chopper.py           Ideal and PMOS-switch differential chopper analyses.
   explore.py           Design-space exploration / optimization driver.
   corners.py           Process corners, mismatch MC, and latch detection.
+  dataset.py           Labeled surrogate-training dataset builder (provenance + failure-retaining).
+  surrogate.py         Baseline metric surrogate (GBT via optional scikit-learn) + region-of-interest filtering.
+  surrogate_torch.py   Differentiable surrogate (torch/MPS) + gradient-based design optimization.
+  optimize.py          Screen-with-surrogate / Pareto-select / verify-with-solver optimization loop.
+  osdi_host.py         OSDI 0.4 ctypes host — loads a compiled Verilog-A (.osdi) model, single-device DC/AC/noise eval.
+  osdi_device.py       TransistorModel adapter over an OSDI-hosted compact model (bridges any OSDI PDK into the solver stack).
+  osdi_transient.py    Backward-Euler transient for OSDI devices (outside the numba loop).
+  sky130_model.py      SKY130 nfet/pfet PDK: BSIM4 param-card extraction (via ngspice) + PDK registration.
 ```
 
 ## Import Relationship
@@ -83,6 +94,14 @@ cadence_netlist.py   <- circuit_loader, topology
 chopper.py           <- noise_solver, pss_solver, pac_solver, pnoise_solver, device_model, topology
 explore.py           <- ac_solver, noise_solver, device_model, topology, circuit_loader
 corners.py           <- ac_solver, noise_solver, topology
+dataset.py           <- explore, circuit_loader, corners, device_model, pss_solver, transient_solver, analysis_dispatch, diagnostics
+surrogate.py         <- no internal dependency; optional scikit-learn/joblib at runtime
+surrogate_torch.py   <- dataset (CLI only); optional torch at runtime
+optimize.py          <- surrogate, circuit_loader, dataset, explore
+osdi_host.py         <- no internal dependency; ctypes + numpy only
+osdi_device.py       <- device_model, osdi_host (lazy import)
+osdi_transient.py    <- no internal dependency (calls the OsdiDevice interface generically)
+sky130_model.py      <- device_model, osdi_device
 ```
 
 ## Main Components
@@ -543,6 +562,91 @@ otherwise get re-derived in every sweep:
 `ac_solve` / `noise_analysis` accept the same `corner` argument (a flat process dict or a
 per-device mismatch map). The driver `examples/mc_mismatch.py` wraps this into a corner
 table + 3-corner MC figure.
+
+### ML surrogate layer (`dataset.py` / `surrogate.py` / `surrogate_torch.py` / `optimize.py`)
+
+Turns the validated solvers into a full **build dataset → train surrogate → optimize →
+verify** loop. The solvers stay the ground truth throughout; the surrogate only
+accelerates the *screening* of a large candidate pool.
+
+- **`dataset.py`** — like `explore.py`'s sampling/evaluation but with **no** constraint
+  or Pareto filtering and **always** evaluates noise, so every sample (including DC
+  failures) becomes a labeled training row. Writes `.jsonl` (human-debuggable rows) +
+  `.manifest.json` (provenance: schema version, solver git commit/dirty flag, topology
+  hash, PDK, `models` binding, corner, sampling seed/method, variable ranges — so a
+  consumer can reject out-of-domain designs) + `.npz` (dense `X`/`Y` matrices, NaN where
+  a label is missing) + optional `.parquet`. **Label groups** (`--labels`, opt-in beyond
+  the default `ac_noise`): `transient` (stimulus-agnostic waveform features from the
+  config's validated periodic transient) and `pss` (periodic-steady-state quality +
+  orbit output). **Design-axis grammar** extends beyond `DEV.W/.L/.NF`/bias:
+  `<Cap>.C` / `<Res>.R` (named passive values — *structural*, rebuilds the circuit per
+  candidate via `candidate_circuit()`), `periodic.frequency` (clock), and `pvt0`/`pbeta0`
+  (continuous global process shift — sampling this turns the discrete corner sweep into
+  a continuous-PVT training axis).
+- **`surrogate.py`** — `HistGradientBoostingRegressor` (optional `scikit-learn`
+  dependency) trained per label, with automatic log-space fitting for labels spanning
+  multiple decades (e.g. IRN). `filter_rows()` / CLI `--filter label:lo:hi` restricts
+  training to a region of interest (e.g. drop railed/collapsed designs whose extreme
+  labels would dominate a squared-error fit, and which get screened out by a constraint
+  anyway). `score()` reports median/P95 relative error and R² per label.
+- **`surrogate_torch.py`** — a differentiable MLP surrogate (optional `torch`
+  dependency; MPS-capable on Apple Silicon) for gradient-based multi-objective design
+  optimization with constraint penalties, plus a `--verify` pass back through the solver.
+- **`optimize.py`** — the screen-and-verify payoff: predict a large pool (µs/candidate)
+  with the surrogate, take the constrained Pareto front, then re-evaluate the top-K on
+  the actual calibrated solver. Uses `dataset.candidate_circuit()`/`split_variables()` so
+  every variable kind (including structural cap/resistor/clock axes) is honored in the
+  verify pass, not just size/bias.
+
+A key operational lesson (see `docs/futureplan.md` §7): no single surrogate is both a
+precise *region-of-interest* model and a good *failure-region-aware screener* — training
+on the operating region (via `--filter`) gives the tightest metric accuracy but makes the
+surrogate blind to railed designs during screening. The screen-and-verify architecture
+tolerates this by design: the solver, not the surrogate, has the final word on feasibility.
+
+### Silicon PDK / OSDI layer (`osdi_host.py` / `osdi_device.py` / `osdi_transient.py` / `sky130_model.py`)
+
+Plugs a **second, industry-standard device physics model (BSIM4)** into the same
+`TransistorModel` interface the AT4000TG OTFT model implements — so any bulk-BSIM4
+PDK (SKY130 today) runs through the *same* DC/AC/noise solver engine, additively
+(`default=False`; the OTFT PDK is untouched and remains byte-identical).
+
+- **`osdi_host.py`** — a ctypes host for the **OSDI 0.4 ABI**, the simulator-independent
+  C interface [OpenVAF](https://github.com/pascalkuthe/OpenVAF) compiles Verilog-A
+  compact models into (`.osdi`, a native shared library). `load_osdi()` introspects the
+  descriptor (nodes/params/opvars) with a struct-size self-check; `Device` sets model/
+  instance params via the ABI's `access()`, replicates the simulator-side node collapse,
+  runs an internal-node Newton (gmin-regularized for DC-floating internal nodes), and
+  exposes `operating_point()` (Id/gm/gds/gmb/capacitances via a Schur complement over
+  internal nodes — BSIM4 exposes zero opvars, so small-signal quantities come from the
+  Jacobian) and `noise_psd()`. This is a **single-device** DC/AC/noise evaluator; the
+  circuit-level MNA/Newton is still owned by the existing `ac_solver`/`noise_solver`.
+- **`osdi_device.py`** — `OsdiDevice(TransistorModel)` wraps a `Device`, implementing
+  `get_Idc`/`get_ss_params`/`get_capacitances`/`get_noise_psd`. `TransistorModel.kcl_sign`
+  (default +1, i.e. source-high — matching PMOS/OTFT) lets `ac_solve`'s DC KCL support
+  NMOS (source-low, `kcl_sign=-1`) without changing the OTFT path (byte-identical:
+  `1.0 * abs(x) == abs(x)`). The three transient-only ABC hooks raise
+  `NotImplementedError` — `.osdi` can't run inside the numba transient loop.
+- **`osdi_transient.py`** — `cs_transient()`: a pure-Python fixed-step backward-Euler
+  integrator that calls the OSDI host directly each step (outside the numba loop), for
+  a foundational (not full-fidelity) silicon transient.
+- **`sky130_model.py`** — `Sky130Nfet`/`Sky130Pfet(OsdiDevice)` + `register_pdk("sky130",
+  ...)`. SKY130's binned BSIM4 subcircuits (63 bins, 2000+ `.param` expressions) are
+  resolved by **letting ngspice do it**: instantiate the subckt, run an `op`, `showmod`
+  dumps the fully-resolved flat card (731 params), which is cached under
+  `data/pdk/sky130/*.json` and fed to the OpenVAF-compiled `bsim4va`. `EXTRACT_W`/
+  `extract_w`: resolve the card once at a reference width and let `bsim4va` scale the
+  actual W — avoids a per-candidate ngspice subprocess during a design sweep
+  (~2 ms/eval instead). Oracle: **local ngspice loading the same `.osdi`** — since both
+  the solver and the oracle run the identical compiled model, correctness is *model==
+  oracle* regardless of the SKY130-vs-VA BSIM4 version gap (SKY130's ngspice built-in is
+  4.5; the VA source is 4.8 — a realistic 130 nm process, not SkyWater's bit-exact
+  sign-off model, which is the right tradeoff for optimizer generalization).
+
+`core/circuit_loader.py`'s optional `models` block (`{"M1": {"type": "sky130.nmos",
+...}}`) binds specific devices in a JSON circuit to a non-default PDK, so a mixed
+OTFT+silicon (or all-silicon) circuit is just configuration — see
+[JSON Circuit Description](json_circuit_format.md).
 
 ## Quick Example
 

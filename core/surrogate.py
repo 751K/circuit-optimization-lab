@@ -206,9 +206,34 @@ def _format_scores(scores):
     return "\n".join(lines)
 
 
+def _parse_filter(spec, label_names):
+    """``"gain_dB:0:60,irn_uV::100"`` → ``{"gain_dB": (0, 60), "irn_uV": (None, 100)}``.
+
+    Each clause is ``label:lo:hi``; an empty bound is open. Restricts training to a
+    region of interest (see :func:`filter_rows`) — e.g. drop railed/collapsed designs
+    whose extreme labels would dominate the fit yet get screened out anyway."""
+    bounds = {}
+    for clause in spec.split(","):
+        clause = clause.strip()
+        if not clause:
+            continue
+        parts = clause.split(":")
+        if len(parts) != 3:
+            raise SystemExit(f"--filter clause {clause!r} must be label:lo:hi (bounds may be empty)")
+        lab, lo, hi = parts
+        if lab not in label_names:
+            raise SystemExit(f"--filter label {lab!r} not in dataset labels {label_names}")
+        bounds[lab] = (float(lo) if lo.strip() else None, float(hi) if hi.strip() else None)
+    return bounds
+
+
 def _cmd_train(args):
     Xtr, Ytr, var_names, label_names, manifest = load_xy(args.train_npz)
-    meta = {"train_npz": args.train_npz,
+    n_all = Xtr.shape[0]
+    if args.filter:
+        Xtr, Ytr = filter_rows(Xtr, Ytr, label_names, _parse_filter(args.filter, label_names))
+        print(f"filtered to region of interest [{args.filter}]: {Xtr.shape[0]}/{n_all} samples")
+    meta = {"train_npz": args.train_npz, "filter": args.filter,
             "solver_commit": (manifest.get("solver") or {}).get("commit"),
             "corner": manifest.get("corner"), "topology_hash": manifest.get("topology_hash")}
     model = train(Xtr, Ytr, var_names, label_names, max_iter=args.max_iter, metadata=meta)
@@ -217,6 +242,8 @@ def _cmd_train(args):
           + (f"; log-space: {list(model.log_labels)}" if model.log_labels else ""))
     if args.test:
         Xte, Yte, _, _, _ = load_xy(args.test)
+        if args.filter:                         # score the same region of interest
+            Xte, Yte = filter_rows(Xte, Yte, label_names, _parse_filter(args.filter, label_names))
         print(f"held-out test: {Xte.shape[0]} samples from {args.test}")
         print(_format_scores(score(Yte, model.predict(Xte), label_names)))
     if args.out:
@@ -242,6 +269,9 @@ def main(argv=None):
     tr.add_argument("--test", default=None, help="held-out test dataset .npz")
     tr.add_argument("--out", default=None, help="save the fitted surrogate here (joblib)")
     tr.add_argument("--max-iter", type=int, default=400, help="HGBR boosting iterations")
+    tr.add_argument("--filter", default=None,
+                    help="train/score on a region of interest: 'label:lo:hi[,...]' "
+                         "(empty bound = open), e.g. 'gain_dB:0:60' to drop railed designs")
     pr = sub.add_parser("predict", help="Predict labels for one design vector")
     pr.add_argument("model", help="saved surrogate (joblib)")
     pr.add_argument("--x", required=True, help="comma-separated design vector (in var order)")

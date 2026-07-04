@@ -48,12 +48,37 @@ import numpy as np
 from .ac_solver import ac_solve
 from .device_model import create_device, get_default_model_type
 from .noise_solver import band_rms, noise_analysis
-from .circuit_loader import circuit_from_dict
+from .circuit_loader import circuit_from_dict, models_from_config
 from . import diagnostics
 
 
 METRICS = ("gain_dB", "gain_peak_dB", "bw_Hz", "irn_uV", "power_uW", "area")
 NOISE_METRICS = frozenset({"irn_uV"})
+
+# SKY130 discrete process corners are baked into the extracted device card (a
+# per-device constructor kwarg), a different mechanism from the OTFT continuous PVT
+# shift the solvers apply via ``corner=``. :func:`apply_silicon_corner` keeps the two
+# separate: a silicon corner name is routed onto silicon devices, an OTFT corner is
+# left for the solver shift path.
+SKY130_CORNERS = frozenset({"tt", "ss", "ff", "sf", "fs"})
+
+
+def apply_silicon_corner(model_types, device_kwargs, corner):
+    """Route a SKY130 corner onto silicon devices; leave OTFT corners for the solver.
+
+    Returns ``(device_kwargs, solver_corner)``. When ``corner`` names a SKY130 corner
+    (``tt/ss/ff/sf/fs``), it is stamped as ``corner=<name>`` on every ``sky130.*``
+    device's kwargs and the solver corner is cleared (``None``) — silicon ignores the
+    OTFT PVT shift. Otherwise (an OTFT corner name / shift-map / ``None``) the device
+    kwargs pass through unchanged and ``corner`` is returned for the solver path."""
+    if not isinstance(corner, str) or corner not in SKY130_CORNERS:
+        return device_kwargs, corner
+    mt = model_types or {}
+    dk = {name: dict(kw) for name, kw in (device_kwargs or {}).items()}
+    for name, model in mt.items():
+        if str(model).startswith("sky130"):
+            dk.setdefault(name, {})["corner"] = corner
+    return dk, None
 
 
 # ── configuration ────────────────────────────────────────────────────────
@@ -231,7 +256,12 @@ def _supply_power_uW(topo, bias, ss):
     return top_v * i_supply * 1e6
 
 
-def _area(topo, sizes, nf):
+def _area(topo, sizes, nf, model_types=None, device_kwargs=None):
+    """Sum of per-device ``g_area``. Each device is built with its own model type so a
+    mixed-process circuit sums each PDK's real area metric (OTFT ``g_area`` is a padded
+    layout box, not W·L); an all-default circuit is byte-identical to the old path."""
+    model_types = model_types or {}
+    device_kwargs = device_kwargs or {}
     total = 0.0
     for name, *_ in topo.devices:
         W, L = sizes[name]
@@ -240,7 +270,8 @@ def _area(topo, sizes, nf):
             n = int(nf.get(name, 1))
         elif nf:
             n = int(nf)
-        total += create_device(get_default_model_type(), W=W, L=L, NF=n).g_area
+        total += create_device(model_types.get(name, get_default_model_type()),
+                               W=W, L=L, NF=n, **device_kwargs.get(name, {})).g_area
     return float(total)
 
 
@@ -262,7 +293,8 @@ def _has_finite_metrics(metrics, names):
 
 
 def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
-             constraints=None, objectives=None, require_noise=None):
+             constraints=None, objectives=None, require_noise=None,
+             model_types=None, device_kwargs=None):
     """Run the solvers for one candidate -> metrics dict, or None if DC fails.
 
     x0_guess seeds the DC solve — required for topologies whose generic DC solve
@@ -270,12 +302,15 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
     bare-AFE operating point).
     corner applies a process shift (flat dict, e.g. the slow corner) or per-device
     mismatch map; passed straight through to the solvers.
+    model_types / device_kwargs bind non-default per-device models (e.g. silicon
+    SKY130 nmos/pmos); ``None`` keeps the default-PDK path byte-for-byte unchanged.
 
     When constraints/objectives are supplied, noise is evaluated lazily: AC-derived
     metrics are checked first, and `irn_uV` is computed only if it is required and
     the candidate has not already failed non-noise constraints. Direct callers that
     omit constraints/objectives keep the old behavior and compute noise by default."""
-    ac = ac_solve(sizes, bias, freqs, topo=topo, nf=nf, x0_guess=x0_guess, corner=corner)
+    ac = ac_solve(sizes, bias, freqs, topo=topo, nf=nf, x0_guess=x0_guess, corner=corner,
+                  model_types=model_types, device_kwargs=device_kwargs)
     if ac is None:
         return None
     irn_uV = float("nan")
@@ -290,14 +325,15 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
         "bw_Hz": float(ac["bw_Hz"]),
         "irn_uV": float(irn_uV),
         "power_uW": power_uW,
-        "area": _area(topo, sizes, nf),
+        "area": _area(topo, sizes, nf, model_types, device_kwargs),
         "_noise_evaluated": False,
     }
     if (_needs_noise(constraints, objectives, require_noise) and
             is_feasible(metrics, _non_noise_constraints(constraints))):
         try:
             noise = noise_analysis(sizes, bias, freqs, x0_guess=ac["dc_op"], topo=topo,
-                                   nf=nf, corner=corner)
+                                   nf=nf, corner=corner, model_types=model_types,
+                                   device_kwargs=device_kwargs)
             if noise is not None:
                 metrics["irn_uV"] = float(band_rms(freqs, noise["irn_psd"],
                                                    band[0], band[1]) * 1e6)
@@ -349,12 +385,16 @@ def pareto_front(rows, objectives):
 
 # ── driver ──────────────────────────────────────────────────────────────────
 def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
-            progress=None, seed_fn=None, corner=None):
+            progress=None, seed_fn=None, corner=None, model_types=None,
+            device_kwargs=None):
     """Sample, evaluate, constrain, and Pareto-select. Returns a results dict.
 
     seed_fn(sizes, bias) -> x0_guess optionally provides a per-candidate DC seed
     (e.g. the bare-AFE operating point for the testbench).
-    corner applies a process shift (e.g. the slow corner) to every evaluation."""
+    corner applies a process shift (e.g. the slow corner) to every evaluation; for a
+    SKY130 corner name it is routed onto the silicon devices instead.
+    model_types / device_kwargs bind non-default per-device models (silicon)."""
+    device_kwargs, corner = apply_silicon_corner(model_types, device_kwargs, corner)
     samples = sample(cfg.variables, n, seed=seed, method=method)
     candidates = []
     for i, var_values in enumerate(samples):
@@ -363,7 +403,8 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
         x0 = seed_fn(sizes, bias) if seed_fn is not None else None
         metrics = evaluate(topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
                            x0_guess=x0, corner=corner, constraints=cfg.constraints,
-                           objectives=cfg.objectives)
+                           objectives=cfg.objectives, model_types=model_types,
+                           device_kwargs=device_kwargs)
         complete = bool(metrics is not None and _has_finite_metrics(metrics, cfg.objectives))
         candidates.append({
             "idx": i,
@@ -456,17 +497,22 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--method", choices=("lhs", "random"), default="lhs")
     parser.add_argument("--out", default=None, help="output path prefix (writes <prefix>.csv/.jsonl)")
+    parser.add_argument("--corner", default=None,
+                        help="process corner: OTFT typical|slow|fast, or SKY130 tt|ss|ff|sf|fs")
     parser.add_argument("--quiet", action="store_true", help="suppress per-candidate progress")
     args = parser.parse_args(argv)
 
     topo, sizes, bias, nf, cfg = load_explore_json(args.config)
+    with open(args.config, "r", encoding="utf-8") as f:
+        model_types, device_kwargs = models_from_config(json.load(f))
 
     def progress(done, total):
         if not args.quiet:
             print(f"\r  evaluating {done}/{total}", end="", flush=True)
 
     results = explore(topo, sizes, bias, nf, cfg, n=args.n, seed=args.seed,
-                      method=args.method, progress=progress)
+                      method=args.method, progress=progress, corner=args.corner,
+                      model_types=model_types, device_kwargs=device_kwargs)
     if not args.quiet:
         print()
     print(_format_summary(results))

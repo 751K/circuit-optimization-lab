@@ -164,9 +164,29 @@
     "explore": {
       "$ref": "#/$defs/explore",
       "description": "Optional design-space exploration spec (see core/explore.py)."
+    },
+    "models": {
+      "$ref": "#/$defs/models",
+      "description": "Optional per-device model binding: PDK model-registry type + constructor kwargs (e.g. silicon SKY130 devices). Devices omitted here use the default PDK."
     }
   },
   "$defs": {
+    "models": {
+      "type": "object",
+      "description": "Device name -> {type, ...ctor kwargs}. 'type' is a model-registry key such as 'sky130.nmos'/'sky130.pmos'.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "type": {"$ref": "#/$defs/name"},
+          "vb": {"type": "number"},
+          "corner": {"type": "string"},
+          "extract_w": {"$ref": "#/$defs/positiveNumber"},
+          "temperature": {"$ref": "#/$defs/positiveNumber"},
+          "NF": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
     "analyses": {
       "type": "object",
       "additionalProperties": false,

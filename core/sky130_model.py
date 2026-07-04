@@ -100,10 +100,14 @@ class _Sky130Fet(OsdiDevice):
 
     def __init__(self, W: float = 1.0, L: float = 0.15, NF: int = 1, *,
                  corner: str = "tt", vb: float = 0.0, temperature: float = 300.15,
-                 **_ignored):
+                 extract_w: float = None, **_ignored):
         # corner is a SKY130 discrete process corner (baked into the extracted card),
         # not a bsim4va param shift; extra registry kwargs (pvt0/…) don't apply here.
-        w_card = self.EXTRACT_W if self.EXTRACT_W is not None else W
+        # extract_w (per instance) pins the card-extraction reference W so a W sweep
+        # resolves one card and lets bsim4va scale W (fast + smooth for optimization);
+        # it overrides the class-level EXTRACT_W. Absent → resolve per instance W.
+        ref = extract_w if extract_w is not None else self.EXTRACT_W
+        w_card = ref if ref is not None else W
         self.BASE_CARD = extract_sky130_card(self.POLARITY, w_card, L, corner)
         self.corner = corner
         super().__init__(W=W, L=L, NF=NF, vb=vb, temperature=temperature)

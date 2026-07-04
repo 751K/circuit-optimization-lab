@@ -19,8 +19,10 @@
 - 工艺角与逐器件 mismatch 扰动。
 - 面向 Cadence/Spectre 的验证，涵盖工作点、AC、噪声、瞬态、PSS、PAC 和 PNoise 行为。
 
-实现刻意保持小而自包含。目前 `core/` 下有 26 个 Python 文件（含 `__init__.py`、CLI 入口 `__main__.py`、
-校准/PSF/Cadence 网表辅助模块、共享诊断/profiling 模块和主求解器栈）。
+实现刻意保持小而自包含。目前 `core/` 下有 34 个 Python 文件（含 `__init__.py`、CLI 入口 `__main__.py`、
+校准/PSF/Cadence 网表辅助模块、共享诊断/profiling 模块、主求解器栈、一套 ML surrogate 层（数据集构建、
+surrogate 训练、筛选-校验优化器），以及通过 OpenVAF/OSDI 桥接、接入同一套 `TransistorModel` 接口的
+第二个 PDK ——硅 SKY130）。
 
 ## 文件结构
 
@@ -50,6 +52,14 @@ core/
   chopper.py           理想与 PMOS 开关差分 chopper 分析。
   explore.py           设计空间探索 / 优化驱动。
   corners.py           工艺角、mismatch MC 与 latch 检测。
+  dataset.py           带 provenance、保留失败样本的 surrogate 训练数据集构建器。
+  surrogate.py         基线指标 surrogate（GBT，可选 scikit-learn）+ 感兴趣区域过滤。
+  surrogate_torch.py   可微 surrogate（torch/MPS）+ 基于梯度的设计优化。
+  optimize.py          surrogate 筛选 / Pareto 选择 / solver 校验闭环。
+  osdi_host.py         OSDI 0.4 ctypes 宿主——加载编译好的 Verilog-A（.osdi）模型，单器件 DC/AC/noise 求值。
+  osdi_device.py       OSDI 宿主紧凑模型的 TransistorModel 适配器（把任意 OSDI PDK 桥接进求解器栈）。
+  osdi_transient.py    OSDI 器件的后向欧拉瞬态（在 numba 循环之外）。
+  sky130_model.py      SKY130 nfet/pfet PDK：BSIM4 参数卡提取（经 ngspice）+ PDK 注册。
 ```
 
 ## 导入关系
@@ -79,6 +89,14 @@ cadence_netlist.py   <- circuit_loader, topology
 chopper.py           <- noise_solver, pss_solver, pac_solver, pnoise_solver, device_model, topology
 explore.py           <- ac_solver, noise_solver, device_model, topology, circuit_loader
 corners.py           <- ac_solver, noise_solver, topology
+dataset.py           <- explore, circuit_loader, corners, device_model, pss_solver, transient_solver, analysis_dispatch, diagnostics
+surrogate.py         <- 无内部依赖；运行时可选 scikit-learn/joblib
+surrogate_torch.py   <- dataset（仅 CLI）；运行时可选 torch
+optimize.py          <- surrogate, circuit_loader, dataset, explore
+osdi_host.py         <- 无内部依赖；仅 ctypes + numpy
+osdi_device.py       <- device_model, osdi_host（延迟导入）
+osdi_transient.py    <- 无内部依赖（通过 OsdiDevice 通用接口调用）
+sky130_model.py      <- device_model, osdi_device
 ```
 
 ## 主要组件
@@ -452,6 +470,68 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - `mismatch_mc(...)`——单个 corner 上的逐器件 mismatch MC，从名义工作点播种；返回各指标数组、latch 掩码以及汇总（latch 率 + 未 latch 样本的 mean/std/P5/P95）。每个样本先跑 AC/latch，只有进入最终噪声统计的未 latch 样本才计算 IRN。
 
 `ac_solve` / `noise_analysis` 接受相同的 `corner` 参数（扁平的工艺 dict 或逐器件 mismatch 映射）。驱动脚本 `examples/mc_mismatch.py` 将其封装为 corner 表 + 3-corner MC 图。
+
+### ML surrogate 层（`dataset.py` / `surrogate.py` / `surrogate_torch.py` / `optimize.py`）
+
+把已验证的求解器变成一条完整的 **造数据集 → 训练 surrogate → 优化 → 校验** 闭环。求解器全程仍是
+唯一的 ground truth；surrogate 只加速大候选池的**筛选**环节。
+
+- **`dataset.py`** ——采样/评估方式与 `explore.py` 相同，但**不做**约束/Pareto 过滤，且**总是**评估
+  噪声，所以每个样本（含 DC 失败样本）都成为一条带标签的训练行。写出 `.jsonl`（可读的逐行样本）+
+  `.manifest.json`（provenance：schema 版本、solver git commit(+dirty)、拓扑 hash、PDK、`models` 绑定、
+  corner、采样 seed/method、变量范围——供下游拒绝域外样本）+ `.npz`（稠密 `X`/`Y` 矩阵，缺失标签为
+  NaN）+ 可选 `.parquet`。**标签组**（`--labels`，在默认 `ac_noise` 之外可选加）：`transient`（复用配置
+  已验证的 `periodic` 瞬态得到的、激励无关的波形特征）和 `pss`（周期稳态质量 + 轨道输出）。**设计轴
+  语法**在 `DEV.W/.L/.NF`/bias 之外还支持：`<Cap>.C` / `<Res>.R`（具名无源器件值——`structural`，通过
+  `candidate_circuit()` 逐候选重建电路）、`periodic.frequency`（clock）、`pvt0`/`pbeta0`（连续全局工艺
+  偏移——采样它就把离散 corner 扫描变成一个连续 PVT 训练轴）。
+- **`surrogate.py`** ——`HistGradientBoostingRegressor`（可选 `scikit-learn` 依赖）逐标签独立训练，对跨
+  多个数量级的标签（如 IRN）自动用 log-space 拟合。`filter_rows()` / CLI `--filter label:lo:hi` 把训练
+  限制在感兴趣区域内（例如剔除甩轨/collapse 的极端设计——它们的极端标签会拖累平方误差拟合，反正也会被
+  约束筛掉）。`score()` 逐标签报告 median/P95 相对误差和 R²。
+- **`surrogate_torch.py`** ——可微 MLP surrogate（可选 `torch` 依赖；Apple Silicon 上支持 MPS），用于
+  带约束惩罚的多目标梯度优化，附带 `--verify` 收尾接回求解器。
+- **`optimize.py`** ——筛选-校验闭环的落地：用 surrogate 对大候选池做预测（µs/candidate），取约束下的
+  Pareto 前沿，再把 top-K 送回真实的已标定求解器复核。用 `dataset.candidate_circuit()`/
+  `split_variables()` 保证每种变量（含结构化的电容/电阻/时钟轴）在校验阶段都生效，而不只是 size/bias。
+
+一条关键的经验教训（详见 `docs/futureplan.md` §7）：**没有一个 surrogate 能同时是精确的"感兴趣区域"
+模型又是懂"失败区域"的好筛选器**——用 `--filter` 只在工作区训练能拿到最紧的指标精度，但会让 surrogate
+对甩轨设计一无所知，筛选阶段就分辨不出它们。screen-and-verify 架构正是为容忍这个矛盾设计的：可行性
+的最终话语权在求解器，不在 surrogate。
+
+### 硅 PDK / OSDI 层（`osdi_host.py` / `osdi_device.py` / `osdi_transient.py` / `sky130_model.py`）
+
+把**第二套行业标准器件物理模型（BSIM4）**接入 AT4000TG OTFT 模型所用的同一个 `TransistorModel`
+接口——所以任何 bulk-BSIM4 PDK（目前是 SKY130）都跑在同一套 DC/AC/noise 求解器引擎里，且是纯增量的
+（`default=False`；OTFT PDK 不受影响，数值 byte-identical）。
+
+- **`osdi_host.py`** ——**OSDI 0.4 ABI** 的 ctypes 宿主，这是 [OpenVAF](https://github.com/pascalkuthe/OpenVAF)
+  把 Verilog-A 紧凑模型编译成的、仿真器无关的 C 接口（`.osdi`，原生共享库）。`load_osdi()` 内省
+  descriptor（节点/参数/opvar），带 struct 尺寸自检；`Device` 通过 ABI 的 `access()` 设置模型/实例参数、
+  复现仿真器侧的节点合并、跑内部节点 Newton（对 DC 悬空的内部节点做 gmin 正则化），暴露
+  `operating_point()`（Id/gm/gds/gmb/电容通过对内部节点做 Schur 补得到——BSIM4 不暴露任何 opvar，
+  所以小信号量全部来自 Jacobian）和 `noise_psd()`。这是一个**单器件** DC/AC/noise 求值器；电路级的
+  MNA/Newton 仍由现有的 `ac_solver`/`noise_solver` 负责。
+- **`osdi_device.py`** ——`OsdiDevice(TransistorModel)` 包装一个 `Device`，实现
+  `get_Idc`/`get_ss_params`/`get_capacitances`/`get_noise_psd`。`TransistorModel.kcl_sign`
+  （默认 +1，即 source-high——匹配 PMOS/OTFT）让 `ac_solve` 的 DC KCL 也能支持 NMOS（source-low，
+  `kcl_sign=-1`），且不改变 OTFT 路径（byte-identical：`1.0 * abs(x) == abs(x)`）。三个瞬态专用的 ABC
+  钩子会抛 `NotImplementedError`——`.osdi` 不能进 numba 瞬态循环。
+- **`osdi_transient.py`** ——`cs_transient()`：一个纯 Python 的固定步长后向欧拉积分器，每步直接调用
+  OSDI 宿主（在 numba 循环之外），是一个基础性（非全保真度）的硅瞬态实现。
+- **`sky130_model.py`** ——`Sky130Nfet`/`Sky130Pfet(OsdiDevice)` + `register_pdk("sky130", ...)`。
+  SKY130 的 binned BSIM4 子电路（63 个 bin，2000+ 个 `.param` 表达式）**让 ngspice 去解析**：实例化子
+  电路、跑一次 `op`、`showmod` 拿到完全展开的扁平参数卡（731 个参数），缓存到 `data/pdk/sky130/*.json`，
+  喂给 OpenVAF 编译的 `bsim4va`。`EXTRACT_W`/`extract_w`：在参考宽度处解析一次卡片，让 `bsim4va` 缩放
+  实际 W——设计扫描时避免逐候选起一个 ngspice 子进程（改为 ~2ms/eval）。Oracle：**加载同一个 `.osdi` 的
+  本地 ngspice**——因为求解器和 oracle 跑的是同一个编译好的模型，正确性是 *model==oracle*，与
+  SKY130-vs-VA 的 BSIM4 版本差异无关（SKY130 的 ngspice 内置模型是 4.5，VA 源码是 4.8——这是一个真实的
+  130nm 工艺，不是 SkyWater 逐字节对齐的 sign-off 模型，但对优化器泛化而言这是正确的取舍）。
+
+`core/circuit_loader.py` 的可选 `models` 块（`{"M1": {"type": "sky130.nmos", ...}}`）把 JSON 电路里的
+特定器件绑到非默认 PDK，所以一个混合 OTFT+硅（或全硅）电路只是配置问题——见
+[JSON 电路格式](json_circuit_format_zh.md)。
 
 ## 快速示例
 
