@@ -243,13 +243,21 @@ def _run_pss_features(base_spec, periodic, sizes, bias, nf, corner_shift):
 _PERIODIC_RUNNERS = {"transient": _run_transient_features, "pss": _run_pss_features}
 
 
-# ── structural / stimulus design axes (extend the DEV.attr grammar) ──────────
+# ── structural / stimulus / corner design axes (extend the DEV.attr grammar) ──
 # A design variable normally targets ``DEV.W/.L/.NF`` (sizes) or a bare bias key.
-# Two more target kinds address elements that live in the *topology / stimulus*
-# rather than in sizes/bias, so the candidate needs its circuit rebuilt from a
-# patched config: ``<CapName>.C`` (a named capacitor's value) and
-# ``periodic.frequency`` (the clock / fundamental of the periodic transient).
+# Extra target kinds address elements outside sizes/bias:
+#   * ``<CapName>.C`` (cap) / ``periodic.frequency`` (clock) — *structural*: live in
+#     the topology / stimulus, so the candidate rebuilds its circuit from a patch.
+#   * ``pvt0`` / ``pbeta0`` (corner) — the continuous global process shift, routed
+#     into each candidate's ``evaluate(corner=...)``. Sampling these turns the
+#     discrete corner into a continuous PVT axis (global process Monte-Carlo) so one
+#     surrogate can interpolate to *any* process point, not just the named corners.
+_CORNER_TARGETS = ("pvt0", "pbeta0")
+
+
 def _target_kind(target):
+    if target in _CORNER_TARGETS:
+        return "corner"
     if target == "periodic.frequency":
         return "clock"
     if "." in target and target.rsplit(".", 1)[1] == "C":
@@ -258,7 +266,24 @@ def _target_kind(target):
 
 
 def _var_is_structural(var):
-    return any(_target_kind(t) != "size_bias" for t in var.targets)
+    return any(_target_kind(t) in ("cap", "clock") for t in var.targets)
+
+
+def _var_is_corner(var):
+    return any(_target_kind(t) == "corner" for t in var.targets)
+
+
+def _corner_shift(corner_vars, var_values, base_shift):
+    """Per-candidate process shift ``{pvt0, pbeta0}`` from sampled corner variables,
+    starting from ``base_shift`` (the dataset-level ``--corner``, or 0)."""
+    shift = {"pvt0": 0.0, "pbeta0": 0.0}
+    if isinstance(base_shift, dict):
+        shift.update(base_shift)
+    for v in corner_vars:
+        for target in v.targets:
+            if _target_kind(target) == "corner":
+                shift[target] = float(var_values[v.name])
+    return shift
 
 
 def _set_named_cap(config, name, value):
@@ -304,8 +329,10 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
     # Structural axes (``<Cap>.C`` / ``periodic.frequency``) change the topology or
     # stimulus, so those candidates get the circuit rebuilt from a patched config;
     # pure size/bias axes keep the fast fixed-topology path.
+    corner_vars = [v for v in cfg.variables if _var_is_corner(v)]
     struct_vars = [v for v in cfg.variables if _var_is_structural(v)]
-    size_vars = [v for v in cfg.variables if not _var_is_structural(v)]
+    size_vars = [v for v in cfg.variables
+                 if not (_var_is_corner(v) or _var_is_structural(v))]
     size_names = {v.name for v in size_vars}
     if struct_vars and not config_dict:
         raise ValueError("capacitor/clock design variables need the source config "
@@ -313,6 +340,8 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
     if periodic_groups and not (config_dict and config_dict.get("periodic")):
         raise ValueError(f"label group(s) {periodic_groups} require a 'periodic' "
                          "stimulus block in the config")
+    if corner_vars:                       # sampled corner ⇒ dataset spans PVT, not one point
+        corner_name = "sampled"
     # Fixed-topology fast path builds the spec once; structural axes rebuild per candidate.
     base_spec = (circuit_from_dict(config_dict)
                  if (periodic_groups and not struct_vars) else None)
@@ -323,6 +352,7 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
         size_vals = {k: v for k, v in var_values.items() if k in size_names}
         sizes, bias, cand_nf = apply_variables(size_vars, size_vals,
                                                base_sizes, base_bias, base_nf=nf)
+        eff_shift = _corner_shift(corner_vars, var_values, shift) if corner_vars else shift
         if struct_vars:
             patched = _patch_structural(config_dict, struct_vars, var_values)
             spec = circuit_from_dict(patched)
@@ -332,13 +362,13 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
             periodic = config_dict.get("periodic") if config_dict else None
         x0 = seed_fn(sizes, bias) if seed_fn is not None else None
         metrics = evaluate(cand_topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
-                           x0_guess=x0, corner=shift, require_noise=True)
+                           x0_guess=x0, corner=eff_shift, require_noise=True)
         extra = {}
         if periodic_groups and metrics is not None and spec is not None:  # DC converged
             for g in periodic_groups:                      # transient / pss
                 try:
                     extra.update(_PERIODIC_RUNNERS[g](spec, periodic, sizes, bias,
-                                                      cand_nf, shift))
+                                                      cand_nf, eff_shift))
                 except Exception as exc:
                     diagnostics.note(f"dataset.{g}_eval_fail", exc)
         rows.append(_row(i, var_values, metrics, extra or None, labels))
@@ -362,7 +392,8 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
         "corner": corner_name,
         "sampling": {"n": int(n), "seed": int(seed), "method": method},
         "variables": {v.name: {"min": v.lo, "max": v.hi, "targets": list(v.targets),
-                               "kind": "structural" if _var_is_structural(v) else "size_bias"}
+                               "kind": ("corner" if _var_is_corner(v) else
+                                        "structural" if _var_is_structural(v) else "size_bias")}
                       for v in cfg.variables},
         "band": [float(cfg.band[0]), float(cfg.band[1])],
         "freqs": {"n_points": int(freqs.size),
@@ -479,10 +510,15 @@ def write_dataset(dataset, out_prefix, *, npz=True, parquet=False):
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 def run_from_config(config_path, *, n=200, seed=0, method="lhs", corner=None,
-                    label_groups=DEFAULT_GROUPS, out=None, npz=True, parquet=False,
-                    progress=None):
-    """Load a config, build the dataset, and (if ``out``) write it. Returns the dataset."""
+                    label_groups=DEFAULT_GROUPS, freqs=None, out=None, npz=True,
+                    parquet=False, progress=None):
+    """Load a config, build the dataset, and (if ``out``) write it. Returns the dataset.
+
+    ``freqs`` (an array) overrides the config's AC/noise analysis grid — e.g. to
+    push the top decade up so ``bw_Hz`` isn't clipped at the grid ceiling."""
     config_dict, topo, sizes, bias, nf, cfg = load_dataset_config(config_path)
+    if freqs is not None:
+        cfg.freqs = np.asarray(freqs, float)
     dataset = build_dataset(topo, sizes, bias, nf, cfg, n=n, seed=seed, method=method,
                             corner=corner, label_groups=label_groups, progress=progress,
                             config_dict=config_dict, config_path=config_path)
@@ -515,6 +551,13 @@ def main(argv=None):
     p.add_argument("--labels", default="ac_noise",
                    help="comma list of label groups: ac_noise, transient "
                         "(transient needs a 'periodic' block; default: ac_noise)")
+    p.add_argument("--freqs-start", type=float, default=-2.0,
+                   help="AC grid start decade (log10 Hz) when --freqs-stop is given")
+    p.add_argument("--freqs-stop", type=float, default=None,
+                   help="override AC grid top decade (log10 Hz), e.g. 4 = 10 kHz "
+                        "(avoids bw_Hz clipping at the ceiling)")
+    p.add_argument("--freqs-num", type=int, default=101,
+                   help="AC grid points when --freqs-stop is given")
     p.add_argument("--out", default=None,
                    help="output path prefix (writes <prefix>.jsonl/.manifest.json/.npz)")
     p.add_argument("--no-npz", action="store_true", help="skip the dense .npz output")
@@ -528,9 +571,12 @@ def main(argv=None):
             print(f"\r  evaluating {done}/{total}", end="", flush=True)
 
     groups = tuple(g.strip() for g in args.labels.split(",") if g.strip())
+    freqs = (np.logspace(args.freqs_start, args.freqs_stop, args.freqs_num)
+             if args.freqs_stop is not None else None)
     dataset = run_from_config(args.config, n=args.n, seed=args.seed, method=args.method,
-                              corner=args.corner, label_groups=groups, out=args.out,
-                              npz=not args.no_npz, parquet=args.parquet, progress=progress)
+                              corner=args.corner, label_groups=groups, freqs=freqs,
+                              out=args.out, npz=not args.no_npz, parquet=args.parquet,
+                              progress=progress)
     if not args.quiet:
         print()
     print(_format_summary(dataset))

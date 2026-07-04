@@ -1,6 +1,7 @@
 -e .
 numpy>=2.0
 scipy>=1.10
+numba>=0.66
 pytest>=8.0
 flask>=3.0
 jsonschema>=4.0

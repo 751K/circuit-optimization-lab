@@ -21,6 +21,7 @@ from .device_model import (TransistorModel, NumbaParams, PDK, create_device,
 from .noise_solver import band_rms, noise_analysis
 from .pac_solver import pac_solve
 from . import pmos_tft_model  # noqa: F401 — triggers register_pdk("at4000tg", …)
+from . import sky130_model    # noqa: F401 — triggers register_pdk("sky130", …)
 from .pnoise_solver import pnoise_solve
 from .pss_solver import pss_solve
 from .topology import Topology

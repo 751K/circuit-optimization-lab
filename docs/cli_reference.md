@@ -16,6 +16,9 @@
 | `python -m core chopper <circuit.json> --level pss` | Chopper 分析（7 个层级） |
 | `python -m core plot [all\|transient\|bode\|afe\|chopper\|ac\|pac]` | 出图：瞬态波形 + AC/PAC Bode（PNG） |
 | `python -m core dataset <circuit.json> -n 500 --out ds/run1` | 生成 surrogate 训练集（provenance + 失败样本保留） |
+| `python -m core.surrogate train <ds>.npz --test <ds>.npz --out m.pkl` | 训练指标 surrogate（GBT，可选 sklearn 依赖） |
+| `python -m core.optimize <circuit.json> m.pkl -n 100000 --top-k 20` | 筛选 → Pareto → solver 校验闭环 |
+| `python -m core.surrogate_torch optimize <circuit.json> m.pt --verify` | 可微 surrogate 梯度设计优化（torch/MPS） |
 | `python -m core.calibration --all` | Cadence 校准回归检查 |
 | `python demo/server.py` | Web 前端（Flask，端口 5100） |
 
@@ -326,10 +329,13 @@ python -m core dataset examples/single_stage.json -n 200 --no-npz --quiet
 `transient` / `pss` 组每候选各跑一次周期分析，比纯 `ac_noise` 慢；按需 `--labels ac_noise,transient,pss`。
 
 **设计轴（`explore.variables` 目标语法）**：除 `DEV.W/.L/.NF`（器件尺寸）和裸 bias key 外，dataset
-还支持两类**结构/激励轴**（这些候选会**逐个重建电路**，manifest 里 `kind="structural"`）：
+还支持三类扩展轴（manifest 每个变量记 `kind`）：
 
-- `<CapName>.C` — 某个具名电容（`capacitors` 列表里带 `name` 的项）的容值，用于扫 load
-- `periodic.frequency` — 周期激励（transient/PSS）的时钟频率，用于扫 clock（只影响 periodic 标签）
+- `<CapName>.C` — 具名电容（`capacitors` 里带 `name` 的项）容值，扫 load（`structural`，逐候选重建电路）
+- `periodic.frequency` — 周期激励的时钟频率，扫 clock（`structural`，只影响 periodic 标签）
+- `pvt0` / `pbeta0` — 连续全局工艺偏移（`corner`），逐候选路由进 `evaluate(corner=...)`。**采样它 = 全局
+  process MC**，让一个 surrogate 覆盖连续 PVT 空间并内插到任意工艺点（manifest `corner="sampled"`）。
+  离散 corner 签核用 `--corner`；连续统计/良率用 `pvt0/pbeta0` 轴。
 
 ---
 
@@ -668,3 +674,70 @@ python -m core.pmos_tft_model     # 打印单管 Id / Cgss / Cgdd / 噪声 PSD
 python -m core.calibration calibration/amp_design3_typical/ && \
 python -m core run examples/periodic_rc.json -a pss --quiet
 ```
+
+---
+
+## 10. ML Surrogate + 优化闭环：`python -m core.surrogate` / `core.optimize`
+
+ML 代理层（可选依赖 `scikit-learn`：`pip install -r requirements-ml.txt`）。求解器仍是真值，
+surrogate 只做快速筛选。完整链路：`dataset`（生成）→ `surrogate train`（训练）→ `optimize`（筛选 + 校验）。
+
+### 10.1 `surrogate` — 训练 / 预测指标代理
+
+每个标签一个 GBT（`HistGradientBoostingRegressor`）；宽动态范围标签自动 log 空间。
+
+```bash
+# 训练 + held-out 评估 + 存模型
+python -m core.surrogate train results/datasets/afe/afe_typical_train.npz \
+    --test results/datasets/afe/afe_typical_test.npz --out results/models/afe.pkl
+# 单点预测（设计向量按变量顺序）
+python -m core.surrogate predict results/models/afe.pkl --x 65000,70,3500,30.5,10.0
+```
+
+| 子命令 | 参数 | 说明 |
+|---|---|---|
+| `train` | `<train.npz> [--test] [--out] [--max-iter]` | 拟合 + 评估（median / P95 相对误差 + R²） |
+| `predict` | `<model.pkl> --x <csv>` | 预测一个设计的全部标签 |
+
+辅助 API：`surrogate.filter_rows`（region-of-interest 过滤）、`surrogate.load_multi_corner`
+（多 corner 堆叠，corner → `pvt0/pbeta0` 特征）。
+
+### 10.2 `optimize` — 筛选 → Pareto → 校验闭环
+
+用 surrogate 快筛大候选池，取约束内 Pareto 前沿，top-K 回本地 solver 校验（约束 / 目标读自配置的 `explore` 块）。
+
+```bash
+python -m core.optimize examples/afe_explore.json results/models/afe_typical.pkl -n 100000 --top-k 20
+```
+
+输出：筛选速率、可行 / Pareto 数、top-K 的 surrogate-vs-solver 误差 + solver 确认可行数 + 加速比。
+典型：10 万候选 ~2.4s 筛完（**~1900× 于 solver**），shortlist 误差 **<1.5%**，solver 确认可行 10/12。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `config` `surrogate` | (必需) | 配置 JSON + 训练好的 `.pkl` |
+| `-n` | `100000` | 候选池大小 |
+| `--top-k` | `20` | 回 solver 校验的 Pareto 点数 |
+| `--no-verify` | — | 只筛不校验（只返回 Pareto 候选） |
+
+> ⚠️ `optimize` 的校验频率网格默认 0.01 Hz–10 kHz，需与 surrogate 训练用的网格一致（否则 `bw` 不可比）。
+
+### 10.3 `surrogate_torch` — 可微 surrogate + 梯度设计优化
+
+PyTorch MLP（可选 `torch`；Apple Silicon 自动用 MPS）。比 GBT 更平滑，把 GBT 最硬的 `bw` 也做到
+p95 <2%。**可微** ⇒ 可直接对设计向量做梯度优化（几百步），而不是随机筛 10 万点。
+
+```bash
+# 训练（在有 torch 的环境，如 conda mps）
+python -m core.surrogate_torch train results/datasets/afe/afe_typical_train.npz \
+    --test results/datasets/afe/afe_typical_test.npz --out results/models/afe_torch.pt
+# 梯度优化一个设计（minimize 目标 s.t. 约束，读自 explore 块）+ solver 校验
+python -m core.surrogate_torch optimize examples/afe_explore.json results/models/afe_torch.pt \
+    --steps 600 --verify
+```
+
+`optimize` 在归一化 [0,1] 设计空间做投影梯度下降（约束软惩罚），返回优化后的设计 + surrogate 指标；
+`--verify` 回 solver 确认。典型：area −34% / power −41%，仍满足 gain/bw/irn，solver 校验 <1%。
+
+> torch 与 scipy 求解器可分处不同 conda 环境：torch surrogate 只吃数据集 `.npz`（不需要 solver）。
+> 若某环境的 torch 因 numpy ABI 不匹配坏了，用专门的 torch/MPS 环境训练（solver/数据仍在原环境）。

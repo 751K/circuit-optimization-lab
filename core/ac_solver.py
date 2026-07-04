@@ -51,18 +51,28 @@ def _dev_nf(nf, name):
     return int(nf)
 
 
-def build_devices(sizes, *, nf=None, corner=None, topo):
+def build_devices(sizes, *, nf=None, corner=None, topo, model_types=None,
+                  device_kwargs=None):
     """Create ``{name: TransistorModel}`` for every transistor in *topo*.
 
     Shared factory used by all solvers instead of repeating the same
     device-creation dict comprehension in each file.  Resolves NF per-device
     via :func:`_dev_nf` and applies corner shifts via :func:`_dev_corner`.
+
+    ``model_types`` optionally maps a device name to a model-registry key (e.g.
+    ``"sky130.nmos"``) for mixed-process / complementary testbenches; unnamed
+    devices fall back to the default PDK.  ``device_kwargs`` passes extra
+    per-device constructor kwargs (e.g. ``{"vb": 1.8}`` for a PMOS bulk).  Both
+    default to empty, so the OTFT path is unchanged.
     """
+    model_types = model_types or {}
+    device_kwargs = device_kwargs or {}
     return {
         name: create_device(
-            get_default_model_type(),
+            model_types.get(name, get_default_model_type()),
             W=sizes[name][0], L=sizes[name][1],
             NF=_dev_nf(nf, name), **_dev_corner(corner, name),
+            **device_kwargs.get(name, {}),
         )
         for name, *_ in topo.devices
     }
@@ -282,7 +292,8 @@ def get_ss_params(W, L, Vs, Vd, Vg, corner=None, nf=1, dev_inst=None):
     return t.get_ss_params(Vs, Vd, Vg)
 
 
-def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=None):
+def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=None,
+             model_types=None, device_kwargs=None):
     """
     Full small-signal AC analysis — topology supplied by `topo` (default AFE_TOPO).
 
@@ -304,11 +315,15 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
 
     # ── pre-build device instances so the warm-start Newton cache survives
     #     across fsolve iterations instead of being reset on every Id() call.
-    _dev_inst = build_devices(sizes, nf=nf, corner=corner, topo=topo)
+    _dev_inst = build_devices(sizes, nf=nf, corner=corner, topo=topo,
+                              model_types=model_types, device_kwargs=device_kwargs)
 
     def Id(name, Vs, Vd, Vg):
         try:
-            return abs(_dev_inst[name].get_Idc(Vs, Vd, Vg))
+            dev = _dev_inst[name]
+            # kcl_sign is +1 for source-high (PMOS/OTFT) — byte-identical to abs() —
+            # and -1 for source-low (NMOS), whose drain current leaves the drain.
+            return getattr(dev, "kcl_sign", 1.0) * abs(dev.get_Idc(Vs, Vd, Vg))
         except Exception as exc:
             diagnostics.note_critical(
                 "model.idc_eval_zeroed", exc,

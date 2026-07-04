@@ -259,6 +259,29 @@ def test_target_kind_classifies_axes():
     assert ds._target_kind("VCM") == "size_bias"
     assert ds._target_kind("CL.C") == "cap"
     assert ds._target_kind("periodic.frequency") == "clock"
+    assert ds._target_kind("pvt0") == "corner"
+    assert ds._target_kind("pbeta0") == "corner"
+
+
+def test_corner_shift_from_sampled_vars():
+    from core.explore import Variable
+    cvars = [Variable("pvt0", -1, 1), Variable("pbeta0", -1, 1)]
+    assert ds._corner_shift(cvars, {"pvt0": 0.1, "pbeta0": -0.2}, None) == \
+        {"pvt0": 0.1, "pbeta0": -0.2}
+
+
+def test_corner_axis_samples_process_shift():
+    from core.explore import Variable
+    data, topo, sizes, bias, nf, cfg = load_dataset_config(CONFIG)   # single_stage (PMOS)
+    cfg.variables += [Variable("pvt0", -0.2, 0.2), Variable("pbeta0", -0.5, 0.5)]
+    d = build_dataset(topo, sizes, bias, nf, cfg, n=5, seed=0,
+                      config_dict=data, config_path=CONFIG)
+    m = d["manifest"]
+    assert m["corner"] == "sampled"                     # dataset spans PVT, not one point
+    assert m["variables"]["pvt0"]["kind"] == "corner"
+    for r in d["rows"]:
+        assert -0.2 <= r["design"]["pvt0"] <= 0.2       # sampled shift recorded in X
+        assert -0.5 <= r["design"]["pbeta0"] <= 0.5
 
 
 def test_patch_structural_applies_and_isolates():
@@ -309,6 +332,13 @@ def test_structural_axis_needs_config_dict():
                         (0.05, 100.0), np.logspace(-2, 3, 11))
     with pytest.raises(ValueError, match="config"):
         build_dataset(None, {}, {}, None, cfg, n=2, config_dict=None)
+
+
+def test_freqs_override():
+    # overriding the AC grid pushes bw's ceiling up (avoids bw_Hz clipping)
+    d = ds.run_from_config(CONFIG, n=3, seed=0,
+                           freqs=np.logspace(-2, 4, 51))          # 0.01 Hz – 10 kHz
+    assert d["manifest"]["freqs"] == {"n_points": 51, "f_min": 0.01, "f_max": 10000.0}
 
 
 def test_dataset_cli_end_to_end(tmp_path):

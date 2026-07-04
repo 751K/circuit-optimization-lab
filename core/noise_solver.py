@@ -36,9 +36,11 @@ _KB = 1.380649e-23          # Boltzmann constant [J/K]
 _TEMP = 300.15              # physical temperature for resistor thermal noise [K]
 
 
-def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1):
+def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1, model_type=None,
+               device_kwargs=None):
     """Drain-current noise PSD A^2/Hz over freqs: S_th + S_fl_1Hz/f."""
-    t = create_device(get_default_model_type(), W=W, L=L, NF=nf, **(corner or {}))
+    t = create_device(model_type or get_default_model_type(), W=W, L=L, NF=nf,
+                      **(corner or {}), **(device_kwargs or {}))
     try:
         S_th, S_fl_1 = t.get_noise_psd(Vs, Vd, Vg, frequency=1.0)
     except Exception as exc:
@@ -50,12 +52,13 @@ def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1):
 
 
 def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO,
-                   nf=None, ac_result=None):
+                   nf=None, ac_result=None, model_types=None, device_kwargs=None):
     # ── 1. DC + small-signal params + gain (reuse the validated AC solver) ──
     ac = ac_result
     if ac is None:
         ac = ac_solve(
-            sizes, bias, freqs, corner=corner, x0_guess=x0_guess, topo=topo, nf=nf)
+            sizes, bias, freqs, corner=corner, x0_guess=x0_guess, topo=topo, nf=nf,
+            model_types=model_types, device_kwargs=device_kwargs)
     if ac is None:
         return None
     dc = ac["dc_op"]
@@ -81,8 +84,10 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
     for name in bpts:
         W, L = sizes[name]
         Vs, Vd, Vg = bpts[name]
-        S, S_th, S_fl1 = device_psd(W, L, Vs, Vd, Vg, freqs,
-                                    corner=_dev_corner(corner, name), nf=_dev_nf(nf, name))
+        S, S_th, S_fl1 = device_psd(
+            W, L, Vs, Vd, Vg, freqs, corner=_dev_corner(corner, name),
+            nf=_dev_nf(nf, name), model_type=(model_types or {}).get(name),
+            device_kwargs=(device_kwargs or {}).get(name))
         psd[name] = S
         psd_split[name] = (S_th, S_fl1)
 

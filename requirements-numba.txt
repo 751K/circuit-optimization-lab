@@ -1,3 +1,4 @@
+# numba is now a CORE dependency — `pip install -r requirements.txt` already
+# installs it (the solver hot paths are JIT-compiled kernels). This file remains
+# only as a backward-compatible alias for older install commands / CI.
 -r requirements.txt
-numpy>=2.0,<2.2
-numba>=0.60

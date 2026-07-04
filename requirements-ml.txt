@@ -1,0 +1,13 @@
+# Optional ML surrogate layer. Not needed for the solvers, dataset builder, or CLI
+# analyses. Install with: pip install -r requirements-ml.txt
+#
+# GBT surrogate (core/surrogate.py) + optimize loop (core/optimize.py):
+scikit-learn>=1.3
+joblib>=1.3
+#
+# Differentiable surrogate (core/surrogate_torch.py) — optional, heavier. On Apple
+# Silicon install a build with MPS support; its numpy must match torch's ABI (a
+# numpy-2 vs torch-built-for-numpy-1 mismatch breaks numpy<->tensor interop). torch
+# and the scipy solvers may live in separate conda envs — the torch surrogate only
+# needs the dataset .npz, not the solver.
+torch>=2.2

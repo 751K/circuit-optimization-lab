@@ -8,21 +8,18 @@ version = "0.1.0"
 description = "Local circuit solvers and benchmarks for TFT circuit optimization."
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=2.0",
+    "numpy>=2.0",        # upper bound left to numba's metadata (0.66 → numpy<2.5)
     "scipy>=1.10",
+    "numba>=0.66",       # required: solver hot paths are JIT kernels; 0.66 supports numpy 2.4
     "flask>=3.0",
 ]
 
 [project.optional-dependencies]
-numba = [
-    "numba>=0.60",
-]
 test = [
     "pytest>=8.0",
     "jsonschema>=4.0",
 ]
 dev = [
-    "numba>=0.60",
     "pytest>=8.0",
     "jsonschema>=4.0",
     "ruff>=0.6",

@@ -24,13 +24,10 @@ For solver internals, see [Core Solver Overview](core_overview.md).
 ## Quick Start
 
 ```bash
-# 1. Install
+# 1. Install (includes Numba — the solver hot paths are JIT-compiled kernels)
 python3 -m pip install -r requirements.txt
 
-# 2. Optional: Numba acceleration (10-50× faster transient)
-python3 -m pip install -r requirements-numba.txt
-
-# 3. Run your first circuit — one command
+# 2. Run your first circuit — one command
 python3 -m core examples/periodic_rc.json
 
 # 4. Verify — run the AFE benchmark

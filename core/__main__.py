@@ -262,6 +262,13 @@ def _add_dataset_parser(subparsers):
     p.add_argument("--labels", default="ac_noise",
                    help="Comma list of label groups: ac_noise, transient "
                         "(transient needs a 'periodic' block; default: ac_noise)")
+    p.add_argument("--freqs-start", type=float, default=-2.0,
+                   help="AC grid start decade (log10 Hz) when --freqs-stop is given")
+    p.add_argument("--freqs-stop", type=float, default=None,
+                   help="Override AC grid top decade (log10 Hz), e.g. 4 = 10 kHz "
+                        "(avoids bw_Hz clipping)")
+    p.add_argument("--freqs-num", type=int, default=101,
+                   help="AC grid points when --freqs-stop is given")
     p.add_argument("--out", default=None,
                    help="Output path prefix (writes <prefix>.jsonl/.manifest.json/.npz)")
     p.add_argument("--no-npz", action="store_true", help="Skip the dense .npz output")
@@ -285,10 +292,13 @@ def _cmd_dataset(args):
         print(f"Building dataset from {args.circuit}  "
               f"(n={args.n}, method={args.method}, corner={args.corner}, labels={args.labels})")
     groups = tuple(g.strip() for g in args.labels.split(",") if g.strip())
+    freqs = (np.logspace(args.freqs_start, args.freqs_stop, args.freqs_num)
+             if args.freqs_stop is not None else None)
     try:
         dataset = run_from_config(args.circuit, n=args.n, seed=args.seed, method=args.method,
-                                  corner=args.corner, label_groups=groups, out=args.out,
-                                  npz=not args.no_npz, parquet=args.parquet, progress=progress)
+                                  corner=args.corner, label_groups=groups, freqs=freqs,
+                                  out=args.out, npz=not args.no_npz, parquet=args.parquet,
+                                  progress=progress)
     except ImportError as exc:                          # e.g. --parquet without pyarrow
         raise SystemExit(str(exc))
     except ValueError as exc:                           # e.g. transient labels w/o periodic

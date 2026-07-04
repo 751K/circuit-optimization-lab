@@ -20,16 +20,13 @@
 ## 快速上手
 
 ```bash
-# 1. 安装
+# 1. 安装（已含 Numba —— 求解器热路径是 JIT 编译内核）
 python3 -m pip install -r requirements.txt
 
-# 2. 可选：Numba 加速（transient 可提速 10–50 倍）
-python3 -m pip install -r requirements-numba.txt
-
-# 3. 运行第一个电路 — 一条命令
+# 2. 运行第一个电路 — 一条命令
 python3 -m core examples/periodic_rc.json
 
-# 4. 验证安装 — 跑 AFE 基准
+# 3. 验证安装 — 跑 AFE 基准
 python3 -m benchmarks.bench_afe --warm-runs 1 --skip-noise
 ```
 

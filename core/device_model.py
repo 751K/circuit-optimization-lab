@@ -198,6 +198,13 @@ class TransistorModel(ABC):
     """Geometric area [µm²].  Models that precompute this can assign directly
     in ``_precompute_constants``."""
 
+    kcl_sign: float = 1.0
+    """Sign of the current the device sources INTO its drain node for the DC KCL.
+    ``+1`` for a source-high (PMOS-like) device — the current flows source→drain, so
+    it enters the drain; this is the OTFT convention.  ``-1`` for a source-low
+    (NMOS-like) device, whose drain current flows drain→source (out of the drain).
+    Solvers apply ``kcl_sign * abs(get_Idc(...))`` so both polarities share one KCL."""
+
     def estimate_channel_charge(self, Vs: float, Vd: float, Vg: float,
                                 mobile_only: bool = True) -> float:
         """Estimate turn‑off channel charge [C].
