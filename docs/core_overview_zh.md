@@ -21,8 +21,8 @@
 
 实现刻意保持小而自包含。目前 `core/` 下有 34 个 Python 文件（含 `__init__.py`、CLI 入口 `__main__.py`、
 校准/PSF/Cadence 网表辅助模块、共享诊断/profiling 模块、主求解器栈、一套 ML surrogate 层（数据集构建、
-surrogate 训练、筛选-校验优化器），以及通过 OpenVAF/OSDI 桥接、接入同一套 `TransistorModel` 接口的
-第二个 PDK ——硅 SKY130）。
+surrogate 训练、筛选-校验优化器），以及接入同一套 `TransistorModel` 接口的两个硅 PDK——SKY130（经
+OpenVAF/OSDI 桥接）与 FreePDK45（经 ngspice-C 求值器）。
 
 ## 文件结构
 
@@ -60,6 +60,9 @@ core/
   osdi_device.py       OSDI 宿主紧凑模型的 TransistorModel 适配器（把任意 OSDI PDK 桥接进求解器栈）。
   osdi_transient.py    OSDI 器件的后向欧拉瞬态（在 numba 循环之外）。
   sky130_model.py      SKY130 nfet/pfet PDK：BSIM4 参数卡提取（经 ngspice）+ PDK 注册。
+  ngspice_char.py      FreePDK45 求值器：批量 ngspice .dc/.noise 表征 → 缓存 (Vsb,Vds,Vgs) 网格。
+  ngspice_device.py    基于缓存 ngspice 网格的 TransistorModel（插值 Id/gm/gds/caps/noise；extract_w + 温度）。
+  freepdk45_model.py   FreePDK45 nmos/pmos PDK：角卡绑定 + PDK 注册（ngspice-C 求值器）。
 ```
 
 ## 导入关系
@@ -97,6 +100,9 @@ osdi_host.py         <- 无内部依赖；仅 ctypes + numpy
 osdi_device.py       <- device_model, osdi_host（延迟导入）
 osdi_transient.py    <- 无内部依赖（通过 OsdiDevice 通用接口调用）
 sky130_model.py      <- device_model, osdi_device
+ngspice_char.py      <- 无内部依赖；ngspice 子进程 + numpy
+ngspice_device.py    <- device_model, ngspice_char；运行期可选 scipy
+freepdk45_model.py   <- device_model, ngspice_device
 ```
 
 ## 主要组件
@@ -532,9 +538,33 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   SKY130-vs-VA 的 BSIM4 版本差异无关（SKY130 的 ngspice 内置模型是 4.5，VA 源码是 4.8——这是一个真实的
   130nm 工艺，不是 SkyWater 逐字节对齐的 sign-off 模型，但对优化器泛化而言这是正确的取舍）。
 
-`core/circuit_loader.py` 的可选 `models` 块（`{"M1": {"type": "sky130.nmos", ...}}`）把 JSON 电路里的
-特定器件绑到非默认 PDK，所以一个混合 OTFT+硅（或全硅）电路只是配置问题——见
-[JSON 电路格式](json_circuit_format_zh.md)。
+### 第三个 PDK：FreePDK45（`ngspice_char.py` / `ngspice_device.py` / `freepdk45_model.py`）
+
+FreePDK45（45nm，1.0V，用户目标工艺）接入**同一个** `TransistorModel` 接口，但用**不同的求值器**。
+FreePDK45 的 BSIM4 卡声明 `version = 4.0`,而我们 OpenVAF 编的 BSIM4.8 VA 没有版本开关,在这些 45nm 卡上
+算出 ~30% 不同的 I-V(与版本无关——已用改卡验证),所以 OSDI 宿主复现不了 FreePDK45 的预期行为。它的
+oracle 因此是 **ngspice-C 本身**:`ngspice_char.characterize()` 按 `(model, W, L, corner, temp)` 跑一次批
+量 `.dc` 扫（~0.03s/1000 点）成缓存的 Id/gm/gds/Cgs/Cgd 网格,`NgspiceDevice` 插值它（µs/eval,节点处即
+exact ngspice-C）。已验证 model==oracle:单器件 op 逐位对 ngspice `.op`,5T OTA 过 `ac_solve` 与 ngspice
+自己的 `.ac` 差 0.05dB/0.3%,输出噪声在 ngspice `.noise` 的 ~5% 内。噪声也是精确 ngspice-C
+（`characterize_noise` 逐偏置跑 `.noise`,CCVS 跨阻→漏噪 PSD,拟合 S_id=A+B/f,log 空间插值）。
+DC+AC+noise,此路径无瞬态/PSS。网格 AC 模型带 Cgs/Cgd 但**不含**漏/源结电容 Cdb/Csb,故整机 `ac_solve`
+的 UGBW 比 ngspice 自己的 `.ac` 偏高 ~8%（增益/PM 对到 <0.2dB / <8°）——头条数字取 ngspice 值并留裕量。
+
+- **`ngspice_char.py`** ——批量表征器。`characterize()` 按 Vsb 切片扫 `.dc vg vd`（op-vars
+  `@m[id/gm/gds/cgs/cgd]`）;`characterize_noise()` 逐偏置跑一次 `.noise`。两者都接受 `temp_c`
+  （`.options temp`,进缓存键——27°C 保持无标签故标称缓存不失效）,缓存到 `data/pdk/freepdk45/*.npz`。
+- **`ngspice_device.py`** ——`NgspiceDevice(TransistorModel)` 插值网格（`scipy.RegularGridInterpolator`,
+  **线性**——cubic 在 ~1e-17 电容数组上返回 0）。`extract_w`:在参考 W 处表征一次,线性缩放实际 W（BSIM4
+  近似正比 W,<0.7% vs 逐 W 真卡）,使 dataset/优化器的 W 扫描变纯插值;`temperature`（开尔文 kwarg）→
+  `temp_c` 物理重表征。Cgs/Cgd 取自 ngspice C 矩阵;瞬态钩子 `NotImplementedError`。
+- **`freepdk45_model.py`** ——`Fp45Nfet`/`Fp45Pfet(NgspiceDevice)` + `register_pdk("freepdk45", ...)`。
+  `corner`（nom/ss/ff）选卡目录 `PDK_ROOT/freepdk45/models_<corner>/`。
+
+`core/circuit_loader.py` 的可选 `models` 块（`{"M1": {"type": "sky130.nmos", ...}}` 或
+`"freepdk45.nmos"`）把 JSON 电路里的特定器件绑到非默认 PDK,所以一个混合 OTFT+硅（或全硅）电路只是配置
+问题——见 [JSON 电路格式](json_circuit_format_zh.md)。两个完整的全差分 OTA 设计流程案例:
+[SKY130 FD-OTA](sky130_fd_ota_design.md)、[FreePDK45 FD-OTA](freepdk45_fd_ota_design.md)。
 
 ## 快速示例
 

@@ -216,6 +216,85 @@ def test_temperature_shifts_current():
     assert i90 == pytest.approx(i27, rel=0.5)     # a physical shift, not a blow-up
 
 
+def _fd_ota_diff_ugbw(freqs, H):
+    """UGBW (last |H|=1 crossing) + passband-referenced PM from a differential H."""
+    mag = np.abs(H)
+    lf = np.log10(freqs)
+    ph = np.unwrap(np.angle(H))
+    above = np.where(mag >= 1.0)[0]
+    idx = above[-1] + 1
+    x0, x1 = np.log10(mag[idx - 1]), np.log10(mag[idx])
+    fu = 10 ** (lf[idx - 1] - x0 * (lf[idx] - lf[idx - 1]) / (x1 - x0))
+    pm = 180.0 + np.degrees(np.interp(np.log10(fu), lf, ph) - ph[int(np.argmax(mag))])
+    return fu, pm
+
+
+def test_fd_ota_ac_matches_ngspice():
+    """The WHOLE FD-OTA — CMFB loop, AC-coupled input, Rs/CL — through ac_solve vs
+    ngspice's own .ac on the equivalent netlist. Passband gain and PM match tightly;
+    UGBW reads ~8 % high because the grid AC model omits drain/source junction caps
+    (Cdb/Csb) that ngspice includes, so the crossing is pinned only to <12 %."""
+    from core.ac_solver import ac_solve
+    from core.circuit_loader import circuit_from_dict
+    cfg = json.load(open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                      "examples", "freepdk45_fd_ota.json")))
+    spec = circuit_from_dict(cfg)
+    freqs = np.logspace(3, 11, 141)
+    ac = ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf,
+                  x0_guess=dict(cfg["dc_guesses"][0]),
+                  model_types=spec.model_types, device_kwargs=spec.device_kwargs)
+    H = ac["response"]
+    our_gain = 20 * np.log10(np.abs(H).max())
+    our_fu, our_pm = _fd_ota_diff_ugbw(freqs, H)
+
+    ncard = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
+    pcard = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "PMOS_VTG.inc")
+    nm = {"GND": "0", "VDD": "vdd", "VINP": "vip", "VINN": "vin", "VCMI": "vcmi",
+          "VCM_REF": "vcmref", "VB_N": "vbn", "VB_CN": "vbcn", "VB_CP": "vbcp"}
+
+    def net(n):
+        return nm.get(n, n.lower())
+    b = cfg["bias"]
+    lines = ["* fp45 fd-ota ac", f'.include "{ncard}"', f'.include "{pcard}"',
+             f"vdd vdd 0 {b['VDD']}", f"vcmi vcmi 0 {b['VCMI']}",
+             f"vcmref vcmref 0 {b['VCM_REF']}", f"vbn vbn 0 {b['VB_N']}",
+             f"vbcn vbcn 0 {b['VB_CN']}", f"vbcp vbcp 0 {b['VB_CP']}",
+             f"vip vip 0 dc {b['VINP']} ac 0.5", f"vin vin 0 dc {b['VINN']} ac -0.5"]
+    for d in cfg["devices"]:
+        mdl = "PMOS_VTG" if cfg["models"][d["name"]]["type"].endswith("pmos") else "NMOS_VTG"
+        bulk = "vdd" if mdl == "PMOS_VTG" else "0"
+        lines.append(f"m{d['name'].lower()} {net(d['drain'])} {net(d['gate'])} "
+                     f"{net(d['source'])} {bulk} {mdl} w={d['W']}u l={d['L']}u")
+    for r in cfg.get("resistors", []):
+        lines.append(f"r{r['name'].lower()} {net(r['a'])} {net(r['b'])} {r['R']}")
+    for c in cfg.get("capacitors", []):
+        lines.append(f"c{c['name'].lower()} {net(c['a'])} {net(c['b'])} {c['C']}")
+    ns = " ".join(f"v({net(k)})={v}" for k, v in cfg["dc_guesses"][0].items())
+    out_txt = tempfile.mktemp(suffix=".txt")
+    lines.append(f".nodeset {ns}")
+    lines.append(f".control\nset filetype=ascii\nac dec 30 1k 1e11\n"
+                 f"wrdata {out_txt} vr(outp) vi(outp) vr(outn) vi(outn)\n.endc\n.end")
+    cir = tempfile.mktemp(suffix=".cir")
+    with open(cir, "w") as fh:
+        fh.write("\n".join(lines))
+    try:
+        subprocess.run([_RUN, "-b", cir], capture_output=True, text=True)
+        raw = np.loadtxt(out_txt)
+    finally:
+        for p in (cir, out_txt):
+            if os.path.exists(p):
+                os.unlink(p)
+    f = raw[:, 0]
+    Hng = (raw[:, 1] + 1j * raw[:, 3]) - (raw[:, 5] + 1j * raw[:, 7])
+    ng_gain = 20 * np.log10(np.abs(Hng).max())
+    ng_fu, ng_pm = _fd_ota_diff_ugbw(f, Hng)
+
+    assert our_gain == pytest.approx(ng_gain, abs=1.0)       # passband gain: <1 dB
+    assert our_pm == pytest.approx(ng_pm, abs=10.0)          # phase margin: <10 deg
+    assert our_fu == pytest.approx(ng_fu, rel=0.12)          # UGBW: <12 % (junction caps)
+    assert ng_fu > 1.0e8                                     # oracle clears the 0.1 GHz spec
+
+
 def test_fd_ota_meets_spec():
     """The optimized FreePDK45 FD-OTA testbench meets its headline specs through the
     project's ac_solve: passband gain > 40 dB and UGBW > 100 MHz (single-pole rolloff)."""

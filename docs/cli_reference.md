@@ -367,8 +367,16 @@ python -m core dataset examples/sky130_chopper.json --labels pss,pac,pnoise -n 2
 }
 ```
 
-- `extract_w`（µm）在参考 W 处解析一次 SKY130 卡片、实际 W 交给 bsim4va 缩放 → ~2 ms/eval、平滑，扫 W 不触发逐候选 ngspice。
-- **硅工艺角**用 `--corner tt|ss|ff|sf|fs`：路由进硅器件的 `corner=` 卡片（与 OTFT 的连续 PVT `pvt0/pbeta0` 分开）。
+- `extract_w`（µm）在参考 W 处解析一次卡片、实际 W 交给紧凑模型缩放 → ~2 ms/eval、平滑，扫 W 不触发逐候选 ngspice。
+  FreePDK45 上是"参考 W 表征一次网格 + 线性缩放实际 W"（<0.7% vs 逐 W 真卡）。
+- **硅工艺角**用 `--corner`：SKY130 用 `tt|ss|ff|sf|fs`,FreePDK45 用 `nom|ss|ff`;路由进硅器件的
+  `corner=` 卡片（与 OTFT 的连续 PVT `pvt0/pbeta0` 分开）。
+- **`run`/`dataset` 会自动播种 DC 并透传 `models`**：`run_analysis_suite` 的 AC/noise 分支用配置里
+  第一个 `dc_guesses`（字典形式）作为 `x0_guess`、并绑定 `model_types`/`device_kwargs`——多稳态硅
+  电路（如带 CMFB 的全差分 OTA）因此能落在物理分支上；OTFT 配置（无 `models`、回调式种子）行为不变。
+
+**FreePDK45**（`"freepdk45.nmos"` / `.pmos"`）绑定相同,但求值器是 ngspice-C（非 OSDI VA）。`temperature`
+（开尔文）可做 PVT 温度轴（按温度重表征卡）。
 
 完整闭环（`examples/sky130_5t_ota.json`，SKY130 互补 5T OTA）：
 
@@ -381,6 +389,8 @@ python -m core.optimize examples/sky130_5t_ota.json ota.pkl -n 50000 --corner ss
 
 需外置盘的 OpenVAF/ngspice/SKY130 工具链（见 `silicon-pdk-openvaf` 记忆）。工作区 surrogate 精度
 （gain/power/bw/irn/area 中位误差 ≈1%）；筛选比 solver 快约 6000×，solver 校验保证入围设计真实可行。
+两个全差分 OTA 完整设计案例见 [SKY130 FD-OTA](sky130_fd_ota_design.md)、
+[FreePDK45 FD-OTA](freepdk45_fd_ota_design.md)（FreePDK45 案例含整机对 ngspice `.ac` 的交叉核对）。
 
 ---
 

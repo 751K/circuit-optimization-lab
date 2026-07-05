@@ -227,8 +227,7 @@ class PMOS_TFT(TransistorModel):
         """Evaluate the DC branch currents given external and internal nodes.
 
         Single-sourced: the formula lives once in ``_eval_currents_impl`` (the jitted
-        kernel under Numba, the raw pure-Python function otherwise). See
-        ``docs/single_source_impl_plan.md``."""
+        kernel under Numba, the raw pure-Python function otherwise)."""
         return _eval_currents_impl(
             Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self.Vss, self.Lc, self.lambda_,
             self._contact_scale, self._channel_exponent, self._current_scale,
@@ -254,7 +253,7 @@ class PMOS_TFT(TransistorModel):
         Analytic 2x2 inverse + warm start: a seed within ~HH of the root converges
         in 1-2 iterations with no scipy overhead. Returns (Vs1, Vd1) on success, or
         None to let the robust cold fsolve path take over. Single-sourced onto
-        ``_newton_internal_impl`` (see ``docs/single_source_impl_plan.md``)."""
+        ``_newton_internal_impl``."""
         x0 = np.asarray(x0, float)
         ok, Vs1, Vd1 = _newton_internal_impl(
             Vs, Vd, Vg, x0[0], x0[1], tol, maxit, self.Vfb, self.Vss, self.Lc,
@@ -406,8 +405,7 @@ class PMOS_TFT(TransistorModel):
     def _capacitances_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
         """Capacitance equations from an already-solved internal OP.
 
-        Single-sourced onto ``_capacitances_impl`` (see
-        ``docs/single_source_impl_plan.md``)."""
+        Single-sourced onto ``_capacitances_impl``."""
         return _capacitances_impl(
             Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
             self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
@@ -429,8 +427,7 @@ class PMOS_TFT(TransistorModel):
         transient uses a step-integrated displacement-current companion based on
         the same local Cgss/Cgdd equations.
 
-        Single-sourced onto ``_capacitance_charges_impl`` (see
-        ``docs/single_source_impl_plan.md``).
+        Single-sourced onto ``_capacitance_charges_impl``.
         """
         return _capacitance_charges_impl(
             Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,

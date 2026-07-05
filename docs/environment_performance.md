@@ -7,8 +7,8 @@
 
 - `CIRCUIT_USE_NUMBA=1` 只是**允许**用 Numba，并不保证真的用上。当 Numba
   `import` 不到时，代码**静默回落**到解释版 `_impl` 内核（单源化后同一份源码既是
-  JIT 核也是纯 Python 核，见 [`single_source_impl_plan.md`](single_source_impl_plan.md)）。
-  功能照常、结果一致，但慢一个数量级。
+  JIT 核也是纯 Python 核：数值内核只存在一份 `_impl`，Numba 在时 JIT、不在时即其
+  `.py_func`/原始纯 Python 形式）。功能照常、结果一致，但慢一个数量级。
 - 本机 base 解释器 `/opt/miniconda3/bin/python` **没装 Numba**；
   conda `daily` 环境（`/opt/miniconda3/envs/daily/bin/python`，Numba 0.61 / NumPy 2.1 /
   Py 3.12）有。

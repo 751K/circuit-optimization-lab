@@ -81,7 +81,7 @@ from . import diagnostics
 # Single source of the transient drivers: these `_impl` kernels are the jitted
 # functions when Numba is installed and the raw pure-Python functions otherwise
 # (never None), so the no-Numba transient path runs the *same* kernels interpreted
-# rather than a hand-mirrored OO copy. See docs/single_source_impl_plan.md.
+# rather than a hand-mirrored OO copy.
 from .numba_kernels import (
     _transient_solve_adaptive_gear2_impl,
     _transient_solve_grid_gear2_impl,

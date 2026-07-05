@@ -6,9 +6,10 @@
 
 Local Python solvers for analog circuit design-space exploration, calibrated against
 Cadence/Spectre. The first use case is an **AT4000TG PMOS thin-film transistor
-ECG AFE** (analog front-end amplifier with chopper). A second, industry-standard
-process — **silicon SKY130** (via an OpenVAF-compiled BSIM4) — plugs into the same
-solver engine and design-optimization pipeline.
+ECG AFE** (analog front-end amplifier with chopper). Two industry-standard silicon
+CMOS processes plug into the same solver engine and design-optimization pipeline:
+**SKY130** (130 nm, via an OpenVAF-compiled BSIM4 through an OSDI host) and
+**FreePDK45** (45 nm, via ngspice-C as the exact device evaluator).
 
 What you can do with this:
 - **DC/AC/Noise/Transient** — standard circuit analysis without a simulator license.
@@ -21,10 +22,42 @@ What you can do with this:
 - **ML-surrogate design optimization** — build a labeled dataset from the solvers,
   train a fast surrogate, screen a large candidate pool, and verify the shortlist
   on the calibrated solver (thousands of times faster than a brute-force sweep).
-- **Silicon PDK (SKY130)** — a real 130 nm CMOS process (NMOS + PMOS), running
-  through the exact same DC/AC/noise/design-optimization pipeline as the OTFT.
+- **Silicon PDKs (SKY130 + FreePDK45)** — real 130 nm and 45 nm CMOS processes
+  (NMOS + PMOS), running through the exact same DC/AC/noise/design-optimization
+  pipeline as the OTFT. Two worked, end-to-end fully-differential OTA design cases
+  ship as reports: [SKY130 FD-OTA](sky130_fd_ota_design.md) and
+  [FreePDK45 FD-OTA](freepdk45_fd_ota_design.md).
 
 For solver internals, see [Core Solver Overview](core_overview.md).
+
+---
+
+## Positioning
+
+Two shifts motivate where this project is heading — it is meant to be foundational
+infrastructure for both, not just an OTFT AFE toolkit.
+
+**1. Open infrastructure for ML-accelerated simulation.** Using ML to accelerate
+chip-design simulation is a fast-growing direction, yet the field still lacks open,
+foundational building blocks: there is no standard, open way to *generate
+large-scale, physics-faithful simulation data*, no reusable *data-generator
+framework*, and no *ML-method framework* purpose-built for circuits. This project
+provides the whole chain as one open, reproducible pipeline — a Cadence-calibrated
+solver stack as the physics-faithful oracle → a provenance-tracked labeled-dataset
+generator ([`core/dataset.py`](../core/dataset.py)) → an ML surrogate + screen-and-verify
+optimizer ([`core/surrogate.py`](../core/surrogate.py), `surrogate_torch.py`,
+`optimize.py`). Circuit in, data out, surrogate trained, design optimized, with no
+commercial simulator in the loop.
+
+**2. A local, license-free toolchain an LLM/agent can drive.** LLM-driven circuit
+design increasingly loops through a simulator, but calling a commercial tool
+(licensed, remote, slow) across many dialogue turns is expensive and cannot run
+autonomously on the local machine. This project is a self-contained toolchain an
+LLM agent can call to **obtain simulation results, analyze and summarize them, and
+optimize a design** — the entire DC/AC/Noise/PSS/… loop, on-device, with no external
+round-trip and no license. The JSON circuit format, the `python -m core` CLI, and the
+structured result dictionaries are deliberately shaped to be machine-callable and
+machine-readable, so an agent drives the whole design loop from the local shell.
 
 ---
 
@@ -45,6 +78,25 @@ The first command above runs AC, noise, PSS, PAC, and PNoise on a passive RC
 lowpass and prints a summary. No Python scripting needed. If it prints numbers,
 everything works. From there, swap in any circuit JSON or use
 `-a ac,noise` to pick specific analyses.
+
+### Dependencies
+
+**Python (pip).** The OTFT / analysis core needs only `requirements.txt` (numpy,
+scipy; Numba is optional but recommended — the solver hot paths are JIT kernels).
+`requirements-ml.txt` adds scikit-learn / torch for the ML surrogate layer;
+`requirements-demo.txt` adds Flask for the web demo. Everything so far runs with no
+external simulator and no license.
+
+**External open-source tools (only for the silicon PDKs — not pip-installable).**
+The AT4000TG OTFT process and all analyses work fully without these; only
+`sky130.*` / `freepdk45.*` model types need them, and they raise a clear error at
+first use if absent.
+
+| Tool | Role in this project | Point at it with |
+|------|----------------------|------------------|
+| **[OpenVAF-Reloaded](https://github.com/751K/OpenVAF-Reloaded)** — a maintained fork of [OpenVAF](https://github.com/pascalkuthe/OpenVAF) | Compiles standard Verilog-A compact models (BSIM4, …) to a native `.osdi` shared library; the **SKY130** device path loads it through the OSDI host (`core/osdi_host.py`) | `OPENVAF_ROOT` |
+| **[ngspice](https://ngspice.sourceforge.io/)** | Its built-in C-BSIM4 is the exact device evaluator / oracle for **FreePDK45** (`core/ngspice_char.py`), and resolves SKY130's binned parameter cards | `NGSPICE_BIN` |
+| PDK card files (SKY130 via `volare`/`ciel`; FreePDK45 cards) | The process parameters themselves | `PDK_ROOT` |
 
 ### CLI Reference
 
@@ -369,7 +421,7 @@ collapsed designs that would otherwise dominate the fit). See
 option reference, and `docs/futureplan.md` §7 for the surrogate roadmap and honest
 accuracy numbers.
 
-### 7. Silicon PDK (SKY130)
+### 7. Silicon PDKs (SKY130 + FreePDK45)
 
 A circuit's `models` field binds specific devices to a non-default PDK — e.g. real
 silicon SKY130 transistors (NMOS + PMOS, via an OpenVAF-compiled BSIM4 running
@@ -402,6 +454,17 @@ silicon amplifier, this example uses an active current-mirror load (for the DC
 operating point / gain) plus a capacitive load (for bandwidth) — a resistor-loaded
 common-source stage isn't representative of on-chip design and rails easily under a
 size/bias sweep, which is why no such example is included.
+
+**FreePDK45 (45 nm, 1.0 V)** binds the same way (`"freepdk45.nmos"` / `.pmos`) but
+uses a *different evaluator*: its BSIM4 cards are tuned for ngspice's built-in
+C-BSIM4, so instead of the OSDI VA the oracle is **ngspice-C itself** — each device
+is characterised once into a cached `(Vsb,Vds,Vgs)` grid and interpolated (exact
+ngspice-C at the nodes, µs/eval). It supports `extract_w` (fast W-sweeps) and
+`temperature` (PVT) just like SKY130, plus exact ngspice `.noise`. The worked
+[FreePDK45 FD-OTA case](freepdk45_fd_ota_design.md) runs the full flow — architecture
+→ 600-sample GBT surrogate → screen/verify/polish → whole-OTA cross-check against
+ngspice's own `.ac` → 27-corner PVT — landing a fully-differential telescopic OTA at
+**58.9 dB / 119.9 MHz / 17 µW** (all metrics vs the ngspice oracle).
 
 ---
 
@@ -520,6 +583,9 @@ you explicitly need the HB comparison path.
 | `examples/vcvs_amplifier.json` | VCVS amplifier — linear gain 100×, demoing controlled sources |
 | `examples/sc_lpf.json` | Switched-capacitor low-pass filter (2-phase, single-ended LPTV) |
 | `examples/sky130_5t_ota.json` | Silicon SKY130 complementary 5T OTA — `models` block + full dataset/surrogate/optimize design loop |
+| `examples/sky130_fd_ota.json` | Silicon SKY130 fully-differential telescopic OTA + CT CMFB — the [SKY130 FD-OTA design case](sky130_fd_ota_design.md) |
+| `examples/freepdk45_5t_ota.json` | FreePDK45 (45 nm) 5T OTA — ngspice-C evaluator, single-ended output |
+| `examples/freepdk45_fd_ota.json` | FreePDK45 fully-differential telescopic OTA + CT CMFB — the [FreePDK45 FD-OTA design case](freepdk45_fd_ota_design.md) |
 | `examples/afe_testbench.py` | Full testbench: dry-electrode front-end (R∥C network) → AFE core → AC + noise + transient |
 | `examples/mc_mismatch.py` | Monte Carlo mismatch driver: corner table + 3-corner MC figure |
 | `examples/find_max_gain.py` | Max gain scan for PMOS inverter amplifier |
@@ -590,12 +656,13 @@ frequency solves are the dominant cost: about 24–25 s for 61 points and
 reuse or batched linear solves.
 
 **A `models`/silicon device raises a toolchain error.**
-The SKY130 PDK needs an external toolchain (OpenVAF + ngspice + the SKY130 PDK
-files) that isn't a pip dependency — install it and point `PDK_ROOT`/
-`OPENVAF_ROOT`/`NGSPICE_BIN` at it (see `docs/futureplan.md` §9). Without it, any
-circuit using a `sky130.*` model type raises a clear error at first use; every
-other PDK (the default AT4000TG OTFT) is unaffected. Tests gated on the toolchain
-(`tests/test_sky130*.py`, `tests/test_osdi_host.py`) skip cleanly when it's absent.
+The silicon PDKs need an external toolchain that isn't a pip dependency: SKY130 wants
+OpenVAF + ngspice + the SKY130 PDK; FreePDK45 wants ngspice + the FreePDK45 cards.
+Install it and point `PDK_ROOT`/`OPENVAF_ROOT`/`NGSPICE_BIN` at it (see
+`docs/futureplan.md` §9). Without it, any circuit using a `sky130.*` / `freepdk45.*`
+model type raises a clear error at first use; every other PDK (the default AT4000TG
+OTFT) is unaffected. Tests gated on the toolchain (`tests/test_sky130*.py`,
+`tests/test_freepdk45.py`, `tests/test_osdi_host.py`) skip cleanly when it's absent.
 
 ---
 
@@ -606,6 +673,8 @@ other PDK (the default AT4000TG OTFT) is unaffected. Tests gated on the toolchai
 | [Core Solver Overview](core_overview.md) | Understand how each solver works, import dependencies, and calibration data |
 | [JSON Circuit Format](json_circuit_format.md) | Full field-by-field reference for writing your own circuit JSON |
 | [CLI Reference](cli_reference.md) | Every subcommand and flag, including `dataset`/`surrogate`/`optimize` and the `models`/silicon-corner options |
+| [SKY130 FD-OTA design case](sky130_fd_ota_design.md) | End-to-end 130 nm fully-differential OTA: architecture → surrogate → optimize → PVT |
+| [FreePDK45 FD-OTA design case](freepdk45_fd_ota_design.md) | End-to-end 45 nm/1.0 V FD-OTA, incl. the whole-OTA ngspice `.ac` cross-check |
 | [Future Plan](futureplan.md) | What's done, what's next, and the execution roadmap |
 | `tests/` directory | Working examples of every API call with expected outputs |
 | `benchmarks/` directory | Performance baselines and how the hardware-accelerated paths compare |

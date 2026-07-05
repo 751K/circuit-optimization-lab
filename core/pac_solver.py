@@ -550,7 +550,7 @@ def _assemble_pac_linearization_python(
 def _pac_hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
     """Dense HB conversion blocks (same kernel as pnoise). Single-sourced onto
     ``_pnoise_hb_blocks_impl`` (jitted for large systems, interpreted `.py_func`
-    below the JIT-worthwhile size). See ``docs/single_source_impl_plan.md``."""
+    below the JIT-worthwhile size)."""
     use_numba = (
         pac_hb_blocks_numba is not None and
         (2 * int(K) + 1) * int(n) >= 16

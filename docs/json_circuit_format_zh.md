@@ -171,14 +171,27 @@ examples/periodic_rc.json
 ```
 
 - `type` ——模型注册键，格式 `"<pdk>.<极性>"`（如 `"sky130.nmos"`、`"sky130.pmos"`、
-  `"at4000tg.pmos"`）。见 `core.device_model.register_pdk`。
+  `"freepdk45.nmos"`、`"at4000tg.pmos"`）。见 `core.device_model.register_pdk`。
 - 其余键透传给器件构造函数。对 SKY130 器件：`vb`（衬底偏置，伏特；默认 0）、
   `corner`（SKY130 工艺角——`tt`/`ss`/`ff`/`sf`/`fs`；默认 `tt`）、`extract_w`
   （µm——在这个参考宽度处解析一次 SKY130 参数卡，让紧凑模型缩放实际 `W`，避免设计
   扫描时逐候选重新提取）、`temperature`（开尔文；默认 300.15）、`NF`（整数）。
+- **FreePDK45**（`"freepdk45.nmos"` / `"freepdk45.pmos"`）是第二个硅 PDK,用**不同的求值器**。
+  它的 BSIM4 卡声明 `version = 4.0`,而我们的 OpenVAF BSIM4.8 VA 无版本开关、在 45nm 卡上算出
+  ~30% 不同 I-V（与版本无关）,故 FreePDK45 走不了 SKY130 的 OSDI 路径。它的 oracle 是
+  **ngspice-C 本身**:每个器件按 `(model, W, L, corner, temp)` 用批量 ngspice `.dc` 扫表征一次成
+  缓存的 Id/gm/gds/Cgs/Cgd 网格（`core.ngspice_char` / `core.ngspice_device`）再插值——每个值都是
+  节点处 exact ngspice-C。噪声同样精确 ngspice-C（逐偏置 `.noise` → S_thermal + S_flicker@1Hz,
+  log 空间插值,5T OTA 上验证在 ngspice `.noise` 的 ~5% 内）。器件键:`vb`（NMOS=0,PMOS=VDD=1.0）、
+  `corner`（`nom`/`ss`/`ff`,独立卡文件;默认 `nom`）、`extract_w`（µm——参考宽度表征一次、线性缩放
+  实际 `W`,<0.7% vs 逐 W 真卡,使 dataset/优化器的 W 扫描保持纯插值）、`temperature`（开尔文,按该
+  温度重表征卡做 PVT）、`NF`。DC + AC + 噪声（此路径无瞬态/PSS）;网格 AC 模型不含漏/源结电容
+  （Cdb/Csb）,故整机 `ac_solve` 的 UGBW 比 ngspice 自己的 `.ac` 偏高 ~8%——头条数字取 ngspice 值。
+  卡在 `PDK_ROOT/freepdk45/` 下;见 `examples/freepdk45_5t_ota.json`（简单）与
+  `examples/freepdk45_fd_ota.json`（全差分 OTA 设计案例,[docs/freepdk45_fd_ota_design.md](freepdk45_fd_ota_design.md)）。
 - 一个电路里部分器件是 OTFT、部分是硅是合法的——例如互补硅 OTA 独立绑定 NMOS/PMOS
   器件。见 `examples/sky130_5t_ota.json`。
-- SKY130 PDK 需要外部工具链（OpenVAF + ngspice + SKY130 PDK 文件）；未安装时求解器
+- SKY130 / FreePDK45 PDK 需要外部工具链（OpenVAF + ngspice + PDK 文件）；未安装时求解器
   调用会给出清晰报错。详见 [核心求解器概览](core_overview_zh.md) 的"硅 PDK / OSDI 层"一节。
 
 ### `bias`

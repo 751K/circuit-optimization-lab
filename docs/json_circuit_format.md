@@ -185,9 +185,15 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
   likewise exact ngspice-C (a `.noise` characterisation per bias → S_thermal +
   S_flicker@1Hz, log-space interpolated; validated within ~5 % of ngspice `.noise`
   on the 5T OTA). Device keys: `vb` (0 for NMOS, `VDD`=1.0 for PMOS), `corner`
-  (`nom`/`ss`/`ff`, shipped as separate card files; default `nom`), `NF`. DC + AC +
-  noise (no transient/PSS on this path). Cards live under `PDK_ROOT/freepdk45/`; see
-  `examples/freepdk45_5t_ota.json`.
+  (`nom`/`ss`/`ff`, shipped as separate card files; default `nom`), `extract_w`
+  (µm — characterise once at this reference width and linearly scale the actual `W`,
+  <0.7 % vs the true per-W card, so dataset/optimizer W-sweeps stay pure interpolation),
+  `temperature` (kelvin; re-characterises the card at that °C for PVT), `NF`. DC + AC +
+  noise (no transient/PSS on this path); the grid AC model omits drain/source junction
+  caps (Cdb/Csb) so a whole-OTA `ac_solve` reads ~8 % high on UGBW vs ngspice's own
+  `.ac` — quote the ngspice value. Cards live under `PDK_ROOT/freepdk45/`; see
+  `examples/freepdk45_5t_ota.json` (simple) and `examples/freepdk45_fd_ota.json`
+  (the fully differential OTA design case, [docs/freepdk45_fd_ota_design.md](freepdk45_fd_ota_design.md)).
 - A mixed circuit (some devices OTFT, some silicon) is valid — e.g. a complementary
   silicon OTA binds NMOS/PMOS devices independently. See `examples/sky130_5t_ota.json`.
 - The SKY130 / FreePDK45 PDKs need an external toolchain (OpenVAF + ngspice + the PDK

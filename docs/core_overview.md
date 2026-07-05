@@ -25,9 +25,9 @@ The implementation is intentionally small and self-contained. It currently has
 34 Python files under `core/`, including `__init__.py`, the CLI entry
 `__main__.py`, calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
 modules, the main solver stack, an ML-surrogate layer (dataset builder, surrogate
-training, screen-and-verify optimizer), and a second PDK — silicon SKY130, via an
-OpenVAF/OSDI bridge — plugged into the same `TransistorModel` interface as the
-original AT4000TG OTFT model.
+training, screen-and-verify optimizer), and two silicon PDKs — SKY130 (via an
+OpenVAF/OSDI bridge) and FreePDK45 (via an ngspice-C evaluator) — plugged into the
+same `TransistorModel` interface as the original AT4000TG OTFT model.
 
 ## File Structure
 
@@ -65,6 +65,9 @@ core/
   osdi_device.py       TransistorModel adapter over an OSDI-hosted compact model (bridges any OSDI PDK into the solver stack).
   osdi_transient.py    Backward-Euler transient for OSDI devices (outside the numba loop).
   sky130_model.py      SKY130 nfet/pfet PDK: BSIM4 param-card extraction (via ngspice) + PDK registration.
+  ngspice_char.py      FreePDK45 evaluator: batch ngspice .dc/.noise characterization → cached (Vsb,Vds,Vgs) grid.
+  ngspice_device.py    TransistorModel over a cached ngspice grid (interpolated Id/gm/gds/caps/noise; extract_w + temperature).
+  freepdk45_model.py   FreePDK45 nmos/pmos PDK: corner-card binding + PDK registration (ngspice-C evaluator).
 ```
 
 ## Import Relationship
@@ -102,6 +105,9 @@ osdi_host.py         <- no internal dependency; ctypes + numpy only
 osdi_device.py       <- device_model, osdi_host (lazy import)
 osdi_transient.py    <- no internal dependency (calls the OsdiDevice interface generically)
 sky130_model.py      <- device_model, osdi_device
+ngspice_char.py      <- no internal dependency; ngspice subprocess + numpy only
+ngspice_device.py    <- device_model, ngspice_char; optional scipy at runtime
+freepdk45_model.py   <- device_model, ngspice_device
 ```
 
 ## Main Components
@@ -623,14 +629,30 @@ OpenVAF BSIM4.8 VA has no version switch and computes ~30 % different I-V on the
 45 nm cards (version-independently — proven by mutating the card version), so the
 OSDI host cannot reproduce FreePDK45's intended behaviour. Its oracle is therefore
 **ngspice-C itself**: `ngspice_char.characterize()` runs one batch `.dc` sweep per
-`(model, W, L, corner)` (~0.03 s / 1000 points) into a cached Id/gm/gds/Cgs/Cgd grid,
+`(model, W, L, corner, temp)` (~0.03 s / 1000 points) into a cached Id/gm/gds/Cgs/Cgd grid,
 and `NgspiceDevice` interpolates it (µs/eval, exact ngspice-C at nodes). Validated
 model==oracle: single-device op bit-exact vs ngspice `.op`, a 5T OTA through
 `ac_solve` within 0.05 dB / 0.3 % of ngspice's own `.ac`, and output noise within
 ~5 % of ngspice `.noise`. Noise is also exact ngspice-C — `characterize_noise` runs a
 `.noise` per coarse-grid bias (CCVS transimpedance → drain-noise PSD, fit S_id=A+B/f
 → S_thermal + S_flicker@1Hz, log-space interpolated). DC+AC+noise; no transient/PSS on
-this path.
+this path. The grid AC model carries Cgs/Cgd but **not** the drain/source junction caps
+Cdb/Csb, so a whole-OTA `ac_solve` reads ~8 % high on UGBW vs ngspice's own `.ac` (gain/PM
+match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see the FD-OTA case).
+
+- **`ngspice_char.py`** — the batch characterizer. `characterize()` sweeps `.dc vg vd` per
+  Vsb slice (op-vars `@m[id/gm/gds/cgs/cgd]`); `characterize_noise()` runs one `.noise` per
+  coarse bias. Both take a `temp_c` (`.options temp`, keyed into the cache — 27 °C stays
+  tag-free so nominal caches persist) and cache to `data/pdk/freepdk45/*.npz`, so reuse needs
+  no ngspice.
+- **`ngspice_device.py`** — `NgspiceDevice(TransistorModel)` interpolates the grid
+  (`scipy.RegularGridInterpolator`, **linear** — cubic returns 0 on the ~1e-17 cap arrays).
+  `extract_w`: characterize once at a reference W and linearly scale the actual W (BSIM4 is
+  ~linear in W, <0.7 % vs the true per-W card) so dataset/optimizer W-sweeps are pure
+  interpolation. `temperature` (Kelvin kwarg) → `temp_c` re-characterizes the card physically.
+  Cgs/Cgd from the ngspice C-matrix (`Cgs=-cgs`, `Cgd=-cgd`); transient hooks `NotImplementedError`.
+- **`freepdk45_model.py`** — `Fp45Nfet`/`Fp45Pfet(NgspiceDevice)` + `register_pdk("freepdk45",
+  ...)`. `corner` (nom/ss/ff) selects the card directory `PDK_ROOT/freepdk45/models_<corner>/`.
 
 - **`osdi_host.py`** — a ctypes host for the **OSDI 0.4 ABI**, the simulator-independent
   C interface [OpenVAF](https://github.com/pascalkuthe/OpenVAF) compiles Verilog-A

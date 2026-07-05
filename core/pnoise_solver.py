@@ -169,7 +169,7 @@ def _try_lti_noise_fast_path(sizes, bias, freqs, *, pss_result, nf, corner,
 def _hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
     """Dense HB conversion blocks. Single-sourced onto ``_pnoise_hb_blocks_impl``
     (jitted for large systems, interpreted `.py_func` below the JIT-worthwhile
-    size). See ``docs/single_source_impl_plan.md``."""
+    size)."""
     use_numba = (
         pnoise_hb_blocks_numba is not None and
         (2 * int(K) + 1) * int(n) >= 16
