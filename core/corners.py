@@ -65,16 +65,36 @@ def latch_screen(sizes, bias, nf=None, base="slow", topo=AFE_TOPO, k=3.0,
     """Worst-case differential-mismatch latch screen. Pushes each symmetric pair
     ±kσ apart over ALL sign patterns and returns the largest output imbalance
     |out+ - out-|. Small => robust against the regenerative latch; large =>
-    latch-prone. Deterministic (2^(P-1) solves) — a cheap, reliable screen to use
-    inside a search instead of a full per-candidate mismatch MC."""
+    latch-prone. Deterministic — a cheap, reliable screen to use inside a search
+    instead of a full per-candidate mismatch MC.
+
+    Each sign pattern is solved twice more from a *split seed* (the neutral op
+    with the two outputs pulled apart by half a rail): if a latched solution
+    exists, the seeded Newton lands in it regardless of which basin the neutral
+    solve happens to hit, so detection does not depend on floating-point luck
+    (x86 vs arm64 rounding was observed to flip the neutral solve's basin);
+    a monostable design returns to the symmetric op from any seed."""
     worst = 0.0
+    split = 0.5 * max((abs(float(v)) for v in bias.values()), default=1.0)
+    outs = topo.outputs
     for combo in itertools.product((1, -1), repeat=len(pairs) - 1):
-        m = metrics(sizes, bias, nf=nf,
-                    corner=latch_kick_corner(base, pairs, k, (1,) + combo),
+        kick = latch_kick_corner(base, pairs, k, (1,) + combo)
+        m = metrics(sizes, bias, nf=nf, corner=kick,
                     topo=topo, x0_guess=x0_guess, freqs=freqs,
                     include_noise=False)
-        if m is not None:
-            worst = max(worst, m["latch_dV"])
+        if m is None:
+            continue
+        worst = max(worst, m["latch_dV"])
+        if len(outs) == 2:
+            op = m["dc_op"]
+            for sgn in (1.0, -1.0):
+                seeded = {**op, outs[0]: op[outs[0]] + sgn * split,
+                          outs[1]: op[outs[1]] - sgn * split}
+                m2 = metrics(sizes, bias, nf=nf, corner=kick,
+                             topo=topo, x0_guess=seeded, freqs=freqs,
+                             include_noise=False)
+                if m2 is not None:
+                    worst = max(worst, m2["latch_dV"])
     return worst
 
 
