@@ -41,7 +41,8 @@ import numpy as np
 
 from . import diagnostics
 from .circuit_loader import circuit_from_dict, models_from_config
-from .device_factory import CORNERS, SKY130_CORNERS, apply_silicon_corner
+from .device_factory import (CORNERS, SKY130_CORNERS, CircuitBinding,
+                             apply_silicon_corner)
 from .device_model import get_default_model_type
 from .explore import (METRICS, apply_variables,
                       evaluate, parse_explore, sample)
@@ -241,35 +242,33 @@ def _pnoise_features(res):
     }
 
 
-def _candidate_spec(base_spec, sizes, bias, nf, model_types, device_kwargs):
+def _candidate_spec(base_spec, binding, sizes, bias):
     """The base spec re-pointed at one candidate's sizes/bias/models.
 
-    ``model_types``/``device_kwargs`` override the spec's own bindings when given —
-    they carry the dataset-level silicon corner baked by ``apply_silicon_corner``,
-    which the config's ``models`` block does not know about."""
+    Models/topo/nf ride on ``binding`` (which carries the dataset-level silicon corner
+    baked by ``at_corner``); this only re-points sizes/bias so the periodic context and
+    the suite dispatcher see the candidate's design. ``spec.binding()`` inside the
+    dispatcher then reconstructs the same per-device map from ``binding``'s fields."""
     return dataclasses.replace(
-        base_spec, sizes=sizes, bias=bias, nf=nf,
-        model_types=model_types or base_spec.model_types,
-        device_kwargs=device_kwargs or base_spec.device_kwargs)
+        base_spec, sizes=sizes, bias=bias, nf=binding.nf,
+        model_types=binding.model_types, device_kwargs=binding.device_kwargs)
 
 
-def _run_transient_features(base_spec, periodic, sizes, bias, nf, corner_shift,
-                            model_types=None, device_kwargs=None):
+def _run_transient_features(base_spec, binding, periodic, sizes, bias, corner_shift):
     """Run the config's *validated* periodic transient for one candidate → features.
 
     The stimulus waveforms/grid come straight from :func:`build_periodic_context`
     (the same path ``run -a transient`` uses), so the transient is never fabricated
-    — only the device sizes/bias vary."""
+    — only the device sizes/bias vary. ``binding`` carries topo / nf / the per-device
+    model map (with any silicon corner already baked in)."""
     from .analysis_dispatch import build_periodic_context   # lazy: avoids import cost
-    spec = _candidate_spec(base_spec, sizes, bias, nf, model_types, device_kwargs)
+    spec = _candidate_spec(base_spec, binding, sizes, bias)
     ctx = build_periodic_context(spec, periodic)           # waveforms may read bias
     corner_kw = {} if corner_shift is None else {"corner": corner_shift}
-    tr = transient(sizes, bias, ctx["tgrid"], topo=base_spec.topology, nf=nf,
+    tr = transient(sizes, bias, ctx["tgrid"], binding=binding,
                    inputs=ctx["inputs"], node_inputs=ctx["node_inputs"],
                    current_inputs=ctx["current_inputs"],
-                   signed_devices=ctx["signed_devices"],
-                   model_types=spec.model_types, device_kwargs=spec.device_kwargs,
-                   **corner_kw)
+                   signed_devices=ctx["signed_devices"], **corner_kw)
     return _transient_features(tr)
 
 
@@ -287,16 +286,17 @@ _SUITE_FEATURES = {"pss": _pss_features, "pac": _pac_features,
                    "pnoise": _pnoise_features}
 
 
-def _run_suite_features(base_spec, groups, sizes, bias, nf, corner_shift,
-                        model_types=None, device_kwargs=None):
+def _run_suite_features(base_spec, binding, groups, sizes, bias, corner_shift):
     """Run the validated PSS/PAC/PNoise chain once for one candidate → features.
 
     The dataset's per-candidate corner (``corner_shift``) overwrites any
     per-analysis corner from the config so every label in a row describes the same
     process point as the AC/noise labels. The PSS config is always threaded in
-    (even when the ``pss`` group itself is off) because PAC/PNoise hang off it."""
+    (even when the ``pss`` group itself is off) because PAC/PNoise hang off it.
+    ``binding`` carries topo / nf / the per-device model map; the candidate spec below
+    re-points sizes/bias/models so the dispatcher's ``spec.binding()`` reconstructs it."""
     from .analysis_dispatch import run_analysis_suite       # lazy: avoids import cost
-    spec = _candidate_spec(base_spec, sizes, bias, nf, model_types, device_kwargs)
+    spec = _candidate_spec(base_spec, binding, sizes, bias)
     base_analyses = spec.analyses or {}
     analyses = {}
     for name in _SUITE_GROUPS:
@@ -442,8 +442,15 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
     ``model_types`` / ``device_kwargs`` bind non-default per-device models (silicon);
     a SKY130 ``corner`` is routed onto those devices rather than an OTFT PVT shift."""
     # A SKY130 corner is baked into each silicon device's card (a device kwarg); an
-    # OTFT corner name/shift-map stays on the solver's continuous PVT path.
+    # OTFT corner name/shift-map stays on the solver's continuous PVT path. One binding
+    # then carries topo + the (silicon-baked) per-device model map to every candidate
+    # runner, so no label group can drop the models and silently revert to OTFT
+    # (bug #95). ``at_corner`` performs the same silicon-corner baking as the manifest
+    # computation below; ``base_binding.corner`` is unused here — the dataset threads
+    # its per-candidate PVT ``eff_shift`` to the solvers explicitly.
     device_kwargs, otft_corner = apply_silicon_corner(model_types, device_kwargs, corner)
+    base_binding = CircuitBinding(topo=topo, model_types=model_types,
+                                  device_kwargs=device_kwargs, nf=nf)
     si_corner = corner if (isinstance(corner, str) and corner in SKY130_CORNERS) else None
     shift, corner_name = _resolve_corner(otft_corner)
     if si_corner:
@@ -497,24 +504,27 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
         else:
             spec, cand_topo = base_spec, topo
             periodic = config_dict.get("periodic") if config_dict else None
+        # This candidate's binding: the dataset binding re-pointed at its topo/nf.
+        # model_types / device_kwargs (with any silicon corner baked) ride along, so
+        # every label group runs against the same per-device models — no group can
+        # drop them (bug #95).
+        cand_binding = dataclasses.replace(base_binding, topo=cand_topo, nf=cand_nf)
         x0 = seed_fn(sizes, bias) if seed_fn is not None else None
         metrics = evaluate(cand_topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
-                           x0_guess=x0, corner=eff_shift, require_noise=True,
-                           model_types=model_types, device_kwargs=device_kwargs)
+                           binding=cand_binding, x0_guess=x0, corner=eff_shift,
+                           require_noise=True)
         extra = {}
         if periodic_groups and metrics is not None and spec is not None:  # DC converged
             for g in direct_groups:                        # transient
                 try:
-                    extra.update(_PERIODIC_RUNNERS[g](spec, periodic, sizes, bias,
-                                                      cand_nf, eff_shift,
-                                                      model_types, device_kwargs))
+                    extra.update(_PERIODIC_RUNNERS[g](spec, cand_binding, periodic,
+                                                      sizes, bias, eff_shift))
                 except Exception as exc:
                     diagnostics.note(f"dataset.{g}_eval_fail", exc)
             if suite_groups:                               # pss/pac/pnoise, one chain
                 try:
-                    extra.update(_run_suite_features(spec, suite_groups, sizes, bias,
-                                                     cand_nf, eff_shift,
-                                                     model_types, device_kwargs))
+                    extra.update(_run_suite_features(spec, cand_binding, suite_groups,
+                                                     sizes, bias, eff_shift))
                 except Exception as exc:
                     diagnostics.note(f"dataset.{'+'.join(suite_groups)}_eval_fail", exc)
         rows.append(_row(i, var_values, metrics, extra or None, labels))

@@ -5,7 +5,7 @@ Includes ALL transistors + load capacitors.
 """
 import numpy as np
 from .device_factory import (dev_corner, dev_nf, is_per_device_corner,
-                             build_devices, get_ss_params)
+                             build_devices, get_ss_params, resolve_binding)
 from .dc_solver import (DC_FALLBACK_TOL, bounded_least_squares_dc,
                         dc_residual_ok, is_afe_topology,
                         is_pairwise_symmetric_afe, symmetric_continuation,
@@ -45,8 +45,8 @@ def bw_from_gain(freqs, gains):
     return bw
 
 
-def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=None,
-             model_types=None, device_kwargs=None):
+def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=None, nf=None,
+             model_types=None, device_kwargs=None, *, binding=None):
     """
     Full small-signal AC analysis — topology supplied by `topo` (default AFE_TOPO).
 
@@ -55,10 +55,18 @@ def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO, nf=N
     freqs: array of frequencies (Hz)
     corner: process shifts — flat dict (global) or per-device map (mismatch); see dev_corner.
     x0_guess: optional DC seed, either a {node: V} dict (e.g. a prior dc_op) or a vector.
+    binding: optional :class:`CircuitBinding` supplying defaults for
+        topo/nf/corner/model_types/device_kwargs/x0_guess; explicit non-None kwargs
+        override it (binding=None reproduces the legacy path exactly).
 
     DC KCL, per-device bias mapping, and the AC terminal list are all DERIVED from
     `topo` (see topology.py) — no hand-written per-device wiring here.
     """
+    topo, nf, corner, model_types, device_kwargs, x0_guess = resolve_binding(
+        binding, topo=topo, nf=nf, corner=corner, model_types=model_types,
+        device_kwargs=device_kwargs, x0_guess=x0_guess)
+    if topo is None:
+        topo = AFE_TOPO
     from scipy.optimize import fsolve
     VCM = topo.default_guess_value(bias)
     gmin = 1e-12

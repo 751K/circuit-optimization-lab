@@ -159,6 +159,18 @@ leaf 器件构建层：只依赖 `device_model`（不 import 任何 solver 或 w
   corner)`** — 硅离散 corner 路由，把一个 corner 名（SKY130 的 `tt`/`ss`/`ff`/`sf`/`fs`，加上
   FreePDK45 的 `nom`）stamp 到解析好的硅器件卡上；从 `explore.py` 迁入此处；`explore.py` 和
   `dataset.py` 现在从这里 import 它，而不是自己定义。
+- **`CircuitBinding`** — frozen dataclass，把每个求解器过去逐个手工穿透的六个逐电路输入打包成一体：
+  `topo` / `model_types` / `device_kwargs` / `nf` / `corner` / `dc_seed`。它的存在是为了钉死一类 bug：
+  向求解器传参时漏掉 `model_types`/`device_kwargs`，电路会静默退回默认 OTFT PDK。现在调用方传一次
+  `binding=` 即可，不再重新铺设这一整簇参数。用 `CircuitSpec.binding()` 构造（见 `circuit_loader.py`）。
+  `binding.build(sizes)` 为这些 sizes 生成 `{name: TransistorModel}`；`binding.at_corner(corner)` 返回
+  一个路由到该 corner 的 binding——硅 corner 经 `apply_silicon_corner` 烘焙进 `device_kwargs`（并清空
+  solver corner），OTFT corner 留在 `binding.corner` 上，`None` 原样返回 `self`。**解析优先级**（经
+  `resolve_binding`）：显式传给求解器的非 `None` keyword 永远优先；否则由 binding 字段提供默认
+  （`binding.dc_seed` 兜底 `x0_guess`）；`binding=None` 时与旧 kwargs 路径逐字节一致。六个求解器入口
+  （`ac_solve`/`noise_analysis`/`transient`/`pss_solve`/`pac_solve`/`pnoise_solve`）都接受 `binding=`，
+  内部工作流——`analysis_dispatch.run_analysis_suite`、`explore`、`dataset`、`optimize`——统一穿一个
+  binding，而不是逐分支重新转发 model 簇。
 
 ### `topology.py`
 
@@ -195,7 +207,7 @@ leaf 器件构建层：只依赖 `device_model`（不 import 任何 solver 或 w
 - `bias`
 - `nf`
 
-这使得可以通过 JSON 文件（如 `examples/single_stage.json`）添加新电路，而无需修改求解器源码。
+这使得可以通过 JSON 文件（如 `examples/single_stage.json`）添加新电路，而无需修改求解器源码。`CircuitSpec.binding()` 把 spec 的 `topology`、`model_types`、`device_kwargs`、`nf` 以及默认 DC 初值（其第一个 dict 型 `dc_guess`）打包成一个 `CircuitBinding`（见 `device_factory.py`），这样工作流可以向求解器传 `binding=`，而不必逐个穿透这一整簇参数。
 
 ### `numba_kernels.py`
 

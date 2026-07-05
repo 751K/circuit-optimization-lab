@@ -36,13 +36,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import json
 import os
 
 import numpy as np
 
 from .ac_solver import ac_solve
-from .device_factory import apply_silicon_corner, build_devices
+from .device_factory import CircuitBinding
 from .noise_solver import band_rms, noise_analysis
 from .circuit_loader import circuit_from_dict, models_from_config
 from . import diagnostics
@@ -227,13 +228,12 @@ def _supply_power_uW(topo, bias, ss):
     return top_v * i_supply * 1e6
 
 
-def _area(topo, sizes, nf, model_types=None, device_kwargs=None):
-    """Sum of per-device ``g_area``. Each device is built with its own model type so a
-    mixed-process circuit sums each PDK's real area metric (OTFT ``g_area`` is a padded
-    layout box, not W·L); an all-default circuit is byte-identical to the old path."""
-    devices = build_devices(sizes, nf=nf, corner=None, topo=topo,
-                            model_types=model_types, device_kwargs=device_kwargs)
-    return float(sum(dev.g_area for dev in devices.values()))
+def _area(binding, sizes):
+    """Sum of per-device ``g_area`` under *binding*. Each device is built with its own
+    model type so a mixed-process circuit sums each PDK's real area metric (OTFT
+    ``g_area`` is a padded layout box, not W·L); an all-default binding is byte-identical
+    to the old path. ``g_area`` is a geometry metric (independent of the PVT corner)."""
+    return float(sum(dev.g_area for dev in binding.build(sizes).values()))
 
 
 def _needs_noise(constraints=None, objectives=None, require_noise=None):
@@ -255,7 +255,7 @@ def _has_finite_metrics(metrics, names):
 
 def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
              constraints=None, objectives=None, require_noise=None,
-             model_types=None, device_kwargs=None):
+             model_types=None, device_kwargs=None, *, binding=None):
     """Run the solvers for one candidate -> metrics dict, or None if DC fails.
 
     x0_guess seeds the DC solve — required for topologies whose generic DC solve
@@ -266,17 +266,34 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
     model_types / device_kwargs bind non-default per-device models (e.g. silicon
     SKY130 nmos/pmos); ``None`` keeps the default-PDK path byte-for-byte unchanged.
 
+    ``binding`` is an optional :class:`CircuitBinding` supplying topo / model_types /
+    device_kwargs; ``explore`` threads one so no candidate loses the per-device model
+    map. The explicit ``topo`` / ``nf`` args (and any non-``None`` ``model_types`` /
+    ``device_kwargs``) still win over the binding — legacy callers that pass the
+    cluster directly are byte-identical to the old kwargs path. ``corner`` and
+    ``x0_guess`` stay per-candidate and are threaded to the solvers explicitly.
+
     When constraints/objectives are supplied, noise is evaluated lazily: AC-derived
     metrics are checked first, and `irn_uV` is computed only if it is required and
     the candidate has not already failed non-noise constraints. Direct callers that
     omit constraints/objectives keep the old behavior and compute noise by default."""
-    ac = ac_solve(sizes, bias, freqs, topo=topo, nf=nf, x0_guess=x0_guess, corner=corner,
-                  model_types=model_types, device_kwargs=device_kwargs)
+    # One binding drives ac_solve / noise_analysis / _area so a candidate never loses
+    # its per-device models. Explicit kwargs override the passed binding's fields; with
+    # binding=None the cluster is built from the explicit args (legacy path).
+    if binding is None:
+        binding = CircuitBinding(topo=topo, model_types=model_types,
+                                 device_kwargs=device_kwargs, nf=nf)
+    else:
+        binding = dataclasses.replace(
+            binding, topo=topo, nf=nf,
+            model_types=model_types if model_types is not None else binding.model_types,
+            device_kwargs=device_kwargs if device_kwargs is not None else binding.device_kwargs)
+    ac = ac_solve(sizes, bias, freqs, binding=binding, x0_guess=x0_guess, corner=corner)
     if ac is None:
         return None
     irn_uV = float("nan")
     try:
-        power_uW = float(_supply_power_uW(topo, bias, ac["ss"]))
+        power_uW = float(_supply_power_uW(binding.topo, bias, ac["ss"]))
     except Exception as exc:
         diagnostics.note("explore.power_eval_fail", exc)
         power_uW = float("nan")
@@ -286,15 +303,14 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
         "bw_Hz": float(ac["bw_Hz"]),
         "irn_uV": float(irn_uV),
         "power_uW": power_uW,
-        "area": _area(topo, sizes, nf, model_types, device_kwargs),
+        "area": _area(binding, sizes),
         "_noise_evaluated": False,
     }
     if (_needs_noise(constraints, objectives, require_noise) and
             is_feasible(metrics, _non_noise_constraints(constraints))):
         try:
-            noise = noise_analysis(sizes, bias, freqs, x0_guess=ac["dc_op"], topo=topo,
-                                   nf=nf, corner=corner, model_types=model_types,
-                                   device_kwargs=device_kwargs)
+            noise = noise_analysis(sizes, bias, freqs, binding=binding,
+                                   x0_guess=ac["dc_op"], corner=corner)
             if noise is not None:
                 metrics["irn_uV"] = float(band_rms(freqs, noise["irn_psd"],
                                                    band[0], band[1]) * 1e6)
@@ -355,7 +371,14 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
     corner applies a process shift (e.g. the slow corner) to every evaluation; for a
     SKY130 corner name it is routed onto the silicon devices instead.
     model_types / device_kwargs bind non-default per-device models (silicon)."""
-    device_kwargs, corner = apply_silicon_corner(model_types, device_kwargs, corner)
+    # One binding carries topo + the per-device model map to every candidate, so a
+    # silicon config never silently falls back to the default OTFT PDK. ``at_corner``
+    # bakes a silicon corner onto the device kwargs and clears the solver corner; an
+    # OTFT corner stays on ``binding.corner`` and is threaded to the solvers as the
+    # per-candidate ``corner=``. Per-candidate nf is applied inside ``evaluate``.
+    binding = CircuitBinding(topo=topo, model_types=model_types,
+                             device_kwargs=device_kwargs, nf=nf).at_corner(corner)
+    corner = binding.corner
     samples = sample(cfg.variables, n, seed=seed, method=method)
     candidates = []
     for i, var_values in enumerate(samples):
@@ -363,9 +386,8 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
                                                base_sizes, base_bias, base_nf=nf)
         x0 = seed_fn(sizes, bias) if seed_fn is not None else None
         metrics = evaluate(topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
-                           x0_guess=x0, corner=corner, constraints=cfg.constraints,
-                           objectives=cfg.objectives, model_types=model_types,
-                           device_kwargs=device_kwargs)
+                           binding=binding, x0_guess=x0, corner=corner,
+                           constraints=cfg.constraints, objectives=cfg.objectives)
         complete = bool(metrics is not None and _has_finite_metrics(metrics, cfg.objectives))
         candidates.append({
             "idx": i,

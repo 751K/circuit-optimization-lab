@@ -166,6 +166,20 @@ module), so every solver can import it without risking a cycle.
   corner)`** — the silicon discrete-corner routing that stamps a corner name (`tt`/`ss`/`ff`/`sf`/`fs`
   for SKY130, plus `nom` for FreePDK45) onto extracted silicon device cards, migrated here from
   `explore.py`; `explore.py` and `dataset.py` now import it from here instead of defining it.
+- **`CircuitBinding`** — a frozen dataclass bundling the six per-circuit inputs every solver used to
+  thread by hand: `topo` / `model_types` / `device_kwargs` / `nf` / `corner` / `dc_seed`. It exists to
+  close a bug class: dropping `model_types`/`device_kwargs` on the way into a solver silently reverted
+  the circuit to the default OTFT PDK. A caller now passes `binding=` once instead of re-plumbing the
+  cluster. Build one from `CircuitSpec.binding()` (see `circuit_loader.py`). `binding.build(sizes)`
+  materializes `{name: TransistorModel}` for those sizes; `binding.at_corner(corner)` returns a binding
+  routed to a corner — a silicon corner is baked onto `device_kwargs` (solver corner cleared, via
+  `apply_silicon_corner`), an OTFT corner stays on `binding.corner`, and `None` returns `self`.
+  **Resolution priority** (via `resolve_binding`): an explicit non-`None` keyword to a solver always
+  wins; otherwise the binding field supplies the default (`binding.dc_seed` backs `x0_guess`); with
+  `binding=None` the legacy kwargs path is byte-identical. All six solver entry points
+  (`ac_solve`/`noise_analysis`/`transient`/`pss_solve`/`pac_solve`/`pnoise_solve`) accept `binding=`,
+  and the internal workflows — `analysis_dispatch.run_analysis_suite`, `explore`, `dataset`,
+  `optimize` — thread one binding rather than re-forwarding the model cluster to each branch.
 
 ### `topology.py`
 
@@ -202,7 +216,7 @@ Loads JSON circuit descriptions and returns a `CircuitSpec` containing:
 - `bias`
 - `nf`
 
-This lets new circuits be added through JSON files such as `examples/single_stage.json` without editing solver source code.
+This lets new circuits be added through JSON files such as `examples/single_stage.json` without editing solver source code. `CircuitSpec.binding()` bundles the spec's `topology`, `model_types`, `device_kwargs`, `nf`, and default DC seed (its first dict `dc_guess`) into a `CircuitBinding` (see `device_factory.py`), so a workflow can pass `binding=` to the solvers instead of threading the whole cluster.
 
 ### `numba_kernels.py`
 

@@ -6,7 +6,6 @@ into calls to AC/noise/transient/PSS/PAC/PNoise solvers.
 """
 from __future__ import annotations
 
-import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -332,7 +331,7 @@ def _analysis_periodic_grid(periodic, cfg):
     return periodic
 
 
-def _run_pss(spec, pss_cfg, periodic):
+def _run_pss(spec, binding, pss_cfg, periodic):
     kwargs = _pack_adaptive_config(solver_kwargs("pss", pss_cfg))
     periodic = _analysis_periodic_grid(periodic, pss_cfg)
     context = build_periodic_context(spec, periodic)
@@ -343,15 +342,14 @@ def _run_pss(spec, pss_cfg, periodic):
     if "corner" in kwargs:
         kwargs["corner"] = _corner_from_cfg(pss_cfg)
     return pss_solve(
-        spec.sizes, spec.bias, context["period"], topo=spec.topology, nf=spec.nf,
+        spec.sizes, spec.bias, context["period"], binding=binding,
         tgrid=context["tgrid"], inputs=context["inputs"],
         node_inputs=context["node_inputs"], current_inputs=context["current_inputs"],
-        signed_devices=context["signed_devices"],
-        model_types=spec.model_types, device_kwargs=spec.device_kwargs, **kwargs,
+        signed_devices=context["signed_devices"], **kwargs,
     )
 
 
-def _run_transient(spec, cfg):
+def _run_transient(spec, binding, cfg):
     periodic = _merge_periodic(spec.periodic or {}, cfg.get("periodic"))
     if periodic:
         period = _period_from(periodic)
@@ -374,11 +372,10 @@ def _run_transient(spec, cfg):
         if "corner" in kwargs:
             kwargs["corner"] = _corner_from_cfg(cfg)
         return transient(
-            spec.sizes, spec.bias, tgrid, topo=spec.topology, nf=spec.nf,
+            spec.sizes, spec.bias, tgrid, binding=binding,
             inputs=context["inputs"], node_inputs=context["node_inputs"],
             current_inputs=context["current_inputs"],
-            signed_devices=context["signed_devices"],
-            model_types=spec.model_types, device_kwargs=spec.device_kwargs, **kwargs,
+            signed_devices=context["signed_devices"], **kwargs,
         )
     tgrid = _time_grid(cfg.get("tgrid", cfg), default_stop=cfg.get("tstop", cfg.get("duration")),
                        default_points=int(cfg.get("n_points", 101)))
@@ -386,9 +383,8 @@ def _run_transient(spec, cfg):
     if "corner" in kwargs:
         kwargs["corner"] = _corner_from_cfg(cfg)
     return transient(
-        spec.sizes, spec.bias, tgrid, topo=spec.topology, nf=spec.nf,
-        signed_devices=tuple(cfg.get("signed_devices", ()) or ()),
-        model_types=spec.model_types, device_kwargs=spec.device_kwargs, **kwargs,
+        spec.sizes, spec.bias, tgrid, binding=binding,
+        signed_devices=tuple(cfg.get("signed_devices", ()) or ()), **kwargs,
     )
 
 
@@ -414,14 +410,18 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None, corner=Non
     }
     if not analysis_cfg:
         raise ValueError("No analyses configured")
-    if corner is not None:
-        from .device_factory import apply_silicon_corner
-        dk, solver_corner = apply_silicon_corner(spec.model_types, spec.device_kwargs, corner)
-        spec = dataclasses.replace(spec, device_kwargs=dk)
-        if solver_corner is not None:               # OTFT corner: default for un-set analyses
-            for cfg in analysis_cfg.values():
-                if isinstance(cfg, dict):
-                    cfg.setdefault("corner", solver_corner)
+    # One binding carries the circuit's structure + process binding + default DC
+    # seed to every solver call below, so no branch re-threads model_types /
+    # device_kwargs / x0 by hand (the drop-one-and-silently-revert-to-OTFT bug
+    # class). ``at_corner`` bakes a silicon suite corner onto the device kwargs
+    # and clears the solver corner; an OTFT suite corner stays on ``binding.corner``
+    # and is also seeded as each analysis's default corner (for the shared-PSS
+    # propagation / mismatch checks that read the per-analysis cfg).
+    binding = spec.binding().at_corner(corner)
+    if corner is not None and binding.corner is not None:   # OTFT suite corner
+        for cfg in analysis_cfg.values():
+            if isinstance(cfg, dict):
+                cfg.setdefault("corner", binding.corner)
     _propagate_shared_pss_corner(analysis_cfg)
     selected_set = set(selected) if selected is not None else None
     results = {}
@@ -432,7 +432,7 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None, corner=Non
     def ensure_pss(owner_cfg):
         if "pss" not in results:
             pss_cfg, periodic = _pss_config(spec, analysis_cfg, owner_cfg)
-            results["pss"] = _run_pss(spec, pss_cfg, periodic)
+            results["pss"] = _run_pss(spec, binding, pss_cfg, periodic)
         elif "corner" in owner_cfg:
             requested = _corner_from_cfg(owner_cfg)
             existing = results["pss"].get("corner")
@@ -447,23 +447,20 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None, corner=Non
         if name not in analysis_cfg or not want(name):
             continue
         cfg = dict(analysis_cfg.get(name) or {})
-        # Seed the (possibly multistable) DC from the config's first dc_guess, and
-        # bind any non-default per-device models (e.g. silicon sky130/freepdk45) —
-        # both default to the old behaviour (None) for OTFT configs without them.
-        dc_seed = next((g for g in spec.topology.dc_guesses if isinstance(g, dict)), None)
+        # model_types / device_kwargs / the multistable DC seed all ride on
+        # ``binding``; only the per-analysis explicit values (freqs, an explicit or
+        # suite-defaulted corner) are threaded here.
         if name == "ac":
             freqs = _frequency_grid(cfg.get("freqs"))
             corner = _corner_from_cfg(cfg)
             results[name] = ac_solve(
-                spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf,
-                corner=corner, x0_guess=dc_seed,
-                model_types=spec.model_types, device_kwargs=spec.device_kwargs,
+                spec.sizes, spec.bias, freqs, binding=binding, corner=corner,
             )
         elif name == "noise":
             freqs = _frequency_grid(cfg.get("freqs"))
             corner_default = (analysis_cfg.get("ac") or {}).get("corner")
             corner = _corner_from_cfg(cfg, default=corner_default)
-            x0_guess = dc_seed
+            x0_guess = None
             ac_result = None
             if "ac" in results and results["ac"] is not None:
                 same_corner = results["ac"].get("corner") == corner
@@ -474,9 +471,8 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None, corner=Non
                             ac_freqs, freqs, rtol=0.0, atol=0.0):
                         ac_result = results["ac"]
             noise = noise_analysis(
-                spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf,
-                corner=corner, x0_guess=x0_guess, ac_result=ac_result,
-                model_types=spec.model_types, device_kwargs=spec.device_kwargs,
+                spec.sizes, spec.bias, freqs, binding=binding, corner=corner,
+                x0_guess=x0_guess, ac_result=ac_result,
             )
             if noise is not None and "band" in cfg:
                 lo, hi = map(float, cfg["band"])
@@ -484,7 +480,7 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None, corner=Non
                 noise["irn_uV_band"] = band_rms(freqs, noise["irn_psd"], lo, hi) * 1e6
             results[name] = noise
         elif name == "transient":
-            results[name] = _run_transient(spec, cfg)
+            results[name] = _run_transient(spec, binding, cfg)
         elif name == "pss":
             ensure_pss(cfg)
         elif name == "pac":
@@ -493,10 +489,11 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None, corner=Non
             _, periodic = _pss_config(spec, analysis_cfg, cfg)
             corner = _corner_from_cfg(cfg, default=pss.get("corner"))
             kwargs = solver_kwargs("pac", cfg, include_defaults=True)
+            # pac/pnoise inherit topo/models from ``pss_result``; the binding only
+            # supplies ``nf`` here (its corner is overridden by the explicit corner).
             results[name] = pac_solve(
-                spec.sizes, spec.bias, freqs, pss_result=pss,
-                input_drive=_input_drive(cfg, periodic), nf=spec.nf,
-                corner=corner, **kwargs,
+                spec.sizes, spec.bias, freqs, pss_result=pss, binding=binding,
+                input_drive=_input_drive(cfg, periodic), corner=corner, **kwargs,
             )
         elif name == "pnoise":
             pss = ensure_pss(cfg)
@@ -508,11 +505,9 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None, corner=Non
             kwargs = solver_kwargs("pnoise", cfg, include_defaults=True)
             band = kwargs.pop("band")
             results[name] = pnoise_solve(
-                spec.sizes, spec.bias, freqs, pss_result=pss,
-                fundamental=_fundamental_from(periodic), nf=spec.nf,
-                corner=corner, band=band,
-                pac_result=pac_result, input_drive=input_drive,
-                **kwargs,
+                spec.sizes, spec.bias, freqs, pss_result=pss, binding=binding,
+                fundamental=_fundamental_from(periodic), corner=corner, band=band,
+                pac_result=pac_result, input_drive=input_drive, **kwargs,
             )
     return results
 

@@ -16,7 +16,8 @@ from scipy.sparse import linalg as _spla
 from .ac_mna import stamp_adm, stamp_dense_lti, stamp_mos_lti, branch_incidence
 from .ac_solver import bw_from_gain, ac_solve
 from .compiled_topology import term_arrays
-from .device_factory import dev_corner, dev_nf, build_devices, get_ss_params
+from .device_factory import (dev_corner, dev_nf, build_devices, get_ss_params,
+                             resolve_binding)
 from .numba_kernels import (_pnoise_hb_blocks_impl, pac_hb_blocks_numba,
                             pac_linearize_orbit_numba,
                             pac_linearize_orbit_gate1_numba, py_impl)
@@ -1486,7 +1487,7 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
               cache_forcing=True, compute_condition=None, lti_fast_path=True,
               analytic=True, n_period_samples=384, max_sideband=10,
               time_domain=False, td_integration="gear2", td_n_period_samples=768,
-              profile=False, debug=False):
+              profile=False, debug=False, binding=None):
     """Solve sideband-0 PAC around a PSS orbit.
 
     Parameters
@@ -1503,7 +1504,14 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
         Mapping ``input_key -> complex amplitude`` for a 1-unit small-signal
         ``exp(j*w*t)`` drive.  For a differential input, use e.g.
         ``{"vip": 0.5, "vin": -0.5}``.
+    binding
+        Optional :class:`CircuitBinding`. Only its ``nf`` and ``corner`` fill in
+        for the matching signature kwargs — ``topo``/``model_types``/
+        ``device_kwargs`` travel with ``pss_result`` and are NOT overridden.
+        Explicit non-None ``nf``/``corner`` still win, and both still fall back to
+        ``pss_result`` after this. binding=None reproduces the legacy path exactly.
     """
+    _, nf, corner, _, _, _ = resolve_binding(binding, nf=nf, corner=corner)
     freqs = np.asarray(freqs, float)
     if np.any(freqs < 0.0):
         raise ValueError("PAC frequencies must be non-negative")

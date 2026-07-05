@@ -48,7 +48,7 @@ from .adaptive_config import (
 )
 from .topology import AFE_TOPO
 from .ac_solver import ac_solve
-from .device_factory import build_devices
+from .device_factory import build_devices, resolve_binding
 from .transient_profile import (
     PROFILE_EDGE_NEWTON_ITERS,
     PROFILE_EDGE_SUBSTEPS,
@@ -1134,7 +1134,7 @@ def osdi_model_names(model_types):
 
 
 def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
-              topo=AFE_TOPO, inputs=None, node_inputs=None, current_inputs=None,
+              topo=None, inputs=None, node_inputs=None, current_inputs=None,
               corner=None, model_types=None, device_kwargs=None,
               max_step=None, flat_max_step=None,
               max_retry_subdivisions=0, newton_maxit=30,
@@ -1146,7 +1146,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
               gear2_be_fallback=True, cap_mode=None, cap_mode_id=None,
               adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
               adaptive_iabstol=1e-12, adaptive_max_steps=200000,
-              adaptive_h0=None, adaptive_config=None):
+              adaptive_h0=None, adaptive_config=None, *, binding=None):
     """Backward-Euler (default) or gear2/BDF2 transient.
 
       integration_method : "be" (backward-Euler, 1st order; the default for the
@@ -1195,7 +1195,18 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
                default (OTFT) path is untouched when these are None.
     Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
     fields are included when those nodes exist.
+
+    binding : optional :class:`CircuitBinding` supplying defaults for
+        topo/nf/corner/model_types/device_kwargs; explicit non-None kwargs override
+        it. ``dc_seed`` is not consumed here (transient seeds from ``V0``, a
+        solved-node vector, not the DC-op dict). binding=None reproduces the legacy
+        path exactly.
     """
+    topo, nf, corner, model_types, device_kwargs, _ = resolve_binding(
+        binding, topo=topo, nf=nf, corner=corner, model_types=model_types,
+        device_kwargs=device_kwargs)
+    if topo is None:
+        topo = AFE_TOPO
     if osdi_model_names(model_types):
         from .osdi_transient import transient_osdi
         _inputs = inputs

@@ -9,6 +9,9 @@ routing (:func:`apply_silicon_corner`) that stamps a corner name onto extracted
 silicon device cards. This is a leaf device layer — it depends only on
 :mod:`.device_model`, never on any solver or workflow module.
 """
+import dataclasses
+from dataclasses import dataclass
+
 from .device_model import create_device, get_default_model_type
 
 # Global process corners (pvt0 = -3·0.0753, pbeta0 = -15·0.036 for slow).
@@ -136,3 +139,98 @@ def apply_silicon_corner(model_types, device_kwargs, corner):
         if str(model).startswith(_SILICON_PREFIXES):
             dk.setdefault(name, {})["corner"] = corner
     return dk, None
+
+
+@dataclass(frozen=True)
+class CircuitBinding:
+    """Bundle a circuit's structure + process binding + default DC seed.
+
+    Every solver entry point historically threaded the same six per-circuit
+    inputs by hand — ``topo / model_types / device_kwargs / nf / corner /
+    x0_guess`` — and dropping ``model_types``/``device_kwargs`` on the way silently
+    reverted the circuit to the default OTFT PDK (a bug class that bit this
+    project three times). :class:`CircuitBinding` captures those inputs once so a
+    caller passes ``binding=`` instead of re-plumbing the cluster, closing that
+    gap by construction.
+
+    Fields
+    ------
+    topo:
+        The :class:`~core.topology.Topology` (circuit structure). Typed loosely to
+        avoid a hard import dependency on the topology module.
+    model_types:
+        Optional ``{device: model-registry key}`` map (e.g. ``freepdk45.nmos``).
+        ``None`` keeps the default PDK — this is the field whose omission caused
+        the silent OTFT regressions.
+    device_kwargs:
+        Optional ``{device: extra ctor kwargs}`` map (``vb``, baked silicon
+        ``corner``, ...).
+    nf:
+        Finger count: ``None``, a global int, or a per-device map.
+    corner:
+        Solver-side corner (an OTFT process-corner name / shift-map). Silicon
+        discrete corners do NOT live here — route them through :meth:`at_corner`,
+        which bakes them onto ``device_kwargs`` instead.
+    dc_seed:
+        Default DC seed dict (the ``x0_guess`` default a solver would otherwise
+        receive inline). ``None`` leaves seeding to the solver's own guesses.
+
+    The dataclass is frozen and its dict fields are treated as immutable by
+    convention (no deep copy). :meth:`at_corner` never mutates in place —
+    :func:`apply_silicon_corner` copies ``device_kwargs`` before stamping.
+    """
+
+    topo: object
+    model_types: object = None
+    device_kwargs: object = None
+    nf: object = None
+    corner: object = None
+    dc_seed: object = None
+
+    def build(self, sizes):
+        """Build ``{name: TransistorModel}`` for *sizes* under this binding."""
+        return build_devices(sizes, nf=self.nf, corner=self.corner, topo=self.topo,
+                             model_types=self.model_types,
+                             device_kwargs=self.device_kwargs)
+
+    def at_corner(self, corner):
+        """Return a binding routed to *corner*.
+
+        A silicon corner name (``tt/ss/ff/sf/fs`` or ``nom``) is baked onto the
+        silicon devices' ``device_kwargs`` and the solver corner cleared; any other
+        value (an OTFT corner name / shift-map) is carried through on ``corner``.
+        ``None`` returns ``self`` unchanged.
+        """
+        if corner is None:
+            return self
+        dk, solver_corner = apply_silicon_corner(self.model_types, self.device_kwargs,
+                                                 corner)
+        return dataclasses.replace(self, device_kwargs=dk, corner=solver_corner)
+
+
+def resolve_binding(binding, *, topo=None, nf=None, corner=None, model_types=None,
+                    device_kwargs=None, x0_guess=None):
+    """Resolve the six-param cluster from a *binding* + explicit overrides.
+
+    Returns ``(topo, nf, corner, model_types, device_kwargs, x0_guess)``. An
+    explicit non-``None`` keyword always wins; otherwise the binding supplies the
+    default (``binding.dc_seed`` backs ``x0_guess``). With ``binding=None`` every
+    field passes through unchanged, so the legacy kwargs path is byte-identical.
+    ``topo`` still defaults to ``None`` here — each solver applies its own module
+    default (``AFE_TOPO``) after this returns.
+    """
+    if binding is None:
+        return topo, nf, corner, model_types, device_kwargs, x0_guess
+    if topo is None:
+        topo = binding.topo
+    if nf is None:
+        nf = binding.nf
+    if corner is None:
+        corner = binding.corner
+    if model_types is None:
+        model_types = binding.model_types
+    if device_kwargs is None:
+        device_kwargs = binding.device_kwargs
+    if x0_guess is None:
+        x0_guess = binding.dc_seed
+    return topo, nf, corner, model_types, device_kwargs, x0_guess

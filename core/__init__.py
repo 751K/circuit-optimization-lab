@@ -14,6 +14,7 @@ Or from the command line::
 from .ac_solver import ac_solve
 from .analysis_dispatch import run_analysis_suite, run_json_analyses
 from .circuit_loader import CircuitSpec, load_circuit_json
+from .device_factory import CircuitBinding
 from .device_model import (TransistorModel, NumbaParams, PDK, create_device,
                            create_transistor, register_model, register_pdk,
                            get_default_model_type, get_default_pdk, get_pdk,
@@ -50,6 +51,7 @@ __all__ = [
     # circuit loading
     "load_circuit_json",
     "CircuitSpec",
+    "CircuitBinding",
     "Topology",
     # analysis dispatch
     "run_analysis_suite",

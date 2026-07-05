@@ -7,6 +7,7 @@ tokens), and determinism for a fixed ``(config, seed)``. The underlying physics 
 :mod:`core.explore`'s, already tested; here we test only the dataset layer.
 """
 import json
+import os
 
 import numpy as np
 import pytest
@@ -16,6 +17,15 @@ from core.dataset import (_finite_or_none, _resolve_corner, _row, _topology_hash
                           build_dataset, load_dataset_config, to_arrays)
 
 CONFIG = "examples/single_stage.json"
+
+# ── FreePDK45 availability gate (mirrors tests/test_freepdk45.py) ────────────
+_PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
+_FP45_INC = os.path.join(_PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
+_VAF = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
+_FP45_RUN = os.path.join(_VAF, ".claude/skills/run-osdi-ngspice/scripts/run-ngspice.sh")
+_HAVE_FP45 = os.path.exists(_FP45_INC) and os.path.exists(_FP45_RUN)
+_requires_fp45 = pytest.mark.skipif(
+    not _HAVE_FP45, reason="FreePDK45 cards / ngspice not present")
 
 
 def _build(n=6, seed=0):
@@ -425,3 +435,24 @@ def test_dataset_cli_end_to_end(tmp_path):
     assert out.with_suffix(".jsonl").exists()
     assert (tmp_path / "cli_ds.manifest.json").exists()
     assert out.with_suffix(".npz").exists()
+
+
+# ── silicon model pass-through into the ac_noise label group ─────────────────
+@_requires_fp45
+def test_ac_noise_group_carries_silicon_models():
+    """The ac_noise label group threads the FreePDK45 per-device model map through
+    the binding, so its labels are silicon-magnitude — not the OTFT PDK a dropped
+    ``model_types`` would silently fall back to (the Phase-B bug class, at the
+    dataset layer). A FreePDK45 45nm OTA gives tens of dB of gain and a µm²-scale
+    area; the OTFT default would give a near-zero gain and a padded g_area in the
+    millions."""
+    dataset = ds.run_from_config("examples/freepdk45_fd_ota.json", n=2, seed=0)
+    m = dataset["manifest"]
+    assert all(str(v).startswith("freepdk45") for v in m["models"].values())
+    _, Y, _, ln, dc, _ = to_arrays(dataset)
+    peak = Y[dc, ln.index("gain_peak_dB")]
+    area = Y[dc, ln.index("area")]
+    assert peak.size                                    # at least one DC-converged row
+    assert np.all(peak > 20.0)                          # real silicon gain, not ~0 (OTFT revert)
+    assert np.all(area < 1e3)                           # µm²-scale silicon area, not the
+    #                                                     OTFT padded g_area (~1e6)

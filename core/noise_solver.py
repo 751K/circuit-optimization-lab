@@ -27,7 +27,7 @@ from .device_model import create_device, get_default_model_type
 from .ac_mna import (stamp_adm, stamp_mos_lti, stamp_vccs, stamp_vsource,
                      stamp_vcvs, stamp_cccs, stamp_ccvs)
 from .ac_solver import ac_solve
-from .device_factory import dev_corner, dev_nf
+from .device_factory import dev_corner, dev_nf, resolve_binding
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
 from . import diagnostics
@@ -52,8 +52,17 @@ def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1, model_type=None,
     return S_th + S_fl_1 / freqs, S_th, S_fl_1
 
 
-def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO,
-                   nf=None, ac_result=None, model_types=None, device_kwargs=None):
+def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=None,
+                   nf=None, ac_result=None, model_types=None, device_kwargs=None,
+                   *, binding=None):
+    """binding: optional :class:`CircuitBinding` supplying defaults for
+    topo/nf/corner/model_types/device_kwargs/x0_guess; explicit non-None kwargs
+    override it (binding=None reproduces the legacy path exactly)."""
+    topo, nf, corner, model_types, device_kwargs, x0_guess = resolve_binding(
+        binding, topo=topo, nf=nf, corner=corner, model_types=model_types,
+        device_kwargs=device_kwargs, x0_guess=x0_guess)
+    if topo is None:
+        topo = AFE_TOPO
     # ── 1. DC + small-signal params + gain (reuse the validated AC solver) ──
     ac = ac_result
     if ac is None:

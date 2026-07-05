@@ -23,7 +23,8 @@ except Exception:  # pragma: no cover - scipy is a project dependency
     _spla = None
 
 from .ac_mna import branch_incidence
-from .device_factory import dev_corner, dev_nf, build_devices, get_ss_params
+from .device_factory import (dev_corner, dev_nf, build_devices, get_ss_params,
+                             resolve_binding)
 from .noise_solver import band_rms, noise_analysis
 from .numba_kernels import (_pnoise_hb_blocks_impl, pnoise_fold_psd_numba,
                             pnoise_hb_blocks_numba, py_impl)
@@ -523,7 +524,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                  hb_solver="auto", hb_sparse_min_size=384,
                  hb_sparse_max_density=0.12, hb_sparse_drop_tol=0.0,
                  iterative_tol=1e-10, iterative_maxiter=10,
-                 profile=False):
+                 profile=False, binding=None):
     """Solve periodic output noise around a PSS orbit.
 
     The circuit is linearized along the supplied PSS trajectory.  Fourier
@@ -534,7 +535,14 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
     If ``gains`` is not supplied, pass either ``pac_result`` or ``input_drive``;
     the latter lets this function run :func:`pac_solve` and compute input-
     referred noise with the same sideband-0 convention.
+
+    ``binding`` is an optional :class:`CircuitBinding`. Only its ``nf`` and
+    ``corner`` fill in for the matching signature kwargs —
+    ``topo``/``model_types``/``device_kwargs`` travel with ``pss_result`` and are
+    NOT overridden. Explicit non-None ``nf``/``corner`` still win, and both still
+    fall back to ``pss_result`` after this. binding=None reproduces the legacy path.
     """
+    _, nf, corner, _, _, _ = resolve_binding(binding, nf=nf, corner=corner)
     freqs = np.asarray(freqs, float)
     if np.any(freqs < 0.0):
         raise ValueError("PNoise frequencies must be non-negative")

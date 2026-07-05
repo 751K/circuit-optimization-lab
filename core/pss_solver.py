@@ -18,7 +18,7 @@ import numpy as np
 
 from .ac_mna import stamp_adm, stamp_mos_lti, branch_incidence
 from .ac_solver import ac_solve
-from .device_factory import dev_nf, build_devices, get_ss_params
+from .device_factory import dev_nf, build_devices, get_ss_params, resolve_binding
 from .adaptive_config import resolve_adaptive_config
 from .topology import AFE_TOPO
 from .transient_solver import transient
@@ -802,7 +802,7 @@ class _PSSShootingStepper:
         )
 
 
-def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
+def pss_solve(sizes, bias, period, *, topo=None, nf=None, tgrid=None,
               n_points=161, inputs=None, node_inputs=None, current_inputs=None,
               corner=None, model_types=None, device_kwargs=None,
               V0=None, tstab_periods=0, max_step=None, flat_max_step=None,
@@ -821,17 +821,27 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
               adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
               adaptive_iabstol=1e-12, adaptive_max_steps=200000,
               adaptive_h0=None, adaptive_freeze_factor=10.0,
-              adaptive_config=None):
+              adaptive_config=None, binding=None):
     """Solve periodic steady state with transient shooting.
 
     Parameters are intentionally close to :func:`transient` so the same topology,
     waveform, current-source, and switch-current metadata can be reused.
+
+    ``binding`` is an optional :class:`CircuitBinding` supplying defaults for
+    topo/nf/corner/model_types/device_kwargs; explicit non-None kwargs override it
+    (``dc_seed`` is not consumed — PSS seeds from ``V0``). binding=None reproduces
+    the legacy path exactly.
 
     Returns a dictionary containing the final one-period trajectory, the PSS
     initial state ``x0``, ``residual = x(T)-x0``, residual norm, convergence flag,
     and shooting iteration history.  Non-convergence is reported in the result
     instead of raising, so callers can inspect the best trajectory.
     """
+    topo, nf, corner, model_types, device_kwargs, _ = resolve_binding(
+        binding, topo=topo, nf=nf, corner=corner, model_types=model_types,
+        device_kwargs=device_kwargs)
+    if topo is None:
+        topo = AFE_TOPO
     adaptive_config = resolve_adaptive_config(
         adaptive_config,
         adaptive_reltol=adaptive_reltol,

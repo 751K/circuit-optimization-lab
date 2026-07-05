@@ -22,6 +22,21 @@ class CircuitSpec:
     model_types: dict | None = None      # device name -> model-registry key (e.g. "sky130.nmos")
     device_kwargs: dict | None = None    # device name -> extra ctor kwargs (vb, corner, ...)
 
+    def binding(self):
+        """Bundle this spec's structure + process binding + default DC seed.
+
+        Returns a :class:`core.device_factory.CircuitBinding` capturing ``topo``,
+        ``model_types``, ``device_kwargs``, ``nf`` and the default DC seed (the
+        first dict ``dc_guess``, matching the inline seed each analysis uses), so a
+        caller can pass ``binding=`` instead of threading the whole cluster.
+        """
+        from .device_factory import CircuitBinding
+        dc_seed = next((g for g in self.topology.dc_guesses if isinstance(g, dict)), None)
+        return CircuitBinding(
+            topo=self.topology, model_types=self.model_types,
+            device_kwargs=self.device_kwargs, nf=self.nf, dc_seed=dc_seed,
+        )
+
 
 def _as_number(value, field):
     if not isinstance(value, (int, float)):

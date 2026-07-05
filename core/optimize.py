@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import time
 
 import numpy as np
@@ -24,7 +25,7 @@ import numpy as np
 from . import surrogate as sg
 from .circuit_loader import models_from_config
 from .dataset import candidate_circuit, load_dataset_config, split_variables
-from .device_factory import apply_silicon_corner
+from .device_factory import CircuitBinding
 from .explore import (evaluate, is_feasible,
                       pareto_front, sample)
 
@@ -53,9 +54,13 @@ def optimize(config_path, surrogate_path, *, n_screen=100000, top_k=20, seed=0,
     should match the surrogate's training grid (default: the wide 0.01 Hz–10 kHz grid)."""
     config_dict, topo, base_sizes, base_bias, nf, cfg = load_dataset_config(config_path)
     model_types, device_kwargs = models_from_config(config_dict)
-    # A SKY130 corner routes onto the silicon devices (verify pass); an OTFT corner
-    # stays on the solver's PVT shift path.
-    device_kwargs, corner = apply_silicon_corner(model_types, device_kwargs, corner)
+    # One binding carries topo + the per-device model map into the verify pass, so the
+    # solver re-run never loses the silicon models. ``at_corner`` routes a SKY130 corner
+    # onto the silicon devices and clears the solver corner; an OTFT corner stays on
+    # ``binding.corner`` and is threaded to ``evaluate`` as the per-candidate ``corner=``.
+    binding = CircuitBinding(topo=topo, model_types=model_types,
+                             device_kwargs=device_kwargs, nf=nf).at_corner(corner)
+    corner = binding.corner
     if freqs is None:
         freqs = np.logspace(-2, 4, 101)          # match the surrogate's training grid
     cfg.freqs = np.asarray(freqs, float)
@@ -95,9 +100,9 @@ def optimize(config_path, surrogate_path, *, n_screen=100000, top_k=20, seed=0,
     for i in picks:
         cand_topo, sizes, bias, cand_nf = candidate_circuit(
             config_dict, topo, base_sizes, base_bias, nf, size_vars, struct_vars, samples[i])
+        cand_binding = dataclasses.replace(binding, topo=cand_topo, nf=cand_nf)
         true = evaluate(cand_topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
-                        corner=corner, require_noise=True,
-                        model_types=model_types, device_kwargs=device_kwargs)
+                        binding=cand_binding, corner=corner, require_noise=True)
         pred = metric_rows[i]
         entry = {"design": samples[i], "surrogate": pred, "solver": None,
                  "solver_feasible": None}
