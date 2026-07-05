@@ -4,27 +4,8 @@
 
 ## 项目概述
 
-本地 Python 电路求解器，用于模拟电路设计空间探索，已对 Cadence/Spectre 完成标定。首个应用场景是 **AT4000TG PMOS 薄膜晶体管 ECG AFE**（带 chopper 的心电模拟前端放大器）。两个行业标准的硅 CMOS 工艺接入了同一套求解器引擎和设计优化管线：**SKY130**（130nm，经 OpenVAF 编译的 BSIM4 + OSDI 宿主）与 **FreePDK45**（45nm，以 ngspice-C 作为精确器件求值器）。
-
-你能用它做什么：
-
-- **DC / AC / Noise / Transient** — 标准电路分析，无需仿真器 license。
-- **PSS / PAC / PNoise** — 周期稳态、周期 AC、周期噪声分析（对标 Spectre RF 分析）。
-- **设计空间探索** — 扫描器件尺寸和偏置电压，按约束过滤（增益、带宽、噪声、功耗、面积），找到 Pareto 最优设计。
-- **工艺角与失配** — 全局工艺角、逐器件 mismatch Monte Carlo、latch 筛查。
-- **ML-surrogate 设计优化** — 用求解器造带标签的数据集，训练一个快速 surrogate，筛选大候选池，
-  再把入围候选送回已标定的求解器校验（比暴力扫描快几个数量级）。
-- **硅 PDK（SKY130 + FreePDK45）** — 真实 130nm 与 45nm CMOS 工艺（NMOS + PMOS），走的是和
-  OTFT 完全相同的 DC/AC/noise/设计优化管线。两个完整的全差分 OTA 设计流程案例:
-  [SKY130 FD-OTA](sky130_fd_ota_design.md)、[FreePDK45 FD-OTA](freepdk45_fd_ota_design.md)。
-
-求解器内部实现见 [核心求解器概览](core_overview_zh.md)。
-
----
-
-## 定位
-
-有两个趋势决定了这个项目的走向——它的目标是成为这两件事的**基础设施**，而不只是一个 OTFT AFE 工具箱。
+一个**本地、免 license、对 Cadence 标定过的模拟电路仿真 + ML 驱动设计优化框架**——目标是成为芯片设计
+两个转变的**基础设施**：
 
 **1. 面向"ML 加速仿真"的开放基础设施。** 用 ML 加速芯片设计仿真是一个快速增长的方向，但这个领域至今
 缺少开放的、基础性的构件：既没有标准、开放的方式来*生成大规模、物理保真的仿真数据*，也没有可复用的
@@ -33,11 +14,25 @@
 （[`core/dataset.py`](../core/dataset.py)）→ ML 代理 + 筛选-校验优化器（[`core/surrogate.py`](../core/surrogate.py)、
 `surrogate_torch.py`、`optimize.py`）。电路进、数据出、代理训练、设计优化，全程无商业仿真器。
 
-**2. 一条本地、免 license、可被 LLM 调用的工具链。** LLM 驱动的电路设计越来越依赖在回路里反复调用仿真器，
-但在多轮对话中反复调用商业工具（要 license、在远端、慢）既昂贵又无法在本地自主完成。本项目是一条自包含
-的工具链，LLM agent 可以调用它来**自主获得仿真结果、分析归纳、优化设计**——整个 DC/AC/Noise/PSS/… 回路
-都在本地设备上完成，无外部往返、无 license。JSON 电路格式、`python -m core` CLI、结构化的结果字典，都是
-刻意做成机器可调用、机器可读的，好让 agent 从本地 shell 里驱动整个设计闭环。
+**2. 一条本地、可被 LLM 调用的工具链。** LLM 驱动的电路设计越来越依赖在回路里反复调用仿真器，但在多轮
+对话中反复调用商业工具（要 license、在远端、慢）既昂贵又无法在本地自主完成。本项目是一条自包含的工具链，
+LLM agent 可以调用它来**自主获得仿真结果、分析归纳、优化设计**——整个 DC/AC/Noise/PSS/… 回路都在本地
+设备上完成，无外部往返、无 license。JSON 电路格式、`python -m core` CLI、结构化的结果字典，都是刻意做成
+机器可调用、机器可读的，好让 agent 从本地 shell 里驱动整个设计闭环。
+
+求解器栈**对 Cadence Spectre 24.1 标定**——以 AT4000TG PMOS-OTFT 心电 AFE 为标定锚点（增益/带宽/IRN
+通常 <1%）——并通过同一套引擎泛化到多个工艺：AT4000TG OTFT，加上两个行业标准硅 CMOS 节点——**SKY130**
+（130nm，经 OpenVAF 编译的 BSIM4 + OSDI 宿主）与 **FreePDK45**（45nm，以 ngspice-C 作为精确器件求值器）。
+
+
+**具体能做：**
+- **DC / AC / Noise / Transient** — 标准电路分析，无需仿真器 license。
+- **PSS / PAC / PNoise** — 周期稳态 / AC / 噪声（对标 Spectre RF），用于 chopper 放大器。
+- **设计探索 + ML-surrogate 优化** — 扫尺寸/偏置，造带标签数据集，训练快速 surrogate，筛选大候选池，再把入围候选送回已标定求解器校验（比暴力扫描快几个数量级）。
+- **工艺角与失配** — 全局工艺角、逐器件 mismatch Monte Carlo、latch 筛查。
+- **多工艺** — OTFT（AT4000TG）+ 硅 SKY130 + FreePDK45 走同一条管线；两个完整的全差分 OTA 设计案例作为报告（[SKY130](sky130_fd_ota_design.md)、[FreePDK45](freepdk45_fd_ota_design.md)）。
+
+求解器内部实现见 [核心求解器概览](core_overview_zh.md)。
 
 ---
 
@@ -614,27 +609,6 @@ FreePDK45 需 ngspice + FreePDK45 卡。安装好之后把 `PDK_ROOT`/`OPENVAF_R
 
 ---
 
-## 项目动机
-
-模拟电路设计需要反复跑仿真来调整晶体管尺寸和偏置。Cadence/Spectre 精确但慢，
-尤其是有大量候选设计或需要检查工艺角和 mismatch 时。
-
-本项目的工作流：
-
-1. **Cadence/Spectre** = 可信参考。
-2. **本仓库** = 经标定匹配 Spectre 行为的本地快速模型。
-3. **本地探索** — 扫描尺寸、偏置、工艺角；用约束过滤。
-4. **Cadence 验证** — 只把最优候选送回 Spectre 最终确认。
-
----
-
 ## 参与贡献
 
 欢迎提 Issue 和 PR。
-
----
-
-## 使用定位
-
-面向科研和早期模拟电路设计探索。**不是** sign-off 级仿真器替代品。
-用于在本地快速理解设计趋势、缩小搜索空间、为 Cadence/Spectre 验证准备更优候选。

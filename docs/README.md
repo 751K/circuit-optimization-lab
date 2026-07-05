@@ -4,60 +4,46 @@
 
 ## Overview
 
-Local Python solvers for analog circuit design-space exploration, calibrated against
-Cadence/Spectre. The first use case is an **AT4000TG PMOS thin-film transistor
-ECG AFE** (analog front-end amplifier with chopper). Two industry-standard silicon
-CMOS processes plug into the same solver engine and design-optimization pipeline:
-**SKY130** (130 nm, via an OpenVAF-compiled BSIM4 through an OSDI host) and
-**FreePDK45** (45 nm, via ngspice-C as the exact device evaluator).
-
-What you can do with this:
-- **DC/AC/Noise/Transient** — standard circuit analysis without a simulator license.
-- **PSS / PAC / PNoise** — periodic steady-state, periodic AC, and periodic noise
-  for chopper amplifiers, matched to Spectre RF analyses.
-- **Design exploration** — sweep device sizes and bias voltages, filter by
-  constraints (gain, BW, noise, power, area), find Pareto-optimal designs.
-- **Corners & mismatch** — process corners, per-device mismatch Monte Carlo, latch
-  screening.
-- **ML-surrogate design optimization** — build a labeled dataset from the solvers,
-  train a fast surrogate, screen a large candidate pool, and verify the shortlist
-  on the calibrated solver (thousands of times faster than a brute-force sweep).
-- **Silicon PDKs (SKY130 + FreePDK45)** — real 130 nm and 45 nm CMOS processes
-  (NMOS + PMOS), running through the exact same DC/AC/noise/design-optimization
-  pipeline as the OTFT. Two worked, end-to-end fully-differential OTA design cases
-  ship as reports: [SKY130 FD-OTA](sky130_fd_ota_design.md) and
-  [FreePDK45 FD-OTA](freepdk45_fd_ota_design.md).
-
-For solver internals, see [Core Solver Overview](core_overview.md).
-
----
-
-## Positioning
-
-Two shifts motivate where this project is heading — it is meant to be foundational
-infrastructure for both, not just an OTFT AFE toolkit.
+A **local, license-free, Cadence-calibrated framework for analog circuit simulation
+and ML-driven design optimization** — built to be foundational infrastructure for two
+shifts in how chips get designed:
 
 **1. Open infrastructure for ML-accelerated simulation.** Using ML to accelerate
 chip-design simulation is a fast-growing direction, yet the field still lacks open,
-foundational building blocks: there is no standard, open way to *generate
-large-scale, physics-faithful simulation data*, no reusable *data-generator
-framework*, and no *ML-method framework* purpose-built for circuits. This project
-provides the whole chain as one open, reproducible pipeline — a Cadence-calibrated
-solver stack as the physics-faithful oracle → a provenance-tracked labeled-dataset
-generator ([`core/dataset.py`](../core/dataset.py)) → an ML surrogate + screen-and-verify
-optimizer ([`core/surrogate.py`](../core/surrogate.py), `surrogate_torch.py`,
-`optimize.py`). Circuit in, data out, surrogate trained, design optimized, with no
-commercial simulator in the loop.
+foundational building blocks: there is no standard, open way to *generate large-scale,
+physics-faithful simulation data*, no reusable *data-generator framework*, and no
+*ML-method framework* purpose-built for circuits. This project provides the whole chain
+as one open, reproducible pipeline — a Cadence-calibrated solver stack as the
+physics-faithful oracle → a provenance-tracked labeled-dataset generator
+([`core/dataset.py`](../core/dataset.py)) → an ML surrogate + screen-and-verify optimizer
+([`core/surrogate.py`](../core/surrogate.py), `surrogate_torch.py`, `optimize.py`).
+Circuit in, data out, surrogate trained, design optimized, with no commercial simulator
+in the loop.
 
-**2. A local, license-free toolchain an LLM/agent can drive.** LLM-driven circuit
-design increasingly loops through a simulator, but calling a commercial tool
-(licensed, remote, slow) across many dialogue turns is expensive and cannot run
-autonomously on the local machine. This project is a self-contained toolchain an
-LLM agent can call to **obtain simulation results, analyze and summarize them, and
-optimize a design** — the entire DC/AC/Noise/PSS/… loop, on-device, with no external
-round-trip and no license. The JSON circuit format, the `python -m core` CLI, and the
-structured result dictionaries are deliberately shaped to be machine-callable and
-machine-readable, so an agent drives the whole design loop from the local shell.
+**2. A local toolchain an LLM/agent can drive.** LLM-driven circuit design increasingly
+loops through a simulator, but calling a commercial tool (licensed, remote, slow) across
+many dialogue turns is expensive and cannot run autonomously on-device. This project is
+a self-contained toolchain an LLM agent can call to **obtain simulation results, analyze
+and summarize them, and optimize a design** — the entire DC/AC/Noise/PSS/… loop, on the
+local machine, no external round-trip, no license. The JSON circuit format, the
+`python -m core` CLI, and the structured result dictionaries are deliberately shaped to
+be machine-callable and machine-readable, so an agent drives the whole design loop from
+the local shell.
+
+The solver stack is **calibrated to Cadence Spectre 24.1** — anchored on an AT4000TG
+PMOS-OTFT ECG AFE (typically <1% on gain/BW/IRN) — and generalizes across processes
+through the same engine: the AT4000TG OTFT plus two industry-standard silicon CMOS
+nodes, **SKY130** (130 nm, OpenVAF-compiled BSIM4 via an OSDI host) and **FreePDK45**
+(45 nm, ngspice-C as the exact device evaluator). 
+
+**Concretely, it does:**
+- **DC/AC/Noise/Transient** — standard analysis without a simulator license.
+- **PSS / PAC / PNoise** — periodic steady-state / AC / noise for chopper amplifiers, matched to Spectre RF.
+- **Design exploration & ML-surrogate optimization** — sweep sizes/bias, build a labeled dataset, train a fast surrogate, screen a large candidate pool, and verify the shortlist on the calibrated solver (thousands of times faster than a brute-force sweep).
+- **Corners & mismatch** — process corners, per-device mismatch Monte Carlo, latch screening.
+- **Multi-process** — OTFT (AT4000TG) + silicon SKY130 + FreePDK45 through one pipeline; two worked, end-to-end fully-differential OTA design cases ship as reports ([SKY130](sky130_fd_ota_design.md), [FreePDK45](freepdk45_fd_ota_design.md)).
+
+For solver internals, see [Core Solver Overview](core_overview.md).
 
 ---
 
@@ -681,28 +667,6 @@ OTFT) is unaffected. Tests gated on the toolchain (`tests/test_sky130*.py`,
 
 ---
 
-## Motivation
-
-Analog design needs many simulator runs to tune transistor sizes and bias.
-Cadence/Spectre is accurate but slow for sweeping thousands of candidates.
-
-The workflow this project enables:
-
-1. **Cadence/Spectre** = trusted reference.
-2. **This repo** = fast local model, calibrated to match Spectre behavior.
-3. **Explore locally** — sweep sizes, bias, corners; filter by constraints.
-4. **Verify in Cadence** — only the best candidates go back to Spectre.
-
----
-
 ## Contributing
 
 Issues and PRs welcome.
-
----
-
-## Intended Use
-
-Research and early-stage analog design exploration. **Not** a sign-off simulator
-replacement. Use it to understand trade-offs, narrow the search space, and
-prepare better candidates for Cadence/Spectre verification.
