@@ -349,6 +349,10 @@ def compare_pac(local, ref_pac, tol, *, outputs=("voutp_f", "voutn_f"),
 
 def compare_pnoise(local, ref_pnoise, ref_pac, tol, *, outputs=("voutp_f", "voutn_f"),
                    inputs=("vinp", "vinn")):
+    # _dev (per-device noise structs) is intentionally discarded: the chopper
+    # fixture mixes 3-col MOSFET and 2-col resistor structs (ragged; see
+    # psf.parse_noise), so we never column-index it — the calibration metric is
+    # built solely from `out`, the total output ASD.
     fr, out, _dev = ref_pnoise
     _f, sig = ref_pac
     op, on = outputs

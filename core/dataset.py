@@ -3,9 +3,9 @@
 The solver stack is calibrated against Cadence, and :mod:`core.explore` already
 samples a design space and evaluates each candidate through it. A surrogate model
 needs the *same* samples, but as a dataset rather than a Pareto front. This module
-is the "Teacher simulator + Dataset builder" role of the ML-surrogate roadmap
-(``docs/futureplan.md`` §7): it reuses explore's sampling and validated
-per-candidate evaluation and adds only the three concerns explore omits.
+is the "Teacher simulator + Dataset builder" role of the ML-surrogate roadmap:
+it reuses explore's sampling and validated per-candidate evaluation and adds
+only the three concerns explore omits.
 
 * **No filtering.** Constraints / Pareto selection are a *search* concern. A
   training set keeps *every* sample, including DC-failed ones — those are

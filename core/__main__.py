@@ -30,6 +30,16 @@ import sys
 
 import numpy as np
 
+# ── Numba flag pre-scan backstop ──────────────────────────────────────────────
+# The authoritative `--no-numba` pre-scan lives in core/__init__.py, which runs
+# (and bakes numba_kernels' USE_NUMBA flag via its transitive solver imports)
+# *before* this module executes under `python -m core`. This repeat here is a
+# cheap backstop for any path that reaches __main__ without that having run; it
+# must still precede the solver imports below. If both are somehow bypassed,
+# _assert_numba_flag() turns the silent no-op into a loud SystemExit.
+if "--no-numba" in sys.argv:
+    os.environ["CIRCUIT_USE_NUMBA"] = "0"
+
 from .analysis_dispatch import run_analysis_suite
 from .chopper import (chopper_analysis, pmos_chopper_analysis,
                       pmos_chopper_lptv_analysis, pmos_chopper_pac,
@@ -49,6 +59,28 @@ _CHOPPER_LEVELS = ["ideal", "pmos", "lptv", "pss", "pac", "pnoise", "transient"]
 
 
 # ── shared helpers ───────────────────────────────────────────────────────────
+
+def _assert_numba_flag(args):
+    """Fail loudly if ``--no-numba`` was requested but Numba is still active.
+
+    The real work is done by the argv pre-scan at module top (it sets
+    CIRCUIT_USE_NUMBA=0 before ``core.numba_kernels`` is imported and bakes its
+    flags). This guard is a tripwire: if someone reorders the imports, imports a
+    solver module before ``core.__main__``, or otherwise defeats the pre-scan,
+    the flag would silently no-op again. Checking the *baked* value here converts
+    that silent failure into a loud one instead of a wrong-but-quiet run.
+    """
+    if not getattr(args, "no_numba", False):
+        return
+    from . import numba_kernels
+    if numba_kernels.USE_NUMBA:
+        raise SystemExit(
+            "--no-numba was requested but Numba is already active "
+            "(core.numba_kernels.USE_NUMBA is True). The CIRCUIT_USE_NUMBA flag "
+            "is baked when numba_kernels is first imported; a solver module was "
+            "imported before core.__main__'s argv pre-scan could set it."
+        )
+
 
 def _load_spec(path):
     """Load a CircuitSpec from a JSON path, or raise SystemExit."""
@@ -162,8 +194,7 @@ def _add_run_parser(subparsers):
 
 
 def _cmd_run(args):
-    if args.no_numba:
-        os.environ["CIRCUIT_USE_NUMBA"] = "0"
+    _assert_numba_flag(args)
 
     selected = None
     if args.analysis:
@@ -224,8 +255,7 @@ def _add_explore_parser(subparsers):
 
 
 def _cmd_explore(args):
-    if args.no_numba:
-        os.environ["CIRCUIT_USE_NUMBA"] = "0"
+    _assert_numba_flag(args)
     return explore_run_cli(args)
 
 
@@ -243,8 +273,7 @@ def _add_dataset_parser(subparsers):
 
 
 def _cmd_dataset(args):
-    if args.no_numba:
-        os.environ["CIRCUIT_USE_NUMBA"] = "0"
+    _assert_numba_flag(args)
     return dataset_run_cli(args)
 
 
@@ -262,8 +291,7 @@ def _add_corners_parser(subparsers):
 
 
 def _cmd_corners(args):
-    if args.no_numba:
-        os.environ["CIRCUIT_USE_NUMBA"] = "0"
+    _assert_numba_flag(args)
 
     spec = _load_spec(args.circuit)
     freqs = _freqs_from_args(args)
@@ -320,8 +348,7 @@ def _add_mc_parser(subparsers):
 
 
 def _cmd_mc(args):
-    if args.no_numba:
-        os.environ["CIRCUIT_USE_NUMBA"] = "0"
+    _assert_numba_flag(args)
 
     spec = _load_spec(args.circuit)
     freqs = _freqs_from_args(args)
@@ -406,8 +433,7 @@ def _add_chopper_parser(subparsers):
 
 
 def _cmd_chopper(args):
-    if args.no_numba:
-        os.environ["CIRCUIT_USE_NUMBA"] = "0"
+    _assert_numba_flag(args)
 
     spec = _load_spec(args.circuit)
     freqs = _freqs_from_args(args)
@@ -589,8 +615,7 @@ def _add_plot_parser(subparsers):
 
 
 def _cmd_plot(args):
-    if args.no_numba:
-        os.environ["CIRCUIT_USE_NUMBA"] = "0"
+    _assert_numba_flag(args)
     try:
         from examples import plot_bode as pbd
         from examples import plot_transient as ptr

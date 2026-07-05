@@ -16,7 +16,6 @@ and skip cleanly without it.
 import json
 import os
 import subprocess
-import tempfile
 
 import numpy as np
 import pytest
@@ -125,7 +124,7 @@ def test_gear2_matches_be_when_settled():
 
 @pytest.mark.skipif(not os.path.exists(RUN_NGSPICE),
                     reason="OSDI-enabled ngspice not present")
-def test_cs_step_matches_ngspice():
+def test_cs_step_matches_ngspice(tmp_path):
     """Same card + same .osdi in ngspice .tran → trajectory oracle."""
     from core.osdi_device import compile_va
     from core.sky130_model import _BSIM4_VA, Sky130Pfet
@@ -141,23 +140,18 @@ def test_cs_step_matches_ngspice():
             cur = "+"
         cur += tok
     lines.append(cur)
-    out_csv = tempfile.mktemp(suffix=".csv")
+    out_csv = str(tmp_path / "out.csv")
     net = (f"* cs pmos tran (osdi)\n.control\npre_osdi {osdi}\n.endc\n"
            f"vdd vdd 0 dc {VDD}\n"
            f"vg g 0 pulse({VG0} {VG1} {TEDGE:g} {TSTEP:g} {TSTEP:g} 1 2)\n"
            f"N1 out g vdd vdd mp\n.model mp bsim4va\n" + "\n".join(lines) +
            f"\nrl out 0 {RL:g}\ncl out 0 {CL:g}\n"
            f".control\ntran {TSTEP:g} {TSTOP:g}\nwrdata {out_csv} v(out)\n.endc\n.end\n")
-    with tempfile.NamedTemporaryFile("w", suffix=".cir", delete=False) as fh:
+    cir = str(tmp_path / "deck.cir")
+    with open(cir, "w") as fh:
         fh.write(net)
-        cir = fh.name
-    try:
-        subprocess.run([RUN_NGSPICE, "-b", cir], capture_output=True, text=True)
-        data = np.loadtxt(out_csv)
-    finally:
-        os.unlink(cir)
-        if os.path.exists(out_csv):
-            os.unlink(out_csv)
+    subprocess.run([RUN_NGSPICE, "-b", cir], capture_output=True, text=True)
+    data = np.loadtxt(out_csv)
     v_ng = np.interp(tgrid, data[:, 0], data[:, 1])
     assert abs(vout[0] - v_ng[0]) < 1e-4                  # same DC start
     assert abs(vout[-1] - v_ng[-1]) < 1e-4                # same settled point

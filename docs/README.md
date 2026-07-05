@@ -404,7 +404,7 @@ shortlist is trusted for a real design decision. `--filter label:lo:hi` on
 `surrogate train` restricts training to a region of interest (e.g. drop railed/
 collapsed designs that would otherwise dominate the fit). See
 [CLI Reference §1.7–1.8](cli_reference.md) for the full dataset/surrogate/optimize
-option reference, and `docs/futureplan.md` §7 for the surrogate roadmap and honest
+option reference, and `docs/core_overview.md` for the surrogate architecture and honest
 accuracy numbers.
 
 ### 7. Silicon PDKs (SKY130 + FreePDK45)
@@ -434,7 +434,7 @@ python -m core.optimize examples/sky130_5t_ota.json ds/ota.pkl -n 50000 --corner
 On the complementary 5T OTA example, this screens 50,000 designs ~6,000× faster
 than the solver, confirms 9/10 shortlisted designs feasible on the solver, and the
 same designs hold (9/10) when re-verified at the slow (`ss`) corner. Needs the
-SKY130 PDK + OpenVAF + ngspice toolchain (see `docs/futureplan.md` §9); solvers
+SKY130 PDK + OpenVAF + ngspice toolchain (see `docs/core_overview.md`); solvers
 raise a clear error if it isn't installed. **Design note:** like any single-stage
 silicon amplifier, this example uses an active current-mirror load (for the DC
 operating point / gain) plus a capacitive load (for bandwidth) — a resistor-loaded
@@ -645,7 +645,7 @@ reuse or batched linear solves.
 The silicon PDKs need an external toolchain that isn't a pip dependency: SKY130 wants
 OpenVAF + ngspice + the SKY130 PDK; FreePDK45 wants ngspice + the FreePDK45 cards.
 Install it and point `PDK_ROOT`/`OPENVAF_ROOT`/`NGSPICE_BIN` at it (see
-`docs/futureplan.md` §9). Without it, any circuit using a `sky130.*` / `freepdk45.*`
+`docs/core_overview.md`). Without it, any circuit using a `sky130.*` / `freepdk45.*`
 model type raises a clear error at first use; every other PDK (the default AT4000TG
 OTFT) is unaffected. Tests gated on the toolchain (`tests/test_sky130*.py`,
 `tests/test_freepdk45.py`, `tests/test_osdi_host.py`) skip cleanly when it's absent.
@@ -661,7 +661,7 @@ OTFT) is unaffected. Tests gated on the toolchain (`tests/test_sky130*.py`,
 | [CLI Reference](cli_reference.md) | Every subcommand and flag, including `dataset`/`surrogate`/`optimize` and the `models`/silicon-corner options |
 | [SKY130 FD-OTA design case](sky130_fd_ota_design.md) | End-to-end 130 nm fully-differential OTA: architecture → surrogate → optimize → PVT |
 | [FreePDK45 FD-OTA design case](freepdk45_fd_ota_design.md) | End-to-end 45 nm/1.0 V FD-OTA, incl. the whole-OTA ngspice `.ac` cross-check |
-| [Future Plan](futureplan.md) | What's done, what's next, and the execution roadmap |
+| [Future Plan](futureplan.md) | Strategic direction: local service layer, desktop client, MCP server, ML scaling |
 | `tests/` directory | Working examples of every API call with expected outputs |
 | `benchmarks/` directory | Performance baselines and how the hardware-accelerated paths compare |
 

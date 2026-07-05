@@ -47,6 +47,30 @@ def _ngspice() -> str:
     return os.environ.get("NGSPICE_BIN", "ngspice")
 
 
+def _run_ngspice(cir: str, out_txt: str, timeout: float, what: str) -> None:
+    """Run one ngspice batch deck, surfacing failures instead of swallowing them.
+
+    ngspice's stderr carries harmless warnings even on a good run, so we key
+    failure on the exit code and the output file's existence — never on stderr
+    being non-empty. On a non-zero exit, or a silent failure (exit 0 but no
+    ``out_txt``), raise :class:`RuntimeError` carrying ``what`` (deck purpose),
+    the return code, and the tail of stderr (falling back to stdout) so the
+    caller sees what ngspice actually said instead of a downstream
+    ``FileNotFoundError`` from :func:`numpy.loadtxt`."""
+    proc = subprocess.run([_ngspice(), "-b", cir], capture_output=True,
+                          text=True, timeout=timeout)
+    tail = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+    tail = tail[-800:]
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ngspice {what} failed (returncode {proc.returncode}); "
+            f"deck={cir}\n--- ngspice output tail ---\n{tail}")
+    if not os.path.exists(out_txt):
+        raise RuntimeError(
+            f"ngspice {what} produced no output {out_txt} (returncode 0, "
+            f"silent failure); deck={cir}\n--- ngspice output tail ---\n{tail}")
+
+
 @dataclass(frozen=True)
 class CharGrid:
     """A characterised MOSFET: op-vars on a regular (Vsb, Vds, Vgs) grid.
@@ -91,28 +115,24 @@ def _sweep_one_vsb(card_path, model_name, W, L, vb, vgs, vds, temp_c=27.0):
     temperature equations run at the PVT point. ngspice accepts a negative sweep step
     for the PMOS descent. wrdata flattens the sweep as Vds-blocks of Vgs-rows,
     reshaped to ``(n_vds, n_vgs)``."""
-    out_txt = tempfile.mktemp(suffix=".txt")
     saves = " ".join(f"@mn[{v}]" for v in _OPVARS)
     g0, g1, gd = vgs[0], vgs[-1], (vgs[1] - vgs[0])
     d0, d1, dd = vds[0], vds[-1], (vds[1] - vds[0])
-    deck = (f"* freepdk45 char {model_name} W={W:g} L={L:g} vb={vb:g} T={temp_c:g}\n"
-            f'.include "{card_path}"\n'
-            f".options temp={temp_c:g}\n"
-            f"mn d g s b {model_name} w={W:g}u l={L:g}u\n"
-            f"vd d 0 {d0:g}\nvg g 0 {g0:g}\nvs s 0 0\nvb b 0 {vb:g}\n"
-            f".control\nset filetype=ascii\nsave {saves}\n"
-            f"dc vg {g0:g} {g1:g} {gd:g} vd {d0:g} {d1:g} {dd:g}\n"
-            f"wrdata {out_txt} {saves}\n.endc\n.end\n")
-    cir = tempfile.mktemp(suffix=".cir")
-    with open(cir, "w") as fh:
-        fh.write(deck)
-    try:
-        subprocess.run([_ngspice(), "-b", cir], capture_output=True, text=True, timeout=120)
+    with tempfile.TemporaryDirectory() as td:
+        out_txt = os.path.join(td, "out.txt")
+        cir = os.path.join(td, "deck.cir")
+        deck = (f"* freepdk45 char {model_name} W={W:g} L={L:g} vb={vb:g} T={temp_c:g}\n"
+                f'.include "{card_path}"\n'
+                f".options temp={temp_c:g}\n"
+                f"mn d g s b {model_name} w={W:g}u l={L:g}u\n"
+                f"vd d 0 {d0:g}\nvg g 0 {g0:g}\nvs s 0 0\nvb b 0 {vb:g}\n"
+                f".control\nset filetype=ascii\nsave {saves}\n"
+                f"dc vg {g0:g} {g1:g} {gd:g} vd {d0:g} {d1:g} {dd:g}\n"
+                f"wrdata {out_txt} {saves}\n.endc\n.end\n")
+        with open(cir, "w") as fh:
+            fh.write(deck)
+        _run_ngspice(cir, out_txt, timeout=120, what="dc-sweep")
         raw = np.loadtxt(out_txt)
-    finally:
-        for p in (cir, out_txt):
-            if os.path.exists(p):
-                os.unlink(p)
     # wrdata writes (scale, value) column-pairs; values are the even columns.
     vals = raw[:, 1::2]                        # (n_rows, n_opvars)
     n_vgs, n_vds = len(vgs), len(vds)
@@ -184,25 +204,21 @@ def _noise_one(card_path, model_name, W, L, vgs, vds, vb, temp_c=27.0):
     S_id(f)=A+B/f splits white channel noise (A) from the 1/f coefficient (B) —
     all exact ngspice-C BSIM4 (tnoimod/fnoimod), ~0.2 % fit residual. ``temp_c``
     sets the device temperature (°C)."""
-    out_txt = tempfile.mktemp(suffix=".txt")
-    deck = (f"* fp45 noise {model_name}\n"
-            f'.include "{card_path}"\n'
-            f".options temp={temp_c:g}\n"
-            f"mn d g s b {model_name} w={W:g}u l={L:g}u\n"
-            f"vd d 0 {vds:g}\nvg g 0 {vgs:g} ac 1\nvs s 0 0\nvb b 0 {vb:g}\n"
-            f"hn out 0 vd 1\nrout out 0 1e12\n"
-            f".control\nset filetype=ascii\nnoise v(out) vg dec 4 1 1e11\n"
-            f"setplot noise1\nwrdata {out_txt} onoise_spectrum\n.endc\n.end\n")
-    cir = tempfile.mktemp(suffix=".cir")
-    with open(cir, "w") as fh:
-        fh.write(deck)
-    try:
-        subprocess.run([_ngspice(), "-b", cir], capture_output=True, text=True, timeout=60)
+    with tempfile.TemporaryDirectory() as td:
+        out_txt = os.path.join(td, "out.txt")
+        cir = os.path.join(td, "deck.cir")
+        deck = (f"* fp45 noise {model_name}\n"
+                f'.include "{card_path}"\n'
+                f".options temp={temp_c:g}\n"
+                f"mn d g s b {model_name} w={W:g}u l={L:g}u\n"
+                f"vd d 0 {vds:g}\nvg g 0 {vgs:g} ac 1\nvs s 0 0\nvb b 0 {vb:g}\n"
+                f"hn out 0 vd 1\nrout out 0 1e12\n"
+                f".control\nset filetype=ascii\nnoise v(out) vg dec 4 1 1e11\n"
+                f"setplot noise1\nwrdata {out_txt} onoise_spectrum\n.endc\n.end\n")
+        with open(cir, "w") as fh:
+            fh.write(deck)
+        _run_ngspice(cir, out_txt, timeout=60, what="noise")
         raw = np.loadtxt(out_txt)
-    finally:
-        for p in (cir, out_txt):
-            if os.path.exists(p):
-                os.unlink(p)
     f, asd = raw[:, 0], raw[:, 1]            # onoise_spectrum is ASD [V/√Hz] = √S_id
     s_id = asd ** 2
     A, B = np.linalg.lstsq(np.column_stack([np.ones_like(f), 1.0 / f]), s_id,

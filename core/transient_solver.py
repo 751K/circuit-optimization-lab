@@ -38,9 +38,12 @@ Clock feedthrough from the Verilog-A Cgss/Cgdd terms is included when the switch
 gate clocks are finite-edge waveforms. Additional explicit charge-injection
 pulses can be supplied through current_inputs.
 """
+from __future__ import annotations
+
 import os
 import time
 from dataclasses import dataclass, fields
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
 from .adaptive_config import (
@@ -78,6 +81,9 @@ from .transient_profile import (
 )
 from .compiled_topology import CompiledTopology, index_array, term_arrays
 from . import diagnostics
+
+if TYPE_CHECKING:
+    from .device_factory import CircuitBinding
 
 # Single source of the transient drivers: these `_impl` kernels are the jitted
 # functions when Numba is installed and the raw pure-Python functions otherwise
@@ -1133,20 +1139,30 @@ def osdi_model_names(model_types):
     return tuple(names)
 
 
-def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
-              topo=None, inputs=None, node_inputs=None, current_inputs=None,
-              corner=None, model_types=None, device_kwargs=None,
-              max_step=None, flat_max_step=None,
-              max_retry_subdivisions=0, newton_maxit=30,
-              newton_step_limit=5.0, newton_vtol=1e-8,
-              fallback_full_jacobian=False,
-              fallback_least_squares=False, fallback_tol=1e-9,
-              signed_devices=None, profile=False, edge_mask=None,
-              rail_margin=None, integration_method="be",
-              gear2_be_fallback=True, cap_mode=None, cap_mode_id=None,
-              adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
-              adaptive_iabstol=1e-12, adaptive_max_steps=200000,
-              adaptive_h0=None, adaptive_config=None, *, binding=None):
+def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float],
+              tgrid: np.ndarray, vip: Any = None, vin: Any = None,
+              nf: int | Mapping[str, int] | None = None, V0: Any = None,
+              topo: Any = None, inputs: Mapping[str, Any] | None = None,
+              node_inputs: Mapping[str, str] | None = None,
+              current_inputs: Sequence[Any] | None = None,
+              corner: str | Mapping[str, Any] | None = None,
+              model_types: Mapping[str, str] | None = None,
+              device_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
+              max_step: float | None = None, flat_max_step: float | None = None,
+              max_retry_subdivisions: int = 0, newton_maxit: int = 30,
+              newton_step_limit: float = 5.0, newton_vtol: float = 1e-8,
+              fallback_full_jacobian: bool = False,
+              fallback_least_squares: bool = False, fallback_tol: float = 1e-9,
+              signed_devices: Any = None, profile: bool = False,
+              edge_mask: Any = None,
+              rail_margin: float | None = None, integration_method: str = "be",
+              gear2_be_fallback: bool = True, cap_mode: Any = None,
+              cap_mode_id: Any = None,
+              adaptive: bool = False, adaptive_reltol: float = 1e-4,
+              adaptive_vabstol: float = 1e-6,
+              adaptive_iabstol: float = 1e-12, adaptive_max_steps: int = 200000,
+              adaptive_h0: float | None = None, adaptive_config: Any = None, *,
+              binding: CircuitBinding | None = None) -> dict:
     """Backward-Euler (default) or gear2/BDF2 transient.
 
       integration_method : "be" (backward-Euler, 1st order; the default for the

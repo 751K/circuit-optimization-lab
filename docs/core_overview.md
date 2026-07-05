@@ -147,7 +147,7 @@ Defines the abstract device‑model interface that decouples solvers from concre
 - **`TransistorModel` (ABC)** — seven abstract methods (`get_Idc`, `get_op`, `get_capacitances`, `get_capacitance_charges_from_op`, `get_capacitance_branch_terms_from_op`, `get_noise_psd`, `get_numba_params`); `get_ss_params` provides a finite‑difference default that subclasses can override.
 - **`NumbaParams` (frozen dataclass)** — the 16 scalar parameters extracted once per device and passed to numba‑accelerated transient kernels.
 - **Backend-capability class attributes** — generic solvers dispatch on *capabilities*, never on a concrete backend type (no `isinstance(dev, OsdiDevice)`). `HAS_TERMINAL_LINEARIZATION` (default `False`) advertises the full quasi-static 4×4 terminal `(G, C)` stamp used by the periodic PAC/PNoise linearizer; `OsdiDevice` overrides it to `True`. `TRANSIENT_BACKEND` (default `None`, meaning the generic OTFT numba transient path) names a specialised integrator to route to instead; `OsdiDevice` sets it to `"osdi"`, which `transient_solver.py` reads to route to `core.osdi_transient.transient_osdi`.
-- **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. `get_model_class(model_type)` is a public read-only registry accessor so solvers can inspect a model's capability flags without importing a concrete backend class. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged.
+- **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. `get_model_class(model_type)` is a public read-only registry accessor so solvers can inspect a model's capability flags without importing a concrete backend class. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged. `register_model()` still *replaces* an existing entry on re-registration (intentional swap-in, e.g. a test stub, keeps working silently), but a genuine collision — a different class (by `__module__.__qualname__`) taking over an already-occupied name, e.g. two PDK modules racing for the same alias — now emits a `RuntimeWarning` before overwriting; a repeat import or `importlib.reload` of the *same* class stays silent.
 
 ### `device_factory.py`
 
@@ -239,6 +239,19 @@ CIRCUIT_NUMBA_CACHE=0
 The solver path uses Numba automatically whenever it is available; no module
 sets `CIRCUIT_USE_NUMBA=1` at import time (set `CIRCUIT_USE_NUMBA=0` to opt out).
 
+The flag is **baked at import time**: `USE_NUMBA`/`NUMBA_AVAILABLE` are fixed
+constants computed once when `numba_kernels` is first imported, so setting the
+env var afterwards is a silent no-op. `core/__init__.py` pre-scans `sys.argv`
+for `--no-numba` and sets `CIRCUIT_USE_NUMBA=0` *before* its solver imports pull
+in `numba_kernels` transitively — under `python -m core …` this `__init__` runs
+before `__main__.py`, so the CLI flag takes effect. Each `__main__.py`
+subcommand handler then calls `_assert_numba_flag(args)`, which raises
+`SystemExit` if `--no-numba` was requested but `numba_kernels.USE_NUMBA` is
+still `True` — turning a defeated pre-scan (e.g. calling `main()` programmatically
+after something already imported a solver module) into a loud failure instead
+of a silently-ignored flag. Disabling Numba from Python code (not the CLI) must
+set `CIRCUIT_USE_NUMBA=0` **before** `import core`.
+
 At present, the accelerated paths are PMOS current evaluation, internal-node
 Newton iterations, bias-dependent capacitance evaluation, AC/PNoise
 terminal-derivative small-signal parameters, PNoise HB block assembly/noise fold,
@@ -247,6 +260,34 @@ residual/Jacobian stamping, and the small dense Newton solve. The dense Newton
 solve uses an in-place `A*x = -R` path to avoid avoidable per-iteration copies.
 If the compiled path cannot handle a step, `transient_solver.py` falls back to
 the original Python Newton / full-Jacobian / least-squares path.
+
+### `analysis_options.py` / `analysis_dispatch.py`
+
+`analysis_options.py` is the central per-analysis option registry that
+`analysis_dispatch.py`'s `run_analysis_suite` (and the JSON schema regression
+test) both derive from, so solver kwargs/defaults/schema cannot silently drift
+apart. `validate_analysis_cfg(analysis, cfg)` rejects residual keys in a JSON
+`analyses` block: `known_keys(analysis)` unions the solver's option registry
+with `DISPATCH_KEYS` (the handful of keys — e.g. `freqs`/`corner`/`band` for
+`ac`/`noise`, `signed_devices` for `transient` — that `run_analysis_suite`
+reads directly out of `cfg` rather than forwarding into `solver_kwargs`); any
+key outside that union raises `ValueError` naming the analysis, the offending
+key(s), and the sorted list of valid keys. This turns a typo (e.g.
+`max_sidebands` for `max_sideband`) into an immediate error instead of a
+silently-ignored option running with its default.
+
+### `psf.py`
+
+`provenance(path)["fundamental"]` reads the PSF HEADER's `"fundamental
+frequency"` key (falling back to the bare `"fundamental"` spelling for any
+non-standard writer) — periodic analyses (PAC/PNoise/PSS) report their real
+drive frequency; DC/AC/noise/tran carry neither key and read back `None`.
+`parse_noise(path)`'s per-device noise arrays are **ragged**: the column count
+follows each device's TYPE-declared struct width (a MOSFET's `(flicker,
+thermal, total)` struct is width 3; a resistor's `(rn, total)` struct is width
+2), so callers must read the *last* column (`[:, -1]`) for the total
+contribution and check `.shape[1]` before slicing a specific field — never
+assume width 3.
 
 ### `ac_mna.py`
 
@@ -684,7 +725,7 @@ accelerates the *screening* of a large candidate pool.
   every variable kind (including structural cap/resistor/clock axes) is honored in the
   verify pass, not just size/bias.
 
-A key operational lesson (see `docs/futureplan.md` §7): no single surrogate is both a
+A key operational lesson: no single surrogate is both a
 precise *region-of-interest* model and a good *failure-region-aware screener* — training
 on the operating region (via `--filter`) gives the tightest metric accuracy but makes the
 surrogate blind to railed designs during screening. The screen-and-verify architecture
@@ -719,7 +760,11 @@ match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see th
   Vsb slice (op-vars `@m[id/gm/gds/cgs/cgd]`); `characterize_noise()` runs one `.noise` per
   coarse bias. Both take a `temp_c` (`.options temp`, keyed into the cache — 27 °C stays
   tag-free so nominal caches persist) and cache to `data/pdk/freepdk45/*.npz`, so reuse needs
-  no ngspice.
+  no ngspice. Both run through a shared `_run_ngspice()` helper that makes failures explicit:
+  a non-zero ngspice return code, or a silently-missing output file on return code 0, raises
+  `RuntimeError` carrying the tail of ngspice's stderr — instead of the batch decks and output
+  files (now built under a `tempfile.TemporaryDirectory()`, not bare `mktemp`) going missing
+  and surfacing as an opaque downstream `FileNotFoundError` from `numpy.loadtxt`.
 - **`ngspice_device.py`** — `NgspiceDevice(TransistorModel)` interpolates the grid
   (`scipy.RegularGridInterpolator`, **linear** — cubic returns 0 on the ~1e-17 cap arrays).
   `extract_w`: characterize once at a reference W and linearly scale the actual W (BSIM4 is

@@ -9,10 +9,16 @@ routing (:func:`apply_silicon_corner`) that stamps a corner name onto extracted
 silicon device cards. This is a leaf device layer — it depends only on
 :mod:`.device_model`, never on any solver or workflow module.
 """
+from __future__ import annotations
+
 import dataclasses
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Mapping
 
 from .device_model import create_device, get_default_model_type
+
+if TYPE_CHECKING:
+    from .device_model import TransistorModel
 
 # Global process corners (pvt0 = -3·0.0753, pbeta0 = -15·0.036 for slow).
 # Numbers come from the AT4000TG PDK monte.scs sections.
@@ -23,7 +29,7 @@ CORNERS = {
 }
 
 
-def dev_corner(corner, name):
+def dev_corner(corner: str | Mapping[str, Any] | None, name: str) -> Mapping[str, Any]:
     """Resolve the model-shift dict for one device.
 
     corner may be:
@@ -45,13 +51,13 @@ def dev_corner(corner, name):
     return corner                                             # global shift
 
 
-def is_per_device_corner(corner):
+def is_per_device_corner(corner: str | Mapping[str, Any] | None) -> bool:
     if not corner or isinstance(corner, str):
         return False
     return any(isinstance(v, dict) for v in corner.values())
 
 
-def dev_nf(nf, name):
+def dev_nf(nf: int | Mapping[str, int] | None, name: str) -> int:
     """Resolve NF (number of fingers) for one device. nf may be None (->1),
     an int (global), or a per-device map {'M7':120,...} (missing -> 1).
     NF doesn't change Idc/gm (current ∝ total W/L) but DOES change the gate
@@ -63,8 +69,12 @@ def dev_nf(nf, name):
     return int(nf)
 
 
-def build_devices(sizes, *, nf=None, corner=None, topo, model_types=None,
-                  device_kwargs=None):
+def build_devices(sizes: Mapping[str, tuple[float, float]], *,
+                  nf: int | Mapping[str, int] | None = None,
+                  corner: str | Mapping[str, Any] | None = None, topo: Any,
+                  model_types: Mapping[str, str] | None = None,
+                  device_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
+                  ) -> dict[str, TransistorModel]:
     """Create ``{name: TransistorModel}`` for every transistor in *topo*.
 
     Shared factory used by all solvers instead of repeating the same
@@ -90,7 +100,9 @@ def build_devices(sizes, *, nf=None, corner=None, topo, model_types=None,
     }
 
 
-def get_ss_params(W, L, Vs, Vd, Vg, corner=None, nf=1, dev_inst=None):
+def get_ss_params(W: float, L: float, Vs: float, Vd: float, Vg: float,
+                  corner: Mapping[str, Any] | None = None, nf: int = 1,
+                  dev_inst: TransistorModel | None = None) -> dict[str, float]:
     """Small-signal parameters at a DC operating point.
 
     gm/gds are the *terminal* values, extracted by finite-differencing the full
@@ -121,7 +133,11 @@ SILICON_CORNERS = SKY130_CORNERS | {"nom"}
 _SILICON_PREFIXES = ("sky130", "freepdk45")
 
 
-def apply_silicon_corner(model_types, device_kwargs, corner):
+def apply_silicon_corner(
+    model_types: Mapping[str, str] | None,
+    device_kwargs: Mapping[str, Mapping[str, Any]] | None,
+    corner: str | Mapping[str, Any] | None,
+) -> tuple[Mapping[str, Mapping[str, Any]] | None, str | Mapping[str, Any] | None]:
     """Route a silicon corner onto silicon devices; leave OTFT corners for the solver.
 
     Returns ``(device_kwargs, solver_corner)``. When ``corner`` names a silicon corner
@@ -180,20 +196,20 @@ class CircuitBinding:
     :func:`apply_silicon_corner` copies ``device_kwargs`` before stamping.
     """
 
-    topo: object
-    model_types: object = None
-    device_kwargs: object = None
-    nf: object = None
-    corner: object = None
-    dc_seed: object = None
+    topo: Any
+    model_types: Mapping[str, str] | None = None
+    device_kwargs: Mapping[str, Mapping[str, Any]] | None = None
+    nf: int | Mapping[str, int] | None = None
+    corner: str | Mapping[str, Any] | None = None
+    dc_seed: Mapping[str, float] | None = None
 
-    def build(self, sizes):
+    def build(self, sizes: Mapping[str, tuple[float, float]]) -> dict[str, TransistorModel]:
         """Build ``{name: TransistorModel}`` for *sizes* under this binding."""
         return build_devices(sizes, nf=self.nf, corner=self.corner, topo=self.topo,
                              model_types=self.model_types,
                              device_kwargs=self.device_kwargs)
 
-    def at_corner(self, corner):
+    def at_corner(self, corner: str | Mapping[str, Any] | None) -> CircuitBinding:
         """Return a binding routed to *corner*.
 
         A silicon corner name (``tt/ss/ff/sf/fs`` or ``nom``) is baked onto the
@@ -208,8 +224,12 @@ class CircuitBinding:
         return dataclasses.replace(self, device_kwargs=dk, corner=solver_corner)
 
 
-def resolve_binding(binding, *, topo=None, nf=None, corner=None, model_types=None,
-                    device_kwargs=None, x0_guess=None):
+def resolve_binding(binding: CircuitBinding | None, *, topo: Any = None,
+                    nf: int | Mapping[str, int] | None = None,
+                    corner: str | Mapping[str, Any] | None = None,
+                    model_types: Mapping[str, str] | None = None,
+                    device_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
+                    x0_guess: Any = None) -> tuple[Any, Any, Any, Any, Any, Any]:
     """Resolve the six-param cluster from a *binding* + explicit overrides.
 
     Returns ``(topo, nf, corner, model_types, device_kwargs, x0_guess)``. An

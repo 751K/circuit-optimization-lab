@@ -369,8 +369,8 @@ python -m core.optimize examples/single_stage.json ds/run1.pkl -n 100000 --top-k
 求解器（而不是 surrogate）永远有最终话语权：真正的设计决策只信任那个小小的、已校验的入围
 名单。`surrogate train` 的 `--filter label:lo:hi` 把训练限制在感兴趣区域内（例如剔除会拖累
 拟合的甩轨/collapse 设计）。完整的 dataset/surrogate/optimize 参数参考见
-[CLI 参考手册 §1.7–1.8](cli_reference.md)；surrogate 路线图和已验证的精度数字见
-`docs/futureplan.md` §7。
+[CLI 参考手册 §1.7–1.8](cli_reference.md)；surrogate 架构和已验证的精度数字见
+`docs/core_overview_zh.md`。
 
 ### 7. 硅 PDK（SKY130 + FreePDK45）
 
@@ -397,7 +397,7 @@ python -m core.optimize examples/sky130_5t_ota.json ds/ota.pkl -n 50000 --corner
 
 在互补 5T OTA 示例上，这条链路的筛选比 solver 快约 6000×，solver 校验确认入围的 10 个设计中
 9 个可行，同一批设计在慢角（`ss`）重新校验时仍有 9 个可行。需要 SKY130 PDK + OpenVAF + ngspice
-工具链（见 `docs/futureplan.md` §9）；未安装时求解器会给出清晰报错。**设计说明**：和任何单级
+工具链（见 `docs/core_overview_zh.md`）；未安装时求解器会给出清晰报错。**设计说明**：和任何单级
 硅放大器一样，这个示例用的是电流镜有源负载（定 DC 工作点/增益）加电容负载（定带宽）——纯电阻
 负载的共源级不代表片上设计的常见做法，扫描尺寸/偏置时也容易大范围甩轨，这正是本项目没有收录
 这类示例的原因。
@@ -587,7 +587,7 @@ PAC 每频点求解仍是主要耗时：61 点约 24–25s，121 点约 47–48s
 **`models`/硅器件报工具链错误。**
 硅 PDK 需要一套外部工具链（不是 pip 依赖）：SKY130 需 OpenVAF + ngspice + SKY130 PDK,
 FreePDK45 需 ngspice + FreePDK45 卡。安装好之后把 `PDK_ROOT`/`OPENVAF_ROOT`/`NGSPICE_BIN`
-指过去（见 `docs/futureplan.md` §9）。没装的话，任何用到 `sky130.*` / `freepdk45.*` 模型类型
+指过去（见 `docs/core_overview_zh.md`）。没装的话，任何用到 `sky130.*` / `freepdk45.*` 模型类型
 的电路会在第一次用到时报出清晰错误；其余 PDK（默认的 AT4000TG OTFT）不受影响。依赖该工具链的
 测试（`tests/test_sky130*.py`、`tests/test_freepdk45.py`、`tests/test_osdi_host.py`）在工具链
 缺失时会干净地 skip。
@@ -603,7 +603,7 @@ FreePDK45 需 ngspice + FreePDK45 卡。安装好之后把 `PDK_ROOT`/`OPENVAF_R
 | [CLI 参考手册](cli_reference.md)             | 每个子命令和参数，含 `dataset`/`surrogate`/`optimize` 和 `models`/硅工艺角选项 |
 | [SKY130 FD-OTA 设计案例](sky130_fd_ota_design.md) | 130nm 全差分 OTA 全流程：架构 → 代理 → 优化 → PVT |
 | [FreePDK45 FD-OTA 设计案例](freepdk45_fd_ota_design.md) | 45nm/1.0V 全差分 OTA 全流程，含整机对 ngspice `.ac` 的交叉核对 |
-| [后续开发计划](futureplan.md)                  | 了解已完成、待做事项和执行路线图       |
+| [后续开发计划](futureplan.md)                  | 未来战略方向：本地服务层、桌面客户端、MCP server、ML 规模化 |
 | `tests/` 目录                              | 每个 API 调用的可运行示例，带预期输出  |
 | `benchmarks/` 目录                         | 性能基线及 Numba 加速对比       |
 

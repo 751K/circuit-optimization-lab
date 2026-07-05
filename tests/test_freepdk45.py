@@ -95,7 +95,7 @@ def test_corners_shift_threshold():
     assert i_ss < i_nom < i_ff          # ss weaker, ff stronger (Vth shift)
 
 
-def test_ota_ac_matches_ngspice():
+def test_ota_ac_matches_ngspice(tmp_path):
     """The 5T OTA through ac_solve matches ngspice .ac on the equivalent netlist."""
     from core.ac_solver import ac_solve
     from core.circuit_loader import circuit_from_dict
@@ -121,19 +121,14 @@ def test_ota_ac_matches_ngspice():
         lines.append(f'm{d["name"].lower()} {nm.get(d["drain"], d["drain"])} '
                      f'{nm.get(d["gate"], d["gate"])} {nm.get(d["source"], d["source"])} '
                      f'{b} {mdl} w={d["W"]}u l={d["L"]}u')
-    out_txt = tempfile.mktemp(suffix=".txt")
+    out_txt = str(tmp_path / "out.txt")
     lines.append("cl vout 0 0.2p")
     lines.append(f".control\nac dec 20 1k 100g\nwrdata {out_txt} vdb(vout)\n.endc\n.end")
-    cir = tempfile.mktemp(suffix=".cir")
+    cir = str(tmp_path / "deck.cir")
     with open(cir, "w") as fh:
         fh.write("\n".join(lines))
-    try:
-        subprocess.run([_RUN, "-b", cir], capture_output=True, text=True)
-        data = np.loadtxt(out_txt)
-    finally:
-        for p in (cir, out_txt):
-            if os.path.exists(p):
-                os.unlink(p)
+    subprocess.run([_RUN, "-b", cir], capture_output=True, text=True)
+    data = np.loadtxt(out_txt)
     a0_ng = data[:, 1].max()
     assert a0 == pytest.approx(a0_ng, abs=0.5)      # <0.5 dB vs ngspice's own .ac
 
@@ -141,23 +136,19 @@ def test_ota_ac_matches_ngspice():
 def _ngspice_noise(card, model, W, L, vgs, vds, vb):
     """Direct ngspice ``.noise`` drain-current PSD → (S_thermal, S_flicker@1Hz) — the
     same CCVS transimpedance + A+B/f fit the characteriser uses, run standalone."""
-    out = tempfile.mktemp(suffix=".txt")
-    deck = (f"* n\n.include \"{card}\"\n"
-            f"mn d g s b {model} w={W}u l={L}u\n"
-            f"vd d 0 {vds} \nvg g 0 {vgs} ac 1\nvs s 0 0\nvb b 0 {vb}\n"
-            f"hn out 0 vd 1\nrout out 0 1e12\n"
-            f".control\nset filetype=ascii\nnoise v(out) vg dec 4 1 1e11\n"
-            f"setplot noise1\nwrdata {out} onoise_spectrum\n.endc\n.end\n")
-    with tempfile.NamedTemporaryFile("w", suffix=".cir", delete=False) as fh:
-        fh.write(deck)
-        cir = fh.name
-    try:
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "out.txt")
+        cir = os.path.join(td, "deck.cir")
+        deck = (f"* n\n.include \"{card}\"\n"
+                f"mn d g s b {model} w={W}u l={L}u\n"
+                f"vd d 0 {vds} \nvg g 0 {vgs} ac 1\nvs s 0 0\nvb b 0 {vb}\n"
+                f"hn out 0 vd 1\nrout out 0 1e12\n"
+                f".control\nset filetype=ascii\nnoise v(out) vg dec 4 1 1e11\n"
+                f"setplot noise1\nwrdata {out} onoise_spectrum\n.endc\n.end\n")
+        with open(cir, "w") as fh:
+            fh.write(deck)
         subprocess.run([_RUN, "-b", cir], capture_output=True, text=True)
         raw = np.loadtxt(out)
-    finally:
-        for p in (cir, out):
-            if os.path.exists(p):
-                os.unlink(p)
     f, sid = raw[:, 0], raw[:, 1] ** 2
     A, B = np.linalg.lstsq(np.column_stack([np.ones_like(f), 1.0 / f]), sid, rcond=None)[0]
     return float(A), float(B)
@@ -229,7 +220,7 @@ def _fd_ota_diff_ugbw(freqs, H):
     return fu, pm
 
 
-def test_fd_ota_ac_matches_ngspice():
+def test_fd_ota_ac_matches_ngspice(tmp_path):
     """The WHOLE FD-OTA — CMFB loop, AC-coupled input, Rs/CL — through ac_solve vs
     ngspice's own .ac on the equivalent netlist. Passband gain and PM match tightly;
     UGBW reads ~8 % high because the grid AC model omits drain/source junction caps
@@ -270,20 +261,15 @@ def test_fd_ota_ac_matches_ngspice():
     for c in cfg.get("capacitors", []):
         lines.append(f"c{c['name'].lower()} {net(c['a'])} {net(c['b'])} {c['C']}")
     ns = " ".join(f"v({net(k)})={v}" for k, v in cfg["dc_guesses"][0].items())
-    out_txt = tempfile.mktemp(suffix=".txt")
+    out_txt = str(tmp_path / "out.txt")
     lines.append(f".nodeset {ns}")
     lines.append(f".control\nset filetype=ascii\nac dec 30 1k 1e11\n"
                  f"wrdata {out_txt} vr(outp) vi(outp) vr(outn) vi(outn)\n.endc\n.end")
-    cir = tempfile.mktemp(suffix=".cir")
+    cir = str(tmp_path / "deck.cir")
     with open(cir, "w") as fh:
         fh.write("\n".join(lines))
-    try:
-        subprocess.run([_RUN, "-b", cir], capture_output=True, text=True)
-        raw = np.loadtxt(out_txt)
-    finally:
-        for p in (cir, out_txt):
-            if os.path.exists(p):
-                os.unlink(p)
+    subprocess.run([_RUN, "-b", cir], capture_output=True, text=True)
+    raw = np.loadtxt(out_txt)
     f = raw[:, 0]
     Hng = (raw[:, 1] + 1j * raw[:, 3]) - (raw[:, 5] + 1j * raw[:, 7])
     ng_gain = 20 * np.log10(np.abs(Hng).max())
@@ -318,3 +304,24 @@ def test_fd_ota_meets_spec():
     lf = np.log10(freqs)
     fu = 10 ** (lf[idx - 1] - x0 * (lf[idx] - lf[idx - 1]) / (x1 - x0))
     assert fu > 1.0e8                                        # UGBW > 0.1 GHz spec
+
+
+def test_run_ngspice_surfaces_failure(tmp_path):
+    """A broken deck must raise RuntimeError carrying ngspice's own diagnostics,
+    not fall through to a bare FileNotFoundError from np.loadtxt downstream.
+
+    The deck ``.include``s a path that does not exist; ngspice aborts, so
+    ``_run_ngspice`` re-raises with the deck purpose, return code, and the tail
+    of ngspice's stderr/stdout so the root cause is visible at the call site."""
+    from core.ngspice_char import _run_ngspice
+    cir = str(tmp_path / "bad.cir")
+    out_txt = str(tmp_path / "out.txt")
+    missing = str(tmp_path / "does_not_exist.inc")
+    deck = (f'* deliberately broken deck\n.include "{missing}"\n'
+            f"mn d g s b NMOS_VTG w=1u l=0.1u\n"
+            f"vd d 0 0.5\nvg g 0 0.6\nvs s 0 0\nvb b 0 0\n"
+            f".control\nop\nwrdata {out_txt} @mn[id]\n.endc\n.end\n")
+    with open(cir, "w") as fh:
+        fh.write(deck)
+    with pytest.raises(RuntimeError, match="ngspice"):
+        _run_ngspice(cir, out_txt, timeout=30, what="dc-sweep")

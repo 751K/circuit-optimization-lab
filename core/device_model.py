@@ -21,6 +21,7 @@ Usage::
 """
 from __future__ import annotations
 
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, Type
@@ -246,9 +247,35 @@ def register_model(model_type: str, cls: Type[TransistorModel]) -> None:
     :file:`pmos_tft_model.py`)::
 
         register_model("pmos_tft", PMOS_TFT)
+
+    Registration deliberately *replaces* any existing entry — the registry has
+    always allowed intentional substitution (e.g. a test swapping in a stub).
+    But an **unintentional** name clash — two different PDK modules registering
+    a different class under the same key/alias, where the last import silently
+    wins — is a robustness hazard.  So a genuine collision (a *different* class,
+    identified by ``__module__ + __qualname__``, taking over an occupied name)
+    emits a :class:`RuntimeWarning` and still performs the override; callers who
+    want the override stay unaffected, while accidental clashes become visible.
+
+    Re-registering the *same* class — a repeat ``import`` or an
+    :func:`importlib.reload` (which rebinds the class to a fresh object under
+    the same qualified name) — is silent: same fully-qualified name means the
+    ``is not`` identity check would over-report, so we compare on qualname too.
     """
     if not isinstance(model_type, str) or not model_type:
         raise ValueError(f"model_type must be a non‑empty string, got {model_type!r}")
+    prev = _model_registry.get(model_type)
+    if prev is not None and prev is not cls:
+        prev_id = f"{prev.__module__}.{prev.__qualname__}"
+        new_id = f"{cls.__module__}.{cls.__qualname__}"
+        if prev_id != new_id:
+            warnings.warn(
+                f"model registry: {model_type!r} already registered to "
+                f"{prev_id}; overwriting with {new_id}. "
+                f"Two PDKs (or an alias) may be claiming the same name.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     _model_registry[model_type] = cls
 
 
@@ -333,7 +360,10 @@ _pdk_registry: Dict[str, PDK] = {}
 _default_pdk: str = ""        # name of the default PDK; "" until first register_pdk
 
 
-def register_pdk(name, devices, *, corners=None, default=False, aliases=None) -> PDK:
+def register_pdk(name: str, devices: Dict[str, Type[TransistorModel]], *,
+                 corners: Dict[str, Dict[str, float]] | None = None,
+                 default: bool = False,
+                 aliases: Dict[str, str] | None = None) -> PDK:
     """Register a PDK and its polarities.
 
     Each ``polarity -> cls`` is also registered into the flat model registry
@@ -364,12 +394,12 @@ def get_default_pdk() -> str:
     return _default_pdk
 
 
-def list_pdks():
+def list_pdks() -> list[str]:
     """Sorted names of all registered PDKs."""
     return sorted(_pdk_registry)
 
 
-def get_pdk(name=None) -> PDK:
+def get_pdk(name: str | None = None) -> PDK:
     """Return a PDK by name, or the default PDK when *name* is None."""
     key = name if name is not None else get_default_pdk()
     pdk = _pdk_registry.get(key)
@@ -378,7 +408,7 @@ def get_pdk(name=None) -> PDK:
     return pdk
 
 
-def transistor_type(polarity: str = "pmos", pdk=None) -> str:
+def transistor_type(polarity: str = "pmos", pdk: str | None = None) -> str:
     """Resolve a ``(pdk, polarity)`` pair to a model-registry key.
 
     Defaults to the default PDK's ``pmos`` — the single switch point every
@@ -389,7 +419,8 @@ def transistor_type(polarity: str = "pmos", pdk=None) -> str:
     return get_pdk(pdk).model_type(polarity)
 
 
-def create_transistor(polarity: str = "pmos", pdk=None, **kwargs) -> TransistorModel:
+def create_transistor(polarity: str = "pmos", pdk: str | None = None,
+                      **kwargs) -> TransistorModel:
     """Create a transistor for a ``(pdk, polarity)`` pair (default PDK's pmos)."""
     return create_device(transistor_type(polarity, pdk), **kwargs)
 

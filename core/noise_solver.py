@@ -22,6 +22,10 @@ Ground-truth check (Cadence Spectre, afe_gt/tb_noise.raw/noiseAnal.noise):
   total output 0.05-100 Hz = 2010 uVrms ; IRN = 209.6 uVrms ;
   M12=M13=47%, M14=M15=1.7%, M7=M8=1.1%, M9=M10=0.3%.
 """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Mapping
+
 import numpy as np
 from .device_model import create_device, get_default_model_type
 from .ac_mna import (stamp_adm, stamp_mos_lti, stamp_vccs, stamp_vsource,
@@ -31,6 +35,9 @@ from .device_factory import dev_corner, dev_nf, resolve_binding
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
 from . import diagnostics
+
+if TYPE_CHECKING:
+    from .device_factory import CircuitBinding
 
 
 _KB = 1.380649e-23          # Boltzmann constant [J/K]
@@ -52,9 +59,15 @@ def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1, model_type=None,
     return S_th + S_fl_1 / freqs, S_th, S_fl_1
 
 
-def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=None,
-                   nf=None, ac_result=None, model_types=None, device_kwargs=None,
-                   *, binding=None):
+def noise_analysis(sizes: Mapping[str, tuple[float, float]],
+                   bias: Mapping[str, float], freqs: np.ndarray,
+                   corner: str | Mapping[str, Any] | None = None,
+                   x0_guess: Any = None, topo: Any = None,
+                   nf: int | Mapping[str, int] | None = None,
+                   ac_result: dict | None = None,
+                   model_types: Mapping[str, str] | None = None,
+                   device_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
+                   *, binding: CircuitBinding | None = None) -> dict | None:
     """binding: optional :class:`CircuitBinding` supplying defaults for
     topo/nf/corner/model_types/device_kwargs/x0_guess; explicit non-None kwargs
     override it (binding=None reproduces the legacy path exactly)."""

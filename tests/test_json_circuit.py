@@ -7,7 +7,12 @@ import pytest
 
 import core.analysis_dispatch as dispatch_mod
 from core.ac_solver import ac_solve
-from core.analysis_options import option_names, schema_properties
+from core.analysis_options import (
+    known_keys,
+    option_names,
+    schema_properties,
+    validate_analysis_cfg,
+)
 from core.analysis_dispatch import run_analysis_suite
 from core.circuit_loader import circuit_from_dict, load_circuit_json
 from core.corners import CORNERS
@@ -352,6 +357,87 @@ def test_dispatch_rejects_mixed_pss_and_pac_corners(monkeypatch):
                 },
             },
         )
+
+
+def test_dispatch_rejects_unknown_analysis_option(monkeypatch):
+    # A typo'd option key (max_sidebands for max_sideband) must hard-error instead
+    # of being silently ignored and run with the default.
+    spec = load_circuit_json("examples/periodic_rc.json")
+
+    def fake_pss_solve(*args, **kwargs):
+        return {"converged": True, "period": args[2], "corner": kwargs.get("corner")}
+
+    monkeypatch.setattr(dispatch_mod, "pss_solve", fake_pss_solve)
+
+    with pytest.raises(ValueError, match="Unknown option") as exc:
+        run_analysis_suite(
+            spec,
+            analyses={
+                "pss": {"max_shooting_iters": 0},
+                "pnoise": {
+                    "freqs": [100.0],
+                    "input_drive": {"vin": 1.0},
+                    "max_sidebands": 5,   # typo: should be max_sideband
+                },
+            },
+        )
+    msg = str(exc.value)
+    assert "max_sidebands" in msg          # names the offending residual key
+    assert "'pnoise'" in msg               # names the analysis
+    assert "max_sideband" in msg           # lists the correct key to help fix it
+
+
+def test_dispatch_accepts_mixed_dispatch_and_solver_keys(monkeypatch):
+    # A full cfg mixing dispatch-consumed keys (freqs/input_drive/corner) with
+    # forwarded solver options must pass validation unchanged.
+    spec = load_circuit_json("examples/periodic_rc.json")
+
+    def fake_pss_solve(*args, **kwargs):
+        return {"converged": True, "period": args[2], "corner": kwargs.get("corner")}
+
+    def fake_pnoise_solve(*_args, **kwargs):
+        return {"out_psd": np.ones(1), "irn_psd": np.ones(1)}
+
+    monkeypatch.setattr(dispatch_mod, "pss_solve", fake_pss_solve)
+    monkeypatch.setattr(dispatch_mod, "pnoise_solve", fake_pnoise_solve)
+
+    # Should not raise.
+    run_analysis_suite(
+        spec,
+        analyses={
+            "pss": {"corner": "typical", "max_shooting_iters": 0,
+                    "jacobian_reuse": True},
+            "pnoise": {
+                "freqs": [100.0],
+                "input_drive": {"vin": 1.0},
+                "corner": "typical",
+                "band": [1.0, 100.0],
+                "max_sideband": 4,
+                "n_period_samples": 32,
+                "lti_fast_path": True,
+            },
+        },
+    )
+
+
+def test_known_keys_cover_dispatch_and_solver_options():
+    # ac/noise carry no solver registry -> their legal keys are the dispatch set.
+    assert known_keys("ac") == frozenset({"freqs", "corner"})
+    assert known_keys("noise") == frozenset({"freqs", "corner", "band"})
+    # transient's registry keys plus the dispatch-only signed_devices.
+    tr = known_keys("transient")
+    assert {"tgrid", "duration", "tstop", "n_points", "corner",
+            "signed_devices"} <= tr
+    # pnoise: every consumed key lives in the registry (no dispatch extras).
+    pn = known_keys("pnoise")
+    assert {"freqs", "input_drive", "pss", "corner", "band",
+            "max_sideband"} <= pn
+
+
+def test_validate_analysis_cfg_direct():
+    validate_analysis_cfg("ac", {"freqs": [1.0, 10.0], "corner": "slow"})  # no raise
+    with pytest.raises(ValueError, match="Unknown option"):
+        validate_analysis_cfg("ac", {"freq": [1.0]})  # typo: freq -> freqs
 
 
 def test_loader_rejects_unknown_device_node():

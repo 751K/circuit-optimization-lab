@@ -3,8 +3,8 @@
 The GBT surrogate (:mod:`core.surrogate`) screens by brute force; a *differentiable*
 surrogate lets you optimize the design vector **directly** by following gradients of
 an objective through the model — a few hundred steps instead of 100k random samples.
-This is the "differentiable optimization loop" of the roadmap (``docs/futureplan.md``
-§7): a small MLP over standardized inputs/outputs (wide-range labels in log-space),
+This is the "differentiable optimization loop" of the roadmap: a small MLP over
+standardized inputs/outputs (wide-range labels in log-space),
 trained on a ``core.dataset`` ``.npz``, then :func:`optimize_design` does projected
 gradient descent on the design under soft constraint penalties.
 
@@ -287,9 +287,18 @@ def _cmd_train(args):
 
 
 def _cmd_optimize(args):
+    import dataclasses
+
+    from .circuit_loader import models_from_config
     from .dataset import load_dataset_config
+    from .device_factory import CircuitBinding
     from .explore import apply_variables, evaluate
-    _, topo, base_sizes, base_bias, nf, cfg = load_dataset_config(args.config)
+    config_dict, topo, base_sizes, base_bias, nf, cfg = load_dataset_config(args.config)
+    # One binding carries topo + the per-device model map into the solver check, so the
+    # verify re-run never silently reverts a silicon config to the default OTFT PDK.
+    model_types, device_kwargs = models_from_config(config_dict)
+    binding = CircuitBinding(topo=topo, model_types=model_types,
+                             device_kwargs=device_kwargs, nf=nf)
     model = load(args.model)
     lo = np.array([v.lo for v in cfg.variables], float)
     hi = np.array([v.hi for v in cfg.variables], float)
@@ -309,7 +318,9 @@ def _cmd_optimize(args):
         sizes, bias, cand_nf = apply_variables(cfg.variables, var_values,
                                                base_sizes, base_bias, base_nf=nf)
         cfg.freqs = np.logspace(-2, 4, 101)
-        true = evaluate(topo, sizes, bias, cand_nf, cfg.freqs, cfg.band, require_noise=True)
+        cand_binding = dataclasses.replace(binding, nf=cand_nf)
+        true = evaluate(topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
+                        binding=cand_binding, require_noise=True)
         if true:
             print("  solver check:     " + "  ".join(
                 f"{m}={true.get(m):.4g}" for m in model.label_names if true.get(m) is not None))

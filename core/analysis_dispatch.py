@@ -7,12 +7,17 @@ into calls to AC/noise/transient/PSS/PAC/PNoise solvers.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
 from .ac_solver import ac_solve
 from .adaptive_config import resolve_adaptive_config
-from .analysis_options import ADAPTIVE_OPTION_NAMES, solver_kwargs
+from .analysis_options import (
+    ADAPTIVE_OPTION_NAMES,
+    solver_kwargs,
+    validate_analysis_cfg,
+)
 from .circuit_loader import CircuitSpec, load_circuit_json
 from .noise_solver import band_rms, noise_analysis
 from .pac_solver import pac_solve
@@ -388,7 +393,10 @@ def _run_transient(spec, binding, cfg):
     )
 
 
-def run_analysis_suite(spec_or_path, analyses=None, *, selected=None, corner=None):
+def run_analysis_suite(spec_or_path: CircuitSpec | str | Path,
+                       analyses: Mapping[str, Any] | None = None, *,
+                       selected: Sequence[str] | None = None,
+                       corner: str | None = None) -> dict:
     """Run the analyses configured in a ``CircuitSpec`` or JSON file.
 
     ``selected`` can restrict execution to a subset such as ``["pss", "pac"]``.
@@ -410,6 +418,12 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None, corner=Non
     }
     if not analysis_cfg:
         raise ValueError("No analyses configured")
+    # Hard-reject unknown option keys before any solver runs: JSON is the only
+    # entry point, so a residual key (typo like ``max_sidebands``) would otherwise
+    # be silently ignored and run with the default -- a silent downgrade.
+    for name, cfg in analysis_cfg.items():
+        if isinstance(cfg, dict):
+            validate_analysis_cfg(name, cfg)
     # One binding carries the circuit's structure + process binding + default DC
     # seed to every solver call below, so no branch re-threads model_types /
     # device_kwargs / x0 by hand (the drop-one-and-silently-revert-to-OTFT bug

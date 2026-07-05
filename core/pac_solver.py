@@ -7,6 +7,7 @@ definition; the finite-difference shooting PAC kernel is topology independent.
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 from scipy import sparse as _sp
@@ -24,6 +25,9 @@ from .numba_kernels import (_pnoise_hb_blocks_impl, pac_hb_blocks_numba,
 from .topology import Topology
 from .transient_solver import transient
 from . import diagnostics
+
+if TYPE_CHECKING:
+    from .device_factory import CircuitBinding
 
 
 def _periodic_average(t, values):
@@ -1480,14 +1484,22 @@ def _resolve_compute_condition(compute_condition, profile=False, debug=False):
     return bool(compute_condition)
 
 
-def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
-              corner=None,
-              fd_state_step=1e-4, fd_input_step=1e-4, transient_kwargs=None,
-              pacmag=1.0, rail_margin=None, cache_linearization=True,
-              cache_forcing=True, compute_condition=None, lti_fast_path=True,
-              analytic=True, n_period_samples=384, max_sideband=10,
-              time_domain=False, td_integration="gear2", td_n_period_samples=768,
-              profile=False, debug=False, binding=None):
+def pac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float],
+              freqs: np.ndarray, *, pss_result: dict,
+              input_drive: Mapping[str, complex],
+              nf: int | Mapping[str, int] | None = None,
+              corner: str | Mapping[str, Any] | None = None,
+              fd_state_step: float = 1e-4, fd_input_step: float = 1e-4,
+              transient_kwargs: Mapping[str, Any] | None = None,
+              pacmag: float = 1.0, rail_margin: float | None = None,
+              cache_linearization: bool = True,
+              cache_forcing: bool = True, compute_condition: Any = None,
+              lti_fast_path: bool = True,
+              analytic: bool = True, n_period_samples: int = 384, max_sideband: int = 10,
+              time_domain: bool = False, td_integration: str = "gear2",
+              td_n_period_samples: int = 768,
+              profile: bool = False, debug: bool = False,
+              binding: CircuitBinding | None = None) -> dict:
     """Solve sideband-0 PAC around a PSS orbit.
 
     Parameters

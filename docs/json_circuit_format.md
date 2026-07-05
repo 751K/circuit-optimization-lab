@@ -506,6 +506,8 @@ The authoritative option registry for `transient` / `pss` / `pac` / `pnoise`
 lives in `core.analysis_options`. `analysis_dispatch.py` derives forwarded
 solver kwargs and defaults from that registry, and the JSON schema is regression
 tested against the same registry so new solver options do not silently drift.
+Unknown keys in an `analyses` block are rejected with an error (a typo such as
+`max_sidebands` for `max_sideband` is not silently ignored).
 
 ```json
 "analyses": {

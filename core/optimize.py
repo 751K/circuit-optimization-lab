@@ -4,8 +4,8 @@ Screen a large candidate pool with a trained surrogate (µs/candidate), keep the
 constrained Pareto front, then verify the top-K with the calibrated solver. The
 surrogate *proposes* (bulk screening, orders of magnitude faster); the Cadence-
 calibrated solver *disposes* (final word on the shortlist). This is the payoff of
-the surrogate roadmap (``docs/futureplan.md`` §7): fast refinement without giving up
-sign-off accuracy on the designs you actually keep.
+the surrogate roadmap: fast refinement without giving up sign-off accuracy on
+the designs you actually keep.
 
 Needs the optional scikit-learn dependency (via :mod:`core.surrogate`).
 

@@ -4,10 +4,18 @@ The loader converts a compact JSON netlist/config into the objects used by the
 solvers: Topology, device sizes, bias values, and optional NF data. It is kept
 dependency-free so circuit definitions can live outside Python code.
 """
+from __future__ import annotations
+
 from dataclasses import dataclass
 import json
+from typing import TYPE_CHECKING, Any
 
 from .topology import Topology
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from .device_factory import CircuitBinding
 
 
 @dataclass(frozen=True)
@@ -22,7 +30,7 @@ class CircuitSpec:
     model_types: dict | None = None      # device name -> model-registry key (e.g. "sky130.nmos")
     device_kwargs: dict | None = None    # device name -> extra ctor kwargs (vb, corner, ...)
 
-    def binding(self):
+    def binding(self) -> CircuitBinding:
         """Bundle this spec's structure + process binding + default DC seed.
 
         Returns a :class:`core.device_factory.CircuitBinding` capturing ``topo``,
@@ -114,7 +122,9 @@ def _load_models(raw_models, devices):
     return model_types, device_kwargs
 
 
-def models_from_config(data):
+def models_from_config(
+    data: dict,
+) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
     """``(model_types, device_kwargs)`` from a parsed circuit dict's ``models`` block.
 
     A thin accessor so CLI drivers (dataset / optimize / explore) can pull the model
@@ -468,7 +478,7 @@ def circuit_from_dict(data):
     )
 
 
-def load_circuit_json(path):
+def load_circuit_json(path: str | Path) -> CircuitSpec:
     """Load a circuit JSON file and return CircuitSpec."""
     with open(path, "r", encoding="utf-8") as f:
         return circuit_from_dict(json.load(f))

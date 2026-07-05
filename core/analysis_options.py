@@ -203,8 +203,64 @@ ANALYSIS_OPTIONS = {
 }
 
 
+# Keys the dispatch layer (core.analysis_dispatch) consumes itself, i.e. legal in
+# an ``analyses`` block but NOT part of any solver's option registry above.  These
+# are read directly out of ``cfg`` by run_analysis_suite / _run_transient / etc.
+# and never reach ``solver_kwargs``.  They must be listed here so that
+# ``validate_analysis_cfg`` does not flag them as unknown.  Anything already
+# declared in ANALYSIS_OPTIONS (forwarded or not, e.g. ``corner``/``freqs``/
+# ``periodic``) is a legal key too and does not need to be repeated here.
+#
+#   ac      -> _frequency_grid(cfg["freqs"]) + _corner_from_cfg(cfg)
+#   noise   -> _frequency_grid(cfg["freqs"]) + _corner_from_cfg(cfg) + band_rms(cfg["band"])
+#   transient -> signed_devices (line "signed_devices=tuple(cfg.get('signed_devices', ...))")
+#                (freqs is not read; periodic/tgrid/tstop/duration/n_points/corner
+#                 all live in TRANSIENT_OPTIONS)
+#   pss/pac/pnoise -> every consumed key (freqs/input_drive/pss/corner/band/tgrid/
+#                     n_points/periodic) is declared in their *_OPTIONS registries.
+DISPATCH_KEYS = {
+    "ac": frozenset({"freqs", "corner"}),
+    "noise": frozenset({"freqs", "corner", "band"}),
+    "transient": frozenset({"signed_devices"}),
+    "pss": frozenset(),
+    "pac": frozenset(),
+    "pnoise": frozenset(),
+}
+
+
 def options_for(analysis):
     return ANALYSIS_OPTIONS.get(str(analysis), ())
+
+
+def known_keys(analysis):
+    """Full set of keys legal in one analysis's ``analyses`` block.
+
+    Union of the solver option registry (:data:`ANALYSIS_OPTIONS`) and the
+    dispatch-consumed keys (:data:`DISPATCH_KEYS`).  Analyses without a solver
+    registry (``ac``/``noise``) rely entirely on the dispatch set.
+    """
+    analysis = str(analysis)
+    solver = {opt.name for opt in options_for(analysis)}
+    return frozenset(solver | DISPATCH_KEYS.get(analysis, frozenset()))
+
+
+def validate_analysis_cfg(analysis, cfg):
+    """Reject unknown keys in one analysis's ``analyses`` block.
+
+    JSON is the only entry point for these options, so a residual key is almost
+    always a typo (``max_sidebands`` for ``max_sideband``) that would otherwise
+    be silently ignored and run with the default -- the same silent-downgrade
+    class this project bans elsewhere.  Raises ``ValueError`` naming the analysis,
+    the offending keys, and the legal keys so the user can fix the spelling.
+    """
+    analysis = str(analysis)
+    known = known_keys(analysis)
+    extra = sorted(k for k in (cfg or {}) if k not in known)
+    if extra:
+        raise ValueError(
+            f"Unknown option(s) for analysis {analysis!r}: {extra}. "
+            f"Valid keys are: {sorted(known)}"
+        )
 
 
 def option_names(analysis, *, forwarded_only=False, schema_only=False):

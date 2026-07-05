@@ -15,7 +15,6 @@ Needs the external toolchain; skips cleanly without it.
 import json
 import os
 import subprocess
-import tempfile
 
 import numpy as np
 import pytest
@@ -168,7 +167,7 @@ def test_frozen_clock_lti_oracles(spec):
 
 @pytest.mark.skipif(not os.path.exists(RUN_NGSPICE),
                     reason="OSDI-enabled ngspice not present")
-def test_chopper_gain_matches_ngspice(spec, suite):
+def test_chopper_gain_matches_ngspice(spec, suite, tmp_path):
     from core.device_factory import build_devices
     from core.osdi_device import compile_va
     from core.sky130_model import _BSIM4_VA
@@ -203,7 +202,7 @@ def test_chopper_gain_matches_ngspice(spec, suite):
 
     vdd, vb = cfg["bias"]["VDD"], cfg["bias"]["VB"]
     tstop = 10 * PERIOD
-    out_csv = tempfile.mktemp(suffix=".csv")
+    out_csv = str(tmp_path / "out.csv")
     lines = [f"* sky130 chopper (osdi)\n.control\npre_osdi {compile_va(_BSIM4_VA)}\n.endc",
              f"vdd vdd 0 dc {vdd}",
              f"vinp vinp 0 dc {cfg['bias']['VINP']:g}",
@@ -221,17 +220,12 @@ def test_chopper_gain_matches_ngspice(spec, suite):
         lines.append(f".model {mname} bsim4va\n{card_lines(card)}")
     lines.append(f".control\ntran {PERIOD/400:g} {tstop:g}\n"
                  f"wrdata {out_csv} v(outp) v(outn)\n.endc\n.end")
-    with tempfile.NamedTemporaryFile("w", suffix=".cir", delete=False) as fh:
+    cir = str(tmp_path / "deck.cir")
+    with open(cir, "w") as fh:
         fh.write("\n".join(lines))
-        cir = fh.name
-    try:
-        subprocess.run([RUN_NGSPICE, "-b", cir], capture_output=True,
-                       text=True, timeout=600)
-        data = np.loadtxt(out_csv)
-    finally:
-        os.unlink(cir)
-        if os.path.exists(out_csv):
-            os.unlink(out_csv)
+    subprocess.run([RUN_NGSPICE, "-b", cir], capture_output=True,
+                   text=True, timeout=600)
+    data = np.loadtxt(out_csv)
     t_ng, vod_ng = data[:, 0], data[:, 1] - data[:, 3]
     sel = t_ng >= (tstop - PERIOD)
     gain_ng = float(vod_ng[sel].mean() / DELTA)

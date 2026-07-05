@@ -86,7 +86,11 @@ def provenance(path) -> dict:
         "date": h.get("date"),
         "analysis_type": h.get("analysis type"),
         "analysis_name": h.get("analysis name"),
-        "fundamental": h.get("fundamental"),
+        # PSF spells the periodic drive frequency "fundamental frequency"
+        # (e.g. pac.0.pac / pnoise HEADER); fall back to the bare "fundamental"
+        # spelling only if a non-standard writer ever emits it. Non-periodic
+        # analyses (dc/ac/noise/tran) carry neither key, so this stays None there.
+        "fundamental": h.get("fundamental frequency", h.get("fundamental")),
     }
 
 
@@ -155,11 +159,20 @@ _TUPLE_OPEN = re.compile(r'^"([^"]+)"\s+\(\s*$')
 
 
 def parse_noise(path) -> tuple:
-    """noise / pnoise -> (freqs, out_asd, {device: (Nfreq, 3) array}).
+    """noise / pnoise -> (freqs, out_asd, {device: (Nfreq, W) array}).
 
     ``out_asd`` is the total output noise ASD (the ``"out"`` signal, V/√Hz). Each
-    per-device contribution is the multi-line ``(flicker thermal total)`` struct,
-    in the column order declared in the TYPE section (flicker, thermal, total)."""
+    per-device contribution is the multi-line struct declared for that device's
+    master in the TYPE section, parsed in declared column order.
+
+    **The per-device width W is NOT fixed — it follows the TYPE struct, so a
+    mixed-device fixture is ragged.** A MOSFET (``pmos_TFT_behavioral``) struct
+    declares ``(flicker, thermal, total)`` → W=3; a resistor (``resistor``)
+    struct declares only ``(rn, total)`` → W=2; other masters may declare other
+    field counts. Callers MUST NOT assume W=3: to read the total contribution,
+    index the LAST column (``[:, -1]``), not ``[:, 2]``, and check ``.shape[1]``
+    before slicing a specific field. (``freqs`` and ``out_asd`` are separate
+    ``"freq"``/``"out"`` records, not part of any per-device struct.)"""
     body = _value_lines(path)
     freqs, out, dev = [], [], {}
     i = 0

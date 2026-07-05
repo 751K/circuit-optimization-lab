@@ -3,6 +3,10 @@ Small-signal AC solver using MNA (Modified Nodal Analysis).
 Solves the full circuit at each frequency, computes gain and BW.
 Includes ALL transistors + load capacitors.
 """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Mapping
+
 import numpy as np
 from .device_factory import (dev_corner, dev_nf, is_per_device_corner,
                              build_devices, get_ss_params, resolve_binding)
@@ -13,6 +17,9 @@ from .dc_solver import (DC_FALLBACK_TOL, bounded_least_squares_dc,
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
 from . import diagnostics
+
+if TYPE_CHECKING:
+    from .device_factory import CircuitBinding
 
 
 def bw_from_gain(freqs, gains):
@@ -45,8 +52,13 @@ def bw_from_gain(freqs, gains):
     return bw
 
 
-def ac_solve(sizes, bias, freqs, corner=None, x0_guess=None, topo=None, nf=None,
-             model_types=None, device_kwargs=None, *, binding=None):
+def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float],
+             freqs: np.ndarray, corner: str | Mapping[str, Any] | None = None,
+             x0_guess: Any = None, topo: Any = None,
+             nf: int | Mapping[str, int] | None = None,
+             model_types: Mapping[str, str] | None = None,
+             device_kwargs: Mapping[str, Mapping[str, Any]] | None = None, *,
+             binding: CircuitBinding | None = None) -> dict | None:
     """
     Full small-signal AC analysis — topology supplied by `topo` (default AFE_TOPO).
 

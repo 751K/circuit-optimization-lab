@@ -13,6 +13,7 @@ keeps all device/capacitance behavior identical to transient analysis.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
 
@@ -23,6 +24,9 @@ from .adaptive_config import resolve_adaptive_config
 from .topology import AFE_TOPO
 from .transient_solver import transient
 from . import diagnostics
+
+if TYPE_CHECKING:
+    from .device_factory import CircuitBinding
 
 
 def _finite_component_max(a):
@@ -802,26 +806,39 @@ class _PSSShootingStepper:
         )
 
 
-def pss_solve(sizes, bias, period, *, topo=None, nf=None, tgrid=None,
-              n_points=161, inputs=None, node_inputs=None, current_inputs=None,
-              corner=None, model_types=None, device_kwargs=None,
-              V0=None, tstab_periods=0, max_step=None, flat_max_step=None,
-              max_retry_subdivisions=0, newton_maxit=30,
-              newton_step_limit=5.0, newton_vtol=1e-8,
-              fallback_full_jacobian=False, fallback_least_squares=False,
-              fallback_tol=1e-9, signed_devices=None, residual_tol=1e-7,
-              max_shooting_iters=8, fd_step=1e-5, min_damping=1.0 / 64.0,
-              jacobian_reuse=True, jacobian_rebuild_interval=0,
-              analytic_jacobian=True,
-              rail_margin=0.5, check_periodic_inputs=True,
-              input_periodic_tol=1e-9, profile=False, edge_mask=None,
-              integration_method="gear2",
-              physical_factor=2.0, max_stabilization_periods=200,
-              levenberg_marquardt=True, cap_mode=None, cap_mode_id=None,
-              adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
-              adaptive_iabstol=1e-12, adaptive_max_steps=200000,
-              adaptive_h0=None, adaptive_freeze_factor=10.0,
-              adaptive_config=None, binding=None):
+def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float],
+              period: float, *, topo: Any = None,
+              nf: int | Mapping[str, int] | None = None, tgrid: np.ndarray | None = None,
+              n_points: int = 161, inputs: Mapping[str, Any] | None = None,
+              node_inputs: Mapping[str, str] | None = None,
+              current_inputs: Sequence[Any] | None = None,
+              corner: str | Mapping[str, Any] | None = None,
+              model_types: Mapping[str, str] | None = None,
+              device_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
+              V0: Any = None, tstab_periods: int = 0, max_step: float | None = None,
+              flat_max_step: float | None = None,
+              max_retry_subdivisions: int = 0, newton_maxit: int = 30,
+              newton_step_limit: float = 5.0, newton_vtol: float = 1e-8,
+              fallback_full_jacobian: bool = False, fallback_least_squares: bool = False,
+              fallback_tol: float = 1e-9, signed_devices: Any = None,
+              residual_tol: float = 1e-7,
+              max_shooting_iters: int = 8, fd_step: float = 1e-5,
+              min_damping: float = 1.0 / 64.0,
+              jacobian_reuse: bool = True, jacobian_rebuild_interval: int = 0,
+              analytic_jacobian: bool = True,
+              rail_margin: float = 0.5, check_periodic_inputs: bool = True,
+              input_periodic_tol: float = 1e-9, profile: bool = False,
+              edge_mask: Any = None,
+              integration_method: str = "gear2",
+              physical_factor: float = 2.0, max_stabilization_periods: int = 200,
+              levenberg_marquardt: bool = True, cap_mode: Any = None,
+              cap_mode_id: Any = None,
+              adaptive: bool = False, adaptive_reltol: float = 1e-4,
+              adaptive_vabstol: float = 1e-6,
+              adaptive_iabstol: float = 1e-12, adaptive_max_steps: int = 200000,
+              adaptive_h0: float | None = None, adaptive_freeze_factor: float = 10.0,
+              adaptive_config: Any = None,
+              binding: CircuitBinding | None = None) -> dict:
     """Solve periodic steady state with transient shooting.
 
     Parameters are intentionally close to :func:`transient` so the same topology,

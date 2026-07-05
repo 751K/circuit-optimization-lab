@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 import warnings
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
 
@@ -38,6 +39,9 @@ from .pac_solver import (
     pac_solve,
 )
 from . import diagnostics
+
+if TYPE_CHECKING:
+    from .device_factory import CircuitBinding
 
 
 _KB = 1.380649e-23
@@ -514,17 +518,24 @@ def _time_domain_pnoise_adjoint(Gf, Cf, e, freqs, K, n_state, fundamental,
     return adjs
 
 
-def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
-                 corner=None, max_sideband=10, n_period_samples=384,
-                 time_domain=False,
-                 band=(0.05, 100.0), gains=None, pac_result=None,
-                 input_drive=None, noise_devices=None,
-                 gds_noise_devices=None, switch_noise_conductance_gated=True,
-                 cache_linearization=True, lti_fast_path=True,
-                 hb_solver="auto", hb_sparse_min_size=384,
-                 hb_sparse_max_density=0.12, hb_sparse_drop_tol=0.0,
-                 iterative_tol=1e-10, iterative_maxiter=10,
-                 profile=False, binding=None):
+def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float],
+                 freqs: np.ndarray, *, pss_result: dict, fundamental: float | None = None,
+                 nf: int | Mapping[str, int] | None = None,
+                 corner: str | Mapping[str, Any] | None = None,
+                 max_sideband: int = 10, n_period_samples: int = 384,
+                 time_domain: bool = False,
+                 band: tuple[float, float] = (0.05, 100.0), gains: Any = None,
+                 pac_result: dict | None = None,
+                 input_drive: Mapping[str, complex] | None = None,
+                 noise_devices: Sequence[str] | None = None,
+                 gds_noise_devices: Sequence[str] | None = None,
+                 switch_noise_conductance_gated: bool = True,
+                 cache_linearization: bool = True, lti_fast_path: bool = True,
+                 hb_solver: str = "auto", hb_sparse_min_size: int = 384,
+                 hb_sparse_max_density: float = 0.12, hb_sparse_drop_tol: float = 0.0,
+                 iterative_tol: float = 1e-10, iterative_maxiter: int = 10,
+                 profile: bool = False,
+                 binding: CircuitBinding | None = None) -> dict:
     """Solve periodic output noise around a PSS orbit.
 
     The circuit is linearized along the supplied PSS trajectory.  Fourier

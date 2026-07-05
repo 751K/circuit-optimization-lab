@@ -266,12 +266,17 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
     model_types / device_kwargs bind non-default per-device models (e.g. silicon
     SKY130 nmos/pmos); ``None`` keeps the default-PDK path byte-for-byte unchanged.
 
-    ``binding`` is an optional :class:`CircuitBinding` supplying topo / model_types /
-    device_kwargs; ``explore`` threads one so no candidate loses the per-device model
-    map. The explicit ``topo`` / ``nf`` args (and any non-``None`` ``model_types`` /
-    ``device_kwargs``) still win over the binding — legacy callers that pass the
-    cluster directly are byte-identical to the old kwargs path. ``corner`` and
-    ``x0_guess`` stay per-candidate and are threaded to the solvers explicitly.
+    Two calling conventions, one behavior. ``binding`` (a :class:`CircuitBinding`
+    supplying topo / model_types / device_kwargs) is the **preferred** path and the
+    one all internal callers now use — it carries the per-device model map so no
+    candidate silently reverts to the default PDK. The bare ``model_types`` /
+    ``device_kwargs`` kwargs are the **legacy** path, kept only for external scripts;
+    with ``binding=None`` a binding is constructed from them, so the result is
+    equivalent. When both are given, an explicit non-``None`` kwarg (and the explicit
+    ``topo`` / ``nf``) **overrides** the binding's corresponding field, so a legacy
+    caller passing the cluster directly is byte-identical to the old kwargs path.
+    ``corner`` and ``x0_guess`` stay per-candidate and are threaded to the solvers
+    explicitly.
 
     When constraints/objectives are supplied, noise is evaluated lazily: AC-derived
     metrics are checked first, and `irn_uV` is computed only if it is required and

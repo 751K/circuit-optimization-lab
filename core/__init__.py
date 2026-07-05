@@ -11,6 +11,19 @@ Or from the command line::
     python -m core examples/periodic_rc.json
 """
 
+# ── Numba flag pre-scan (MUST run before any solver import below) ──────────────
+# core.numba_kernels reads CIRCUIT_USE_NUMBA and bakes USE_NUMBA/NUMBA_AVAILABLE
+# at *import time*. Under `python -m core …`, this package __init__ runs (and its
+# solver imports below pull numba_kernels in transitively) *before* __main__.py's
+# code executes — so a `_cmd_*` handler that sets the env var, or even a pre-scan
+# in __main__.py, would be too late and `--no-numba` would silently no-op. Scan
+# argv here, at the earliest possible point, so the flag actually takes effect.
+import os as _os
+import sys as _sys
+
+if "--no-numba" in _sys.argv:
+    _os.environ["CIRCUIT_USE_NUMBA"] = "0"
+
 from .ac_solver import ac_solve
 from .analysis_dispatch import run_analysis_suite, run_json_analyses
 from .circuit_loader import CircuitSpec, load_circuit_json

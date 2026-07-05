@@ -3,7 +3,7 @@
 Fits one gradient-boosted-tree regressor per label (scikit-learn
 ``HistGradientBoostingRegressor``) on a dataset built by :mod:`core.dataset`, and
 scores held-out accuracy against the teacher solver. This is the first ML layer of
-the surrogate roadmap (``docs/futureplan.md`` §7): the calibrated solvers stay the
+the surrogate roadmap: the calibrated solvers stay the
 source of truth; the surrogate only *screens* candidates orders of magnitude faster
 during design refinement, with anything promising handed back to the solver.
 

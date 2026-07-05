@@ -296,7 +296,7 @@ python -m core plot pac --npts 121 --out-dir /tmp/plots
 `(设计参数 → 指标)` 标注数据集。与 `explore` 的区别：**不做约束/Pareto 过滤**（每个样本都保留，
 DC 失败样本作为分类/边界标签，不丢弃），**总是评估噪声**（每个收敛点都带完整标签），并写出 manifest
 记录 schema 版本、solver commit、拓扑 hash、corner、参数范围——供下游 surrogate 判断泛化边界。
-是 ML surrogate 路线（`docs/futureplan.md` §7）的数据生成前置。
+是 ML surrogate 路线（架构见 `docs/core_overview.md`，未来方向见 `docs/futureplan.md`）的数据生成前置。
 
 ```bash
 python -m core dataset examples/single_stage.json -n 500 --out ds/run1
@@ -717,6 +717,8 @@ python -m core.pmos_tft_model     # 打印单管 Id / Cgss / Cgdd / 噪声 PSD
 默认启用 Numba JIT 加速。`--no-numba` 强制走纯 Python 路径（调试 / 基准对比用）。环境变量 `CIRCUIT_USE_NUMBA=0` 等效。
 
 > ⚠️ `CIRCUIT_USE_NUMBA=1` 只是**允许**用 Numba；解释器里 import 不到 Numba 时会**静默回落**到解释版内核（结果一致但 chopper 慢约 28×）。跑性能必须用装了 Numba 的 conda `daily` 环境，详见 [`environment_performance.md`](environment_performance.md)（含实测基准与验证方法）。
+
+> **生效机制与限制**：`numba_kernels` 的 `USE_NUMBA` 标志在该模块首次 import 时烙死为常量，事后设环境变量是静默 no-op。`--no-numba` 之所以能生效，是因为 `core/__init__.py` 在其求解器 import（会连带传递 import `numba_kernels`）之前，先对 `sys.argv` 预扫该 flag 并设好 `CIRCUIT_USE_NUMBA=0`；在 `python -m core …` 下 `__init__` 先于 `__main__.py` 执行，所以命令行用法（如上）总能生效。但如果从 Python 内部直接调用 `core.__main__.main()`（跳过了 `python -m core` 的正常 import 顺序，或在那之前已 import 了某个求解器模块），预扫可能被绕过——这种情况下 `_assert_numba_flag()` 守卫会检测到 `--no-numba` 请求但 Numba 仍激活，直接抛 `SystemExit` 响亮报错，而不是静默地假装关闭了 Numba。
 
 ### 退出码
 

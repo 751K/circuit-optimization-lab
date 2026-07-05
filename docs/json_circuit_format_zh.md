@@ -467,6 +467,8 @@ PAC/PNoise 需要 PSS 时会自动复用或先运行 PSS。
 `core.analysis_options`。`analysis_dispatch.py` 从这个 registry 派生转发到
 solver 的 kwargs 和默认值；JSON schema 也用测试和同一 registry 对齐，避免新增
 solver 参数后 dispatch/schema/docs 继续漂移。
+`analyses` 块中的未知选项会直接报错（例如把 `max_sideband` 拼成 `max_sidebands`
+不会被静默忽略）。
 
 ```json
 "analyses": {
