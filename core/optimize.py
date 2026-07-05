@@ -24,7 +24,8 @@ import numpy as np
 from . import surrogate as sg
 from .circuit_loader import models_from_config
 from .dataset import candidate_circuit, load_dataset_config, split_variables
-from .explore import (apply_silicon_corner, evaluate, is_feasible,
+from .device_factory import apply_silicon_corner
+from .explore import (evaluate, is_feasible,
                       pareto_front, sample)
 
 

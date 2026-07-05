@@ -39,7 +39,9 @@ from threading import RLock
 
 import numpy as np
 
-from .ac_solver import _bw_from_gain, ac_solve, _dev_corner, _dev_nf, _is_afe_topology
+from .ac_solver import bw_from_gain, ac_solve
+from .dc_solver import is_afe_topology
+from .device_factory import dev_corner, dev_nf
 from .adaptive_config import resolve_adaptive_config
 from .device_model import create_device, get_default_model_type
 from .noise_solver import band_rms, noise_analysis
@@ -288,7 +290,7 @@ def build_afe_pmos_chopper(*, switch_size=(20000.0, 80.0), switch_nf=1,
     PMOS is on when its gate is low, so use `pmos_chopper_phase_bias(..., "A")`
     or `"B"` to generate the matching clock bias.
     """
-    if not _is_afe_topology(base_topo):
+    if not is_afe_topology(base_topo):
         raise NotImplementedError("build_afe_pmos_chopper currently rewires the canonical AFE")
 
     vip = f"{prefix}_VIP"
@@ -678,7 +680,7 @@ def _pmos_chopper_one_phase(sizes, bias, freqs, phase, *, switch_size,
         "gains": gains,
         "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300)),
         "peak_dB": 20 * np.log10(max(float(np.max(gains)), 1e-300)),
-        "bw_Hz": _bw_from_gain(freqs, gains),
+        "bw_Hz": bw_from_gain(freqs, gains),
         "out_psd": out_psd,
         "irn_psd": irn_psd,
         "irn_uV_band": band_rms(freqs, irn_psd, band[0], band[1]) * 1e6,
@@ -742,7 +744,7 @@ def pmos_chopper_analysis(sizes, bias, freqs, *, switch_size=(20000.0, 80.0),
         "gains": gains,
         "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300)),
         "peak_dB": 20 * np.log10(max(peak, 1e-300)),
-        "bw_Hz": _bw_from_gain(freqs, gains),
+        "bw_Hz": bw_from_gain(freqs, gains),
         "out_psd": out_psd,
         "irn_psd": irn_psd,
         "irn_uV_band": band_rms(freqs, irn_psd, band[0], band[1]) * 1e6,
@@ -920,7 +922,7 @@ def _charge_injection_sources(build, all_sizes, all_nf, bias, tgrid, clk_a, clk_
         Vg_on = pbias["CLK_A"] if phase == "A" else pbias["CLK_B"]
         dev = create_device(get_default_model_type(),
             W=all_sizes[name][0], L=all_sizes[name][1],
-            NF=_dev_nf(all_nf, name), **_dev_corner(corner, name))
+            NF=dev_nf(all_nf, name), **dev_corner(corner, name))
         qch = float(charge_scale) * dev.estimate_channel_charge(Vs, Vd, Vg_on)
         if qch <= 0.0:
             continue
@@ -1584,14 +1586,14 @@ def pmos_chopper_lptv_analysis(sizes, bias, freqs, f_chop, *,
         "gains": gains,
         "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300)),
         "peak_dB": 20 * np.log10(max(peak, 1e-300)),
-        "bw_Hz": _bw_from_gain(freqs, gains),
+        "bw_Hz": bw_from_gain(freqs, gains),
         "out_psd": out_psd,
         "irn_psd": irn_psd,
         "irn_uV_band": band_rms(freqs, irn_psd, band[0], band[1]) * 1e6,
         "raw_quasi_response": raw_h_chop,
         "raw_quasi_gains": raw_gains,
         "raw_quasi_Av_dc_dB": 20 * np.log10(max(float(raw_gains[0]), 1e-300)),
-        "raw_quasi_bw_Hz": _bw_from_gain(freqs, raw_gains),
+        "raw_quasi_bw_Hz": bw_from_gain(freqs, raw_gains),
         "raw_quasi_out_psd": raw_out_psd,
         "raw_quasi_irn_psd": raw_irn_psd,
         "raw_quasi_irn_uV_band": (
@@ -1683,7 +1685,7 @@ def chopper_analysis(sizes, bias, freqs, f_chop, *, topo=AFE_TOPO, nf=None,
         "gains": gains,
         "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300)),
         "peak_dB": 20 * np.log10(max(peak, 1e-300)),
-        "bw_Hz": _bw_from_gain(freqs, gains),
+        "bw_Hz": bw_from_gain(freqs, gains),
         "out_psd": out_psd,
         "irn_psd": irn_psd,
         "irn_uV_band": band_rms(freqs, irn_psd, band[0], band[1]) * 1e6,

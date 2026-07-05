@@ -24,9 +24,10 @@ Ground-truth check (Cadence Spectre, afe_gt/tb_noise.raw/noiseAnal.noise):
 """
 import numpy as np
 from .device_model import create_device, get_default_model_type
-from .ac_mna import (_stamp_adm, _stamp_mos_lti, _stamp_vccs, _stamp_vsource,
-                     _stamp_vcvs, _stamp_cccs, _stamp_ccvs)
-from .ac_solver import ac_solve, _dev_corner, _dev_nf
+from .ac_mna import (stamp_adm, stamp_mos_lti, stamp_vccs, stamp_vsource,
+                     stamp_vcvs, stamp_cccs, stamp_ccvs)
+from .ac_solver import ac_solve
+from .device_factory import dev_corner, dev_nf
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
 from . import diagnostics
@@ -85,8 +86,8 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
         W, L = sizes[name]
         Vs, Vd, Vg = bpts[name]
         S, S_th, S_fl1 = device_psd(
-            W, L, Vs, Vd, Vg, freqs, corner=_dev_corner(corner, name),
-            nf=_dev_nf(nf, name), model_type=(model_types or {}).get(name),
+            W, L, Vs, Vd, Vg, freqs, corner=dev_corner(corner, name),
+            nf=dev_nf(nf, name), model_type=(model_types or {}).get(name),
             device_kwargs=(device_kwargs or {}).get(name))
         psd[name] = S
         psd_split[name] = (S_th, S_fl1)
@@ -106,22 +107,22 @@ def noise_analysis(sizes, bias, freqs, corner=None, x0_guess=None, topo=AFE_TOPO
     RHS_C = np.zeros(NN, dtype=complex)
     for name, d, g, s in devs:
         p = ss[name]
-        _stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
+        stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
                        p["gm"], p["gds"], p["Cgs"], p["Cgd"])
     for a, b, cap in ac_caps:
-        _stamp_adm(C, RHS_C, a, b, cap)
+        stamp_adm(C, RHS_C, a, b, cap)
     for _, a, b, _, gval in ac_res:
-        _stamp_adm(G, RHS_G, a, b, gval)
+        stamp_adm(G, RHS_G, a, b, gval)
     for p, q, cp, cn, gm in ac_vccs:
-        _stamp_vccs(G, RHS_G, p, cp, cn, gm)
+        stamp_vccs(G, RHS_G, p, cp, cn, gm)
     for p, q, bi, e_ac in plan.ac_vsources():        # short; ideal source carries NO noise
-        _stamp_vsource(G, RHS_G, p, q, bi, e_ac)
+        stamp_vsource(G, RHS_G, p, q, bi, e_ac)
     for p, q, cp, cn, bi, mu in plan.ac_vcvs():     # VCVS: noiseless
-        _stamp_vcvs(G, RHS_G, p, q, cp, cn, bi, mu)
+        stamp_vcvs(G, RHS_G, p, q, cp, cn, bi, mu)
     for p, q, ctrl_bi, beta in plan.ac_cccs():      # CCCS: noiseless
-        _stamp_cccs(G, RHS_G, p, q, ctrl_bi, beta)
+        stamp_cccs(G, RHS_G, p, q, ctrl_bi, beta)
     for p, q, ctrl_bi, bi, gamma in plan.ac_ccvs(): # CCVS: noiseless
-        _stamp_ccvs(G, RHS_G, p, q, ctrl_bi, bi, gamma)
+        stamp_ccvs(G, RHS_G, p, q, ctrl_bi, bi, gamma)
 
     jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
     Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]

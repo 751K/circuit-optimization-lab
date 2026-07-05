@@ -79,7 +79,7 @@ def load_multi_corner(npz_paths, *, finite_only=True):
     appended to ``X`` as two design columns — a continuous, physically-meaningful
     encoding (not a one-hot label), so the model can *interpolate* across corners.
     Returns ``(X_aug, Y, var_names + ['pvt0','pbeta0'], label_names)``."""
-    from core.corners import CORNERS
+    from core.device_factory import CORNERS
     Xs, Ys, var_names, label_names = [], [], None, None
     for path in npz_paths:
         X, Y, var_names, label_names, manifest = load_xy(path, finite_only=finite_only)
@@ -110,7 +110,7 @@ def filter_rows(X, Y, label_names, bounds):
 
 
 # ── train / score ────────────────────────────────────────────────────────────
-def _auto_log_labels(Y, label_names, *, ratio=10.0):
+def auto_log_labels(Y, label_names, *, ratio=10.0):
     """Labels worth fitting in log-space: strictly positive and spanning >1 decade.
 
     Input-referred noise runs from ~30 µV (feasible) to >1 mV (infeasible designs);
@@ -138,7 +138,7 @@ def train(X, Y, var_names, label_names, *, max_iter=400, learning_rate=0.1,
     X = np.asarray(X, float)
     Y = np.asarray(Y, float)
     if log_labels is None:
-        log_labels = _auto_log_labels(Y, label_names)
+        log_labels = auto_log_labels(Y, label_names)
     log_set = set(log_labels)
     regressors = {}
     for j, lab in enumerate(label_names):

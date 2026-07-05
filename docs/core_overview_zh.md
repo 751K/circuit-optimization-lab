@@ -19,7 +19,7 @@
 - 工艺角与逐器件 mismatch 扰动。
 - 面向 Cadence/Spectre 的验证，涵盖工作点、AC、噪声、瞬态、PSS、PAC 和 PNoise 行为。
 
-实现刻意保持小而自包含。目前 `core/` 下有 34 个 Python 文件（含 `__init__.py`、CLI 入口 `__main__.py`、
+实现刻意保持小而自包含。目前 `core/` 下有 39 个 Python 文件（含 `__init__.py`、CLI 入口 `__main__.py`、
 校准/PSF/Cadence 网表辅助模块、共享诊断/profiling 模块、主求解器栈、一套 ML surrogate 层（数据集构建、
 surrogate 训练、筛选-校验优化器），以及接入同一套 `TransistorModel` 接口的两个硅 PDK——SKY130（经
 OpenVAF/OSDI 桥接）与 FreePDK45（经 ngspice-C 求值器）。
@@ -32,10 +32,13 @@ core/
   compiled_topology.py 运行态拓扑/index/stamp 元数据编译层。
   circuit_loader.py    JSON 电路描述加载器。
   device_model.py      TransistorModel ABC + NumbaParams + 模型工厂/注册表 + PDK/极性分层。
+  device_factory.py    器件构建/解析层（build_devices、get_ss_params）+ corner 路由（OTFT CORNERS、
+                        SKY130/FreePDK45 apply_silicon_corner）。leaf 模块：只依赖 device_model。
   pmos_tft_model.py    AT4000TG PMOS-OTFT 紧凑模型实现。
   numba_kernels.py     可选 Numba 加速标量内核。
   ac_mna.py            MNA stamp 原语。
-  ac_solver.py         DC 工作点与 AC 小信号求解器。
+  ac_solver.py         纯 AC 小信号求解器：DC 工作点 + AC 响应（ac_solve）。
+  dc_solver.py         DC 求解 fallback（有界最小二乘）+ AFE 专用对称 DC seeding/续流启发式。
   noise_solver.py      噪声传播与等价输入噪声分析。
   transient_solver.py  时域瞬态求解器。
   transient_profile.py 瞬态/chopper 求解器共享分析计数器槽位。
@@ -73,32 +76,34 @@ compiled_topology.py <- 无内部依赖；运行时消费 Topology 风格对象
 circuit_loader.py    <- topology
 numba_kernels.py     <- 无内部依赖；运行时可选 numba
 device_model.py      <- 无内部依赖（仅 abc、dataclasses）
+device_factory.py    <- 仅 device_model（leaf 器件层；不 import 任何 solver/workflow 模块）
 pmos_tft_model.py    <- 可选 numba_kernels、device_model
 ac_mna.py            <- 无内部依赖
-ac_solver.py         <- topology, compiled_topology, ac_mna, device_model
-noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, device_model
-transient_solver.py  <- ac_solver, compiled_topology, topology, device_model, transient_profile
+ac_solver.py         <- device_factory, dc_solver, topology, compiled_topology, diagnostics
+dc_solver.py         <- device_factory, topology, diagnostics
+noise_solver.py      <- device_model, ac_mna, ac_solver, device_factory, topology, compiled_topology, diagnostics
+transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, numba_kernels, diagnostics；按需延迟 import osdi_transient（OSDI 器件路由）
 transient_profile.py <- 无内部依赖（计数器槽位常量）
-pss_solver.py        <- ac_solver, ac_mna, device_model, topology, transient_solver, adaptive_config
-pac_solver.py        <- ac_mna, ac_solver, device_model, transient_solver
-pnoise_solver.py     <- ac_solver, noise_solver, pac_solver, device_model, ac_mna
+pss_solver.py        <- ac_mna, ac_solver, device_factory, adaptive_config, topology, transient_solver, diagnostics
+pac_solver.py        <- ac_mna, ac_solver, device_factory, numba_kernels, topology, transient_solver, diagnostics
+pnoise_solver.py     <- ac_mna, device_factory, noise_solver, numba_kernels, pac_solver, diagnostics
 adaptive_config.py   <- 无内部依赖（仅 dataclass）
 analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader, analysis_options
 analysis_options.py  <- 无内部依赖（注册表）
 diagnostics.py       <- 无内部依赖（线程安全计数器）
 psf.py               <- 无内部依赖
-calibration.py       <- ac_solver, noise_solver, chopper, psf, circuit_loader
+calibration.py       <- psf, ac_solver, adaptive_config, noise_solver
 cadence_netlist.py   <- circuit_loader, topology
-chopper.py           <- noise_solver, pss_solver, pac_solver, pnoise_solver, device_model, topology
-explore.py           <- ac_solver, noise_solver, device_model, topology, circuit_loader
-corners.py           <- ac_solver, noise_solver, topology
-dataset.py           <- explore, circuit_loader, corners, device_model, pss_solver, transient_solver, analysis_dispatch, diagnostics
+chopper.py           <- ac_solver, dc_solver, device_factory, adaptive_config, device_model, noise_solver, pac_solver, pnoise_solver, pss_solver, topology, transient_solver
+explore.py           <- ac_solver, device_factory, device_model, noise_solver, circuit_loader, diagnostics
+corners.py           <- ac_solver, device_factory, noise_solver, topology, diagnostics
+dataset.py           <- diagnostics, circuit_loader, corners, device_model, device_factory, explore, transient_solver
 surrogate.py         <- 无内部依赖；运行时可选 scikit-learn/joblib
 surrogate_torch.py   <- dataset（仅 CLI）；运行时可选 torch
 optimize.py          <- surrogate, circuit_loader, dataset, explore
 osdi_host.py         <- 无内部依赖；仅 ctypes + numpy
 osdi_device.py       <- device_model, osdi_host（延迟导入）
-osdi_transient.py    <- 无内部依赖（通过 OsdiDevice 通用接口调用）
+osdi_transient.py    <- diagnostics, numba_kernels, osdi_host, compiled_topology（通过 OsdiDevice 通用接口调用；不 import transient_solver）
 sky130_model.py      <- device_model, osdi_device
 ngspice_char.py      <- 无内部依赖；ngspice 子进程 + numpy
 ngspice_device.py    <- device_model, ngspice_char；运行期可选 scipy
@@ -132,7 +137,28 @@ AC 和噪声分析时，求解器通过有限差分 `get_Idc` 提取端 `gm` 和
 
 - **`TransistorModel` (ABC)** — 七个抽象方法（`get_Idc`、`get_op`、`get_capacitances`、`get_capacitance_charges_from_op`、`get_capacitance_branch_terms_from_op`、`get_noise_psd`、`get_numba_params`）；`get_ss_params` 提供有限差分默认实现，子类可覆盖。
 - **`NumbaParams` (frozen dataclass)** — 16 个标量参数，瞬态求解器每个器件提取一次，传入 Numba 加速内核。
-- **`register_model()` / `create_device()` + PDK/极性分层** — 工厂 + 注册表。每个 `(pdk, polarity)` 以结构化键 `"<pdk>.<polarity>"`（如 `"at4000tg.pmos"`）注册；`register_pdk()` 把一个工艺的各极性归组并标记默认。求解器文件调用 `create_device(get_default_model_type(), …)`（单一切换点）而非硬编码模型名，新增工艺或 `nmos` 极性只需一次 `register_pdk`、不改任何求解器。`"pmos_tft"` 保留为向后兼容别名。通用元件（电阻/电容/理想 V/I/受控源）是与工艺无关的拓扑原语，**不在**此注册表中，故每个 PDK 零改动复用。
+- **后端能力类属性** — 通用求解器按*能力*分派，而非具体后端类型（不再 `isinstance(dev, OsdiDevice)`）。
+  `HAS_TERMINAL_LINEARIZATION`（默认 `False`）标记该模型是否暴露周期 PAC/PNoise 线性化用的完整
+  quasi-static 4×4 terminal `(G, C)` stamp（`get_terminal_linearization`）；`OsdiDevice` 覆写为 `True`。
+  `TRANSIENT_BACKEND`（默认 `None`，即走通用 OTFT numba 瞬态路径）指定要路由的专用积分器名称；
+  `OsdiDevice` 设为 `"osdi"`，`transient_solver.py` 读取它并路由到 `core.osdi_transient.transient_osdi`。
+- **`register_model()` / `create_device()` + PDK/极性分层** — 工厂 + 注册表。每个 `(pdk, polarity)` 以结构化键 `"<pdk>.<polarity>"`（如 `"at4000tg.pmos"`）注册；`register_pdk()` 把一个工艺的各极性归组并标记默认。求解器文件调用 `create_device(get_default_model_type(), …)`（单一切换点）而非硬编码模型名，新增工艺或 `nmos` 极性只需一次 `register_pdk`、不改任何求解器。`"pmos_tft"` 保留为向后兼容别名。`get_model_class(model_type)` 是公开只读的注册表访问器，让求解器无需 import 具体后端类即可读取模型的能力标志。通用元件（电阻/电容/理想 V/I/受控源）是与工艺无关的拓扑原语，**不在**此注册表中，故每个 PDK 零改动复用。
+
+### `device_factory.py`
+
+leaf 器件构建层：只依赖 `device_model`（不 import 任何 solver 或 workflow 模块），因此所有求解器都
+能放心 import 它而不引入循环依赖。
+
+- **`build_devices(sizes, *, nf=None, corner=None, topo, model_types=None, device_kwargs=None)`** /
+  **`get_ss_params(...)`** — 把求解器已有的逐器件输入（sizes、NF、corner、`model_types`、
+  `device_kwargs`）转换成具体的 `TransistorModel` 实例；原样从 `ac_solver.py` 迁入。
+  `dev_corner`/`dev_nf`/`is_per_device_corner` 是背后的逐器件 corner/NF 解析辅助函数。
+- **`CORNERS`** — OTFT 连续 PVT 全局工艺偏移 dict（`typical`/`slow`/`fast`，按 `pvt0`/`pbeta0`），
+  从 `corners.py` 迁入此处；`corners.py` 现在从这里 import 它，而不是自己定义。
+- **`SKY130_CORNERS`** / **`SILICON_CORNERS`** / **`apply_silicon_corner(model_types, device_kwargs,
+  corner)`** — 硅离散 corner 路由，把一个 corner 名（SKY130 的 `tt`/`ss`/`ff`/`sf`/`fs`，加上
+  FreePDK45 的 `nom`）stamp 到解析好的硅器件卡上；从 `explore.py` 迁入此处；`explore.py` 和
+  `dataset.py` 现在从这里 import 它，而不是自己定义。
 
 ### `topology.py`
 
@@ -153,6 +179,12 @@ AC 和噪声分析时，求解器通过有限差分 `get_Idc` 提取端 `gm` 和
 - transient input 与 `node_inputs` 映射。
 
 这样 AC、noise 和 transient 使用同一套 indexing/stamping 约定，同时仍能保持 JSON 电路替换能力。
+
+它还承载两个小的编组辅助函数 `term_arrays()`（把 `(kind, ref_or_value)` terminal token 拆成并行的
+`kind`/`ref`/`value` int/float 数组）和 `index_array()`（把可选整数 index 打包成 int64 数组，`None`
+→ `-1`）。`transient_solver.py` 的 raw-transient 编组和 `osdi_transient.py` 的 OSDI transient 编组都
+基于这两个辅助函数构建同一套 stamp-ready 数组，所以它们和拓扑 token 放在一起，而不是每个后端各自
+复制一份。
 
 ### `circuit_loader.py`
 
@@ -181,9 +213,8 @@ Numba 编译结果默认会写入磁盘缓存，因此后续新的 Python 进程
 CIRCUIT_NUMBA_CACHE=0
 ```
 
-`core.explore` 和 `core.corners` 仍会默认把该变量设为 `1`，因为设计空间探索、
-corner sweep 和 mismatch MC 都是长任务；普通 solver 路径现在也会在 Numba 可用时
-自动使用加速内核。
+solver 路径在 Numba 可用时会自动使用加速内核；不再有任何模块在 import 时设置
+`CIRCUIT_USE_NUMBA=1`（想关掉设 `CIRCUIT_USE_NUMBA=0`）。
 
 目前加速路径包括 PMOS 电流计算、内部节点 Newton 迭代、偏置相关电容计算、
 AC/PNoise 小信号参数端导数、PNoise HB block 组装和噪声折叠，
@@ -211,7 +242,20 @@ stamp 和小规模稠密 Newton 线性求解。稠密 Newton 求解使用原地 
 - 同时支持全局工艺角和逐器件 mismatch 映射。
 - 使用拓扑元数据确定输出、负载电容和 AC 输入驱动。
 
-DC 求解包含物理支路选择、对称工作点和 rail 有界节点解的鲁棒性处理。
+DC 求解包含物理支路选择、对称工作点和 rail 有界节点解的鲁棒性处理——实现在 `dc_solver.py` 里，
+由这里调用。`ac_solver.py` 本身现在是纯 AC 小信号模块：`ac_solve` 加上带宽辅助函数
+`bw_from_gain`；不再承载器件工厂或 DC seeding 代码。
+
+### `dc_solver.py`
+
+DC 工作点求解支持代码——以前内嵌在 `ac_solver.py` 里，现在拆出来，因为它混杂着两类不同的关注点：
+
+- **`bounded_least_squares_dc(...)`** / **`dc_residual_ok(...)`** — 通用的最后手段 DC 求解：当主
+  Newton/`fsolve` 路径不收敛时使用的有界最小二乘 fallback，以及门控它的残差判定。
+- **`symmetric_seed(...)`** / **`symmetric_continuation(...)`** / **`is_afe_topology(...)`** /
+  **`is_pairwise_symmetric_afe(...)`** / **`_AFE_SYMMETRIC_PAIRS`** — 只针对 AFE 拓扑的电路专用
+  seeding 启发式，**不是**通用求解器逻辑。它为这一个电路选出物理上（匹配 Spectre）的对称上电支路。
+  单独放一个模块能让 `ac_solver.py` 的通用求解保持不含逐电路分支。
 
 ### `noise_solver.py`
 
@@ -460,15 +504,24 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - 指标：`gain_dB`、`bw_Hz`、`irn_uV`、`power_uW`（顶 rail 供电电流 × rail 电压）和 `area`（各器件 `g_area` 之和）。
 - 变量的 `targets` 可以同时驱动多个键值，保持匹配对（M7=M8, …）一致，使 AFE 的对称 DC 续流保持在物理支路上。
 - 结果导出为 CSV 和 JSONL；CLI 运行 `python -m core.explore <config.json>`。
+- 硅 corner 路由（`SKY130_CORNERS`/`SILICON_CORNERS`/`apply_silicon_corner`）现在在
+  `device_factory.py` 里；`explore.py` 从那里 import，而不是自己定义。
+- `add_cli_args(parser)` / `run_cli(args)` 是 CLI 参数定义的单一来源——`python -m core explore`
+  子命令和独立的 `python -m core.explore` 入口都调用同一对函数，两个入口不会再互相漂移
+  （见 [`cli_reference.md`](cli_reference.md)）。
 
 示例配置：`examples/afe_explore.json` 和 `examples/single_stage.json`，二者都是带
 `explore` 块的完整电路 JSON。
 
 ### `corners.py`
 
-工艺角和鲁棒性工作的单一事实来源——这些内容原本会在每次扫描中重复推导：
+工艺角和鲁棒性*工作*的单一事实来源——这些内容原本会在每次扫描中重复推导。`CORNERS` 数据本身（全局
+工艺偏移 `typical` / `slow` / `fast`，按 `pvt0`/`pbeta0` 表示，来源于 PDK 的 monte.scs 段落；如
+slow = `{"pvt0": -0.2259, "pbeta0": -0.54}`）现在放在共享的 leaf 器件层 `device_factory.py` 里；
+`corners.py` 从那里 import 它（`from .device_factory import CORNERS`），所以既有的
+`from core.corners import CORNERS` 调用点无需改动。`corners.py` 里保留的是建立在它之上的
+mismatch/latch 相关工作：
 
-- `CORNERS`——全局工艺偏移（`typical` / `slow` / `fast`，按 `pvt0`/`pbeta0` 表示），来源于 PDK 的 monte.scs 段落；如 slow = `{"pvt0": -0.2259, "pbeta0": -0.54}`。
 - `mismatch_corner(rng, devices, base)`——在工艺角基础上叠加逐器件随机 `mvt0`/`mbeta0`。
 - `metrics(...)`——单设计单 corner → `gain_peak_dB`、`bw_Hz`、`irn_uV` 和 `latch_dV`（DC 工作点的 `|out+ - out-|`；大值 ⇒ 交叉耦合正反馈已 latch）。
 - `corner_table(...)`——typ/slow/fast 三个 corner 的指标汇总。
@@ -493,7 +546,10 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   设置（`time_domain`、drive、band、打靶容差）原样生效；`pac`/`pnoise` 要求配置带对应 `analyses` 块。
   **设计轴语法**在 `DEV.W/.L/.NF`/bias 之外还支持：`<Cap>.C` / `<Res>.R`（具名无源器件值——`structural`，通过
   `candidate_circuit()` 逐候选重建电路）、`periodic.frequency`（clock）、`pvt0`/`pbeta0`（连续全局工艺
-  偏移——采样它就把离散 corner 扫描变成一个连续 PVT 训练轴）。
+  偏移——采样它就把离散 corner 扫描变成一个连续 PVT 训练轴）。和 `explore.py` 一样，`dataset.py` 的硅
+  corner 路由（`SKY130_CORNERS`、`apply_silicon_corner`）也从 `device_factory.py` import，而不是自己
+  定义；并暴露同一对 `add_cli_args(parser)` / `run_cli(args)`，使 `python -m core dataset` 子命令与
+  独立的 `python -m core.dataset` 入口共用一份参数定义。
 - **`surrogate.py`** ——`HistGradientBoostingRegressor`（可选 `scikit-learn` 依赖）逐标签独立训练，对跨
   多个数量级的标签（如 IRN）自动用 log-space 拟合。`filter_rows()` / CLI `--filter label:lo:hi` 把训练
   限制在感兴趣区域内（例如剔除甩轨/collapse 的极端设计——它们的极端标签会拖累平方误差拟合，反正也会被
@@ -525,10 +581,16 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - **`osdi_device.py`** ——`OsdiDevice(TransistorModel)` 包装一个 `Device`，实现
   `get_Idc`/`get_ss_params`/`get_capacitances`/`get_noise_psd`。`TransistorModel.kcl_sign`
   （默认 +1，即 source-high——匹配 PMOS/OTFT）让 `ac_solve` 的 DC KCL 也能支持 NMOS（source-low，
-  `kcl_sign=-1`），且不改变 OTFT 路径（byte-identical：`1.0 * abs(x) == abs(x)`）。三个瞬态专用的 ABC
-  钩子会抛 `NotImplementedError`——`.osdi` 不能进 numba 瞬态循环。
-- **`osdi_transient.py`** ——`cs_transient()`：一个纯 Python 的固定步长后向欧拉积分器，每步直接调用
-  OSDI 宿主（在 numba 循环之外），是一个基础性（非全保真度）的硅瞬态实现。
+  `kcl_sign=-1`），且不改变 OTFT 路径（byte-identical：`1.0 * abs(x) == abs(x)`）。`OsdiDevice`
+  覆写基类的能力类属性：`HAS_TERMINAL_LINEARIZATION = True`（提供 `get_terminal_linearization`）和
+  `TRANSIENT_BACKEND = "osdi"`。三个瞬态专用的 ABC 钩子仍会抛 `NotImplementedError`——`.osdi`
+  不能进 numba 瞬态循环。
+- **`osdi_transient.py`** ——`transient_osdi(sizes, bias, tgrid, ...)` 是电路级入口：一个固定步长
+  后向欧拉积分器，每步直接调用 OSDI 宿主（在 numba 循环之外），建立在更底层的单器件辅助函数
+  `cs_transient()` 上，是一个基础性（非全保真度）的硅瞬态实现。`transient_solver.py` 里的
+  `transient()` 会检查器件的 `TRANSIENT_BACKEND` 类属性，若为 `"osdi"` 就延迟 import 并路由到
+  `transient_osdi`——单向依赖。`osdi_transient.py` 自身不再 import `transient_solver.py`，
+  两个模块不再构成循环 import（这次拆分之前是的）。
 - **`sky130_model.py`** ——`Sky130Nfet`/`Sky130Pfet(OsdiDevice)` + `register_pdk("sky130", ...)`。
   SKY130 的 binned BSIM4 子电路（63 个 bin，2000+ 个 `.param` 表达式）**让 ngspice 去解析**：实例化子
   电路、跑一次 `op`、`showmod` 拿到完全展开的扁平参数卡（731 个参数），缓存到 `data/pdk/sky130/*.json`，

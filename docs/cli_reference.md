@@ -73,10 +73,14 @@ python -m core run examples/afe_explore.json -a ac,noise
 |------|------|--------|------|
 | `circuit` | path | (必需) | 电路 JSON 文件路径 |
 | `-a`, `--analysis` | str | 全部配置项 | 逗号分隔，可选：`ac,noise,transient,pss,pac,pnoise` |
+| `--corner` | str | — | 工艺角覆盖：OTFT `typical/slow/fast`，或硅 `tt/ss/ff/sf/fs`（SKY130）/ `nom/ss/ff`（FreePDK45）。硅角路由进器件卡，OTFT 角作各分析默认；不给则用 JSON 里配置的角 |
 | `--noise-band LO HI` | float×2 | `0.05 100.0` | IRN 积分频带 (Hz) |
 | `-o`, `--output` | path | — | 结果写出为 JSON |
 | `--no-numba` | flag | — | 禁用 Numba 加速 |
 | `--quiet` | flag | — | 不打印进度 |
+
+> `run`/`explore` 都会自动绑定 `models` 块的非默认 PDK 并对多稳态 DC 播种（用第一个字典型
+> `dc_guesses`）——硅配置（含 FreePDK45）经 `python -m core run` / `python -m core explore` 直接可用。
 
 **输出示例：**
 
@@ -101,13 +105,18 @@ python -m core explore examples/afe_explore.json -n 200 --method random
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `circuit` | path | (必需) | 含 `"explore"` 块的电路 JSON |
+| `config` | path | (必需) | 含 `"explore"` 块的电路 JSON |
 | `-n`, `--n` | int | `200` | 候选数量 |
 | `--seed` | int | `0` | 随机种子 |
 | `--method` | choices | `lhs` | 采样方法：`lhs`（拉丁超立方）或 `random` |
-| `-o`, `--output` | path | — | 输出路径前缀（生成 `<prefix>.csv` + `<prefix>.jsonl`） |
-| `--no-numba` | flag | — | 禁用 Numba |
+| `--corner` | str | — | 工艺角：OTFT `typical/slow/fast`，或硅 `tt/ss/ff/sf/fs`（SKY130）/ `nom/ss/ff`（FreePDK45） |
+| `-o`, `--out`, `--output` | path | — | 输出路径前缀（生成 `<prefix>.csv` + `<prefix>.jsonl`） |
+| `--no-numba` | flag | — | 禁用 Numba（仅 `python -m core explore` 子命令有此参数；独立入口 `python -m core.explore` 没有） |
 | `--quiet` | flag | — | 不打印逐候选进度 |
+
+> `explore` 的 CLI 参数由 `core/explore.py` 的 `add_cli_args(parser)` / `run_cli(args)` 定义，
+> `python -m core explore` 子命令和独立入口 `python -m core.explore` 共用同一份定义，因此参数
+> 表（除 `--no-numba`，只在子命令级存在）对两者一致，不会漂移。
 
 **旧版兼容：**
 
@@ -306,17 +315,27 @@ python -m core dataset examples/single_stage.json -n 200 --no-npz --quiet
 
 | 参数 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `circuit` | path | (必需) | 含 `"explore"` 块的电路 JSON |
+| `config` | path | (必需) | 含 `"explore"` 块的电路 JSON |
 | `-n` | int | `200` | 样本数 |
 | `--seed` | int | `0` | RNG 种子（同 config+seed+commit ⇒ 同数据集） |
 | `--method` | lhs/random | `lhs` | 采样方法 |
-| `--corner` | str | `typical` | 工艺角：typical / slow / fast |
+| `--corner` | str | `typical` | 工艺角：OTFT `typical/slow/fast`，或硅 `tt/ss/ff/sf/fs`（SKY130）/ `nom/ss/ff`（FreePDK45） |
 | `--labels` | str | `ac_noise` | 标签组(逗号分隔)：`ac_noise` / `transient` / `pss` / `pac` / `pnoise`(周期组需 `periodic` 块；`pac`/`pnoise` 另需对应 `analyses` 块) |
+| `--freqs-start` | float | — | 给了 `--freqs-stop` 时，AC 网格起始十进位（log10 Hz） |
+| `--freqs-stop` | float | — | 覆盖 AC 网格终止十进位（log10 Hz），如 4 = 10kHz（避免 `bw_Hz` 卡在上限） |
+| `--freqs-num` | int | — | 给了 `--freqs-stop` 时的 AC 网格点数 |
 | `--out` | path | — | 输出前缀（不给则只在内存计算，不落盘） |
 | `--no-npz` | flag | — | 跳过 `.npz` 稠密输出 |
 | `--parquet` | flag | — | 额外写 `.parquet`（需可选依赖 pyarrow） |
-| `--no-numba` | flag | — | 禁用 Numba |
+| `--no-numba` | flag | — | 禁用 Numba（仅 `python -m core dataset` 子命令有此参数；独立入口 `python -m core.dataset` 没有） |
 | `--quiet` | flag | — | 不打印进度 |
+
+> `dataset` 的 `--corner` 帮助文案与 `run`/`explore` 一致：OTFT `typical/slow/fast`，
+> 或硅 `tt/ss/ff/sf/fs`（SKY130）/ `nom/ss/ff`（FreePDK45）。
+>
+> `dataset` 的 CLI 参数由 `core/dataset.py` 的 `add_cli_args(parser)` / `run_cli(args)` 定义，
+> `python -m core dataset` 子命令和独立入口 `python -m core.dataset` 共用同一份定义，因此参数表
+> （除 `--no-numba`，只在子命令级存在）对两者一致，不会漂移。
 
 **标签组**（`--labels`，schema 1.2）：
 

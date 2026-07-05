@@ -6,6 +6,7 @@ into calls to AC/noise/transient/PSS/PAC/PNoise solvers.
 """
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -273,7 +274,7 @@ def _complex_value(value, field):
 
 def _resolve_corner(corner):
     if isinstance(corner, str):
-        from .corners import CORNERS
+        from .device_factory import CORNERS
         if corner not in CORNERS:
             raise ValueError(f"Unknown process corner {corner!r}; expected one of {sorted(CORNERS)}")
         return CORNERS[corner]
@@ -391,12 +392,19 @@ def _run_transient(spec, cfg):
     )
 
 
-def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
+def run_analysis_suite(spec_or_path, analyses=None, *, selected=None, corner=None):
     """Run the analyses configured in a ``CircuitSpec`` or JSON file.
 
     ``selected`` can restrict execution to a subset such as ``["pss", "pac"]``.
     Required dependencies are run automatically: PAC/PNoise will compute PSS if
     it is not already present.
+
+    ``corner`` optionally overrides the process corner for the whole suite: a silicon
+    corner name (``tt``/``ss``/``ff``/``sf``/``fs`` for SKY130, ``nom``/``ss``/``ff``
+    for FreePDK45) is stamped onto the silicon devices; an OTFT corner
+    (``typical``/``slow``/``fast``) becomes the default for analyses that don't set
+    their own. ``None`` (default) leaves the JSON-configured corners untouched
+    (byte-identical to the old behaviour).
     """
     spec = _as_spec(spec_or_path)
     raw_analysis_cfg = analyses if analyses is not None else (spec.analyses or {})
@@ -406,6 +414,14 @@ def run_analysis_suite(spec_or_path, analyses=None, *, selected=None):
     }
     if not analysis_cfg:
         raise ValueError("No analyses configured")
+    if corner is not None:
+        from .device_factory import apply_silicon_corner
+        dk, solver_corner = apply_silicon_corner(spec.model_types, spec.device_kwargs, corner)
+        spec = dataclasses.replace(spec, device_kwargs=dk)
+        if solver_corner is not None:               # OTFT corner: default for un-set analyses
+            for cfg in analysis_cfg.values():
+                if isinstance(cfg, dict):
+                    cfg.setdefault("corner", solver_corner)
     _propagate_shared_pss_corner(analysis_cfg)
     selected_set = set(selected) if selected is not None else None
     results = {}

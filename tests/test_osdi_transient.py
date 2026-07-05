@@ -287,8 +287,8 @@ def test_mixed_model_libraries():
 
 
 def test_three_libraries_rejected():
-    from core.transient_solver import _osdi_model_names
-    assert _osdi_model_names({"M1": "sky130.nmos"})  # sanity: resolver works
+    from core.transient_solver import osdi_model_names
+    assert osdi_model_names({"M1": "sky130.nmos"})  # sanity: resolver works
 
 
 def test_adaptive_matches_fine_fixed_grid():

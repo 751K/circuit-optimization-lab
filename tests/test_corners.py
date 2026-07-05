@@ -14,7 +14,7 @@ from core.corners import (
     metrics,
     mismatch_mc,
 )
-from core.ac_solver import _dev_corner
+from core.device_factory import dev_corner
 
 # fast coarse grid for the test (the tools accept a freqs override)
 FREQS = np.logspace(-2, 4, 41)
@@ -44,8 +44,8 @@ def test_corner_constants():
 
 
 def test_named_corner_resolves_at_device_boundary():
-    assert _dev_corner("slow", "M7") == CORNERS["slow"]
-    assert _dev_corner("typical", "M7") == CORNERS["typical"]
+    assert dev_corner("slow", "M7") == CORNERS["slow"]
+    assert dev_corner("typical", "M7") == CORNERS["typical"]
 
 
 def test_metrics_reports_latch_dv():

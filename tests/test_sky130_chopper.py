@@ -169,7 +169,7 @@ def test_frozen_clock_lti_oracles(spec):
 @pytest.mark.skipif(not os.path.exists(RUN_NGSPICE),
                     reason="OSDI-enabled ngspice not present")
 def test_chopper_gain_matches_ngspice(spec, suite):
-    from core.ac_solver import build_devices
+    from core.device_factory import build_devices
     from core.osdi_device import compile_va
     from core.sky130_model import _BSIM4_VA
     with open(_CFG_PATH) as fh:

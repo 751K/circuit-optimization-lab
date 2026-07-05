@@ -41,9 +41,9 @@ import numpy as np
 
 from . import diagnostics
 from .circuit_loader import circuit_from_dict, models_from_config
-from .corners import CORNERS
+from .device_factory import CORNERS, SKY130_CORNERS, apply_silicon_corner
 from .device_model import get_default_model_type
-from .explore import (METRICS, SKY130_CORNERS, apply_silicon_corner, apply_variables,
+from .explore import (METRICS, apply_variables,
                       evaluate, parse_explore, sample)
 from .transient_solver import transient
 
@@ -688,52 +688,86 @@ def _format_summary(dataset):
             f"  topology_hash: {m['topology_hash']}")
 
 
-def main(argv=None):
-    p = argparse.ArgumentParser(
-        description="Build a labeled surrogate dataset from an explore config.")
-    p.add_argument("config", help="JSON file carrying an 'explore' block")
-    p.add_argument("-n", "--n", type=int, default=200, help="number of samples")
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--method", choices=("lhs", "random"), default="lhs")
-    p.add_argument("--corner", default="typical",
-                   help="process corner: OTFT typical|slow|fast, or SKY130 tt|ss|ff|sf|fs "
-                        "for silicon configs (default: typical)")
-    p.add_argument("--labels", default="ac_noise",
-                   help="comma list of label groups: ac_noise, transient, pss, pac, "
-                        "pnoise (periodic groups need a 'periodic' block; pac/pnoise "
-                        "also need their 'analyses' blocks; default: ac_noise)")
-    p.add_argument("--freqs-start", type=float, default=-2.0,
-                   help="AC grid start decade (log10 Hz) when --freqs-stop is given")
-    p.add_argument("--freqs-stop", type=float, default=None,
-                   help="override AC grid top decade (log10 Hz), e.g. 4 = 10 kHz "
-                        "(avoids bw_Hz clipping at the ceiling)")
-    p.add_argument("--freqs-num", type=int, default=101,
-                   help="AC grid points when --freqs-stop is given")
-    p.add_argument("--out", default=None,
-                   help="output path prefix (writes <prefix>.jsonl/.manifest.json/.npz)")
-    p.add_argument("--no-npz", action="store_true", help="skip the dense .npz output")
-    p.add_argument("--parquet", action="store_true",
-                   help="also write a .parquet table (needs the optional pyarrow dep)")
-    p.add_argument("--quiet", action="store_true", help="suppress per-sample progress")
-    args = p.parse_args(argv)
+def add_cli_args(parser):
+    """Register the dataset feature's own arguments on ``parser``.
 
+    Single source of truth for both ``python -m core.dataset`` and the
+    ``python -m core dataset`` subcommand — keeps the two CLI surfaces from
+    drifting. Feature-only: subcommand-level mechanisms (e.g. ``--no-numba``)
+    stay with their host parser, not here."""
+    parser.add_argument("config", help="JSON file carrying an 'explore' block")
+    parser.add_argument("-n", "--n", type=int, default=200,
+                        help="Number of samples (default: 200)")
+    parser.add_argument("--seed", type=int, default=0, help="RNG seed")
+    parser.add_argument("--method", choices=("lhs", "random"), default="lhs",
+                        help="Sampling method (default: lhs)")
+    parser.add_argument("--corner", default="typical",
+                        help="Process corner: OTFT typical|slow|fast, or silicon "
+                             "tt|ss|ff|sf|fs (SKY130) / nom|ss|ff (FreePDK45) "
+                             "(default: typical)")
+    parser.add_argument("--labels", default="ac_noise",
+                        help="Comma list of label groups: ac_noise, transient, pss, "
+                             "pac, pnoise (periodic groups need a 'periodic' block; "
+                             "pac/pnoise also need their 'analyses' blocks; default: "
+                             "ac_noise)")
+    parser.add_argument("--freqs-start", type=float, default=-2.0,
+                        help="AC grid start decade (log10 Hz) when --freqs-stop is "
+                             "given")
+    parser.add_argument("--freqs-stop", type=float, default=None,
+                        help="Override AC grid top decade (log10 Hz), e.g. 4 = 10 kHz "
+                             "(avoids bw_Hz clipping at the ceiling)")
+    parser.add_argument("--freqs-num", type=int, default=101,
+                        help="AC grid points when --freqs-stop is given")
+    parser.add_argument("--out", default=None,
+                        help="Output path prefix (writes "
+                             "<prefix>.jsonl/.manifest.json/.npz)")
+    parser.add_argument("--no-npz", action="store_true",
+                        help="Skip the dense .npz output")
+    parser.add_argument("--parquet", action="store_true",
+                        help="Also write a .parquet table (needs the optional "
+                             "pyarrow dep)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suppress per-sample progress")
+    return parser
+
+
+def run_cli(args):
+    """Execute the dataset feature from parsed ``args``. Returns the dataset dict."""
     def progress(done, total):
         if not args.quiet:
             print(f"\r  evaluating {done}/{total}", end="", flush=True)
 
+    if not args.quiet:
+        print(f"Building dataset from {args.config}  "
+              f"(n={args.n}, method={args.method}, corner={args.corner}, "
+              f"labels={args.labels})")
     groups = tuple(g.strip() for g in args.labels.split(",") if g.strip())
     freqs = (np.logspace(args.freqs_start, args.freqs_stop, args.freqs_num)
              if args.freqs_stop is not None else None)
-    dataset = run_from_config(args.config, n=args.n, seed=args.seed, method=args.method,
-                              corner=args.corner, label_groups=groups, freqs=freqs,
-                              out=args.out, npz=not args.no_npz, parquet=args.parquet,
-                              progress=progress)
+    try:
+        dataset = run_from_config(args.config, n=args.n, seed=args.seed,
+                                  method=args.method, corner=args.corner,
+                                  label_groups=groups, freqs=freqs, out=args.out,
+                                  npz=not args.no_npz, parquet=args.parquet,
+                                  progress=progress)
+    except ImportError as exc:                  # e.g. --parquet without pyarrow
+        raise SystemExit(str(exc))
+    except ValueError as exc:                   # e.g. transient labels w/o periodic
+        raise SystemExit(str(exc))
     if not args.quiet:
         print()
     print(_format_summary(dataset))
     if args.out:
         print("wrote " + ", ".join(dataset["_paths"].values()))
     return dataset
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        description="Build a labeled surrogate dataset from an explore config.")
+    add_cli_args(p)
+    args = p.parse_args(argv)
+    return run_cli(args)
 
 
 if __name__ == "__main__":

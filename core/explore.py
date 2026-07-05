@@ -39,14 +39,10 @@ import csv
 import json
 import os
 
-# Exploration evaluates many candidates, so default to optional Numba acceleration
-# unless the caller explicitly disables it with CIRCUIT_USE_NUMBA=0.
-os.environ.setdefault("CIRCUIT_USE_NUMBA", "1")
-
 import numpy as np
 
 from .ac_solver import ac_solve
-from .device_model import create_device, get_default_model_type
+from .device_factory import apply_silicon_corner, build_devices
 from .noise_solver import band_rms, noise_analysis
 from .circuit_loader import circuit_from_dict, models_from_config
 from . import diagnostics
@@ -54,36 +50,6 @@ from . import diagnostics
 
 METRICS = ("gain_dB", "gain_peak_dB", "bw_Hz", "irn_uV", "power_uW", "area")
 NOISE_METRICS = frozenset({"irn_uV"})
-
-# Silicon discrete process corners are baked into the extracted device card (a
-# per-device constructor kwarg), a different mechanism from the OTFT continuous PVT
-# shift the solvers apply via ``corner=``. :func:`apply_silicon_corner` keeps the two
-# separate: a silicon corner name is routed onto silicon devices, an OTFT corner is
-# left for the solver shift path. SKY130 uses tt/ss/ff/sf/fs; FreePDK45 ships
-# nom/ss/ff card directories (nom == typical).
-SKY130_CORNERS = frozenset({"tt", "ss", "ff", "sf", "fs"})
-SILICON_CORNERS = SKY130_CORNERS | {"nom"}
-_SILICON_PREFIXES = ("sky130", "freepdk45")
-
-
-def apply_silicon_corner(model_types, device_kwargs, corner):
-    """Route a silicon corner onto silicon devices; leave OTFT corners for the solver.
-
-    Returns ``(device_kwargs, solver_corner)``. When ``corner`` names a silicon corner
-    (SKY130 ``tt/ss/ff/sf/fs`` or FreePDK45 ``nom/ss/ff``), it is stamped as
-    ``corner=<name>`` on every ``sky130.*`` / ``freepdk45.*`` device's kwargs and the
-    solver corner is cleared (``None``) — silicon ignores the OTFT PVT shift. Otherwise
-    (an OTFT corner name / shift-map / ``None``) the device kwargs pass through unchanged
-    and ``corner`` is returned for the solver path. A circuit is single-process, so the
-    shared ``ss``/``ff`` names route onto whichever silicon family the devices declare."""
-    if not isinstance(corner, str) or corner not in SILICON_CORNERS:
-        return device_kwargs, corner
-    mt = model_types or {}
-    dk = {name: dict(kw) for name, kw in (device_kwargs or {}).items()}
-    for name, model in mt.items():
-        if str(model).startswith(_SILICON_PREFIXES):
-            dk.setdefault(name, {})["corner"] = corner
-    return dk, None
 
 
 # ── configuration ────────────────────────────────────────────────────────
@@ -265,19 +231,9 @@ def _area(topo, sizes, nf, model_types=None, device_kwargs=None):
     """Sum of per-device ``g_area``. Each device is built with its own model type so a
     mixed-process circuit sums each PDK's real area metric (OTFT ``g_area`` is a padded
     layout box, not W·L); an all-default circuit is byte-identical to the old path."""
-    model_types = model_types or {}
-    device_kwargs = device_kwargs or {}
-    total = 0.0
-    for name, *_ in topo.devices:
-        W, L = sizes[name]
-        n = 1
-        if isinstance(nf, dict):
-            n = int(nf.get(name, 1))
-        elif nf:
-            n = int(nf)
-        total += create_device(model_types.get(name, get_default_model_type()),
-                               W=W, L=L, NF=n, **device_kwargs.get(name, {})).g_area
-    return float(total)
+    devices = build_devices(sizes, nf=nf, corner=None, topo=topo,
+                            model_types=model_types, device_kwargs=device_kwargs)
+    return float(sum(dev.g_area for dev in devices.values()))
 
 
 def _needs_noise(constraints=None, objectives=None, require_noise=None):
@@ -495,19 +451,38 @@ def _format_summary(results):
     return "\n".join(lines)
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="Circuit design-space exploration / optimization.")
-    parser.add_argument("config", help="JSON file carrying an 'explore' block")
-    parser.add_argument("-n", "--n", type=int, default=200, help="number of candidates")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--method", choices=("lhs", "random"), default="lhs")
-    parser.add_argument("--out", default=None, help="output path prefix (writes <prefix>.csv/.jsonl)")
-    parser.add_argument("--corner", default=None,
-                        help="process corner: OTFT typical|slow|fast, or SKY130 tt|ss|ff|sf|fs")
-    parser.add_argument("--quiet", action="store_true", help="suppress per-candidate progress")
-    args = parser.parse_args(argv)
+def add_cli_args(parser):
+    """Register the explore feature's own arguments on ``parser``.
 
+    Single source of truth for both ``python -m core.explore`` and the
+    ``python -m core explore`` subcommand — keeps the two CLI surfaces from
+    drifting. Feature-only: subcommand-level mechanisms (e.g. ``--no-numba``)
+    stay with their host parser, not here.
+
+    The output prefix accepts both ``--out`` (module-CLI spelling) and
+    ``-o/--output`` (subcommand spelling); they share the ``output`` dest so
+    either name works from either surface."""
+    parser.add_argument("config", help="JSON file carrying an 'explore' block")
+    parser.add_argument("-n", "--n", type=int, default=200,
+                        help="Number of candidates (default: 200)")
+    parser.add_argument("--seed", type=int, default=0, help="RNG seed")
+    parser.add_argument("--method", choices=("lhs", "random"), default="lhs",
+                        help="Sampling method (default: lhs)")
+    parser.add_argument("--corner", default=None,
+                        help="Process corner: OTFT typical|slow|fast, or silicon "
+                             "tt|ss|ff|sf|fs (SKY130) / nom|ss|ff (FreePDK45)")
+    parser.add_argument("-o", "--out", "--output", dest="output", default=None,
+                        help="Output path prefix (writes <prefix>.csv/.jsonl)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suppress per-candidate progress")
+    return parser
+
+
+def run_cli(args):
+    """Execute the explore feature from parsed ``args``. Returns the results dict."""
     topo, sizes, bias, nf, cfg = load_explore_json(args.config)
+    # bind any non-default per-device models (silicon sky130/freepdk45); without this
+    # a silicon config silently falls back to the default OTFT PDK.
     with open(args.config, "r", encoding="utf-8") as f:
         model_types, device_kwargs = models_from_config(json.load(f))
 
@@ -515,6 +490,8 @@ def main(argv=None):
         if not args.quiet:
             print(f"\r  evaluating {done}/{total}", end="", flush=True)
 
+    if not args.quiet:
+        print(f"Exploring {args.config}  (n={args.n}, method={args.method})")
     results = explore(topo, sizes, bias, nf, cfg, n=args.n, seed=args.seed,
                       method=args.method, progress=progress, corner=args.corner,
                       model_types=model_types, device_kwargs=device_kwargs)
@@ -522,12 +499,20 @@ def main(argv=None):
         print()
     print(_format_summary(results))
 
-    if args.out:
-        os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
-        write_csv(results, args.out + ".csv")
-        write_jsonl(results, args.out + ".jsonl")
-        print(f"wrote {args.out}.csv and {args.out}.jsonl")
+    if args.output:
+        os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
+        write_csv(results, args.output + ".csv")
+        write_jsonl(results, args.output + ".jsonl")
+        print(f"wrote {args.output}.csv and {args.output}.jsonl")
     return results
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Circuit design-space exploration / optimization.")
+    add_cli_args(parser)
+    args = parser.parse_args(argv)
+    return run_cli(args)
 
 
 if __name__ == "__main__":

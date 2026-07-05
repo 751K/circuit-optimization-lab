@@ -22,8 +22,8 @@ except Exception:  # pragma: no cover - scipy is a project dependency
     _sp = None
     _spla = None
 
-from .ac_mna import _branch_incidence
-from .ac_solver import _dev_corner, _dev_nf, build_devices, get_ss_params
+from .ac_mna import branch_incidence
+from .device_factory import dev_corner, dev_nf, build_devices, get_ss_params
 from .noise_solver import band_rms, noise_analysis
 from .numba_kernels import (_pnoise_hb_blocks_impl, pnoise_fold_psd_numba,
                             pnoise_hb_blocks_numba, py_impl)
@@ -684,7 +684,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
                 Vg = term_value(g, m)
                 p = get_ss_params(
                     all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
-                    corner=_dev_corner(corner, name), nf=_dev_nf(all_nf, name),
+                    corner=dev_corner(corner, name), nf=dev_nf(all_nf, name),
                     dev_inst=dev_inst[name],
                 )
                 if name in gated_noise:
@@ -909,7 +909,7 @@ def pnoise_solve(sizes, bias, freqs, *, pss_result, fundamental=None, nf=None,
             Y_base, C_block, _ = _hb_blocks(Gf, Cf, K, N, n_state, fundamental,
                                             charge_caps=charge_caps)
         all_branch_sources = list(topo.vsources) + list(topo.vcvs) + list(topo.ccvs)
-        Binc = _branch_incidence(all_branch_sources, idx, n)
+        Binc = branch_incidence(all_branch_sources, idx, n)
         if n_state != n:
             Bpad = np.zeros((n_state, nbr))
             Bpad[:n, :] = Binc

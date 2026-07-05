@@ -16,6 +16,36 @@ TERM_INPUT = 1
 TERM_RAIL = 2
 
 
+def term_arrays(terms):
+    """Split terminal tokens into parallel (kind, ref, value) int/float arrays.
+
+    A token is ``(kind, ref_or_value)``: for a solved/input terminal
+    (``kind`` in {``TERM_SOLVED``, ``TERM_INPUT``}) the second field is an
+    integer index (``ref``); for a rail it is a float bias (``value``).  Both
+    the raw-transient marshal and the OSDI transient marshal build the same
+    stamp-ready arrays, so this helper lives with the topology tokens they
+    share.
+    """
+    kind = np.empty(len(terms), dtype=np.int64)
+    ref = np.empty(len(terms), dtype=np.int64)
+    value = np.empty(len(terms), dtype=float)
+    for pos, term in enumerate(terms):
+        kind[pos] = int(term[0])
+        if term[0] in (0, 1):
+            ref[pos] = int(term[1])
+            value[pos] = 0.0
+        else:
+            ref[pos] = 0
+            value[pos] = float(term[1])
+    return kind, ref, value
+
+
+def index_array(vals):
+    """Pack optional integer indices into an int64 array (``None`` -> ``-1``)."""
+    return np.array([-1 if val is None else int(val) for val in vals],
+                    dtype=np.int64)
+
+
 @dataclass(frozen=True)
 class DevicePlan:
     name: str

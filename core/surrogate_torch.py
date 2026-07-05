@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .surrogate import _auto_log_labels, load_xy
+from .surrogate import auto_log_labels, load_xy
 
 
 def _require_torch():
@@ -131,7 +131,7 @@ def train(X, Y, var_names, label_names, *, log_labels=None, hidden=(128, 128),
     X = np.asarray(X, float)
     Y = np.asarray(Y, float)
     if log_labels is None:
-        log_labels = _auto_log_labels(Y, label_names)
+        log_labels = auto_log_labels(Y, label_names)
     logm = np.array([lab in set(log_labels) for lab in label_names])
     Yt = Y.copy()
     Yt[:, logm] = np.log(Yt[:, logm])

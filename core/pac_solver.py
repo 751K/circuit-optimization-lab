@@ -13,9 +13,10 @@ from scipy import sparse as _sp
 from scipy.linalg import lu_factor, lu_solve
 from scipy.sparse import linalg as _spla
 
-from .ac_mna import _stamp_adm, _stamp_dense_lti, _stamp_mos_lti, _branch_incidence
-from .ac_solver import _bw_from_gain, _dev_corner, _dev_nf, ac_solve, build_devices, get_ss_params
-from .osdi_device import OsdiDevice
+from .ac_mna import stamp_adm, stamp_dense_lti, stamp_mos_lti, branch_incidence
+from .ac_solver import bw_from_gain, ac_solve
+from .compiled_topology import term_arrays
+from .device_factory import dev_corner, dev_nf, build_devices, get_ss_params
 from .numba_kernels import (_pnoise_hb_blocks_impl, pac_hb_blocks_numba,
                             pac_linearize_orbit_numba,
                             pac_linearize_orbit_gate1_numba, py_impl)
@@ -380,14 +381,14 @@ def _stamp_pmos_gate1_lti(G, C, RHS_G, RHS_C, d, g, s, g1,
     lets periodic conversion retain the switch-edge charge memory that a static
     terminal {gm,gds,Cgs,Cgd} collapse loses.
     """
-    _stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s, gm, gds, 0.0, 0.0)
-    _stamp_adm(G, RHS_G, g1, g, 1.0 / float(dev.R_cap))
+    stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s, gm, gds, 0.0, 0.0)
+    stamp_adm(G, RHS_G, g1, g, 1.0 / float(dev.R_cap))
     leak_g = 1.0 / float(dev.R_cap2)
     if leak_g != 0.0:
-        _stamp_adm(G, RHS_G, s, g1, leak_g)
-        _stamp_adm(G, RHS_G, d, g1, leak_g)
-    _stamp_adm(C, RHS_C, s, g1, Cgs)
-    _stamp_adm(C, RHS_C, d, g1, Cgd)
+        stamp_adm(G, RHS_G, s, g1, leak_g)
+        stamp_adm(G, RHS_G, d, g1, leak_g)
+    stamp_adm(C, RHS_C, s, g1, Cgs)
+    stamp_adm(C, RHS_C, d, g1, Cgd)
 
 
 def _stamp_pmos_gate1_dynamic_cap_terms(
@@ -472,9 +473,9 @@ def _assemble_pac_linearization_python(
     rg = np.zeros(n_ext)
     rc = np.zeros(n_ext)
     for a, b, cap in topo.cap_list():
-        _stamp_adm(C_const, rc, term(a), term(b), cap)
+        stamp_adm(C_const, rc, term(a), term(b), cap)
     for _, a, b, R in topo.resistors:
-        _stamp_adm(G_const, rg, term(a), term(b), 1.0 / R)
+        stamp_adm(G_const, rg, term(a), term(b), 1.0 / R)
     for k in range(n):
         G_const[k, k] += 1e-12
 
@@ -500,20 +501,20 @@ def _assemble_pac_linearization_python(
             Vs = term_value(s, m)
             Vd = term_value(d, m)
             Vg = term_value(g, m)
-            if isinstance(dev_inst[name], OsdiDevice):
+            if dev_inst[name].HAS_TERMINAL_LINEARIZATION:
                 # silicon: full quasi-static 4×4 terminal stamp (bulk is a
                 # constant bias -> known-voltage term, drops). The OTFT
                 # dynamic-cap corrections below are model-specific; the OSDI
                 # C(V) block is the dQ/dV operator at the orbit point.
                 G4, C4 = dev_inst[name].get_terminal_linearization(Vs, Vd, Vg)
-                _stamp_dense_lti(Gt_full[m], Ct_full[m], rg, rc,
+                stamp_dense_lti(Gt_full[m], Ct_full[m], rg, rc,
                                  (term(d), term(g), term(s), ("v", 0.0)),
                                  G4, C4)
                 continue
             p = get_ss_params(
                 all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
-                corner=_dev_corner(corner, name),
-                nf=_dev_nf(all_nf, name), dev_inst=dev_inst[name])
+                corner=dev_corner(corner, name),
+                nf=dev_nf(all_nf, name), dev_inst=dev_inst[name])
             if name in gate1_idx:
                 g1 = ("n", gate1_idx[name])
                 _stamp_pmos_gate1_lti(
@@ -526,7 +527,7 @@ def _assemble_pac_linearization_python(
                         term_derivative(s, m), term_derivative(d, m),
                         gate1_dc_dot[name][m])
             else:
-                _stamp_mos_lti(
+                stamp_mos_lti(
                     Gt_full[m], Ct_full[m], rg, rc, term(d), term(g), term(s),
                     p["gm"], p["gds"], p["Cgs"], p["Cgd"])
                 if not charge_caps:
@@ -563,21 +564,6 @@ def _pac_hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
     return Y_base, C_block, use_numba
 
 
-def _term_arrays(terms):
-    kind = np.empty(len(terms), dtype=np.int64)
-    ref = np.empty(len(terms), dtype=np.int64)
-    value = np.empty(len(terms), dtype=float)
-    for pos, term in enumerate(terms):
-        kind[pos] = int(term[0])
-        if term[0] in (0, 1):
-            ref[pos] = int(term[1])
-            value[pos] = 0.0
-        else:
-            ref[pos] = 0
-            value[pos] = float(term[1])
-    return kind, ref, value
-
-
 def _stamp_arrays(terms):
     kind = np.empty(len(terms), dtype=np.int64)
     ref = np.empty(len(terms), dtype=np.int64)
@@ -603,7 +589,8 @@ def _try_numba_pac_linearization(
     # the kernel evaluates the OTFT compact model; silicon (OSDI) devices go
     # through the Python assembler's dense terminal stamp instead
     if dev_inst is not None and any(
-            isinstance(dev_inst.get(name), OsdiDevice) for name, *_ in topo.devices):
+            getattr(dev_inst.get(name), "HAS_TERMINAL_LINEARIZATION", False)
+            for name, *_ in topo.devices):
         return None
 
     try:
@@ -665,11 +652,11 @@ def _try_numba_pac_linearization(
         p_cap_cgd3_base = np.array([p.cap_cgd3_base for p in params], dtype=float)
         p_k1 = np.array([p.k1 for p in params], dtype=float)
 
-        dev_value_d_kind, dev_value_d_ref, dev_value_d_val = _term_arrays(
+        dev_value_d_kind, dev_value_d_ref, dev_value_d_val = term_arrays(
             [value_term(d) for _name, d, _g, _s in topo.devices])
-        dev_value_g_kind, dev_value_g_ref, dev_value_g_val = _term_arrays(
+        dev_value_g_kind, dev_value_g_ref, dev_value_g_val = term_arrays(
             [value_term(g) for _name, _d, g, _s in topo.devices])
-        dev_value_s_kind, dev_value_s_ref, dev_value_s_val = _term_arrays(
+        dev_value_s_kind, dev_value_s_ref, dev_value_s_val = term_arrays(
             [value_term(s) for _name, _d, _g, s in topo.devices])
         dev_stamp_d_kind, dev_stamp_d_ref = _stamp_arrays(
             [stamp_term(d) for _name, d, _g, _s in topo.devices])
@@ -797,9 +784,9 @@ def _try_numba_pac_linearization_gate1(
         gate1_ref = np.arange(n, n + ndev, dtype=np.int64)
         n_state = n + ndev
 
-        vt_d = _term_arrays([value_term(d) for _n, d, _g, _s in topo.devices])
-        vt_g = _term_arrays([value_term(g) for _n, _d, g, _s in topo.devices])
-        vt_s = _term_arrays([value_term(s) for _n, _d, _g, s in topo.devices])
+        vt_d = term_arrays([value_term(d) for _n, d, _g, _s in topo.devices])
+        vt_g = term_arrays([value_term(g) for _n, _d, g, _s in topo.devices])
+        vt_s = term_arrays([value_term(s) for _n, _d, _g, s in topo.devices])
         st_d = _stamp_arrays([stamp_term(d) for _n, d, _g, _s in topo.devices])
         st_g = _stamp_arrays([stamp_term(g) for _n, _d, g, _s in topo.devices])
         st_s = _stamp_arrays([stamp_term(s) for _n, _d, _g, s in topo.devices])
@@ -948,7 +935,7 @@ def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
         "Hmag": gains,
         "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300))
         if len(gains) else np.nan,
-        "bw_Hz": _bw_from_gain(freqs, gains) if len(gains) else np.nan,
+        "bw_Hz": bw_from_gain(freqs, gains) if len(gains) else np.nan,
         "pss": pss_result,
         "input_drive": input_drive,
         "pacmag": 1.0,
@@ -1133,7 +1120,7 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     nbr = topo.n_branches
     if nbr:
         all_branch_sources = list(topo.vsources) + list(topo.vcvs) + list(topo.ccvs)
-        Binc = _branch_incidence(all_branch_sources, idx, n)
+        Binc = branch_incidence(all_branch_sources, idx, n)
         if n_state != n:
             Bpad = np.zeros((n_state, nbr))
             Bpad[:n, :] = Binc
@@ -1196,7 +1183,7 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         "gains": gains,
         "Hmag": gains,
         "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300)) if len(gains) else np.nan,
-        "bw_Hz": _bw_from_gain(freqs, gains) if len(gains) else np.nan,
+        "bw_Hz": bw_from_gain(freqs, gains) if len(gains) else np.nan,
         "pss": pss_result,
         "input_drive": input_drive,
         "pacmag": float(pacmag),
@@ -1469,7 +1456,7 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     return {
         "freqs": freqs, "response": response, "gains": gains, "Hmag": gains,
         "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300)) if len(gains) else np.nan,
-        "bw_Hz": _bw_from_gain(freqs, gains) if len(gains) else np.nan,
+        "bw_Hz": bw_from_gain(freqs, gains) if len(gains) else np.nan,
         "pss": pss_result, "input_drive": input_drive, "pacmag": float(pacmag),
         "pac_residual": np.zeros(len(freqs)), "pac_condition": np.ones(len(freqs)),
         "pac_period_runs": 0, "pac_cache_enabled": bool(cache),
@@ -1747,7 +1734,7 @@ def pac_solve(sizes, bias, freqs, *, pss_result, input_drive, nf=None,
         "Hmag": gains,
         "Av_dc_dB": 20 * np.log10(max(float(gains[0]), 1e-300))
         if len(gains) else np.nan,
-        "bw_Hz": _bw_from_gain(freqs, gains) if len(gains) else np.nan,
+        "bw_Hz": bw_from_gain(freqs, gains) if len(gains) else np.nan,
         "pss": pss_result,
         "input_drive": input_drive,
         "pacmag": float(pacmag),

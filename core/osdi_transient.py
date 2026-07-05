@@ -131,10 +131,10 @@ def transient_osdi(sizes, bias, tgrid, *, topo, nf=None, V0=None,
     current/voltage sources, controlled sources (VCCS/VCVS/CCCS/CCVS), and
     input-driven nodes/gates/current sources.
     """
-    from .ac_solver import ac_solve, build_devices
-    from .compiled_topology import CompiledTopology
+    from .ac_solver import ac_solve
+    from .device_factory import build_devices
+    from .compiled_topology import CompiledTopology, index_array, term_arrays
     from .osdi_device import OsdiDevice, load_model
-    from .transient_solver import _index_array, _term_arrays
 
     method = str(integration_method).lower()
     if method not in ("be", "gear2"):
@@ -301,22 +301,22 @@ def transient_osdi(sizes, bias, tgrid, *, topo, nf=None, V0=None,
     # ── passive element arrays (mirrors _marshal_transient's subset) ─────
     res_meta = [(item.a, item.b, item.ai, item.bi, item.g)
                 for item in plan.resistors]
-    res_a_kind, res_a_ref, res_a_val = _term_arrays([m[0] for m in res_meta])
-    res_b_kind, res_b_ref, res_b_val = _term_arrays([m[1] for m in res_meta])
-    res_ai = _index_array(m[2] for m in res_meta)
-    res_bi = _index_array(m[3] for m in res_meta)
+    res_a_kind, res_a_ref, res_a_val = term_arrays([m[0] for m in res_meta])
+    res_b_kind, res_b_ref, res_b_val = term_arrays([m[1] for m in res_meta])
+    res_ai = index_array(m[2] for m in res_meta)
+    res_bi = index_array(m[3] for m in res_meta)
     res_g = np.array([m[4] for m in res_meta], dtype=float)
 
     cap_meta = [(item.a, item.b, item.ai, item.bi, item.value)
                 for item in plan.capacitors]
-    cap_a_kind, cap_a_ref, cap_a_val = _term_arrays([m[0] for m in cap_meta])
-    cap_b_kind, cap_b_ref, cap_b_val = _term_arrays([m[1] for m in cap_meta])
-    cap_ai = _index_array(m[2] for m in cap_meta)
-    cap_bi = _index_array(m[3] for m in cap_meta)
+    cap_a_kind, cap_a_ref, cap_a_val = term_arrays([m[0] for m in cap_meta])
+    cap_b_kind, cap_b_ref, cap_b_val = term_arrays([m[1] for m in cap_meta])
+    cap_ai = index_array(m[2] for m in cap_meta)
+    cap_bi = index_array(m[3] for m in cap_meta)
     cap_value = np.array([m[4] for m in cap_meta], dtype=float)
 
-    isrc_pi = _index_array(item.pi for item in plan.isources)
-    isrc_qi = _index_array(item.qi for item in plan.isources)
+    isrc_pi = index_array(item.pi for item in plan.isources)
+    isrc_qi = index_array(item.qi for item in plan.isources)
     isrc_value = np.array([item.value for item in plan.isources], dtype=float)
 
     dyn_meta = []
@@ -330,43 +330,43 @@ def transient_osdi(sizes, bias, tgrid, *, topo, nf=None, V0=None,
         dyn_meta.append((plan.solved_index(plan.compile_term(p_node)),
                          plan.solved_index(plan.compile_term(q_node)),
                          plan.input_index[key]))
-    dyn_pi = _index_array(m[0] for m in dyn_meta)
-    dyn_qi = _index_array(m[1] for m in dyn_meta)
+    dyn_pi = index_array(m[0] for m in dyn_meta)
+    dyn_qi = index_array(m[1] for m in dyn_meta)
     dyn_idx = np.array([m[2] for m in dyn_meta], dtype=np.int64)
 
-    vs_pi = _index_array(item.pi for item in plan.vsources)
-    vs_qi = _index_array(item.qi for item in plan.vsources)
-    vs_bi = _index_array(item.bi for item in plan.vsources)
+    vs_pi = index_array(item.pi for item in plan.vsources)
+    vs_qi = index_array(item.qi for item in plan.vsources)
+    vs_bi = index_array(item.bi for item in plan.vsources)
     vs_e_const = np.array([item.e_const for item in plan.vsources], dtype=float)
-    vs_e_idx = _index_array(item.e_input_idx for item in plan.vsources)
+    vs_e_idx = index_array(item.e_input_idx for item in plan.vsources)
 
     # controlled sources (same stamping conventions as CompiledTopology.dc_residuals)
-    vccs_pi = _index_array(item.pi for item in plan.vccs)
-    vccs_qi = _index_array(item.qi for item in plan.vccs)
-    vccs_cp_kind, vccs_cp_ref, vccs_cp_val = _term_arrays([i.cp for i in plan.vccs])
-    vccs_cn_kind, vccs_cn_ref, vccs_cn_val = _term_arrays([i.cn for i in plan.vccs])
+    vccs_pi = index_array(item.pi for item in plan.vccs)
+    vccs_qi = index_array(item.qi for item in plan.vccs)
+    vccs_cp_kind, vccs_cp_ref, vccs_cp_val = term_arrays([i.cp for i in plan.vccs])
+    vccs_cn_kind, vccs_cn_ref, vccs_cn_val = term_arrays([i.cn for i in plan.vccs])
     vccs_gm = np.array([item.gm for item in plan.vccs], dtype=float)
 
-    vcvs_pi = _index_array(item.pi for item in plan.vcvs)
-    vcvs_qi = _index_array(item.qi for item in plan.vcvs)
-    vcvs_bi = _index_array(item.bi for item in plan.vcvs)
-    vcvs_p_kind, vcvs_p_ref, vcvs_p_val = _term_arrays([i.p for i in plan.vcvs])
-    vcvs_q_kind, vcvs_q_ref, vcvs_q_val = _term_arrays([i.q for i in plan.vcvs])
-    vcvs_cp_kind, vcvs_cp_ref, vcvs_cp_val = _term_arrays([i.cp for i in plan.vcvs])
-    vcvs_cn_kind, vcvs_cn_ref, vcvs_cn_val = _term_arrays([i.cn for i in plan.vcvs])
+    vcvs_pi = index_array(item.pi for item in plan.vcvs)
+    vcvs_qi = index_array(item.qi for item in plan.vcvs)
+    vcvs_bi = index_array(item.bi for item in plan.vcvs)
+    vcvs_p_kind, vcvs_p_ref, vcvs_p_val = term_arrays([i.p for i in plan.vcvs])
+    vcvs_q_kind, vcvs_q_ref, vcvs_q_val = term_arrays([i.q for i in plan.vcvs])
+    vcvs_cp_kind, vcvs_cp_ref, vcvs_cp_val = term_arrays([i.cp for i in plan.vcvs])
+    vcvs_cn_kind, vcvs_cn_ref, vcvs_cn_val = term_arrays([i.cn for i in plan.vcvs])
     vcvs_mu = np.array([item.mu for item in plan.vcvs], dtype=float)
 
-    cccs_pi = _index_array(item.pi for item in plan.cccs)
-    cccs_qi = _index_array(item.qi for item in plan.cccs)
-    cccs_ctrl_bi = _index_array(item.ctrl_bi for item in plan.cccs)
+    cccs_pi = index_array(item.pi for item in plan.cccs)
+    cccs_qi = index_array(item.qi for item in plan.cccs)
+    cccs_ctrl_bi = index_array(item.ctrl_bi for item in plan.cccs)
     cccs_beta = np.array([item.beta for item in plan.cccs], dtype=float)
 
-    ccvs_pi = _index_array(item.pi for item in plan.ccvs)
-    ccvs_qi = _index_array(item.qi for item in plan.ccvs)
-    ccvs_bi = _index_array(item.bi for item in plan.ccvs)
-    ccvs_p_kind, ccvs_p_ref, ccvs_p_val = _term_arrays([i.p for i in plan.ccvs])
-    ccvs_q_kind, ccvs_q_ref, ccvs_q_val = _term_arrays([i.q for i in plan.ccvs])
-    ccvs_ctrl_bi = _index_array(item.ctrl_bi for item in plan.ccvs)
+    ccvs_pi = index_array(item.pi for item in plan.ccvs)
+    ccvs_qi = index_array(item.qi for item in plan.ccvs)
+    ccvs_bi = index_array(item.bi for item in plan.ccvs)
+    ccvs_p_kind, ccvs_p_ref, ccvs_p_val = term_arrays([i.p for i in plan.ccvs])
+    ccvs_q_kind, ccvs_q_ref, ccvs_q_val = term_arrays([i.q for i in plan.ccvs])
+    ccvs_ctrl_bi = index_array(item.ctrl_bi for item in plan.ccvs)
     ccvs_gamma = np.array([item.gamma for item in plan.ccvs], dtype=float)
 
     fn_args = (

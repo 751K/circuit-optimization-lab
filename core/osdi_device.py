@@ -105,6 +105,10 @@ class OsdiDevice(TransistorModel):
     BASE_CARD: Dict[str, float] = {}
     TYPE: int = 1                # +1 NMOS, -1 PMOS (BSIM4 `type`)
 
+    # capability flags read by generic solvers (see TransistorModel):
+    HAS_TERMINAL_LINEARIZATION = True   # provides get_terminal_linearization
+    TRANSIENT_BACKEND = "osdi"          # routes transient() to transient_osdi
+
     def __init__(self, W: float = 1.0, L: float = 0.15, NF: int = 1, *,
                  vb: float = 0.0, temperature: float = 300.15, **corner):
         card = dict(self.BASE_CARD)

@@ -17,25 +17,15 @@ This module drives the local Python solvers; Cadence/Spectre comparison should
 live in dedicated verification scripts instead of the core solver package.
 """
 import itertools
-import os
-
-# Corner sweeps and mismatch MC are long-running local-solver workloads, so default
-# to optional Numba acceleration unless explicitly disabled.
-os.environ.setdefault("CIRCUIT_USE_NUMBA", "1")
 
 import numpy as np
 
 from .ac_solver import ac_solve
+from .device_factory import CORNERS
 from .noise_solver import band_rms, noise_analysis
 from .topology import AFE_TOPO
 from . import diagnostics
 
-# Global process corners (pvt0 = -3·0.0753, pbeta0 = -15·0.036 for slow).
-CORNERS = {
-    "typical": {"pvt0": 0.0, "pbeta0": 0.0},
-    "slow": {"pvt0": -0.2259, "pbeta0": -0.54},
-    "fast": {"pvt0": +0.2259, "pbeta0": +0.54},
-}
 # Per-device mismatch sigmas: Vth (area-scaled inside the model) and beta (flat).
 SIGMA_MVT0 = 1.27e-5
 SIGMA_MBETA0 = 0.019

@@ -5,7 +5,7 @@ Terminal encoding: each transistor terminal is either
     ("n", i)  -> solved node index i
     ("v", x)  -> known AC voltage x (AC grounds use x=0.0; driven inputs use x=Vin)
 
-These three stamps (_stamp_adm, _stamp_vccs, _stamp_mos) are the small-signal
+These three stamps (stamp_adm, stamp_vccs, _stamp_mos) are the small-signal
 engine used by ac_solver.ac_solve and noise_solver.noise_analysis. The full
 DC+AC solve (with corner support and terminal-gm extraction) lives in
 ac_solver.py; this module is just the reusable stamp kernel.
@@ -18,7 +18,7 @@ GND = ("v", 0.0)        # AC ground
 VDD = ("v", 0.0)        # ideal supply -> AC ground
 
 
-def _stamp_adm(Y, RHS, P, Q, y):
+def stamp_adm(Y, RHS, P, Q, y):
     """Two-terminal admittance y between terminals P and Q."""
     if P[0] == "n":
         Y[P[1], P[1]] += y
@@ -34,7 +34,7 @@ def _stamp_adm(Y, RHS, P, Q, y):
             RHS[Q[1]] += y * P[1]
 
 
-def _stamp_dense_lti(G, C, RHS_G, RHS_C, terms, G4, C4):
+def stamp_dense_lti(G, C, RHS_G, RHS_C, terms, G4, C4):
     """Dense multi-terminal small-signal stamp (silicon/OSDI devices).
 
     ``terms`` is a tuple of terminal encodings matching the rows/cols of the
@@ -57,7 +57,7 @@ def _stamp_dense_lti(G, C, RHS_G, RHS_C, terms, G4, C4):
                 RHS_C[r] -= C4[i, j] * tj[1]
 
 
-def _stamp_vccs(Y, RHS, d, g, s, gm):
+def stamp_vccs(Y, RHS, d, g, s, gm):
     """Transconductance VCCS: drain current i_d = gm*(Vg-Vs) flows from drain
     to source through the device. Canonical MNA stamp:
 
@@ -78,7 +78,7 @@ def _stamp_vccs(Y, RHS, d, g, s, gm):
     addrow(s, g, -gm); addrow(s, s, +gm)
 
 
-def _branch_incidence(vsources, idx, n):
+def branch_incidence(vsources, idx, n):
     """n×m incidence matrix B of ideal voltage sources for the bordered MNA system
     ``[[Y, B], [B^T, 0]]``: column k has +1 at the source's p node and -1 at its q node
     (solved nodes only; rail terminals drop out). Used by the periodic solvers (PSS
@@ -96,7 +96,7 @@ def _branch_incidence(vsources, idx, n):
     return B
 
 
-def _stamp_vsource(Y, RHS, P, Q, bi, E):
+def stamp_vsource(Y, RHS, P, Q, bi, E):
     """Ideal voltage source (true MNA). Branch current I_b (P->Q through the source
     interior) is the unknown at index `bi`; the constraint row enforces V_P - V_Q = E.
     P/Q are ("n", idx) solved nodes or ("v", val) known AC voltages. A DC bias source
@@ -119,7 +119,7 @@ def _stamp_vsource(Y, RHS, P, Q, bi, E):
     RHS[bi] += rhs_b
 
 
-def _stamp_vcvs(Y, RHS, P, Q, CP, CN, bi, mu):
+def stamp_vcvs(Y, RHS, P, Q, CP, CN, bi, mu):
     """VCVS (voltage-controlled voltage source): V_P - V_Q = mu*(V_CP - V_CN).
     Same branch-current KCL as vsource; constraint row has extra entries for
     control nodes. ``bi`` is the row index of the branch-current unknown.
@@ -149,7 +149,7 @@ def _stamp_vcvs(Y, RHS, P, Q, CP, CN, bi, mu):
     RHS[bi] += rhs_b
 
 
-def _stamp_cccs(Y, RHS, P, Q, ctrl_bi, beta):
+def stamp_cccs(Y, RHS, P, Q, ctrl_bi, beta):
     """CCCS (current-controlled current source): I_out = beta * I_ctrl.
     The control current ``I_ctrl`` is the branch current at index ``ctrl_bi``.
     No new branch current — just stamps the output current into the KCL of P and Q.
@@ -162,7 +162,7 @@ def _stamp_cccs(Y, RHS, P, Q, ctrl_bi, beta):
         Y[Q[1], ctrl_bi] -= beta
 
 
-def _stamp_ccvs(Y, RHS, P, Q, ctrl_bi, bi, gamma):
+def stamp_ccvs(Y, RHS, P, Q, ctrl_bi, bi, gamma):
     """CCVS (current-controlled voltage source): V_P - V_Q = gamma * I_ctrl.
     Same branch-current KCL as vsource; constraint row enforces
     V_P - V_Q - gamma*I_ctrl = 0.
@@ -187,22 +187,22 @@ def _stamp_ccvs(Y, RHS, P, Q, ctrl_bi, bi, gamma):
 
 def _stamp_mos(Y, RHS, d, g, s, gm, gds, Cgs, Cgd, jw):
     # gds between drain and source
-    _stamp_adm(Y, RHS, d, s, gds)
+    stamp_adm(Y, RHS, d, s, gds)
     # Cgs between gate and source, Cgd between gate and drain
-    _stamp_adm(Y, RHS, g, s, jw * Cgs)
-    _stamp_adm(Y, RHS, g, d, jw * Cgd)
+    stamp_adm(Y, RHS, g, s, jw * Cgs)
+    stamp_adm(Y, RHS, g, d, jw * Cgd)
     # transconductance
-    _stamp_vccs(Y, RHS, d, g, s, gm)
+    stamp_vccs(Y, RHS, d, g, s, gm)
 
 
-def _stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s, gm, gds, Cgs, Cgd):
+def stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s, gm, gds, Cgs, Cgd):
     """Split a MOS small-signal stamp into frequency-independent G and C.
 
     The per-frequency matrix is exactly ``Y(w) = G + jw*C`` and the RHS is
     ``RHS_G + jw*RHS_C``.  This lets callers batch many frequency points without
     re-running the Python stamping loops for every point.
     """
-    _stamp_adm(G, RHS_G, d, s, gds)
-    _stamp_adm(C, RHS_C, g, s, Cgs)
-    _stamp_adm(C, RHS_C, g, d, Cgd)
-    _stamp_vccs(G, RHS_G, d, g, s, gm)
+    stamp_adm(G, RHS_G, d, s, gds)
+    stamp_adm(C, RHS_C, g, s, Cgs)
+    stamp_adm(C, RHS_C, g, d, Cgd)
+    stamp_vccs(G, RHS_G, d, g, s, gm)

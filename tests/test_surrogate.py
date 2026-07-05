@@ -23,7 +23,7 @@ def _synthetic(n=400, seed=0):
 
 def test_auto_log_labels_picks_wide_range():
     Y = np.array([[1.0, 10.0], [2.0, 1000.0], [1.5, 50.0]])   # col b spans 100× (>1 decade)
-    assert sg._auto_log_labels(Y, ["a", "b"]) == ("b",)
+    assert sg.auto_log_labels(Y, ["a", "b"]) == ("b",)
 
 
 def test_train_predict_and_score():

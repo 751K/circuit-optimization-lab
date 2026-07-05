@@ -37,7 +37,10 @@ from .chopper import (chopper_analysis, pmos_chopper_analysis,
                       pmos_chopper_transient)
 from .circuit_loader import load_circuit_json
 from .corners import corner_table, mismatch_mc
-from .explore import explore, load_explore_json
+from .dataset import add_cli_args as dataset_add_cli_args
+from .dataset import run_cli as dataset_run_cli
+from .explore import add_cli_args as explore_add_cli_args
+from .explore import run_cli as explore_run_cli
 from .noise_solver import band_rms
 
 _ANALYSIS_NAMES = ["ac", "noise", "transient", "pss", "pac", "pnoise"]
@@ -148,6 +151,9 @@ def _add_run_parser(subparsers):
              f"Choices: {','.join(_ANALYSIS_NAMES)}",
         default=None,
     )
+    p.add_argument("--corner", default=None,
+                   help="Process corner override: OTFT typical|slow|fast, or silicon "
+                        "tt|ss|ff|sf|fs (SKY130) / nom|ss|ff (FreePDK45)")
     _add_noise_band_arg(p)
     _add_output_arg(p)
     p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
@@ -170,7 +176,7 @@ def _cmd_run(args):
         what = ",".join(selected) if selected else "all configured"
         print(f"Running {what} analyses for {args.circuit}")
 
-    results = run_analysis_suite(args.circuit, selected=selected)
+    results = run_analysis_suite(args.circuit, selected=selected, corner=args.corner)
 
     lo, hi = args.noise_band
     for key in ("noise", "pnoise"):
@@ -209,42 +215,18 @@ def _cmd_run(args):
 
 def _add_explore_parser(subparsers):
     p = subparsers.add_parser("explore", help="Run design-space exploration")
-    p.add_argument("circuit", help="Path to circuit JSON file (must contain 'explore' block)")
-    p.add_argument("-n", "--n", type=int, default=200, help="Number of candidates (default: 200)")
-    p.add_argument("--seed", type=int, default=0, help="RNG seed")
-    p.add_argument("--method", choices=("lhs", "random"), default="lhs",
-                   help="Sampling method (default: lhs)")
-    _add_output_arg(p)
+    # Feature args (positional + sampling/corner/output/quiet) come from the single
+    # source in core.explore so this subcommand can't drift from `python -m core.explore`.
+    explore_add_cli_args(p)
+    # Subcommand-level mechanism — not a feature arg, so it stays here.
     p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
-    p.add_argument("--quiet", action="store_true", help="Suppress per-candidate progress")
     return p
 
 
 def _cmd_explore(args):
     if args.no_numba:
         os.environ["CIRCUIT_USE_NUMBA"] = "0"
-
-    topo, sizes, bias, nf, cfg = load_explore_json(args.circuit)
-
-    def progress(done, total):
-        if not args.quiet:
-            print(f"\r  evaluating {done}/{total}", end="", flush=True)
-
-    if not args.quiet:
-        print(f"Exploring {args.circuit}  (n={args.n}, method={args.method})")
-    results = explore(topo, sizes, bias, nf, cfg, n=args.n, seed=args.seed,
-                      method=args.method, progress=progress)
-    if not args.quiet:
-        print()
-    from .explore import _format_summary
-    print(_format_summary(results))
-    if args.output:
-        from .explore import write_csv, write_jsonl
-        os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
-        write_csv(results, args.output + ".csv")
-        write_jsonl(results, args.output + ".jsonl")
-        print(f"wrote {args.output}.csv and {args.output}.jsonl")
-    return results
+    return explore_run_cli(args)
 
 
 # ── subcommand: dataset ──────────────────────────────────────────────────────
@@ -252,64 +234,18 @@ def _cmd_explore(args):
 def _add_dataset_parser(subparsers):
     p = subparsers.add_parser(
         "dataset", help="Build a labeled surrogate dataset from an 'explore' config")
-    p.add_argument("circuit", help="Path to circuit JSON file (must contain 'explore' block)")
-    p.add_argument("-n", "--n", type=int, default=200, help="Number of samples (default: 200)")
-    p.add_argument("--seed", type=int, default=0, help="RNG seed")
-    p.add_argument("--method", choices=("lhs", "random"), default="lhs",
-                   help="Sampling method (default: lhs)")
-    p.add_argument("--corner", default="typical",
-                   help="Process corner: typical | slow | fast (default: typical)")
-    p.add_argument("--labels", default="ac_noise",
-                   help="Comma list of label groups: ac_noise, transient, pss, pac, "
-                        "pnoise (periodic groups need a 'periodic' block; pac/pnoise "
-                        "also need their 'analyses' blocks; default: ac_noise)")
-    p.add_argument("--freqs-start", type=float, default=-2.0,
-                   help="AC grid start decade (log10 Hz) when --freqs-stop is given")
-    p.add_argument("--freqs-stop", type=float, default=None,
-                   help="Override AC grid top decade (log10 Hz), e.g. 4 = 10 kHz "
-                        "(avoids bw_Hz clipping)")
-    p.add_argument("--freqs-num", type=int, default=101,
-                   help="AC grid points when --freqs-stop is given")
-    p.add_argument("--out", default=None,
-                   help="Output path prefix (writes <prefix>.jsonl/.manifest.json/.npz)")
-    p.add_argument("--no-npz", action="store_true", help="Skip the dense .npz output")
-    p.add_argument("--parquet", action="store_true",
-                   help="Also write a .parquet table (needs the optional pyarrow dep)")
+    # Feature args come from the single source in core.dataset so this subcommand
+    # can't drift from `python -m core.dataset`.
+    dataset_add_cli_args(p)
+    # Subcommand-level mechanism — not a feature arg, so it stays here.
     p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
-    p.add_argument("--quiet", action="store_true", help="Suppress per-sample progress")
     return p
 
 
 def _cmd_dataset(args):
     if args.no_numba:
         os.environ["CIRCUIT_USE_NUMBA"] = "0"
-    from .dataset import _format_summary, run_from_config
-
-    def progress(done, total):
-        if not args.quiet:
-            print(f"\r  evaluating {done}/{total}", end="", flush=True)
-
-    if not args.quiet:
-        print(f"Building dataset from {args.circuit}  "
-              f"(n={args.n}, method={args.method}, corner={args.corner}, labels={args.labels})")
-    groups = tuple(g.strip() for g in args.labels.split(",") if g.strip())
-    freqs = (np.logspace(args.freqs_start, args.freqs_stop, args.freqs_num)
-             if args.freqs_stop is not None else None)
-    try:
-        dataset = run_from_config(args.circuit, n=args.n, seed=args.seed, method=args.method,
-                                  corner=args.corner, label_groups=groups, freqs=freqs,
-                                  out=args.out, npz=not args.no_npz, parquet=args.parquet,
-                                  progress=progress)
-    except ImportError as exc:                          # e.g. --parquet without pyarrow
-        raise SystemExit(str(exc))
-    except ValueError as exc:                           # e.g. transient labels w/o periodic
-        raise SystemExit(str(exc))
-    if not args.quiet:
-        print()
-    print(_format_summary(dataset))
-    if args.out:
-        print("wrote " + ", ".join(dataset["_paths"].values()))
-    return dataset
+    return dataset_run_cli(args)
 
 
 # ── subcommand: corners ──────────────────────────────────────────────────────

@@ -16,8 +16,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .ac_mna import _stamp_adm, _stamp_mos_lti, _branch_incidence
-from .ac_solver import ac_solve, _dev_nf, build_devices, get_ss_params
+from .ac_mna import stamp_adm, stamp_mos_lti, branch_incidence
+from .ac_solver import ac_solve
+from .device_factory import dev_nf, build_devices, get_ss_params
 from .adaptive_config import resolve_adaptive_config
 from .topology import AFE_TOPO
 from .transient_solver import transient
@@ -62,7 +63,7 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
     idx = topo.idx
     rails = topo.rail_values(bias)
     all_branch_sources = list(topo.vsources) + list(topo.vcvs) + list(topo.ccvs)
-    Binc = _branch_incidence(all_branch_sources, idx, n) if nbr else None
+    Binc = branch_incidence(all_branch_sources, idx, n) if nbr else None
 
     def term(node):
         return ("n", idx[node]) if node in idx else ("v", 0.0)
@@ -77,9 +78,9 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
     G0 = np.zeros((n, n)); C0 = np.zeros((n, n))
     rg = np.zeros(n); rc = np.zeros(n)
     for a, b, cap in topo.cap_list():
-        _stamp_adm(C0, rc, term(a), term(b), cap)
+        stamp_adm(C0, rc, term(a), term(b), cap)
     for _, a, b, R in topo.resistors:
-        _stamp_adm(G0, rg, term(a), term(b), 1.0 / R)
+        stamp_adm(G0, rg, term(a), term(b), 1.0 / R)
     for k in range(n):
         G0[k, k] += gmin
 
@@ -88,8 +89,8 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
         for name, d, g, s in topo.devices:
             Vs = term_value(s, m); Vd = term_value(d, m); Vg = term_value(g, m)
             p = get_ss_params(sizes[name][0], sizes[name][1], Vs, Vd, Vg,
-                              nf=_dev_nf(nf, name), dev_inst=dev_inst[name])
-            _stamp_mos_lti(G, C, rg, rc, term(d), term(g), term(s),
+                              nf=dev_nf(nf, name), dev_inst=dev_inst[name])
+            stamp_mos_lti(G, C, rg, rc, term(d), term(g), term(s),
                            p["gm"], p["gds"], p["Cgs"], p["Cgd"])
         return G, C
 
@@ -853,8 +854,8 @@ def pss_solve(sizes, bias, period, *, topo=AFE_TOPO, nf=None, tgrid=None,
             raise ValueError("edge_mask length must match tgrid")
 
     if model_types:
-        from .transient_solver import _osdi_model_names
-        if _osdi_model_names(model_types) and analytic_jacobian:
+        from .transient_solver import osdi_model_names
+        if osdi_model_names(model_types) and analytic_jacobian:
             # the analytic monodromy rebuilds G/C from the OTFT compact model —
             # silicon (OSDI) circuits shoot with the FD Jacobian instead
             analytic_jacobian = False

@@ -47,7 +47,8 @@ from .adaptive_config import (
     resolve_adaptive_config,
 )
 from .topology import AFE_TOPO
-from .ac_solver import ac_solve, build_devices
+from .ac_solver import ac_solve
+from .device_factory import build_devices
 from .transient_profile import (
     PROFILE_EDGE_NEWTON_ITERS,
     PROFILE_EDGE_SUBSTEPS,
@@ -75,7 +76,7 @@ from .transient_profile import (
     PROFILE_SUBSTEPS,
     PROFILE_TERMINAL_FD_JAC_FALLBACKS,
 )
-from .compiled_topology import CompiledTopology
+from .compiled_topology import CompiledTopology, index_array, term_arrays
 from . import diagnostics
 
 # Single source of the transient drivers: these `_impl` kernels are the jitted
@@ -526,26 +527,6 @@ def _cap_mode_to_id(cap_mode):
     return _CAP_MODE_IDS[key]
 
 
-def _term_arrays(terms):
-    kind = np.empty(len(terms), dtype=np.int64)
-    ref = np.empty(len(terms), dtype=np.int64)
-    value = np.empty(len(terms), dtype=float)
-    for pos, term in enumerate(terms):
-        kind[pos] = int(term[0])
-        if term[0] in (0, 1):
-            ref[pos] = int(term[1])
-            value[pos] = 0.0
-        else:
-            ref[pos] = 0
-            value[pos] = float(term[1])
-    return kind, ref, value
-
-
-def _index_array(vals):
-    return np.array([-1 if val is None else int(val) for val in vals],
-                    dtype=np.int64)
-
-
 def _solve_fixed_gear2_numba(ctx, V0, tgrid, input_values, edge_mask_arr,
                              profile, gear2_retry_requested):
     out = _PathOutcome()
@@ -922,12 +903,12 @@ def _marshal_transient(
             plan.input_index[key],
         ))
 
-    dev_d_kind, dev_d_ref, dev_d_val = _term_arrays([item[2] for item in dev_meta])
-    dev_g_kind, dev_g_ref, dev_g_val = _term_arrays([item[3] for item in dev_meta])
-    dev_s_kind, dev_s_ref, dev_s_val = _term_arrays([item[4] for item in dev_meta])
-    dev_di = _index_array(item[5] for item in dev_meta)
-    dev_gi = _index_array(item[6] for item in dev_meta)
-    dev_si = _index_array(item[7] for item in dev_meta)
+    dev_d_kind, dev_d_ref, dev_d_val = term_arrays([item[2] for item in dev_meta])
+    dev_g_kind, dev_g_ref, dev_g_val = term_arrays([item[3] for item in dev_meta])
+    dev_s_kind, dev_s_ref, dev_s_val = term_arrays([item[4] for item in dev_meta])
+    dev_di = index_array(item[5] for item in dev_meta)
+    dev_gi = index_array(item[6] for item in dev_meta)
+    dev_si = index_array(item[7] for item in dev_meta)
     dev_use_abs = np.array([not item[1] for item in dev_meta], dtype=np.bool_)
     dev_objs = [item[0] for item in dev_meta]
     _np_params = [d.get_numba_params() for d in dev_objs]
@@ -951,68 +932,68 @@ def _marshal_transient(
     op_cache_vs1 = np.zeros(len(dev_meta), dtype=float)
     op_cache_vd1 = np.zeros(len(dev_meta), dtype=float)
 
-    res_a_kind, res_a_ref, res_a_val = _term_arrays([item[0] for item in res_meta])
-    res_b_kind, res_b_ref, res_b_val = _term_arrays([item[1] for item in res_meta])
-    res_ai = _index_array(item[2] for item in res_meta)
-    res_bi = _index_array(item[3] for item in res_meta)
+    res_a_kind, res_a_ref, res_a_val = term_arrays([item[0] for item in res_meta])
+    res_b_kind, res_b_ref, res_b_val = term_arrays([item[1] for item in res_meta])
+    res_ai = index_array(item[2] for item in res_meta)
+    res_bi = index_array(item[3] for item in res_meta)
     res_g = np.array([item[4] for item in res_meta], dtype=float)
 
-    cap_a_kind, cap_a_ref, cap_a_val = _term_arrays([item[0] for item in load_meta])
-    cap_b_kind, cap_b_ref, cap_b_val = _term_arrays([item[1] for item in load_meta])
-    cap_ai = _index_array(item[2] for item in load_meta)
-    cap_bi = _index_array(item[3] for item in load_meta)
+    cap_a_kind, cap_a_ref, cap_a_val = term_arrays([item[0] for item in load_meta])
+    cap_b_kind, cap_b_ref, cap_b_val = term_arrays([item[1] for item in load_meta])
+    cap_ai = index_array(item[2] for item in load_meta)
+    cap_bi = index_array(item[3] for item in load_meta)
     cap_value = np.array([item[4] for item in load_meta], dtype=float)
 
-    isrc_pi = _index_array(item[0] for item in isrc_meta)
-    isrc_qi = _index_array(item[1] for item in isrc_meta)
+    isrc_pi = index_array(item[0] for item in isrc_meta)
+    isrc_qi = index_array(item[1] for item in isrc_meta)
     isrc_value = np.array([item[2] for item in isrc_meta], dtype=float)
 
-    vccs_pi = _index_array(item[0] for item in vccs_meta)
-    vccs_qi = _index_array(item[1] for item in vccs_meta)
+    vccs_pi = index_array(item[0] for item in vccs_meta)
+    vccs_qi = index_array(item[1] for item in vccs_meta)
     # For control nodes, extract solved index from the terminal tuple; rails -> -1.
-    vccs_cpi = _index_array(
+    vccs_cpi = index_array(
         item[2][1] if item[2][0] == 0 else None for item in vccs_meta)
-    vccs_cni = _index_array(
+    vccs_cni = index_array(
         item[3][1] if item[3][0] == 0 else None for item in vccs_meta)
     vccs_gm = np.array([item[4] for item in vccs_meta], dtype=float)
 
-    dyn_pi = _index_array(item[0] for item in dyn_isrc_meta)
-    dyn_qi = _index_array(item[1] for item in dyn_isrc_meta)
+    dyn_pi = index_array(item[0] for item in dyn_isrc_meta)
+    dyn_qi = index_array(item[1] for item in dyn_isrc_meta)
     dyn_input_idx = np.array([item[2] for item in dyn_isrc_meta], dtype=np.int64)
 
     # Branch-element Numba arrays (augmented n_aug > n path). Mirror the Python
     # _k_step_residual / _k_build_jac branch stamping; built unconditionally and
     # empty for n_aug == n circuits.
-    vs_a_kind, vs_a_ref, vs_a_val = _term_arrays([item[0] for item in vs_meta])
-    vs_b_kind, vs_b_ref, vs_b_val = _term_arrays([item[1] for item in vs_meta])
-    vs_pi = _index_array(item[2] for item in vs_meta)
-    vs_qi = _index_array(item[3] for item in vs_meta)
-    vs_bi = _index_array(item[4] for item in vs_meta)
+    vs_a_kind, vs_a_ref, vs_a_val = term_arrays([item[0] for item in vs_meta])
+    vs_b_kind, vs_b_ref, vs_b_val = term_arrays([item[1] for item in vs_meta])
+    vs_pi = index_array(item[2] for item in vs_meta)
+    vs_qi = index_array(item[3] for item in vs_meta)
+    vs_bi = index_array(item[4] for item in vs_meta)
     vs_e_const = np.array([item[5] for item in vs_meta], dtype=float)
-    vs_e_idx = _index_array(item[6] for item in vs_meta)
+    vs_e_idx = index_array(item[6] for item in vs_meta)
 
-    vcvs_a_kind, vcvs_a_ref, vcvs_a_val = _term_arrays([item[0] for item in vcvs_meta])
-    vcvs_b_kind, vcvs_b_ref, vcvs_b_val = _term_arrays([item[1] for item in vcvs_meta])
-    vcvs_cp_kind, vcvs_cp_ref, vcvs_cp_val = _term_arrays([item[2] for item in vcvs_meta])
-    vcvs_cn_kind, vcvs_cn_ref, vcvs_cn_val = _term_arrays([item[3] for item in vcvs_meta])
-    vcvs_pi = _index_array(item[4] for item in vcvs_meta)
-    vcvs_qi = _index_array(item[5] for item in vcvs_meta)
-    vcvs_cpi = _index_array(item[6] for item in vcvs_meta)
-    vcvs_cni = _index_array(item[7] for item in vcvs_meta)
-    vcvs_bi = _index_array(item[8] for item in vcvs_meta)
+    vcvs_a_kind, vcvs_a_ref, vcvs_a_val = term_arrays([item[0] for item in vcvs_meta])
+    vcvs_b_kind, vcvs_b_ref, vcvs_b_val = term_arrays([item[1] for item in vcvs_meta])
+    vcvs_cp_kind, vcvs_cp_ref, vcvs_cp_val = term_arrays([item[2] for item in vcvs_meta])
+    vcvs_cn_kind, vcvs_cn_ref, vcvs_cn_val = term_arrays([item[3] for item in vcvs_meta])
+    vcvs_pi = index_array(item[4] for item in vcvs_meta)
+    vcvs_qi = index_array(item[5] for item in vcvs_meta)
+    vcvs_cpi = index_array(item[6] for item in vcvs_meta)
+    vcvs_cni = index_array(item[7] for item in vcvs_meta)
+    vcvs_bi = index_array(item[8] for item in vcvs_meta)
     vcvs_mu = np.array([item[9] for item in vcvs_meta], dtype=float)
 
-    cccs_pi = _index_array(item[0] for item in cccs_meta)
-    cccs_qi = _index_array(item[1] for item in cccs_meta)
-    cccs_ctrl_bi = _index_array(item[2] for item in cccs_meta)
+    cccs_pi = index_array(item[0] for item in cccs_meta)
+    cccs_qi = index_array(item[1] for item in cccs_meta)
+    cccs_ctrl_bi = index_array(item[2] for item in cccs_meta)
     cccs_beta = np.array([item[3] for item in cccs_meta], dtype=float)
 
-    ccvs_a_kind, ccvs_a_ref, ccvs_a_val = _term_arrays([item[0] for item in ccvs_meta])
-    ccvs_b_kind, ccvs_b_ref, ccvs_b_val = _term_arrays([item[1] for item in ccvs_meta])
-    ccvs_pi = _index_array(item[2] for item in ccvs_meta)
-    ccvs_qi = _index_array(item[3] for item in ccvs_meta)
-    ccvs_bi = _index_array(item[4] for item in ccvs_meta)
-    ccvs_ctrl_bi = _index_array(item[5] for item in ccvs_meta)
+    ccvs_a_kind, ccvs_a_ref, ccvs_a_val = term_arrays([item[0] for item in ccvs_meta])
+    ccvs_b_kind, ccvs_b_ref, ccvs_b_val = term_arrays([item[1] for item in ccvs_meta])
+    ccvs_pi = index_array(item[2] for item in ccvs_meta)
+    ccvs_qi = index_array(item[3] for item in ccvs_meta)
+    ccvs_bi = index_array(item[4] for item in ccvs_meta)
+    ccvs_ctrl_bi = index_array(item[5] for item in ccvs_meta)
     ccvs_gamma = np.array([item[6] for item in ccvs_meta], dtype=float)
 
     if rail_margin is None and getattr(topo, "require_dc_in_box", False):
@@ -1139,15 +1120,17 @@ def _marshal_transient(
         gear2_retry_requested=gear2_retry_requested)
 
 
-def _osdi_model_names(model_types):
+def osdi_model_names(model_types):
     """Names in a ``model_types`` map bound to OSDI (compiled-VA) devices."""
     if not model_types:
         return ()
-    from .device_model import _model_registry
-    from .osdi_device import OsdiDevice
-    return tuple(name for name, mt in model_types.items()
-                 if isinstance(_model_registry.get(mt), type)
-                 and issubclass(_model_registry[mt], OsdiDevice))
+    from .device_model import get_model_class
+    names = []
+    for name, mt in model_types.items():
+        cls = get_model_class(mt)
+        if cls is not None and getattr(cls, "TRANSIENT_BACKEND", None) == "osdi":
+            names.append(name)
+    return tuple(names)
 
 
 def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
@@ -1213,7 +1196,7 @@ def transient(sizes, bias, tgrid, vip=None, vin=None, nf=None, V0=None,
     Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
     fields are included when those nodes exist.
     """
-    if _osdi_model_names(model_types):
+    if osdi_model_names(model_types):
         from .osdi_transient import transient_osdi
         _inputs = inputs
         if _inputs is None:

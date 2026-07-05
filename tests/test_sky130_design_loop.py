@@ -16,7 +16,7 @@ import pytest
 from core.ac_solver import ac_solve
 from core.circuit_loader import load_circuit_json, models_from_config
 from core.dataset import run_from_config, to_arrays
-from core.explore import apply_silicon_corner
+from core.device_factory import apply_silicon_corner
 
 _PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _HAVE = os.path.exists(os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")) \

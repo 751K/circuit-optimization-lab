@@ -22,7 +22,7 @@ The current solver stack covers:
   PSS, PAC, and PNoise behavior.
 
 The implementation is intentionally small and self-contained. It currently has
-34 Python files under `core/`, including `__init__.py`, the CLI entry
+39 Python files under `core/`, including `__init__.py`, the CLI entry
 `__main__.py`, calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
 modules, the main solver stack, an ML-surrogate layer (dataset builder, surrogate
 training, screen-and-verify optimizer), and two silicon PDKs — SKY130 (via an
@@ -37,10 +37,15 @@ core/
   compiled_topology.py Runtime-compiled topology/index/stamp metadata.
   circuit_loader.py    JSON circuit description loader.
   device_model.py      TransistorModel ABC + NumbaParams + model factory/registry + PDK/polarity layer.
+  device_factory.py    Device build/resolve layer (build_devices, get_ss_params) + corner routing
+                        (OTFT CORNERS, SKY130/FreePDK45 apply_silicon_corner). Leaf module: depends
+                        only on device_model.
   pmos_tft_model.py    AT4000TG PMOS-OTFT compact-model implementation.
   numba_kernels.py     Optional Numba-accelerated scalar kernels.
   ac_mna.py            MNA stamping primitives.
-  ac_solver.py         DC operating point and AC small-signal solver.
+  ac_solver.py         Pure AC small-signal solver: DC operating point + AC response (ac_solve).
+  dc_solver.py         DC solve fallback (bounded least squares) + AFE-specific symmetric DC
+                        seeding/continuation heuristics.
   noise_solver.py      Noise propagation and input-referred noise analysis.
   transient_solver.py  Time-domain transient solver.
   transient_profile.py Shared transient/chopper analysis counter slots.
@@ -78,32 +83,34 @@ compiled_topology.py <- no internal dependency; consumes Topology-like objects a
 circuit_loader.py    <- topology
 numba_kernels.py     <- no internal dependency; optional numba at runtime
 device_model.py      <- no internal dependency (abc, dataclasses only)
+device_factory.py    <- device_model only (leaf device layer; no solver/workflow imports)
 pmos_tft_model.py    <- optional numba_kernels, device_model
 ac_mna.py            <- no internal dependency
-ac_solver.py         <- topology, compiled_topology, ac_mna, device_model
-noise_solver.py      <- ac_solver, compiled_topology, topology, ac_mna, device_model
-transient_solver.py  <- ac_solver, compiled_topology, topology, device_model, transient_profile
+ac_solver.py         <- device_factory, dc_solver, topology, compiled_topology, diagnostics
+dc_solver.py         <- device_factory, topology, diagnostics
+noise_solver.py      <- device_model, ac_mna, ac_solver, device_factory, topology, compiled_topology, diagnostics
+transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, numba_kernels, diagnostics; lazily imports osdi_transient for OSDI-backed devices
 transient_profile.py <- no internal dependency (counter slot constants)
-pss_solver.py        <- ac_solver, ac_mna, device_model, topology, transient_solver, adaptive_config
-pac_solver.py        <- ac_mna, ac_solver, device_model, transient_solver
-pnoise_solver.py     <- ac_solver, noise_solver, pac_solver, device_model, ac_mna
+pss_solver.py        <- ac_mna, ac_solver, device_factory, adaptive_config, topology, transient_solver, diagnostics
+pac_solver.py        <- ac_mna, ac_solver, device_factory, numba_kernels, topology, transient_solver, diagnostics
+pnoise_solver.py     <- ac_mna, device_factory, noise_solver, numba_kernels, pac_solver, diagnostics
 adaptive_config.py   <- no internal dependency (dataclass only)
 analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader, analysis_options
 analysis_options.py  <- no internal dependency (registry)
 diagnostics.py       <- no internal dependency (thread-safe counters)
 psf.py               <- no internal dependency
-calibration.py       <- ac_solver, noise_solver, chopper, psf, circuit_loader
+calibration.py       <- psf, ac_solver, adaptive_config, noise_solver
 cadence_netlist.py   <- circuit_loader, topology
-chopper.py           <- noise_solver, pss_solver, pac_solver, pnoise_solver, device_model, topology
-explore.py           <- ac_solver, noise_solver, device_model, topology, circuit_loader
-corners.py           <- ac_solver, noise_solver, topology
-dataset.py           <- explore, circuit_loader, corners, device_model, pss_solver, transient_solver, analysis_dispatch, diagnostics
+chopper.py           <- ac_solver, dc_solver, device_factory, adaptive_config, device_model, noise_solver, pac_solver, pnoise_solver, pss_solver, topology, transient_solver
+explore.py           <- ac_solver, device_factory, device_model, noise_solver, circuit_loader, diagnostics
+corners.py           <- ac_solver, device_factory, noise_solver, topology, diagnostics
+dataset.py           <- diagnostics, circuit_loader, corners, device_model, device_factory, explore, transient_solver
 surrogate.py         <- no internal dependency; optional scikit-learn/joblib at runtime
 surrogate_torch.py   <- dataset (CLI only); optional torch at runtime
 optimize.py          <- surrogate, circuit_loader, dataset, explore
 osdi_host.py         <- no internal dependency; ctypes + numpy only
 osdi_device.py       <- device_model, osdi_host (lazy import)
-osdi_transient.py    <- no internal dependency (calls the OsdiDevice interface generically)
+osdi_transient.py    <- diagnostics, numba_kernels, osdi_host, compiled_topology (calls the OsdiDevice interface generically; does not import transient_solver)
 sky130_model.py      <- device_model, osdi_device
 ngspice_char.py      <- no internal dependency; ngspice subprocess + numpy only
 ngspice_device.py    <- device_model, ngspice_char; optional scipy at runtime
@@ -139,7 +146,26 @@ Defines the abstract device‑model interface that decouples solvers from concre
 
 - **`TransistorModel` (ABC)** — seven abstract methods (`get_Idc`, `get_op`, `get_capacitances`, `get_capacitance_charges_from_op`, `get_capacitance_branch_terms_from_op`, `get_noise_psd`, `get_numba_params`); `get_ss_params` provides a finite‑difference default that subclasses can override.
 - **`NumbaParams` (frozen dataclass)** — the 16 scalar parameters extracted once per device and passed to numba‑accelerated transient kernels.
-- **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged.
+- **Backend-capability class attributes** — generic solvers dispatch on *capabilities*, never on a concrete backend type (no `isinstance(dev, OsdiDevice)`). `HAS_TERMINAL_LINEARIZATION` (default `False`) advertises the full quasi-static 4×4 terminal `(G, C)` stamp used by the periodic PAC/PNoise linearizer; `OsdiDevice` overrides it to `True`. `TRANSIENT_BACKEND` (default `None`, meaning the generic OTFT numba transient path) names a specialised integrator to route to instead; `OsdiDevice` sets it to `"osdi"`, which `transient_solver.py` reads to route to `core.osdi_transient.transient_osdi`.
+- **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. `get_model_class(model_type)` is a public read-only registry accessor so solvers can inspect a model's capability flags without importing a concrete backend class. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged.
+
+### `device_factory.py`
+
+The leaf device-build layer: it depends only on `device_model` (never on any solver or workflow
+module), so every solver can import it without risking a cycle.
+
+- **`build_devices(sizes, *, nf=None, corner=None, topo, model_types=None, device_kwargs=None)`** /
+  **`get_ss_params(...)`** — turn the per-device inputs a solver already carries (sizes, NF, corner,
+  `model_types`, `device_kwargs`) into concrete `TransistorModel` instances, migrated here from
+  `ac_solver.py` unchanged. `dev_corner`/`dev_nf`/`is_per_device_corner` are the small per-device
+  corner/NF resolution helpers behind them.
+- **`CORNERS`** — the OTFT continuous-PVT global process shift dict (`typical`/`slow`/`fast` as
+  `pvt0`/`pbeta0`), migrated here from `corners.py`; `corners.py` now imports it from here instead of
+  defining it.
+- **`SKY130_CORNERS`** / **`SILICON_CORNERS`** / **`apply_silicon_corner(model_types, device_kwargs,
+  corner)`** — the silicon discrete-corner routing that stamps a corner name (`tt`/`ss`/`ff`/`sf`/`fs`
+  for SKY130, plus `nom` for FreePDK45) onto extracted silicon device cards, migrated here from
+  `explore.py`; `explore.py` and `dataset.py` now import it from here instead of defining it.
 
 ### `topology.py`
 
@@ -160,6 +186,12 @@ Builds a runtime plan from a declarative `Topology` and a bias/input context. It
 - transient input and `node_inputs` mappings.
 
 This keeps AC, noise, and transient on the same indexing/stamping convention while preserving the ability to swap in a different JSON-defined circuit.
+
+It also hosts the small marshalling helpers `term_arrays()` (splits `(kind, ref_or_value)` terminal
+tokens into parallel `kind`/`ref`/`value` int/float arrays) and `index_array()` (packs optional
+integer indices into an int64 array, `None` → `-1`). Both `transient_solver.py`'s raw-transient marshal
+and `osdi_transient.py`'s OSDI transient marshal build the same stamp-ready arrays from these, so the
+helpers live with the topology tokens they share instead of being duplicated per backend.
 
 ### `circuit_loader.py`
 
@@ -190,9 +222,8 @@ Disable only the cache with:
 CIRCUIT_NUMBA_CACHE=0
 ```
 
-`core.explore` and `core.corners` still set `CIRCUIT_USE_NUMBA=1` by default for
-long-running workloads, but the general solver path now also uses Numba
-automatically when it is available.
+The solver path uses Numba automatically whenever it is available; no module
+sets `CIRCUIT_USE_NUMBA=1` at import time (set `CIRCUIT_USE_NUMBA=0` to opt out).
 
 At present, the accelerated paths are PMOS current evaluation, internal-node
 Newton iterations, bias-dependent capacitance evaluation, AC/PNoise
@@ -222,7 +253,24 @@ Solves the DC operating point and AC response:
 - Supports both global process corners and per-device mismatch maps.
 - Uses topology metadata for output sensing, load capacitance, and AC input drive.
 
-The DC solve includes robustness handling for physical branch selection, symmetric operating points, and rail-bounded node solutions.
+The DC solve includes robustness handling for physical branch selection, symmetric operating points,
+and rail-bounded node solutions — implemented in `dc_solver.py` and called from here. `ac_solver.py`
+itself is now a pure AC small-signal module: `ac_solve` plus the `bw_from_gain` bandwidth helper. It
+no longer carries the device-factory or DC-seeding code it used to.
+
+### `dc_solver.py`
+
+DC operating-point solving support that used to live inline in `ac_solver.py`, split out because it
+mixes two different concerns:
+
+- **`bounded_least_squares_dc(...)`** / **`dc_residual_ok(...)`** — a generic last-resort DC solve:
+  a bounded least-squares fallback used when the primary Newton/`fsolve` path fails to converge, plus
+  the residual-acceptance check that gates it.
+- **`symmetric_seed(...)`** / **`symmetric_continuation(...)`** / **`is_afe_topology(...)`** /
+  **`is_pairwise_symmetric_afe(...)`** / **`_AFE_SYMMETRIC_PAIRS`** — a circuit-specific seeding
+  heuristic for the AFE topology only, **not** general solver logic. It selects the physical
+  (Spectre-matching) symmetric power-up branch for that one circuit. Keeping it in its own module
+  keeps `ac_solver.py`'s generic solve free of per-circuit branches.
 
 ### `noise_solver.py`
 
@@ -538,17 +586,26 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
   (M7=M8, ...) identical so the AFE's symmetric DC continuation stays on the
   physical branch.
 - Results export to CSV and JSONL; a CLI runs `python -m core.explore <config.json>`.
+- Silicon corner routing (`SKY130_CORNERS`/`SILICON_CORNERS`/`apply_silicon_corner`) now lives in
+  `device_factory.py`; `explore.py` imports it from there rather than defining it.
+- `add_cli_args(parser)` / `run_cli(args)` are the single source of the CLI argument definitions —
+  both the `python -m core explore` subcommand and the standalone `python -m core.explore` entry
+  point call the same two functions, so the two surfaces cannot drift apart (see
+  [`cli_reference.md`](cli_reference.md)).
 
 Example configs: `examples/afe_explore.json` and `examples/single_stage.json`;
 both are full circuit JSON files with an `explore` block.
 
 ### `corners.py`
 
-Single source of truth for process-corner and robustness work — the pieces that
-otherwise get re-derived in every sweep:
+Single source of truth for process-corner and robustness *work* — the pieces that
+otherwise get re-derived in every sweep. The `CORNERS` data itself (global process shifts
+`typical` / `slow` / `fast` as `pvt0`/`pbeta0`, from the PDK monte.scs sections; e.g.
+slow = `{"pvt0": -0.2259, "pbeta0": -0.54}`) now lives in `device_factory.py`, the shared
+leaf device layer; `corners.py` imports it from there (`from .device_factory import CORNERS`)
+so existing `from core.corners import CORNERS` call sites keep working unchanged. What stays
+in `corners.py` is the mismatch/latch machinery built on top of it:
 
-- `CORNERS` — global process shifts (`typical` / `slow` / `fast` as `pvt0`/`pbeta0`,
-  from the PDK monte.scs sections; e.g. slow = `{"pvt0": -0.2259, "pbeta0": -0.54}`).
 - `mismatch_corner(rng, devices, base)` — per-device random `mvt0`/`mbeta0` on top of
   a process corner.
 - `metrics(...)` — one design at one corner → `gain_peak_dB`, `bw_Hz`, `irn_uV`, and
@@ -593,7 +650,11 @@ accelerates the *screening* of a large candidate pool.
   `<Cap>.C` / `<Res>.R` (named passive values — *structural*, rebuilds the circuit per
   candidate via `candidate_circuit()`), `periodic.frequency` (clock), and `pvt0`/`pbeta0`
   (continuous global process shift — sampling this turns the discrete corner sweep into
-  a continuous-PVT training axis).
+  a continuous-PVT training axis). Like `explore.py`, `dataset.py` imports silicon corner
+  routing (`SKY130_CORNERS`, `apply_silicon_corner`) from `device_factory.py` rather than
+  defining it, and exposes the same `add_cli_args(parser)` / `run_cli(args)` pair so the
+  `python -m core dataset` subcommand and the standalone `python -m core.dataset` entry
+  point share one argument definition.
 - **`surrogate.py`** — `HistGradientBoostingRegressor` (optional `scikit-learn`
   dependency) trained per label, with automatic log-space fitting for labels spanning
   multiple decades (e.g. IRN). `filter_rows()` / CLI `--filter label:lo:hi` restricts
@@ -668,11 +729,18 @@ match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see th
   `get_Idc`/`get_ss_params`/`get_capacitances`/`get_noise_psd`. `TransistorModel.kcl_sign`
   (default +1, i.e. source-high — matching PMOS/OTFT) lets `ac_solve`'s DC KCL support
   NMOS (source-low, `kcl_sign=-1`) without changing the OTFT path (byte-identical:
-  `1.0 * abs(x) == abs(x)`). The three transient-only ABC hooks raise
+  `1.0 * abs(x) == abs(x)`). `OsdiDevice` overrides the base capability class attributes:
+  `HAS_TERMINAL_LINEARIZATION = True` (it provides `get_terminal_linearization`) and
+  `TRANSIENT_BACKEND = "osdi"`. The three transient-only ABC hooks still raise
   `NotImplementedError` — `.osdi` can't run inside the numba transient loop.
-- **`osdi_transient.py`** — `cs_transient()`: a pure-Python fixed-step backward-Euler
-  integrator that calls the OSDI host directly each step (outside the numba loop), for
-  a foundational (not full-fidelity) silicon transient.
+- **`osdi_transient.py`** — `transient_osdi(sizes, bias, tgrid, ...)` is the circuit-level
+  entry point: a fixed-step backward-Euler integrator that calls the OSDI host directly
+  each step (outside the numba loop), for a foundational (not full-fidelity) silicon
+  transient, built on the lower-level single-device `cs_transient()` helper. `transient()`
+  in `transient_solver.py` checks the device's `TRANSIENT_BACKEND` class attribute and, when
+  it is `"osdi"`, lazily imports and routes to `transient_osdi` — a one-way dependency.
+  `osdi_transient.py` itself never imports `transient_solver.py`, so the two modules no
+  longer form a circular import (they did before this split).
 - **`sky130_model.py`** — `Sky130Nfet`/`Sky130Pfet(OsdiDevice)` + `register_pdk("sky130",
   ...)`. SKY130's binned BSIM4 subcircuits (63 bins, 2000+ `.param` expressions) are
   resolved by **letting ngspice do it**: instantiate the subckt, run an `op`, `showmod`

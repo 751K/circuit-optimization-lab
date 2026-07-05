@@ -192,6 +192,23 @@ class TransistorModel(ABC):
         """Scalar parameter bundle for numba‑accelerated transient inner loop."""
         ...
 
+    # ── Backend-capability flags ──────────────────────────────────────
+    # Generic solvers dispatch on *capabilities*, never on a concrete backend
+    # type.  A model advertises what it can do via these class attributes and
+    # solvers read them (e.g. ``dev.HAS_TERMINAL_LINEARIZATION``), instead of
+    # ``isinstance(dev, OsdiDevice)``.  Base defaults describe the plain OTFT
+    # analytic model; only backends that add a capability override them.
+
+    HAS_TERMINAL_LINEARIZATION: bool = False
+    """True if the model exposes :meth:`get_terminal_linearization` — the full
+    quasi-static 4×4 terminal (G, C) stamp used by the periodic PAC/PNoise
+    linearizer.  Backends without it fall back to the terminal-gm/gds path."""
+
+    TRANSIENT_BACKEND: str | None = None
+    """Which specialised transient integrator this model routes to, or ``None``
+    to use the generic (OTFT numba) transient path.  ``"osdi"`` routes the
+    circuit to :func:`core.osdi_transient.transient_osdi`."""
+
     # ── Auxiliary (optional; subclasses may override or set as attributes) ─
 
     g_area: float = 0.0
@@ -233,6 +250,16 @@ def register_model(model_type: str, cls: Type[TransistorModel]) -> None:
     if not isinstance(model_type, str) or not model_type:
         raise ValueError(f"model_type must be a non‑empty string, got {model_type!r}")
     _model_registry[model_type] = cls
+
+
+def get_model_class(model_type: str) -> Type[TransistorModel] | None:
+    """Return the model class registered under *model_type*, or ``None``.
+
+    Public read-only accessor over the registry so solvers can inspect a
+    model's capability flags (class attributes) without importing a concrete
+    backend class or reaching into the private ``_model_registry`` dict.
+    """
+    return _model_registry.get(model_type)
 
 
 def create_device(model_type: str, **kwargs) -> TransistorModel:
