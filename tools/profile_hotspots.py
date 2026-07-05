@@ -37,7 +37,7 @@ def profile(label: str, fn, *, sort_by: str = "cumtime", top: int = 25):
     print(f"  {label}  (wall: {wall:.3f}s)  —  sort by: {sort_by}")
     print(f"{'='*70}")
     print(s.getvalue())
-    print(f"\n─── by call count ───")
+    print("\n─── by call count ───")
     print(s2.getvalue())
     return result
 
@@ -54,7 +54,7 @@ def main():
     from core.noise_solver import noise_analysis, band_rms
 
     def _ac_noise():
-        ac = ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
+        ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
         noise = noise_analysis(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
         return band_rms(freqs, noise["irn_psd"], 0.05, 100.0)
 

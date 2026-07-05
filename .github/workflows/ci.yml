@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref (keeps queue short on rapid pushes).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Fast lint gate (runs first; cheap) ──
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install ruff
+        run: python -m pip install "ruff>=0.6"
+      - name: ruff check
+        run: ruff check .
+
+  # ── Test matrix ──
+  # Silicon tests (SKY130 / OSDI / FreePDK45) self-skip on CI: their guards look
+  # for the OpenVAF/ngspice toolchain + PDK cards (external drive), absent here,
+  # so they resolve to pytest.mark.skipif and never error at collection.
+  test:
+    needs: lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package (with test extras)
+        run: python -m pip install -e ".[test]"
+      - name: Run tests
+        run: python -m pytest -q
+
+  # ── Byte-gate: Cadence-calibration reproduction gate ──
+  # core.calibration --all exits 1 on any drift, so it doubles as a hard gate.
+  byte-gate:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package (with test extras)
+        run: python -m pip install -e ".[test]"
+      - name: Calibration byte-gate
+        env:
+          RUN_SLOW_CHOPPER: "1"
+        run: python -m core.calibration --all

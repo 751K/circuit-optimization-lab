@@ -7,6 +7,7 @@ and verifies the shortlist on the Cadence-calibrated solver — including a cros
 (tt vs ss) check. Needs the SKY130 PDK + OpenVAF + ngspice (external drive), so it skips
 cleanly in CI. See the ``silicon-pdk-openvaf`` memory.
 """
+import importlib.util
 import json
 import os
 
@@ -17,13 +18,14 @@ from core.ac_solver import ac_solve
 from core.circuit_loader import load_circuit_json, models_from_config
 from core.dataset import run_from_config, to_arrays
 from core.device_factory import apply_silicon_corner
+from core.osdi_device import openvaf_binary
 
 _PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _HAVE = os.path.exists(os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")) \
-    and os.path.exists(os.path.join(
-        os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded"),
-        ".claude/skills/build-openvaf/scripts/vacompile.sh"))
-pytestmark = pytest.mark.skipif(not _HAVE, reason="SKY130 PDK / OpenVAF toolchain not present")
+    and openvaf_binary() is not None \
+    and importlib.util.find_spec("sklearn") is not None  # design loop trains a surrogate
+pytestmark = pytest.mark.skipif(
+    not _HAVE, reason="SKY130 PDK / OpenVAF toolchain / scikit-learn not present")
 
 CONFIG = "examples/sky130_5t_ota.json"
 

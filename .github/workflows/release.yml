@@ -1,0 +1,59 @@
+name: Release
+
+# Fires when a semantic-version tag is pushed (e.g. `git tag v0.1.0 && git push --tags`).
+# Builds the sdist + wheel and attaches them to a GitHub Release for that tag.
+on:
+  push:
+    tags:
+      - "v*"
+
+# Minimal token scope: creating a Release + uploading assets only needs write
+# access to repository contents. Nothing else is granted.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build backend
+        run: python -m pip install build
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  # ── PyPI publishing (intentionally NOT enabled yet) ──────────────────────────
+  # KNOWN RELEASE DEBT (see pyproject.toml [tool.setuptools]): the installed
+  # top-level import name is the generic `core`, which can collide with other
+  # packages in a shared environment. That name MUST be renamed (e.g. to
+  # `circuit_opt`) before any public PyPI upload. Until then this workflow ships
+  # build artifacts to GitHub Releases only, never to PyPI.
+  #
+  # To enable PyPI later, add a job like the following (trusted publishing, no
+  # long-lived token) AFTER the rename lands:
+  #
+  #   pypi:
+  #     needs: release
+  #     runs-on: ubuntu-latest
+  #     permissions:
+  #       id-token: write        # OIDC for PyPI trusted publishing
+  #     steps:
+  #       - uses: actions/checkout@v4
+  #       - uses: actions/setup-python@v5
+  #         with:
+  #           python-version: "3.12"
+  #       - run: python -m pip install build
+  #       - run: python -m build
+  #       - uses: pypa/gh-action-pypi-publish@release/v1

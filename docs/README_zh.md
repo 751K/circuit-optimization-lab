@@ -2,6 +2,9 @@
 
 [English](README.md) | [中文说明](README_zh.md)
 
+**当前版本：v0.1.0**（2026-07-05）—— 见
+[CHANGELOG](https://github.com/751K/circuit-optimization-lab/blob/main/CHANGELOG.md)。
+
 ## 项目概述
 
 一个**本地、免 license、对 Cadence 标定过的模拟电路仿真 + ML 驱动设计优化框架**——目标是成为芯片设计
@@ -11,7 +14,7 @@
 缺少开放的、基础性的构件：既没有标准、开放的方式来*生成大规模、物理保真的仿真数据*，也没有可复用的
 *数据生成器框架*，更没有为电路量身定做的 *ML 方法框架*。本项目把整条链路做成一条开放、可复现的流水线
 ——以对 Cadence 标定过的求解器栈作为物理保真的 oracle → 带 provenance 的带标签数据集生成器
-（[`core/dataset.py`](../core/dataset.py)）→ ML 代理 + 筛选-校验优化器（[`core/surrogate.py`](../core/surrogate.py)、
+（[`core/dataset.py`](https://github.com/751K/circuit-optimization-lab/blob/main/core/dataset.py)）→ ML 代理 + 筛选-校验优化器（[`core/surrogate.py`](https://github.com/751K/circuit-optimization-lab/blob/main/core/surrogate.py)、
 `surrogate_torch.py`、`optimize.py`）。电路进、数据出、代理训练、设计优化，全程无商业仿真器。
 
 **2. 一条本地、可被 LLM 调用的工具链。** LLM 驱动的电路设计越来越依赖在回路里反复调用仿真器，但在多轮
@@ -64,8 +67,8 @@ python3 -m benchmarks.bench_afe --warm-runs 1 --skip-noise
 
 | 工具 | 在本项目中的作用 | 用哪个环境变量指向 |
 |------|-----------------|------------------|
-| **[OpenVAF-Reloaded](https://github.com/751K/OpenVAF-Reloaded)** —— [OpenVAF](https://github.com/pascalkuthe/OpenVAF) 的维护 fork | 把标准 Verilog-A 紧凑模型（BSIM4 等）编译成原生 `.osdi` 共享库；**SKY130** 器件路径通过 OSDI 宿主（`core/osdi_host.py`）加载它 | `OPENVAF_ROOT` |
-| **[ngspice](https://ngspice.sourceforge.io/)** | 其内置 C-BSIM4 是 **FreePDK45** 的精确器件求值器 / oracle（`core/ngspice_char.py`），也负责解析 SKY130 的 binned 参数卡 | `NGSPICE_BIN` |
+| **[OpenVAF-Reloaded](https://github.com/751K/OpenVAF-Reloaded)** —— [OpenVAF](https://github.com/pascalkuthe/OpenVAF) 的维护 fork | 把标准 Verilog-A 紧凑模型（BSIM4 等）编译成原生 `.osdi` 共享库；**SKY130** 器件路径通过 OSDI 宿主（`core/osdi_host.py`）加载它，由仓内 `tools/vacompile.sh` 包装脚本驱动 | `OPENVAF_BIN` / `OPENVAF_ROOT` |
+| **[ngspice](https://ngspice.sourceforge.io/)** | 其内置 C-BSIM4 是 **FreePDK45** 的精确器件求值器 / oracle（`core/ngspice_char.py`），也负责解析 SKY130 的 binned 参数卡；由仓内 `tools/run-ngspice.sh` 包装脚本调用 | `NGSPICE_BIN` |
 | PDK 卡文件（SKY130 经 `volare`/`ciel`；FreePDK45 卡） | 工艺参数本身 | `PDK_ROOT` |
 
 ### CLI 参考
@@ -586,8 +589,10 @@ PAC 每频点求解仍是主要耗时：61 点约 24–25s，121 点约 47–48s
 
 **`models`/硅器件报工具链错误。**
 硅 PDK 需要一套外部工具链（不是 pip 依赖）：SKY130 需 OpenVAF + ngspice + SKY130 PDK,
-FreePDK45 需 ngspice + FreePDK45 卡。安装好之后把 `PDK_ROOT`/`OPENVAF_ROOT`/`NGSPICE_BIN`
-指过去（见 `docs/core_overview_zh.md`）。没装的话，任何用到 `sky130.*` / `freepdk45.*` 模型类型
+FreePDK45 需 ngspice + FreePDK45 卡。编译 / ngspice 的包装脚本已收编进仓库 `tools/`,
+仓外只剩二进制。安装好之后把 `PDK_ROOT` 与二进制路径——`OPENVAF_BIN`（或 `OPENVAF_ROOT`,
+解析为 `$OPENVAF_ROOT/target/release/openvaf-r`）与 `NGSPICE_BIN`——指过去（见
+`docs/core_overview_zh.md`）。没装的话，任何用到 `sky130.*` / `freepdk45.*` 模型类型
 的电路会在第一次用到时报出清晰错误；其余 PDK（默认的 AT4000TG OTFT）不受影响。依赖该工具链的
 测试（`tests/test_sky130*.py`、`tests/test_freepdk45.py`、`tests/test_osdi_host.py`）在工具链
 缺失时会干净地 skip。

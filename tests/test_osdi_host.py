@@ -1,14 +1,15 @@
 """Validate core.osdi_host against ngspice on an OpenVAF-compiled BSIM4 model.
 
 The OpenVAF compiler, the OSDI-enabled ngspice, and the BSIM4 Verilog-A source
-live on the external drive (see the ``silicon-pdk-openvaf`` project memory and the
-``build-openvaf`` / ``run-osdi-ngspice`` skills). These tests locate that toolchain,
-compile ``bsim4.va`` → ``bsim4.osdi`` once, then check the Python host reproduces
-ngspice's DC/AC results for the *same* compiled model (model == oracle). The whole
-module skips cleanly when the toolchain is absent (e.g. CI), so it never blocks the
-core suite.
+live outside this repo (see the ``silicon-pdk-openvaf`` project memory). The
+compile / ngspice *wrappers* are vendored in-repo under ``tools/``; the actual
+binaries are resolved via ``OPENVAF_BIN`` / ``OPENVAF_ROOT`` / ``NGSPICE_BIN``.
+These tests compile ``bsim4.va`` → ``bsim4.osdi`` once, then check the Python
+host reproduces ngspice's DC/AC results for the *same* compiled model (model ==
+oracle). The whole module skips cleanly when the toolchain is absent (e.g. CI),
+so it never blocks the core suite.
 
-Override locations with ``OPENVAF_ROOT`` / ``NGSPICE_BIN`` if they move.
+Override locations with ``OPENVAF_BIN`` / ``OPENVAF_ROOT`` / ``NGSPICE_BIN``.
 """
 import os
 import re
@@ -16,12 +17,16 @@ import subprocess
 
 import pytest
 
+from core.ngspice_char import ngspice_binary
+from core.osdi_device import openvaf_binary
+
 VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
-VACOMPILE = os.path.join(VAF_ROOT, ".claude/skills/build-openvaf/scripts/vacompile.sh")
-RUN_NGSPICE = os.path.join(VAF_ROOT, ".claude/skills/run-osdi-ngspice/scripts/run-ngspice.sh")
+_TOOLS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools")
+VACOMPILE = os.path.join(_TOOLS, "vacompile.sh")
+RUN_NGSPICE = os.path.join(_TOOLS, "run-ngspice.sh")
 BSIM4_VA = os.path.join(VAF_ROOT, "integration_tests/BSIM4/bsim4.va")
 
-_HAVE_COMPILER = os.path.exists(VACOMPILE) and os.path.exists(BSIM4_VA)
+_HAVE_COMPILER = openvaf_binary() is not None and os.path.exists(BSIM4_VA)
 pytestmark = pytest.mark.skipif(
     not _HAVE_COMPILER, reason="OpenVAF/BSIM4 toolchain not present (external-drive only)")
 
@@ -89,15 +94,13 @@ def _ngspice_op_id(osdi_path, tmp_path):
         f"vd d 0 dc {_BIAS[0]}\nvg g 0 dc {_BIAS[1]}\nvs s 0 0\nvb b 0 0\n"
         f"N1 d g s b mn\n.model mn bsim4va {_CARD_SPICE}\n"
         f".control\nop\nprint i(vd)\n.endc\n.end\n")
-    runner = RUN_NGSPICE if os.path.exists(RUN_NGSPICE) else \
-        os.environ.get("NGSPICE_BIN", "ngspice")
-    res = subprocess.run([runner, "-b", str(net)], capture_output=True, text=True)
+    res = subprocess.run([RUN_NGSPICE, "-b", str(net)], capture_output=True, text=True)
     m = re.search(r"i\(vd\)\s*=\s*([-\d.eE+]+)", res.stdout)
     assert m, f"could not parse i(vd):\n{res.stdout}\n{res.stderr}"
     return -float(m.group(1))
 
 
-@pytest.mark.skipif(not os.path.exists(RUN_NGSPICE),
+@pytest.mark.skipif(ngspice_binary() is None,
                     reason="OSDI-enabled ngspice not present")
 def test_dc_matches_ngspice(dev, osdi_path, tmp_path):
     id_host = dev.operating_point(*_BIAS)["Id"]

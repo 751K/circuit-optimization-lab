@@ -1,0 +1,3 @@
+# Documentation site toolchain (MkDocs + Material theme).
+# Not a package dependency — used only to build the docs site (see .github/workflows/docs.yml).
+mkdocs-material>=9.5

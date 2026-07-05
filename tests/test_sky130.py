@@ -10,13 +10,11 @@ import os
 import pytest
 
 import core
+from core.osdi_device import openvaf_binary
 
 PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _NGSPICE_LIB = os.path.join(PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")
-_VACOMPILE = os.path.join(
-    os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded"),
-    ".claude/skills/build-openvaf/scripts/vacompile.sh")
-_HAVE = os.path.exists(_NGSPICE_LIB) and os.path.exists(_VACOMPILE)
+_HAVE = os.path.exists(_NGSPICE_LIB) and openvaf_binary() is not None
 
 
 def test_sky130_registered_but_not_default():

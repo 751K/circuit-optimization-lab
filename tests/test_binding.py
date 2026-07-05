@@ -26,6 +26,7 @@ from core.ac_solver import ac_solve
 from core.analysis_dispatch import run_analysis_suite
 from core.circuit_loader import load_circuit_json
 from core.device_factory import CORNERS, SILICON_CORNERS
+from core.ngspice_char import ngspice_binary
 from core.noise_solver import noise_analysis
 from core.pac_solver import pac_solve
 from core.pnoise_solver import pnoise_solve
@@ -37,9 +38,7 @@ from core.transient_solver import transient
 # ── FreePDK45 availability gate (mirrors tests/test_freepdk45.py) ────────────
 PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _FP45 = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
-_VAF = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
-_RUN = os.path.join(_VAF, ".claude/skills/run-osdi-ngspice/scripts/run-ngspice.sh")
-_HAVE_FP45 = os.path.exists(_FP45) and os.path.exists(_RUN)
+_HAVE_FP45 = os.path.exists(_FP45) and ngspice_binary() is not None
 _requires_fp45 = pytest.mark.skipif(
     not _HAVE_FP45, reason="FreePDK45 cards / ngspice not present")
 

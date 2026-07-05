@@ -15,15 +15,14 @@ import pytest
 import core.dataset as ds
 from core.dataset import (_finite_or_none, _resolve_corner, _row, _topology_hash,
                           build_dataset, load_dataset_config, to_arrays)
+from core.ngspice_char import ngspice_binary
 
 CONFIG = "examples/single_stage.json"
 
 # ── FreePDK45 availability gate (mirrors tests/test_freepdk45.py) ────────────
 _PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _FP45_INC = os.path.join(_PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
-_VAF = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
-_FP45_RUN = os.path.join(_VAF, ".claude/skills/run-osdi-ngspice/scripts/run-ngspice.sh")
-_HAVE_FP45 = os.path.exists(_FP45_INC) and os.path.exists(_FP45_RUN)
+_HAVE_FP45 = os.path.exists(_FP45_INC) and ngspice_binary() is not None
 _requires_fp45 = pytest.mark.skipif(
     not _HAVE_FP45, reason="FreePDK45 cards / ngspice not present")
 

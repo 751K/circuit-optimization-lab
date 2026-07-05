@@ -30,7 +30,10 @@ from .osdi_device import OsdiDevice
 _PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _NGSPICE_LIB = os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")
 _VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
-_RUN_NGSPICE = os.path.join(_VAF_ROOT, ".claude/skills/run-osdi-ngspice/scripts/run-ngspice.sh")
+# run-ngspice wrapper is vendored in-repo; RUN_NGSPICE env overrides the path.
+_RUN_NGSPICE = os.environ.get(
+    "RUN_NGSPICE",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tools", "run-ngspice.sh")))
 _BSIM4_VA = os.path.join(_VAF_ROOT, "integration_tests/BSIM4/bsim4.va")
 _CARD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/pdk/sky130")
 

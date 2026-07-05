@@ -17,11 +17,12 @@ import tempfile
 import numpy as np
 import pytest
 
+from core.ngspice_char import ngspice_binary
+
 PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _FP45 = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
-_VAF = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
-_RUN = os.path.join(_VAF, ".claude/skills/run-osdi-ngspice/scripts/run-ngspice.sh")
-_HAVE = os.path.exists(_FP45) and os.path.exists(_RUN)
+_RUN = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools", "run-ngspice.sh")
+_HAVE = os.path.exists(_FP45) and ngspice_binary() is not None
 
 pytestmark = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards / ngspice not present")
 

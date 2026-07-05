@@ -24,6 +24,15 @@ import sys as _sys
 if "--no-numba" in _sys.argv:
     _os.environ["CIRCUIT_USE_NUMBA"] = "0"
 
+# Single-source version: the number lives only in pyproject.toml. When installed
+# (pip / wheel) importlib.metadata reads it back; a bare repo checkout with no
+# `pip install` falls back to a local sentinel.
+try:
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("circuit-optimization")
+except Exception:  # not installed (repo checkout w/o pip install)
+    __version__ = "0.0.0+local"
+
 from .ac_solver import ac_solve
 from .analysis_dispatch import run_analysis_suite, run_json_analyses
 from .circuit_loader import CircuitSpec, load_circuit_json
@@ -48,6 +57,8 @@ from .transient_solver import transient
 # All other top-level names exported below have no module-name collision.
 
 __all__ = [
+    # package metadata
+    "__version__",
     # device model abstraction
     "TransistorModel",
     "NumbaParams",

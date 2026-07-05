@@ -14,13 +14,12 @@ import pytest
 import core
 from core.ac_solver import ac_solve
 from core.noise_solver import noise_analysis
+from core.osdi_device import openvaf_binary
 from core.topology import Topology
 
 _PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _HAVE = os.path.exists(os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")) \
-    and os.path.exists(os.path.join(
-        os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded"),
-        ".claude/skills/build-openvaf/scripts/vacompile.sh"))
+    and openvaf_binary() is not None
 pytestmark = pytest.mark.skipif(not _HAVE, reason="SKY130 PDK / OpenVAF toolchain not present")
 
 _RL = 5e3

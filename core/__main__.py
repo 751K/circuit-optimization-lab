@@ -701,24 +701,27 @@ def main(argv=None):
             args = ap.parse_args(["run"] + argv)
 
     # ── dispatch ──
+    # NOTE: the handlers return their result payloads (dicts/…) for programmatic
+    # callers, but ``main`` must return an *exit status* — the setuptools console
+    # script wraps this in ``sys.exit(main())``, and ``sys.exit(<truthy dict>)``
+    # would print the dict to stderr and exit 1. So swallow the payload here and
+    # return None (→ exit 0) on success; errors still raise SystemExit as before.
     cmd = args.command
-    if cmd == "run":
-        return _cmd_run(args)
-    elif cmd == "explore":
-        return _cmd_explore(args)
-    elif cmd == "corners":
-        return _cmd_corners(args)
-    elif cmd == "mc":
-        return _cmd_mc(args)
-    elif cmd == "chopper":
-        return _cmd_chopper(args)
-    elif cmd == "plot":
-        return _cmd_plot(args)
-    elif cmd == "dataset":
-        return _cmd_dataset(args)
-    else:
+    handlers = {
+        "run": _cmd_run,
+        "explore": _cmd_explore,
+        "corners": _cmd_corners,
+        "mc": _cmd_mc,
+        "chopper": _cmd_chopper,
+        "plot": _cmd_plot,
+        "dataset": _cmd_dataset,
+    }
+    handler = handlers.get(cmd)
+    if handler is None:
         ap.print_help()
         return None
+    handler(args)
+    return None
 
 
 if __name__ == "__main__":

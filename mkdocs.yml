@@ -1,0 +1,68 @@
+site_name: Circuit Optimization Lab
+site_description: A local, license-free, Cadence-calibrated framework for analog circuit simulation and ML-driven design optimization.
+site_url: https://751k.github.io/circuit-optimization-lab/
+repo_url: https://github.com/751K/circuit-optimization-lab
+repo_name: 751K/circuit-optimization-lab
+
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+
+nav:
+  - Home: README.md
+  - User Guide:
+      - JSON Circuit Format: json_circuit_format.md
+      - CLI Reference: cli_reference.md
+  - Architecture:
+      - Core Overview: core_overview.md
+  - Design Cases:
+      - SKY130 FD-OTA: sky130_fd_ota_design.md
+      - FreePDK45 FD-OTA: freepdk45_fd_ota_design.md
+      - AFE Design Equations: afe_design_equations.md
+  - Performance:
+      - Environment & Benchmarks: environment_performance.md
+  - Roadmap:
+      - Future Plan: futureplan.md
+  - 中文文档:
+      - 项目说明: README_zh.md
+      - 核心求解器概览: core_overview_zh.md
+      - JSON 电路描述格式: json_circuit_format_zh.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+
+plugins:
+  - search:
+      # CJK-aware separator so Chinese docs are indexed per-character.
+      # Recommended by the Material for MkDocs docs for mixed CN/EN content.
+      separator: '[\s​\-　，。；：！？“”‘’]+'

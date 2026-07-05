@@ -33,8 +33,12 @@ import numpy as np
 
 _PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _FP45_DIR = os.path.join(_PDK_ROOT, "freepdk45")
-_VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
-_RUN_NGSPICE = os.path.join(_VAF_ROOT, ".claude/skills/run-osdi-ngspice/scripts/run-ngspice.sh")
+# The run-ngspice wrapper is vendored in-repo (self-contained); it resolves the
+# ngspice binary via NGSPICE_BIN at call time. RUN_NGSPICE can override the
+# wrapper path itself (escape hatch for wheel installs).
+_RUN_NGSPICE = os.environ.get(
+    "RUN_NGSPICE",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tools", "run-ngspice.sh")))
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/pdk/freepdk45")
 
 # op-vars pulled from ngspice at every grid node (order fixed for wrdata parsing)
@@ -45,6 +49,21 @@ def _ngspice() -> str:
     if os.path.exists(_RUN_NGSPICE):
         return _RUN_NGSPICE
     return os.environ.get("NGSPICE_BIN", "ngspice")
+
+
+def ngspice_binary() -> "str | None":
+    """The ngspice executable the wrapper would run, or ``None`` if unreachable.
+
+    Mirrors ``tools/run-ngspice.sh``: ``$NGSPICE_BIN`` if set (default is the
+    external-drive build), else ``ngspice`` on ``PATH``. Returns ``None`` when
+    no runnable binary exists, so tests can gate on the *real* ngspice
+    dependency rather than on the presence of the (always-vendored) wrapper.
+    """
+    import shutil
+    env_bin = os.environ.get("NGSPICE_BIN", "/Volumes/MacoutDsik/ngspice/install/bin/ngspice")
+    if os.access(env_bin, os.X_OK):
+        return env_bin
+    return shutil.which("ngspice")
 
 
 def _run_ngspice(cir: str, out_txt: str, timeout: float, what: str) -> None:

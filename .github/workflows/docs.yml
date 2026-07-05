@@ -1,0 +1,53 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - requirements-docs.txt
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+# Allow the deploy job to publish to GitHub Pages via the official Pages flow.
+permissions:
+  contents: read
+
+# Only one Pages deployment at a time; don't cancel an in-flight deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  # ── Build the static site and upload it as a Pages artifact ──
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install docs toolchain
+        run: python -m pip install -r requirements-docs.txt
+      - name: Build site (strict)
+        run: mkdocs build --strict
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # ── Deploy the artifact to GitHub Pages ──
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

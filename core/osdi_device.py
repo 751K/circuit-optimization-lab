@@ -24,9 +24,31 @@ from typing import Dict, Optional, Tuple
 from .device_model import TransistorModel
 
 _VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
-_VACOMPILE = os.path.join(_VAF_ROOT, ".claude/skills/build-openvaf/scripts/vacompile.sh")
+# The vacompile wrapper is vendored in-repo (self-contained); it resolves the
+# openvaf-r binary via OPENVAF_BIN / OPENVAF_ROOT at call time. VACOMPILE can
+# override the wrapper path itself (escape hatch for wheel installs where
+# ``core/../tools`` is not packaged).
+_VACOMPILE = os.environ.get(
+    "VACOMPILE",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tools", "vacompile.sh")))
 _OSDI_CACHE_DIR = os.environ.get(
     "OSDI_CACHE_DIR", os.path.join(_VAF_ROOT, ".osdi_cache"))
+
+
+def openvaf_binary() -> Optional[str]:
+    """Path to the openvaf-r compiler binary, or ``None`` if not reachable.
+
+    Mirrors ``tools/vacompile.sh``'s resolution: ``$OPENVAF_BIN`` if set, else
+    ``$OPENVAF_ROOT/target/release/openvaf-r`` (``OPENVAF_ROOT`` defaults to the
+    external-drive checkout). Returns ``None`` when the binary is absent, so
+    callers/tests can gate the silicon path on the *real* dependency rather than
+    on the presence of the (always-vendored) wrapper script.
+    """
+    env_bin = os.environ.get("OPENVAF_BIN")
+    if env_bin:
+        return env_bin if os.access(env_bin, os.X_OK) else None
+    cand = os.path.join(_VAF_ROOT, "target", "release", "openvaf-r")
+    return cand if os.access(cand, os.X_OK) else None
 
 _lib_cache: Dict[str, object] = {}       # va_path -> OsdiLibrary
 _lib_lock = threading.Lock()
@@ -69,7 +91,12 @@ def compile_va(va_path: str, *, cache_dir: Optional[str] = None) -> str:
     """Compile a ``.va`` to ``.osdi`` via the OpenVAF wrapper (cached by mtime)."""
     if not os.path.exists(_VACOMPILE):
         raise RuntimeError(
-            f"OpenVAF compiler wrapper not found at {_VACOMPILE}; set OPENVAF_ROOT")
+            f"OpenVAF compiler wrapper not found at {_VACOMPILE}; set VACOMPILE")
+    if openvaf_binary() is None:
+        raise RuntimeError(
+            "openvaf-r compiler not found; set OPENVAF_BIN to the binary or "
+            "OPENVAF_ROOT to its checkout (expects "
+            "$OPENVAF_ROOT/target/release/openvaf-r)")
     cache_dir = cache_dir or _OSDI_CACHE_DIR
     os.makedirs(cache_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(va_path))[0]

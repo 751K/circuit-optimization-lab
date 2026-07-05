@@ -20,12 +20,16 @@ import subprocess
 import numpy as np
 import pytest
 
+from core.ngspice_char import ngspice_binary
+from core.osdi_device import openvaf_binary
+
 PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _NGSPICE_LIB = os.path.join(PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")
 VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
-_VACOMPILE = os.path.join(VAF_ROOT, ".claude/skills/build-openvaf/scripts/vacompile.sh")
-RUN_NGSPICE = os.path.join(VAF_ROOT, ".claude/skills/run-osdi-ngspice/scripts/run-ngspice.sh")
-_HAVE = os.path.exists(_NGSPICE_LIB) and os.path.exists(_VACOMPILE)
+_TOOLS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools")
+_VACOMPILE = os.path.join(_TOOLS, "vacompile.sh")
+RUN_NGSPICE = os.path.join(_TOOLS, "run-ngspice.sh")
+_HAVE = os.path.exists(_NGSPICE_LIB) and openvaf_binary() is not None
 
 pytestmark = pytest.mark.skipif(
     not _HAVE, reason="SKY130 PDK / OpenVAF toolchain not present")
@@ -122,7 +126,7 @@ def test_gear2_matches_be_when_settled():
     assert np.max(np.abs(vb_[-50:] - vg_[-50:])) < 1e-5   # same settled point
 
 
-@pytest.mark.skipif(not os.path.exists(RUN_NGSPICE),
+@pytest.mark.skipif(ngspice_binary() is None,
                     reason="OSDI-enabled ngspice not present")
 def test_cs_step_matches_ngspice(tmp_path):
     """Same card + same .osdi in ngspice .tran → trajectory oracle."""

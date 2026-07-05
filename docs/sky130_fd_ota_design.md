@@ -1,7 +1,7 @@
 # SKY130 全差分 OTA:完整设计流程报告
 
 用本仓库工具链(OSDI/BSIM4 硅求解器 + dataset/surrogate/optimize ML 管线)从零走完的
-设计案例。测试台:[examples/sky130_fd_ota.json](../examples/sky130_fd_ota.json)(其中
+设计案例。测试台:[examples/sky130_fd_ota.json](https://github.com/751K/circuit-optimization-lab/blob/main/examples/sky130_fd_ota.json)(其中
 的尺寸即最终优化设计,直接可复现)。
 
 ## 1. 设计需求与测试台选择

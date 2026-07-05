@@ -2,6 +2,9 @@
 
 [English](README.md) | [中文说明](README_zh.md)
 
+**Current release: v0.1.0** (2026-07-05) — see the
+[CHANGELOG](https://github.com/751K/circuit-optimization-lab/blob/main/CHANGELOG.md).
+
 ## Overview
 
 A **local, license-free, Cadence-calibrated framework for analog circuit simulation
@@ -15,8 +18,8 @@ physics-faithful simulation data*, no reusable *data-generator framework*, and n
 *ML-method framework* purpose-built for circuits. This project provides the whole chain
 as one open, reproducible pipeline — a Cadence-calibrated solver stack as the
 physics-faithful oracle → a provenance-tracked labeled-dataset generator
-([`core/dataset.py`](../core/dataset.py)) → an ML surrogate + screen-and-verify optimizer
-([`core/surrogate.py`](../core/surrogate.py), `surrogate_torch.py`, `optimize.py`).
+([`core/dataset.py`](https://github.com/751K/circuit-optimization-lab/blob/main/core/dataset.py)) → an ML surrogate + screen-and-verify optimizer
+([`core/surrogate.py`](https://github.com/751K/circuit-optimization-lab/blob/main/core/surrogate.py), `surrogate_torch.py`, `optimize.py`).
 Circuit in, data out, surrogate trained, design optimized, with no commercial simulator
 in the loop.
 
@@ -80,8 +83,8 @@ first use if absent.
 
 | Tool | Role in this project | Point at it with |
 |------|----------------------|------------------|
-| **[OpenVAF-Reloaded](https://github.com/751K/OpenVAF-Reloaded)** — a maintained fork of [OpenVAF](https://github.com/pascalkuthe/OpenVAF) | Compiles standard Verilog-A compact models (BSIM4, …) to a native `.osdi` shared library; the **SKY130** device path loads it through the OSDI host (`core/osdi_host.py`) | `OPENVAF_ROOT` |
-| **[ngspice](https://ngspice.sourceforge.io/)** | Its built-in C-BSIM4 is the exact device evaluator / oracle for **FreePDK45** (`core/ngspice_char.py`), and resolves SKY130's binned parameter cards | `NGSPICE_BIN` |
+| **[OpenVAF-Reloaded](https://github.com/751K/OpenVAF-Reloaded)** — a maintained fork of [OpenVAF](https://github.com/pascalkuthe/OpenVAF) | Compiles standard Verilog-A compact models (BSIM4, …) to a native `.osdi` shared library; the **SKY130** device path loads it through the OSDI host (`core/osdi_host.py`), driven by the in-repo `tools/vacompile.sh` wrapper | `OPENVAF_BIN` / `OPENVAF_ROOT` |
+| **[ngspice](https://ngspice.sourceforge.io/)** | Its built-in C-BSIM4 is the exact device evaluator / oracle for **FreePDK45** (`core/ngspice_char.py`), and resolves SKY130's binned parameter cards; invoked via the in-repo `tools/run-ngspice.sh` wrapper | `NGSPICE_BIN` |
 | PDK card files (SKY130 via `volare`/`ciel`; FreePDK45 cards) | The process parameters themselves | `PDK_ROOT` |
 
 ### CLI Reference
@@ -643,12 +646,15 @@ reuse or batched linear solves.
 
 **A `models`/silicon device raises a toolchain error.**
 The silicon PDKs need an external toolchain that isn't a pip dependency: SKY130 wants
-OpenVAF + ngspice + the SKY130 PDK; FreePDK45 wants ngspice + the FreePDK45 cards.
-Install it and point `PDK_ROOT`/`OPENVAF_ROOT`/`NGSPICE_BIN` at it (see
-`docs/core_overview.md`). Without it, any circuit using a `sky130.*` / `freepdk45.*`
-model type raises a clear error at first use; every other PDK (the default AT4000TG
-OTFT) is unaffected. Tests gated on the toolchain (`tests/test_sky130*.py`,
-`tests/test_freepdk45.py`, `tests/test_osdi_host.py`) skip cleanly when it's absent.
+OpenVAF + ngspice + the SKY130 PDK; FreePDK45 wants ngspice + the FreePDK45 cards. The
+compile / ngspice wrappers are vendored in-repo under `tools/`; only the binaries live
+outside. Install them and point `PDK_ROOT` plus the binaries — `OPENVAF_BIN` (or
+`OPENVAF_ROOT`, which resolves `$OPENVAF_ROOT/target/release/openvaf-r`) and
+`NGSPICE_BIN` — at them (see `docs/core_overview.md`). Without it, any circuit using a
+`sky130.*` / `freepdk45.*` model type raises a clear error at first use; every other
+PDK (the default AT4000TG OTFT) is unaffected. Tests gated on the toolchain
+(`tests/test_sky130*.py`, `tests/test_freepdk45.py`, `tests/test_osdi_host.py`) skip
+cleanly when it's absent.
 
 ---
 

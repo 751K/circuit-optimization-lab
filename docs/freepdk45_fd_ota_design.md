@@ -3,7 +3,7 @@
 用本仓库工具链在 **FreePDK45(45 nm, 1.0 V)** 上从零走完的设计案例——器件由
 **ngspice-C BSIM4**(FreePDK45 的 oracle,经缓存特性化网格 `core.ngspice_device`)精确
 求值,配合 dataset/surrogate/optimize 的 ML 筛选管线。测试台:
-[examples/freepdk45_fd_ota.json](../examples/freepdk45_fd_ota.json)(其中尺寸即最终优化设计,
+[examples/freepdk45_fd_ota.json](https://github.com/751K/circuit-optimization-lab/blob/main/examples/freepdk45_fd_ota.json)(其中尺寸即最终优化设计,
 直接可复现)。方法沿用 SKY130 案例([docs/sky130_fd_ota_design.md](sky130_fd_ota_design.md)),
 但工艺换成用户的目标工艺 FreePDK45,电压从 1.8 V 收紧到 1.0 V。
 
@@ -179,4 +179,4 @@ python -m core run examples/freepdk45_fd_ota.json -a ac,noise
 - dataset/筛选阶段给器件加 `extract_w=1.0`(参考 W 特性化 + 线性 W 缩放,单器件误差 ~0.7%),
   免逐候选 ngspice 重表征;**终选设计务必逐 W 真卡复核**。
 - FreePDK45 器件评估器是 ngspice-C(非 SKY130 的 OSDI VA)——见
-  [freepdk45-ngspice-eval 记忆](../README.md) 与 `core/ngspice_char.py` 头注。
+  [freepdk45-ngspice-eval 记忆](https://github.com/751K/circuit-optimization-lab/blob/main/README.md) 与 `core/ngspice_char.py` 头注。
