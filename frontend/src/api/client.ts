@@ -6,12 +6,26 @@
  * solve) that the F1..F3 browser builder needs; background-job endpoints
  * (explore / mc) are intentionally out of scope for now.
  *
- * Base URL: `import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8341"`.
+ * Base URL, resolved once at load time in three tiers (highest first):
+ *   1. `window.__CIRCUITOPT_API_BASE__` — injected by the Tauri desktop shell,
+ *      which negotiates the backend port at launch (see src-tauri/).
+ *   2. `import.meta.env.VITE_API_BASE` — the plain-web override env var.
+ *   3. `http://127.0.0.1:8341` — the service's default port.
+ * Pure web mode (vite dev/build with no Tauri) never sees tier 1, so its
+ * behaviour is byte-for-byte what it was before the desktop shell existed.
  */
 import type { CircuitJson } from "../model/circuit";
 
+/** Read the shell-injected base if present; guarded for non-browser (test) envs. */
+function injectedBase(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  const b = (window as { __CIRCUITOPT_API_BASE__?: unknown })
+    .__CIRCUITOPT_API_BASE__;
+  return typeof b === "string" && b.length > 0 ? b : undefined;
+}
+
 export const API_BASE: string =
-  import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8341";
+  injectedBase() ?? import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8341";
 
 // ── Response shapes (docs/service_api.md) ────────────────────────────────
 

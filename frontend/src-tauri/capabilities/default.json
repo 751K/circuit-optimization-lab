@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core permissions for the main window. The webview only talks to the local backend over HTTP/WS; no extra plugin surface is granted.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

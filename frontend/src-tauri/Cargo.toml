@@ -1,0 +1,42 @@
+[package]
+name = "circuitopt-builder"
+version = "0.1.0"
+description = "CircuitOpt Builder — desktop shell for the circuitopt browser circuit editor"
+authors = ["circuit-optimization"]
+edition = "2021"
+# Bump if you rely on newer std/toolchain features; 1.77 is Tauri 2's floor.
+rust-version = "1.77"
+
+# The library the binary links against. `_lib` suffix avoids a Windows name
+# clash between the bin and the lib; harmless on macOS but kept for parity with
+# the Tauri 2 template so tooling that expects it keeps working.
+[lib]
+name = "circuitopt_builder_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+# Used only to install a SIGTERM/SIGINT handler that reaps the spawned backend
+# even when the app is terminated with a signal (Tauri's RunEvent::Exit covers
+# the normal GUI-quit path; the signal handler covers `kill <app>`).
+libc = "0.2"
+
+[features]
+# This feature is used for production builds or when a dev server is not
+# specified. If you use `tauri dev`, this feature is disabled automatically.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+# Smaller, faster-to-load bundles for a local desktop app.
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

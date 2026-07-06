@@ -36,6 +36,52 @@ solve→transform pipeline:
 node_modules/.bin/vite-node scripts/smoke_solve.ts
 ```
 
+## Desktop app (Tauri)
+
+The same editor ships as a native macOS app under `src-tauri/`. The app is a
+thin **shell**: it does not bundle Python. Instead it discovers and manages the
+`circuitopt` service you install yourself, then points the webview at it.
+
+**Prerequisites**
+
+- [Rust](https://rustup.rs/) (stable) and Xcode command-line tools.
+- The backend installed on your machine:
+  `pip install "circuit-optimization[serve]"` (provides `circuit-opt serve`).
+
+**Develop / build**
+
+```sh
+npm run tauri:dev     # Vite dev server + native window, hot reload
+npm run tauri:build   # release .app + .dmg under src-tauri/target/release/bundle/
+```
+
+The build is unsigned/un-notarized — first launch needs right-click → **Open**
+(or `xattr -dr com.apple.quarantine "CircuitOpt Builder.app"`).
+
+**Backend discovery order** (on launch, in `src-tauri/src/backend.rs`):
+
+1. **Adopt** — if `GET /api/v1/health` on the default port **8341** answers, the
+   app uses that service as-is and never kills it (it's yours).
+2. **Config file** — `~/Library/Application Support/com.circuitopt.builder/backend.json`,
+   shape `{"command": ["/path/to/python", "-m", "circuitopt.service"]}` (or
+   `["/path/to/circuit-opt", "serve"]`). The app appends `--port <n>`. On first
+   run a template with `command: null` and a `_hint` is written here.
+3. **Login-shell PATH** — `zsh -lc "command -v circuit-opt"`. This runs through
+   a *login* shell on purpose: a Finder-launched GUI app has a bare PATH, so
+   conda/homebrew/pyenv shims are invisible without sourcing your profile.
+
+If all three fail, the app opens in offline mode with the toolbar's "backend
+not connected" banner (validation/solve disabled; editing still works).
+
+When the app *spawns* the backend it picks a free port at/after 8341, waits for
+`/health` (up to 15 s), injects the URL as `window.__CIRCUITOPT_API_BASE__`
+(highest-priority tier in `src/api/client.ts`), and **kills that process on
+quit** — via both the normal quit path and a SIGTERM/SIGINT handler, so
+`kill <app>` reaps it too. An adopted service (step 1) is always left running.
+
+**Logs**: `~/Library/Logs/com.circuitopt.builder/backend.log` — the discovery
+decisions plus the backend's own stdout/stderr, for troubleshooting.
+
 ## Layout
 
 - **`src/model/`** — the graph ⇄ circuit-JSON mapping core (F1): parses circuit
@@ -51,4 +97,9 @@ node_modules/.bin/vite-node scripts/smoke_solve.ts
   responses to plot-ready data (`transform.ts`, unit-tested against real
   response fixtures under `__fixtures__/`) and the ECharts views
   (`charts.tsx`, `ResultView.tsx`) plus JSON export (`download.ts`).
-- **`src/api/client.ts`** — the typed fetch client for the service routes.
+- **`src/api/client.ts`** — the typed fetch client for the service routes. Its
+  `API_BASE` resolves in three tiers: the Tauri-injected
+  `window.__CIRCUITOPT_API_BASE__`, then `VITE_API_BASE`, then the 8341 default.
+- **`src-tauri/`** — the macOS desktop shell (see *Desktop app* above).
+  `src/backend.rs` is the pure, unit-tested backend-discovery/port logic;
+  `src/lib.rs` is the Tauri glue (spawn, health-wait, inject, quit-cleanup).

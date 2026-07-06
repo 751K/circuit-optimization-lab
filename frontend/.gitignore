@@ -2,3 +2,9 @@ node_modules/
 dist/
 *.local
 .vite/
+
+# Tauri (desktop shell) build artifacts and generated files.
+src-tauri/target/
+src-tauri/gen/
+# Cargo lockfile is generated on first build; not tracked for this shell.
+src-tauri/Cargo.lock

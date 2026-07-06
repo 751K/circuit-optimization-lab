@@ -4,6 +4,10 @@
  */
 import { useEditor } from "../store";
 
+/** True when running inside the Tauri desktop shell (vs. a plain browser). */
+const IN_TAURI =
+  typeof window !== "undefined" && window.__TAURI__ !== undefined;
+
 export default function Toolbar() {
   const undo = useEditor((s) => s.undo);
   const redo = useEditor((s) => s.redo);
@@ -31,6 +35,13 @@ export default function Toolbar() {
             <>
               backend not connected ({capsError}) — start it with{" "}
               <code>circuit-opt serve --port 8341</code>{" "}
+              {IN_TAURI && (
+                <>
+                  , or install it with{" "}
+                  <code>pip install "circuit-optimization[serve]"</code> and edit{" "}
+                  <code>backend.json</code>{" "}
+                </>
+              )}
             </>
           ) : (
             "backend not connected "
