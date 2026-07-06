@@ -27,7 +27,7 @@ _VDD = 1.0                      # FreePDK45 nominal supply
 
 # SS/FF are shipped as separate card directories (not a param shift): the corner
 # name selects which models_<corner>/ file the device characterises against.
-_CORNERS = ("nom", "ss", "ff")
+FREEPDK45_CORNERS = ("nom", "ss", "ff")
 
 
 def _card_path(polarity: str, corner: str) -> str:
@@ -46,7 +46,7 @@ class _Fp45Fet(NgspiceDevice):
     def __init__(self, W: float = 0.09, L: float = 0.05, NF: int = 1, *,
                  corner: str = "nom", vb: float = 0.0, temperature: float = 300.15,
                  extract_w: float = None, **_ignored):
-        corner = corner if corner in _CORNERS else "nom"
+        corner = corner if corner in FREEPDK45_CORNERS else "nom"
         self.CARD_PATH = _card_path(self.POLARITY, corner)
         super().__init__(W=W, L=L, NF=NF, vb=vb, corner=corner,
                          temperature=temperature, extract_w=extract_w)

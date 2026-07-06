@@ -1,0 +1,80 @@
+{
+  "name": "freepdk45_fd_ota",
+  "description": "Fully differential telescopic-cascode OTA in FreePDK45 (45nm, 1.0V) with continuous-time dual-differential-pair CMFB and AC-coupled inputs. Evaluated by ngspice-C BSIM4 (the FreePDK45 oracle) via a cached characterization grid (core.ngspice_device). Signal path: VINP/VINN -> Rs=1k -> Cc=2pF coupling -> G1/G2; gate DC set by RB=1M to VCMI. Core: NMOS tail M0 -> input pair M1/2 (weak-moderate inversion, gm/Id~20 for power efficiency) -> NMOS cascodes M3/4 -> OUTP/OUTN <- PMOS cascodes M5/6 <- PMOS loads M7/8 (gates = CMFB CTRL). CMFB: NMOS sense pairs MS1/MS2 (OUTP vs VCM_REF) and MS3/MS4 (OUTN vs VCM_REF), tails MT1/2, steer current into diode PMOS MD at CTRL. Output CM regulates to VCM_REF (tunable rail): OCM tracks 475..587mV over VCM_REF 0.45..0.56 (>110mV, >>50mV spec). Sizes are the screen-and-verify design (600-sample HistGBT surrogate screen + solver verify + coordinate-descent polish, extract_w reference-W sampling) sized for ~20% UGBW margin over spec. Cross-checked vs ngspice's OWN .ac on the full netlist: A0=58.9dB, UGBW=119.9MHz, PM=84deg (the solver's grid AC omits drain/source junction caps, so ac_solve reads +8% UGBW=130MHz — headline numbers are the ngspice values). CL=0.2pF/side, 17.1uW at 1.0V, OUT_CM offset +26mV; power floor at exactly 100MHz(oracle) is ~14uW. PVT (nom/ss/ff x VDD+-10% x 30/60/90C) with a constant-gm tail bias holds UGBW in-spec; see docs/freepdk45_fd_ota_design.md. Multistable DC: always seed from dc_guesses.",
+  "solved": ["G1", "G2", "VSP", "VSN", "TAIL", "X1", "X2", "P1", "P2",
+             "OUTP", "OUTN", "CTRL", "CMT1", "CMT2"],
+  "rails": {"GND": 0.0, "VDD": "VDD", "VINP": "VINP", "VINN": "VINN",
+            "VCMI": "VCMI", "VCM_REF": "VCM_REF", "VB_N": "VB_N",
+            "VB_CN": "VB_CN", "VB_CP": "VB_CP"},
+  "bias": {"VDD": 1.0, "VINP": 0.65, "VINN": 0.65, "VCMI": 0.65, "VCM_REF": 0.5,
+           "VB_N": 0.44, "VB_CN": 0.814, "VB_CP": 0.35},
+  "devices": [
+    {"name": "M0",  "drain": "TAIL", "gate": "VB_N",  "source": "GND",  "W": 2.10, "L": 0.2},
+    {"name": "M1",  "drain": "X1",   "gate": "G1",    "source": "TAIL", "W": 8.20, "L": 0.15},
+    {"name": "M2",  "drain": "X2",   "gate": "G2",    "source": "TAIL", "W": 8.20, "L": 0.15},
+    {"name": "M3",  "drain": "OUTP", "gate": "VB_CN", "source": "X1",   "W": 4.56, "L": 0.1},
+    {"name": "M4",  "drain": "OUTN", "gate": "VB_CN", "source": "X2",   "W": 4.56, "L": 0.1},
+    {"name": "M5",  "drain": "OUTP", "gate": "VB_CP", "source": "P1",   "W": 9.08, "L": 0.1},
+    {"name": "M6",  "drain": "OUTN", "gate": "VB_CP", "source": "P2",   "W": 9.08, "L": 0.1},
+    {"name": "M7",  "drain": "P1",   "gate": "CTRL",  "source": "VDD",  "W": 13.0, "L": 0.2},
+    {"name": "M8",  "drain": "P2",   "gate": "CTRL",  "source": "VDD",  "W": 13.0, "L": 0.2},
+    {"name": "MS1", "drain": "VDD",  "gate": "OUTP",    "source": "CMT1", "W": 1.0, "L": 0.1},
+    {"name": "MS2", "drain": "CTRL", "gate": "VCM_REF", "source": "CMT1", "W": 1.0, "L": 0.1},
+    {"name": "MS3", "drain": "VDD",  "gate": "OUTN",    "source": "CMT2", "W": 1.0, "L": 0.1},
+    {"name": "MS4", "drain": "CTRL", "gate": "VCM_REF", "source": "CMT2", "W": 1.0, "L": 0.1},
+    {"name": "MT1", "drain": "CMT1", "gate": "VB_N",  "source": "GND",  "W": 0.5, "L": 0.2},
+    {"name": "MT2", "drain": "CMT2", "gate": "VB_N",  "source": "GND",  "W": 0.5, "L": 0.2},
+    {"name": "MD",  "drain": "CTRL", "gate": "CTRL",  "source": "VDD",  "W": 4.0, "L": 0.2}
+  ],
+  "models": {
+    "M0": {"type": "freepdk45.nmos"}, "M1": {"type": "freepdk45.nmos"},
+    "M2": {"type": "freepdk45.nmos"}, "M3": {"type": "freepdk45.nmos"},
+    "M4": {"type": "freepdk45.nmos"},
+    "M5": {"type": "freepdk45.pmos", "vb": 1.0}, "M6": {"type": "freepdk45.pmos", "vb": 1.0},
+    "M7": {"type": "freepdk45.pmos", "vb": 1.0}, "M8": {"type": "freepdk45.pmos", "vb": 1.0},
+    "MS1": {"type": "freepdk45.nmos"}, "MS2": {"type": "freepdk45.nmos"},
+    "MS3": {"type": "freepdk45.nmos"}, "MS4": {"type": "freepdk45.nmos"},
+    "MT1": {"type": "freepdk45.nmos"}, "MT2": {"type": "freepdk45.nmos"},
+    "MD": {"type": "freepdk45.pmos", "vb": 1.0}
+  },
+  "resistors": [
+    {"name": "RS1", "a": "VINP", "b": "VSP", "R": 1000.0},
+    {"name": "RS2", "a": "VINN", "b": "VSN", "R": 1000.0},
+    {"name": "RB1", "a": "G1", "b": "VCMI", "R": 1000000.0},
+    {"name": "RB2", "a": "G2", "b": "VCMI", "R": 1000000.0}
+  ],
+  "capacitors": [
+    {"name": "CC1", "a": "VSP", "b": "G1", "C": 2e-12},
+    {"name": "CC2", "a": "VSN", "b": "G2", "C": 2e-12},
+    {"name": "CL1", "a": "OUTP", "b": "GND", "C": 2e-13},
+    {"name": "CL2", "a": "OUTN", "b": "GND", "C": 2e-13}
+  ],
+  "outputs": ["OUTP", "OUTN"],
+  "ac_drives": {"VINP": 0.5, "VINN": -0.5},
+  "dc_guesses": [
+    {"G1": 0.65, "G2": 0.65, "VSP": 0.65, "VSN": 0.65, "TAIL": 0.15,
+     "X1": 0.25, "X2": 0.25, "P1": 0.85, "P2": 0.85,
+     "OUTP": 0.5, "OUTN": 0.5, "CTRL": 0.6, "CMT1": 0.1, "CMT2": 0.1},
+    {"G1": 0.65, "G2": 0.65, "VSP": 0.65, "VSN": 0.65, "TAIL": 0.12,
+     "X1": 0.30, "X2": 0.30, "P1": 0.80, "P2": 0.80,
+     "OUTP": 0.45, "OUTN": 0.45, "CTRL": 0.65, "CMT1": 0.08, "CMT2": 0.08}
+  ],
+  "analyses": {
+    "ac": {"freqs": {"start": 1000.0, "stop": 100000000000.0, "num": 141, "scale": "log"}},
+    "noise": {"freqs": {"start": 1000.0, "stop": 1000000000.0, "num": 51, "scale": "log"},
+              "band": [10000.0, 100000000.0]}
+  },
+  "explore": {
+    "variables": {
+      "W_IN":   {"min": 3.0,  "max": 11.0, "targets": ["M1.W", "M2.W"]},
+      "W_TAIL": {"min": 1.0,  "max": 2.6,  "targets": ["M0.W"]},
+      "W_LOAD": {"min": 7.0,  "max": 13.0, "targets": ["M7.W", "M8.W"]},
+      "VB_N":   {"min": 0.42, "max": 0.50},
+      "VB_CN":  {"min": 0.77, "max": 0.83}
+    },
+    "objectives": {"power_uW": "min"},
+    "constraints": {"gain_peak_dB": {"min": 45.0}},
+    "band": [10000.0, 100000000.0],
+    "freqs": {"start": 3, "stop": 11, "num": 121}
+  }
+}

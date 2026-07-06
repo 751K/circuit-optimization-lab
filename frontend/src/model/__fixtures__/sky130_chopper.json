@@ -1,0 +1,83 @@
+{
+  "name": "sky130_chopper",
+  "description": "Silicon (SKY130) chopper amplifier: NMOS input chopper -> NMOS diff pair with diode-connected PMOS loads -> NMOS output chopper -> hold caps, f_chop=250kHz. Clocks drive the switch gates directly (transient_inputs); the differential input drives the VINP/VINN source nodes (node_inputs) - no ideal vsources, so the border-free time-domain PAC/PNoise paths apply (hard-switched conductances converge poorly in sideband-truncated HB). Demodulated differential output (OUTP-OUTN) is DC at gain*(VINP-VINN), gain = -gm1/gm3 (about -1.77). Validated: local transient, PSS orbit, ngspice .tran on the same BSIM4 card + .osdi, and frozen-clock LTI oracles for PAC/PNoise (see tests/test_sky130_chopper.py). The explore block makes this a surrogate-dataset config: python -m core dataset examples/sky130_chopper.json --labels pss,pac,pnoise -n 200 --out chopper_ds labels every candidate with the chopper's periodic figures of merit (conversion gain, band-integrated input-referred noise).",
+  "solved": ["G1", "G2", "D1", "D2", "OUTP", "OUTN", "TAIL"],
+  "rails": {"GND": 0.0, "VDD": "VDD", "VBIAS": "VB", "VINP": "VINP", "VINN": "VINN",
+            "CLK": "VCK", "CLKB": "VCKB"},
+  "bias": {"VDD": 1.8, "VB": 0.75, "VINP": 0.905, "VINN": 0.895,
+           "VCK": 1.8, "VCKB": 0.0},
+  "devices": [
+    {"name": "SI1", "drain": "G1", "gate": "CLK", "source": "VINP", "W": 2.0, "L": 0.15},
+    {"name": "SI2", "drain": "G1", "gate": "CLKB", "source": "VINN", "W": 2.0, "L": 0.15},
+    {"name": "SI3", "drain": "G2", "gate": "CLK", "source": "VINN", "W": 2.0, "L": 0.15},
+    {"name": "SI4", "drain": "G2", "gate": "CLKB", "source": "VINP", "W": 2.0, "L": 0.15},
+    {"name": "M1", "drain": "D1", "gate": "G1", "source": "TAIL", "W": 8.0, "L": 0.5},
+    {"name": "M2", "drain": "D2", "gate": "G2", "source": "TAIL", "W": 8.0, "L": 0.5},
+    {"name": "M3", "drain": "D1", "gate": "D1", "source": "VDD", "W": 2.0, "L": 0.5},
+    {"name": "M4", "drain": "D2", "gate": "D2", "source": "VDD", "W": 2.0, "L": 0.5},
+    {"name": "M5", "drain": "TAIL", "gate": "VBIAS", "source": "GND", "W": 6.0, "L": 1.0},
+    {"name": "SO1", "drain": "OUTP", "gate": "CLK", "source": "D1", "W": 2.0, "L": 0.15},
+    {"name": "SO2", "drain": "OUTP", "gate": "CLKB", "source": "D2", "W": 2.0, "L": 0.15},
+    {"name": "SO3", "drain": "OUTN", "gate": "CLK", "source": "D2", "W": 2.0, "L": 0.15},
+    {"name": "SO4", "drain": "OUTN", "gate": "CLKB", "source": "D1", "W": 2.0, "L": 0.15}
+  ],
+  "models": {
+    "SI1": {"type": "sky130.nmos"}, "SI2": {"type": "sky130.nmos"},
+    "SI3": {"type": "sky130.nmos"}, "SI4": {"type": "sky130.nmos"},
+    "M1": {"type": "sky130.nmos"}, "M2": {"type": "sky130.nmos"},
+    "M3": {"type": "sky130.pmos", "vb": 1.8}, "M4": {"type": "sky130.pmos", "vb": 1.8},
+    "M5": {"type": "sky130.nmos"},
+    "SO1": {"type": "sky130.nmos"}, "SO2": {"type": "sky130.nmos"},
+    "SO3": {"type": "sky130.nmos"}, "SO4": {"type": "sky130.nmos"}
+  },
+  "capacitors": [
+    {"name": "CO1", "a": "OUTP", "b": "GND", "C": 1e-11},
+    {"name": "CO2", "a": "OUTN", "b": "GND", "C": 1e-11}
+  ],
+  "outputs": ["OUTP", "OUTN"],
+  "dc_guesses": [
+    {"G1": 0.9, "G2": 0.9, "D1": 0.7, "D2": 0.7, "OUTP": 0.7, "OUTN": 0.7,
+     "TAIL": 0.15},
+    {"G1": 0.9, "G2": 0.9, "D1": 1.0, "D2": 1.0, "OUTP": 1.0, "OUTN": 1.0,
+     "TAIL": 0.3}
+  ],
+  "periodic": {
+    "frequency": 250000.0,
+    "n_points": 401,
+    "node_inputs": {"VINP": "vinp", "VINN": "vinn", "CLK": "clk", "CLKB": "clkb"},
+    "inputs": {
+      "clk": {"type": "pulse", "low": 0.0, "high": 1.8, "duty": 0.5, "delay": 0.0,
+              "rise": 1e-07, "fall": 1e-07},
+      "clkb": {"type": "pulse", "low": 0.0, "high": 1.8, "duty": 0.5, "delay": 2e-06,
+               "rise": 1e-07, "fall": 1e-07},
+      "vinp": {"type": "constant", "value": 0.905},
+      "vinn": {"type": "constant", "value": 0.895}
+    }
+  },
+  "analyses": {
+    "transient": {"tstop": 4e-05, "n_points": 4001},
+    "pss": {"residual_tol": 2e-05, "max_shooting_iters": 15,
+            "tstab_periods": 8, "integration_method": "gear2"},
+    "pac": {
+      "freqs": {"start": 100.0, "stop": 100000.0, "num": 21, "scale": "log"},
+      "input_drive": {"vinp": 0.5, "vinn": -0.5},
+      "time_domain": true
+    },
+    "pnoise": {
+      "freqs": {"start": 10.0, "stop": 100000.0, "num": 21, "scale": "log"},
+      "input_drive": {"vinp": 0.5, "vinn": -0.5},
+      "time_domain": true,
+      "band": [10.0, 10000.0]
+    }
+  },
+  "explore": {
+    "variables": {
+      "W_IN": {"min": 6.0, "max": 10.0, "targets": ["M1.W", "M2.W"]},
+      "W_LOAD": {"min": 1.0, "max": 3.0, "targets": ["M3.W", "M4.W"]},
+      "VB": {"min": 0.7, "max": 0.8}
+    },
+    "objectives": {"irn_uV": "min"},
+    "band": [10.0, 10000.0],
+    "freqs": {"start": 1, "stop": 5, "num": 21}
+  }
+}

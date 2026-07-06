@@ -22,6 +22,7 @@
 | `python -m circuitopt dataset examples/sky130_5t_ota.json -n 400 --out ds/ota` | 硅（SKY130）设计闭环：`models` 块绑 PDK，跨工艺角 `--corner ss`（见 §1.8） |
 | `python -m circuitopt.calibration --all` | Cadence 校准回归检查 |
 | `python demo/server.py` | Web 前端（Flask，端口 5100） |
+| `circuit-opt serve` | 本地 FastAPI 服务（需 `serve` extra，见 §1.9） |
 
 ### 性能基准
 
@@ -410,6 +411,28 @@ python -m circuitopt.optimize examples/sky130_5t_ota.json ota.pkl -n 50000 --cor
 （gain/power/bw/irn/area 中位误差 ≈1%）；筛选比 solver 快约 6000×，solver 校验保证入围设计真实可行。
 两个全差分 OTA 完整设计案例见 [SKY130 FD-OTA](sky130_fd_ota_design.md)、
 [FreePDK45 FD-OTA](freepdk45_fd_ota_design.md)（FreePDK45 案例含整机对 ngspice `.ac` 的交叉核对）。
+
+### 1.9 `serve` — 本地 FastAPI 服务
+
+把求解器栈跑成一个本地 HTTP 服务（需 `pip install -e ".[serve]"` 装 `serve` extra）：
+
+```bash
+circuit-opt serve
+python -m circuitopt.service                          # 等价的模块入口
+circuit-opt serve --port 9000 --job-workers 2          # 自定义端口 + 并发任务 worker
+```
+
+**参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--host` | str | `127.0.0.1` | 绑定地址（仅本机）；改 `0.0.0.0` 会把求解器暴露到网络，风险自担 |
+| `--port` | int | `8341` | 监听端口 |
+| `--reload` | flag | — | 开发用 uvicorn 自动重载；此模式下 `--job-workers` 不生效 |
+| `--job-workers` | int | `1` | `explore`/`mc` 后台任务的线程池大小 |
+
+完整的端点参考（同步分析、后台任务、WebSocket 进度、job 状态机、序列化约定）见
+[本地服务 API](service_api_zh.md)。
 
 ---
 

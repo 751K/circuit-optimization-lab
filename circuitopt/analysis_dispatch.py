@@ -26,7 +26,7 @@ from .pss_solver import pss_solve
 from .transient_solver import transient
 
 
-_ANALYSIS_ORDER = ("ac", "noise", "transient", "pss", "pac", "pnoise")
+ANALYSIS_ORDER = ("ac", "noise", "transient", "pss", "pac", "pnoise")
 
 
 def _pack_adaptive_config(kwargs):
@@ -457,7 +457,7 @@ def run_analysis_suite(spec_or_path: CircuitSpec | str | Path,
                 )
         return results["pss"]
 
-    for name in _ANALYSIS_ORDER:
+    for name in ANALYSIS_ORDER:
         if name not in analysis_cfg or not want(name):
             continue
         cfg = dict(analysis_cfg.get(name) or {})

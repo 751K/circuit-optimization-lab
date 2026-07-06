@@ -132,6 +132,21 @@ def parse_explore(cfg):
     return ExploreConfig(variables, constraints, objectives, band, freqs)
 
 
+def explore_setup_from_dict(data):
+    """Return (topo, base_sizes, base_bias, nf, ExploreConfig) from a parsed dict.
+
+    Dict sibling of :func:`load_explore_json` — the single place that turns a
+    circuit-JSON object carrying an ``explore`` block into the exploration inputs,
+    so the CLI (which reads a file) and the service (which receives a body dict)
+    share one parse path. Legacy ``builtin_topology`` configs are rejected."""
+    cfg = parse_explore(data.get("explore"))
+    if "builtin_topology" in data:
+        raise ValueError("builtin_topology configs are deprecated; use a full circuit JSON")
+    spec = circuit_from_dict(data)
+    topo, sizes, bias, nf = spec.topology, dict(spec.sizes), dict(spec.bias), spec.nf
+    return topo, sizes, bias, nf, cfg
+
+
 def load_explore_json(path):
     """Return (topo, base_sizes, base_bias, nf, ExploreConfig) from a JSON file.
 
@@ -140,12 +155,26 @@ def load_explore_json(path):
     the topology in JSON makes circuit changes explicit and solver-independent."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    cfg = parse_explore(data.get("explore"))
-    if "builtin_topology" in data:
-        raise ValueError("builtin_topology configs are deprecated; use a full circuit JSON")
-    spec = circuit_from_dict(data)
-    topo, sizes, bias, nf = spec.topology, dict(spec.sizes), dict(spec.bias), spec.nf
-    return topo, sizes, bias, nf, cfg
+    return explore_setup_from_dict(data)
+
+
+def explore_from_dict(data, n=200, seed=0, method="lhs", corner=None,
+                      progress=None, should_stop=None):
+    """Run a full exploration from a parsed circuit-JSON *dict*. Returns the
+    results dict (same shape as :func:`explore`).
+
+    The single shared entry point for `circuit-opt explore` (via :func:`run_cli`)
+    and the service's ``POST /api/v1/jobs/explore`` — both parse the ``explore``
+    block and bind any silicon models here, so the two surfaces can never drift.
+    ``progress``/``should_stop`` are threaded straight to :func:`explore` for the
+    background-job progress/cancel hooks."""
+    topo, sizes, bias, nf, cfg = explore_setup_from_dict(data)
+    # Bind any non-default per-device models (silicon sky130/freepdk45); without
+    # this a silicon config silently falls back to the default OTFT PDK.
+    model_types, device_kwargs = models_from_config(data)
+    return explore(topo, sizes, bias, nf, cfg, n=n, seed=seed, method=method,
+                   progress=progress, corner=corner, model_types=model_types,
+                   device_kwargs=device_kwargs, should_stop=should_stop)
 
 
 # ── sampling ──────────────────────────────────────────────────────────────
@@ -368,14 +397,23 @@ def pareto_front(rows, objectives):
 # ── driver ──────────────────────────────────────────────────────────────────
 def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
             progress=None, seed_fn=None, corner=None, model_types=None,
-            device_kwargs=None):
+            device_kwargs=None, should_stop=None):
     """Sample, evaluate, constrain, and Pareto-select. Returns a results dict.
 
     seed_fn(sizes, bias) -> x0_guess optionally provides a per-candidate DC seed
     (e.g. the bare-AFE operating point for the testbench).
     corner applies a process shift (e.g. the slow corner) to every evaluation; for a
     SKY130 corner name it is routed onto the silicon devices instead.
-    model_types / device_kwargs bind non-default per-device models (silicon)."""
+    model_types / device_kwargs bind non-default per-device models (silicon).
+
+    ``progress(done, total)`` — the existing 2-arg callback, fired after each
+    candidate finishes (``done`` 1-based, ``total`` == ``n``). ``should_stop()`` —
+    optional zero-arg predicate checked *before* each candidate; returning ``True``
+    finishes early over the candidates already evaluated and adds
+    ``"stopped_early": True`` to the results (and its ``summary``). Cancellation is
+    cooperative — a candidate already in flight runs to completion first. Both
+    default ``None``; with both ``None`` the result is unchanged from the pre-hook
+    behaviour (same seed → same candidates)."""
     # One binding carries topo + the per-device model map to every candidate, so a
     # silicon config never silently falls back to the default OTFT PDK. ``at_corner``
     # bakes a silicon corner onto the device kwargs and clears the solver corner; an
@@ -386,7 +424,11 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
     corner = binding.corner
     samples = sample(cfg.variables, n, seed=seed, method=method)
     candidates = []
+    stopped_early = False
     for i, var_values in enumerate(samples):
+        if should_stop is not None and should_stop():
+            stopped_early = True
+            break
         sizes, bias, cand_nf = apply_variables(cfg.variables, var_values,
                                                base_sizes, base_bias, base_nf=nf)
         x0 = seed_fn(sizes, bias) if seed_fn is not None else None
@@ -426,9 +468,17 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
             pick = (min if sense == "min" else max)(pool, key=lambda c: c["metrics"][metric])
             summary["best"][metric] = {"idx": pick["idx"], "value": pick["metrics"][metric],
                                        "vars": pick["vars"]}
-    return {"candidates": candidates, "summary": summary,
-            "variables": [v.name for v in cfg.variables],
-            "objectives": cfg.objectives}
+    results = {"candidates": candidates, "summary": summary,
+               "variables": [v.name for v in cfg.variables],
+               "objectives": cfg.objectives}
+    if stopped_early:
+        # Early cancellation: expose how many candidates actually ran (``n`` above
+        # is the requested count) plus the flag, both at the top level and in the
+        # summary, mirroring mismatch_mc's ``stopped_early`` contract.
+        summary["evaluated"] = len(candidates)
+        summary["stopped_early"] = True
+        results["stopped_early"] = True
+    return results
 
 
 # ── output ────────────────────────────────────────────────────────────────
@@ -507,11 +557,8 @@ def add_cli_args(parser):
 
 def run_cli(args):
     """Execute the explore feature from parsed ``args``. Returns the results dict."""
-    topo, sizes, bias, nf, cfg = load_explore_json(args.config)
-    # bind any non-default per-device models (silicon sky130/freepdk45); without this
-    # a silicon config silently falls back to the default OTFT PDK.
     with open(args.config, "r", encoding="utf-8") as f:
-        model_types, device_kwargs = models_from_config(json.load(f))
+        data = json.load(f)
 
     def progress(done, total):
         if not args.quiet:
@@ -519,9 +566,10 @@ def run_cli(args):
 
     if not args.quiet:
         print(f"Exploring {args.config}  (n={args.n}, method={args.method})")
-    results = explore(topo, sizes, bias, nf, cfg, n=args.n, seed=args.seed,
-                      method=args.method, progress=progress, corner=args.corner,
-                      model_types=model_types, device_kwargs=device_kwargs)
+    # explore_from_dict is the shared CLI/service entry: it parses the explore
+    # block + binds silicon models once, so both surfaces stay in lock-step.
+    results = explore_from_dict(data, n=args.n, seed=args.seed, method=args.method,
+                                corner=args.corner, progress=progress)
     if not args.quiet:
         print()
     print(_format_summary(results))

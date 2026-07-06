@@ -1,0 +1,18 @@
+{
+  "name": "ideal_vsource_divider",
+  "solved": ["IN", "MID"],
+  "rails": {"GND": 0.0},
+  "devices": [],
+  "vsources": [
+    {"name": "V1", "p": "IN", "q": "GND", "value": 2.0}
+  ],
+  "resistors": [
+    {"name": "R1", "a": "IN", "b": "MID", "R": 1000.0},
+    {"name": "R2", "a": "MID", "b": "GND", "R": 1000.0}
+  ],
+  "capacitors": [
+    {"name": "C1", "a": "MID", "b": "GND", "C": 1e-9}
+  ],
+  "outputs": ["MID"],
+  "bias": {}
+}

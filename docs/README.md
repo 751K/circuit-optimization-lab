@@ -73,7 +73,9 @@ everything works. From there, swap in any circuit JSON or use
 **Python (pip).** The OTFT / analysis core needs only `requirements.txt` (numpy,
 scipy; Numba is optional but recommended — the solver hot paths are JIT kernels).
 `requirements-ml.txt` adds scikit-learn / torch for the ML surrogate layer;
-`requirements-demo.txt` adds Flask for the web demo. Everything so far runs with no
+`requirements-demo.txt` adds Flask for the web demo; the `serve` extra
+(`pip install -e ".[serve]"`) adds FastAPI + uvicorn for the local HTTP
+service layer (`circuit-opt serve`, see below). Everything so far runs with no
 external simulator and no license.
 
 **External open-source tools (only for the silicon PDKs — not pip-installable).**
@@ -521,6 +523,23 @@ live. Includes preset designs and DC warm-start logic.
 
 ---
 
+## Local Service API
+
+A local FastAPI HTTP layer over the same solver stack the CLI drives — the
+shared base for a future desktop GUI and MCP server. Synchronous endpoints
+(`health`/`capabilities`/`validate`/`solve`) plus background-job endpoints for
+`explore`/`mc` (submit, poll, WebSocket progress, cancel), all thin adapters
+over the existing single sources of truth, so CLI and HTTP stay in lockstep.
+
+```bash
+pip install -e ".[serve]"
+circuit-opt serve   # http://127.0.0.1:8341, swagger at /docs
+```
+
+See [Service API](service_api.md) for the full endpoint reference.
+
+---
+
 ## Benchmarks
 
 Five fixed benchmarks for performance tracking:
@@ -665,9 +684,10 @@ cleanly when it's absent.
 | [Core Solver Overview](module_overview.md) | Understand how each solver works, import dependencies, and calibration data |
 | [JSON Circuit Format](json_circuit_format.md) | Full field-by-field reference for writing your own circuit JSON |
 | [CLI Reference](cli_reference.md) | Every subcommand and flag, including `dataset`/`surrogate`/`optimize` and the `models`/silicon-corner options |
+| [Service API](service_api.md) | The local FastAPI HTTP layer: endpoints, job state machine, and CLI equivalence |
 | [SKY130 FD-OTA design case](sky130_fd_ota_design.md) | End-to-end 130 nm fully-differential OTA: architecture → surrogate → optimize → PVT |
 | [FreePDK45 FD-OTA design case](freepdk45_fd_ota_design.md) | End-to-end 45 nm/1.0 V FD-OTA, incl. the whole-OTA ngspice `.ac` cross-check |
-| [Future Plan](futureplan.md) | Strategic direction: local service layer, desktop client, MCP server, ML scaling |
+| [Future Plan](futureplan.md) | Strategic direction: desktop client, MCP server, ML scaling |
 | `tests/` directory | Working examples of every API call with expected outputs |
 | `benchmarks/` directory | Performance baselines and how the hardware-accelerated paths compare |
 

@@ -40,6 +40,7 @@ Repository = "https://github.com/751K/circuit-optimization-lab"
 #   plot     circuitopt/__main__.py plot subcommand + examples/plot_*.py
 #   parquet  circuitopt/dataset.py     (optional .parquet dataset export)
 #   demo     demo/server.py      (Flask AFE Tuner web app)
+#   serve    circuitopt/service/ (FastAPI local service layer + `circuitopt serve` CLI)
 ml = [
     "scikit-learn>=1.3",
     "joblib>=1.3",
@@ -56,15 +57,25 @@ parquet = [
 demo = [
     "flask>=3.0",
 ]
+serve = [
+    "fastapi>=0.110",    # circuitopt/service/app.py (create_app + routes)
+    "uvicorn>=0.27",     # circuitopt/service/cli.py  (programmatic server start)
+]
 test = [
     "pytest>=8.0",
     "jsonschema>=4.0",
     "flask>=3.0",        # tests/test_demo_server.py imports demo.server
+    "fastapi>=0.110",    # tests/test_service.py imports circuitopt.service.app
+    "uvicorn>=0.27",     # serve extra's runtime pair (kept aligned with fastapi)
+    "httpx>=0.27",       # fastapi.testclient.TestClient requires httpx
 ]
 dev = [
     "pytest>=8.0",
     "jsonschema>=4.0",
     "flask>=3.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "httpx>=0.27",
     "ruff>=0.6",
 ]
 # Everything installable at once (excludes torch, which is heavy / env-specific).
@@ -74,6 +85,8 @@ all = [
     "matplotlib>=3.7",
     "pyarrow>=14.0",
     "flask>=3.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
 ]
 
 [project.scripts]
@@ -82,7 +95,9 @@ circuit-opt = "circuitopt.__main__:main"
 [tool.setuptools]
 # Top-level import name. Renamed from the generic `core` in 0.2.0 — this was the
 # blocker for public PyPI publishing (name collisions in shared environments).
-packages = ["circuitopt"]
+# ``circuitopt.service`` is listed explicitly: with an explicit ``packages`` list
+# setuptools does NOT auto-discover subpackages, so it must be named here.
+packages = ["circuitopt", "circuitopt.service"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

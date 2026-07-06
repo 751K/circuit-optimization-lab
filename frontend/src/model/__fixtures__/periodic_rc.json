@@ -1,0 +1,56 @@
+{
+  "name": "periodic_rc_lowpass",
+  "solved": ["OUT"],
+  "rails": {
+    "VIN": "VIN",
+    "GND": 0.0
+  },
+  "devices": [],
+  "resistors": [
+    {"name": "RIN", "a": "VIN", "b": "OUT", "R": 100000.0}
+  ],
+  "capacitors": [
+    {"name": "COUT", "a": "OUT", "b": "GND", "C": 1e-9}
+  ],
+  "bias": {
+    "VIN": 0.0
+  },
+  "outputs": ["OUT"],
+  "ac_drives": {
+    "VIN": 1.0
+  },
+  "periodic": {
+    "frequency": 1000.0,
+    "n_points": 101,
+    "inputs": {
+      "vin": {"type": "constant", "value": "VIN"}
+    },
+    "node_inputs": {
+      "VIN": "vin"
+    }
+  },
+  "analyses": {
+    "ac": {
+      "freqs": {"start": 100.0, "stop": 1000.0, "num": 2, "scale": "log"}
+    },
+    "noise": {
+      "freqs": {"start": 100.0, "stop": 1000.0, "num": 2, "scale": "log"},
+      "band": [100.0, 1000.0]
+    },
+    "pss": {
+      "residual_tol": 1e-12,
+      "max_shooting_iters": 2
+    },
+    "pac": {
+      "freqs": [100.0, 1000.0],
+      "input_drive": {"vin": 1.0}
+    },
+    "pnoise": {
+      "freqs": [100.0, 1000.0],
+      "input_drive": {"vin": 1.0},
+      "max_sideband": 0,
+      "n_period_samples": 32,
+      "band": [100.0, 1000.0]
+    }
+  }
+}

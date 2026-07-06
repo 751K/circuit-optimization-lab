@@ -1,0 +1,362 @@
+/* F2 editor styling — plain CSS, no UI framework. Engineering-clean, light. */
+
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --border: #d8dce2;
+  --border-strong: #b9c0cb;
+  --ink: #1f2430;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --accent-soft: #e8f0ff;
+  --ok: #15803d;
+  --err: #dc2626;
+  --warn: #b45309;
+  --node-ink: #334155;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font);
+  color: var(--ink);
+  background: var(--bg);
+  font-size: 13px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ── toolbar ─────────────────────────────────────────────────────────── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.brand { font-weight: 700; font-size: 14px; letter-spacing: 0.2px; }
+.toolbar-actions { display: flex; gap: 6px; }
+.banner {
+  margin-left: auto;
+  color: var(--warn);
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.banner code { font-family: var(--mono); background: #fde9d0; padding: 1px 4px; border-radius: 3px; }
+
+/* ── columns ─────────────────────────────────────────────────────────── */
+.columns {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.center {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+}
+.right {
+  width: 300px;
+  flex: none;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── panels ──────────────────────────────────────────────────────────── */
+.panel {
+  padding: 12px 14px;
+  overflow-y: auto;
+}
+.palette {
+  width: 210px;
+  flex: none;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+}
+.inspector { flex: 1 1 auto; min-height: 0; }
+.panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin: 0 0 10px; }
+.panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin: 16px 0 6px; }
+
+/* palette items */
+.palette-grid { display: flex; flex-direction: column; gap: 6px; }
+.pal-item {
+  text-align: left;
+  padding: 9px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: #fbfcfe;
+  cursor: grab;
+  font-weight: 600;
+  color: var(--node-ink);
+}
+.pal-item:hover { background: var(--accent-soft); border-color: var(--accent); }
+.pal-item:active { cursor: grabbing; }
+
+/* buttons */
+.btn {
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: #fbfcfe;
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 12px;
+  margin-top: 8px;
+  width: 100%;
+}
+.btn:hover:not(:disabled) { background: var(--accent-soft); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.primary:hover:not(:disabled) { background: #1d4ed8; }
+.btn.tiny { width: auto; padding: 2px 8px; margin: 0 0 0 6px; font-size: 11px; }
+
+/* fields */
+.field { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.field span { font-size: 11px; color: var(--muted); }
+.field input, .field select, textarea {
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--ink);
+}
+.field input:focus, .field select:focus, textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+
+.import-box { margin-top: 8px; }
+.import-box textarea { width: 100%; font-family: var(--mono); font-size: 11px; resize: vertical; }
+.err { color: var(--err); font-size: 11px; margin: 4px 0; }
+
+/* inspector editors */
+.editor .badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin-bottom: 10px;
+}
+.subhead { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin: 12px 0 6px; border-top: 1px dashed var(--border); padding-top: 8px; }
+.muted { color: var(--muted); }
+.small { font-size: 11px; }
+.stats { list-style: none; padding: 0; margin: 8px 0; }
+.stats li { padding: 2px 0; border-bottom: 1px dotted var(--border); }
+
+/* ── canvas ──────────────────────────────────────────────────────────── */
+.canvas-wrap { flex: 1 1 auto; min-width: 0; }
+.react-flow { background: var(--bg); }
+
+/* custom nodes */
+.cnode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel);
+  border: 1.5px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--node-ink);
+  min-width: 96px;
+  position: relative;
+  font-size: 11px;
+}
+.cnode.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.cnode .sym { color: var(--node-ink); flex: none; }
+.cnode-body { display: flex; flex-direction: column; line-height: 1.25; }
+.cnode-name { font-weight: 700; font-size: 12px; display: flex; align-items: center; gap: 4px; }
+.cnode-sub { color: var(--muted); font-size: 10px; }
+.cnode-model { color: var(--accent); font-size: 10px; font-family: var(--mono); }
+.pol-tag { font-size: 9px; font-weight: 700; border-radius: 3px; padding: 0 3px; }
+.pol-tag.n { background: #dcfce7; color: #166534; }
+.pol-tag.p { background: #fee2e2; color: #991b1b; }
+
+.cnode.rail { background: #eef2ff; }
+.cnode.output { background: #f0fdf4; }
+
+/* handles */
+.handle {
+  width: 8px;
+  height: 8px;
+  background: var(--accent);
+  border: 1.5px solid #fff;
+}
+
+/* per-port net labels */
+.netlbl {
+  position: absolute;
+  font-size: 9px;
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.85);
+  padding: 0 2px;
+  border-radius: 2px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.netlbl-top { top: -14px; left: 50%; transform: translateX(-50%); }
+.netlbl-bottom { bottom: -14px; left: 50%; transform: translateX(-50%); }
+.netlbl-left { left: -4px; top: -14px; }
+.netlbl-right { right: -4px; top: -14px; }
+
+/* ── edges (EDA-style: signal solid & dark, power dimmed & dashed) ─────── */
+/* Signal nets: the readable path. Solid, darker, a touch wider. */
+.react-flow__edge.edge-signal .react-flow__edge-path {
+  stroke: #64748b;
+  stroke-width: 1.6px;
+}
+/* Power/ground rail nets: real schematics don't draw long power wires, so we
+   dim them hard — thin, light, dashed, low opacity — to keep signal flow read. */
+.react-flow__edge.edge-rail .react-flow__edge-path {
+  stroke: #b6bdc9;
+  stroke-width: 1px;
+  stroke-dasharray: 4 3;
+  stroke-opacity: 0.6;
+}
+/* Net-conflict short: loud red over everything. */
+.react-flow__edge.edge-conflict .react-flow__edge-path {
+  stroke: var(--err) !important;
+  stroke-width: 2.5px !important;
+  stroke-dasharray: none !important;
+  stroke-opacity: 1 !important;
+}
+/* RF selection: highlight a picked edge (works with the dynamic net rule too). */
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--accent);
+  stroke-width: 2.4px;
+  stroke-opacity: 1;
+  stroke-dasharray: none;
+}
+.react-flow__edge-textbg { fill: var(--panel); }
+.react-flow__edge-text { font-size: 9px; fill: var(--muted); }
+
+/* ── junction dots (schematic tee where a port carries >=2 edges) ─────── */
+.jdot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--node-ink);
+  pointer-events: none;
+  z-index: 2;
+}
+.jdot-top { top: -3.5px; left: 50%; transform: translateX(-50%); }
+.jdot-bottom { bottom: -3.5px; left: 50%; transform: translateX(-50%); }
+.jdot-left { left: -3.5px; top: 50%; transform: translateY(-50%); }
+.jdot-right { right: -3.5px; top: 50%; transform: translateY(-50%); }
+
+/* ── run panel ───────────────────────────────────────────────────────── */
+.runpanel { border-top: 1px solid var(--border); flex: none; }
+.runpanel-tab {
+  width: 100%;
+  text-align: left;
+  padding: 8px 14px;
+  background: #f0f2f6;
+  border: none;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--ink);
+}
+.runpanel-body { padding: 10px 14px; max-height: 60vh; overflow-y: auto; }
+.runpanel.open { display: flex; flex-direction: column; min-height: 0; }
+.runpanel.open .runpanel-body { flex: 1 1 auto; }
+
+/* run controls */
+.analysis-list { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 0 0 8px; }
+.analysis-item { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; }
+.analysis-item input { margin: 0; }
+.run-actions { display: flex; gap: 8px; margin: 10px 0 4px; }
+.run-actions .btn { width: auto; flex: 1; }
+
+/* spinner */
+.spinner {
+  display: inline-block;
+  width: 11px; height: 11px;
+  margin-left: 8px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: -1px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* errors */
+.run-error {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--err);
+  border-left-width: 3px;
+  border-radius: 4px;
+  background: #fef2f2;
+}
+.run-error-stage { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--err); font-weight: 700; }
+.run-error-msg { font-family: var(--mono); font-size: 11px; color: var(--ink); white-space: pre-wrap; margin: 2px 0 4px; }
+
+/* results */
+.run-results { margin-top: 8px; }
+.result-block { margin-bottom: 16px; border-top: 1px dashed var(--border); padding-top: 8px; }
+.result-block h3 { color: var(--accent); }
+
+/* metric cards */
+.metric-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+.metric-card {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  background: var(--panel);
+  min-width: 90px;
+}
+.metric-key { font-size: 10px; color: var(--muted); font-family: var(--mono); }
+.metric-val { font-size: 14px; font-weight: 600; color: var(--ink); }
+.metric-unit { font-size: 11px; font-weight: 400; color: var(--muted); }
+
+/* json tree */
+.jt-wrap { margin-top: 6px; }
+.jt-node { margin-left: 8px; }
+.jt-summary { cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.jt-children { margin-left: 12px; border-left: 1px dotted var(--border); padding-left: 8px; }
+.jt-leaf { font-family: var(--mono); font-size: 11px; margin: 1px 0; }
+.jt-key { color: var(--accent); }
+.jt-val { color: var(--ink); }
+
+/* ── status bar ──────────────────────────────────────────────────────── */
+.statusbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.statusbar .conn.up { color: var(--ok); }
+.statusbar .conn.down { color: var(--muted); }
+.statusbar .sep { width: 1px; height: 14px; background: var(--border); }
+.statusbar .ok { color: var(--ok); font-weight: 600; }
+.statusbar .err { color: var(--err); }
+.statusbar .warn { color: var(--warn); }

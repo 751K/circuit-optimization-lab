@@ -22,12 +22,14 @@ The current solver stack covers:
   PSS, PAC, and PNoise behavior.
 
 The implementation is intentionally small and self-contained. It currently has
-39 Python files under `circuitopt/`, including `__init__.py`, the CLI entry
-`__main__.py`, calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
+39 Python files directly under `circuitopt/` (45 including the `service/`
+subpackage), including `__init__.py`, the CLI entry `__main__.py`,
+calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
 modules, the main solver stack, an ML-surrogate layer (dataset builder, surrogate
-training, screen-and-verify optimizer), and two silicon PDKs — SKY130 (via an
+training, screen-and-verify optimizer), two silicon PDKs — SKY130 (via an
 OpenVAF/OSDI bridge) and FreePDK45 (via an ngspice-C evaluator) — plugged into the
-same `TransistorModel` interface as the original AT4000TG OTFT model.
+same `TransistorModel` interface as the original AT4000TG OTFT model, and an
+optional local HTTP service layer (`circuitopt/service/`) over the whole stack.
 
 ## File Structure
 
@@ -73,6 +75,12 @@ circuitopt/
   ngspice_char.py      FreePDK45 evaluator: batch ngspice .dc/.noise characterization → cached (Vsb,Vds,Vgs) grid.
   ngspice_device.py    TransistorModel over a cached ngspice grid (interpolated Id/gm/gds/caps/noise; extract_w + temperature).
   freepdk45_model.py   FreePDK45 nmos/pmos PDK: corner-card binding + PDK registration (ngspice-C evaluator).
+  service/             Optional local FastAPI HTTP service layer (the `serve` extra) — see below.
+    __init__.py        Re-exports CLI glue only; never imports fastapi (import circuitopt stays fastapi-free).
+    app.py             create_app() — /api/v1 routes (health/capabilities/validate/solve/jobs/*); thin adapter, no numerics.
+    jobs.py            JobManager — in-process thread-pool background jobs (explore/mc) with progress queue + cooperative cancel.
+    serialize.py        to_jsonable()/serialize_results() — numpy/complex/NaN → strict-JSON conventions.
+    cli.py              add_cli_args()/run_cli() — shared `serve` subcommand argument wiring (lazy fastapi/uvicorn import).
 ```
 
 ## Import Relationship
@@ -115,7 +123,16 @@ sky130_model.py      <- device_model, osdi_device
 ngspice_char.py      <- no internal dependency; ngspice subprocess + numpy only
 ngspice_device.py    <- device_model, ngspice_char; optional scipy at runtime
 freepdk45_model.py   <- device_model, ngspice_device
+service/app.py       <- analysis_dispatch, analysis_options, circuit_loader, device_factory, device_model,
+                        freepdk45_model, service/jobs, service/serialize; optional fastapi/pydantic at import time
+service/jobs.py      <- explore, corners, service/serialize; no fastapi (pure threading/queue)
+service/serialize.py <- no internal dependency; numpy only
+service/cli.py       <- service/app (lazy); optional uvicorn at runtime
 ```
+
+The `service/` subpackage is a pure *consumer* leaf — nothing outside it imports
+back into it, and `circuitopt/__init__.py` never imports it, so plain
+`import circuitopt` stays fastapi-free even when the `serve` extra is installed.
 
 ## Main Components
 
@@ -147,7 +164,7 @@ Defines the abstract device‑model interface that decouples solvers from concre
 - **`TransistorModel` (ABC)** — seven abstract methods (`get_Idc`, `get_op`, `get_capacitances`, `get_capacitance_charges_from_op`, `get_capacitance_branch_terms_from_op`, `get_noise_psd`, `get_numba_params`); `get_ss_params` provides a finite‑difference default that subclasses can override.
 - **`NumbaParams` (frozen dataclass)** — the 16 scalar parameters extracted once per device and passed to numba‑accelerated transient kernels.
 - **Backend-capability class attributes** — generic solvers dispatch on *capabilities*, never on a concrete backend type (no `isinstance(dev, OsdiDevice)`). `HAS_TERMINAL_LINEARIZATION` (default `False`) advertises the full quasi-static 4×4 terminal `(G, C)` stamp used by the periodic PAC/PNoise linearizer; `OsdiDevice` overrides it to `True`. `TRANSIENT_BACKEND` (default `None`, meaning the generic OTFT numba transient path) names a specialised integrator to route to instead; `OsdiDevice` sets it to `"osdi"`, which `transient_solver.py` reads to route to `circuitopt.osdi_transient.transient_osdi`.
-- **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. `get_model_class(model_type)` is a public read-only registry accessor so solvers can inspect a model's capability flags without importing a concrete backend class. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged. `register_model()` still *replaces* an existing entry on re-registration (intentional swap-in, e.g. a test stub, keeps working silently), but a genuine collision — a different class (by `__module__.__qualname__`) taking over an already-occupied name, e.g. two PDK modules racing for the same alias — now emits a `RuntimeWarning` before overwriting; a repeat import or `importlib.reload` of the *same* class stays silent.
+- **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. `get_model_class(model_type)` is a public read-only registry accessor so solvers can inspect a model's capability flags without importing a concrete backend class. `registered_models()` returns a read-only `{model_type: "module.QualName"}` snapshot of the whole registry (insertion order) for a caller that needs to *enumerate* rather than look up one entry — the service layer's `GET /api/v1/capabilities` uses it to list every selectable model key. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged. `register_model()` still *replaces* an existing entry on re-registration (intentional swap-in, e.g. a test stub, keeps working silently), but a genuine collision — a different class (by `__module__.__qualname__`) taking over an already-occupied name, e.g. two PDK modules racing for the same alias — now emits a `RuntimeWarning` before overwriting; a repeat import or `importlib.reload` of the *same* class stays silent.
 
 ### `device_factory.py`
 
@@ -275,6 +292,12 @@ key outside that union raises `ValueError` naming the analysis, the offending
 key(s), and the sorted list of valid keys. This turns a typo (e.g.
 `max_sidebands` for `max_sideband`) into an immediate error instead of a
 silently-ignored option running with its default.
+
+`ANALYSIS_ORDER = ("ac", "noise", "transient", "pss", "pac", "pnoise")` in
+`analysis_dispatch.py` is the canonical analysis-name tuple and execution order;
+`run_analysis_suite` iterates it, and the service layer's `GET
+/api/v1/capabilities` builds its `analyses` map by iterating the same tuple, so
+the two surfaces list identical analysis names with no separate hardcoded list.
 
 ### `psf.py`
 
@@ -647,6 +670,15 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
   both the `python -m circuitopt explore` subcommand and the standalone `python -m circuitopt.explore` entry
   point call the same two functions, so the two surfaces cannot drift apart (see
   [`cli_reference.md`](cli_reference.md)).
+- `explore_from_dict(data, n=, seed=, method=, corner=, progress=None, should_stop=None)` — the
+  single shared entry point for the `explore` subcommand and the service layer's
+  `POST /api/v1/jobs/explore`: parses the `explore` block, binds any silicon `models`, and calls
+  `explore()`. `progress(done, total)` / `should_stop()` are optional hooks threaded straight
+  through to `explore()` for a caller that needs live progress or cooperative cancellation (e.g.
+  the service's background-job manager, see `service/jobs.py`); both default to `None`, in which
+  case behavior is byte-identical to the pre-hook code path. On early stop, `results["stopped_early"]`
+  and `results["summary"]["stopped_early"]` are `True` and `summary["evaluated"]` records how many
+  candidates actually ran (`summary["n"]` stays the originally requested count).
 
 Example configs: `examples/afe_explore.json` and `examples/single_stage.json`;
 both are full circuit JSON files with an `explore` block.
@@ -675,7 +707,16 @@ in `corners.py` is the mismatch/latch machinery built on top of it:
 - `mismatch_mc(...)` — per-device mismatch MC at one corner, seeded from the nominal op;
   returns per-metric arrays, a latched mask, and a summary (latch rate + non-latched
   mean/std/P5/P95). Each sample is evaluated AC-first; IRN is computed only for
-  non-latched samples included in the final noise statistics.
+  non-latched samples included in the final noise statistics. Accepts optional
+  `progress(i, n, partial)` / `should_stop()` hooks (default `None`, byte-identical result to the
+  pre-hook code path): `progress` fires after each sample with a lightweight running summary,
+  `should_stop` is checked before each sample and, if it returns `True`, ends the run early with
+  `"stopped_early": True` on both the top level and `summary` — the count actually evaluated is
+  `summary["n"]` (this path has no separate "requested n" field; unlike `explore`'s
+  `summary["evaluated"]`, `mismatch_mc`'s `summary["n"]` always reflects samples actually run).
+- `mismatch_mc_from_dict(data, n=, seed=, corner="typical", progress=None, should_stop=None)` — the
+  shared entry point for the `mc` subcommand and the service layer's `POST /api/v1/jobs/mc`; parses
+  the circuit and calls `mismatch_mc()` so the two surfaces can't drift.
 
 `ac_solve` / `noise_analysis` accept the same `corner` argument (a flat process dict or a
 per-device mismatch map). The driver `examples/mc_mismatch.py` wraps this into a corner
@@ -773,6 +814,9 @@ match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see th
   Cgs/Cgd from the ngspice C-matrix (`Cgs=-cgs`, `Cgd=-cgd`); transient hooks `NotImplementedError`.
 - **`freepdk45_model.py`** — `Fp45Nfet`/`Fp45Pfet(NgspiceDevice)` + `register_pdk("freepdk45",
   ...)`. `corner` (nom/ss/ff) selects the card directory `PDK_ROOT/freepdk45/models_<corner>/`.
+  `FREEPDK45_CORNERS = ("nom", "ss", "ff")` is the public tuple of legal corner names; the service
+  layer's `GET /api/v1/capabilities` reads it directly (alongside `device_factory.SKY130_CORNERS`
+  and `device_factory.CORNERS`) rather than hardcoding the three corner families.
 
 - **`osdi_host.py`** — a ctypes host for the **OSDI 0.4 ABI**, the simulator-independent
   C interface [OpenVAF](https://github.com/pascalkuthe/OpenVAF) compiles Verilog-A
@@ -817,6 +861,45 @@ match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see th
 ...}}`) binds specific devices in a JSON circuit to a non-default PDK, so a mixed
 OTFT+silicon (or all-silicon) circuit is just configuration — see
 [JSON Circuit Description](json_circuit_format.md).
+
+### Local service layer (`service/app.py` / `jobs.py` / `serialize.py` / `cli.py`)
+
+An **optional** local FastAPI HTTP layer over the whole solver stack, gated on the
+`serve` extra (`pip install -e ".[serve]"`). It is a thin adapter — every route hands
+a request straight to an existing single source of truth and carries no numerical
+logic of its own — and is the shared base a future desktop GUI or MCP server would
+sit on top of (see [Future Plan](futureplan.md)). Full endpoint reference:
+[Service API](service_api.md).
+
+- **`app.py`** — `create_app(job_workers=1) -> FastAPI` builds the `/api/v1` app:
+  `GET health`/`capabilities`, `POST validate`/`solve` (synchronous, calling
+  `circuit_from_dict`/`validate_analysis_cfg`/`run_analysis_suite` directly), and the
+  `jobs/*` background-task routes (`POST jobs/explore`/`jobs/mc`, `GET jobs`/`jobs/{id}`,
+  `DELETE jobs/{id}`, `WS jobs/{id}/events`) backed by `jobs.JobManager`. CORS is
+  restricted to `localhost`/`127.0.0.1` on any port. `pydantic` request models
+  (`SolveRequest`/`ExploreJobRequest`/`McJobRequest`) wrap `circuit` as an opaque
+  `dict` — the circuit schema's single source of truth stays `circuit_from_dict`,
+  never re-described here.
+- **`jobs.py`** — `JobManager`/`Job`: an in-process `ThreadPoolExecutor`-backed
+  background-job table for the two long-running drivers, `explore_from_dict` and
+  `mismatch_mc_from_dict`. State machine `queued -> running -> {done, failed,
+  cancelled}`; progress is pushed onto a per-job `queue.Queue` (drained by the
+  WebSocket route) and also cached on `Job.progress` for polling; cancellation sets a
+  `threading.Event` consumed as the `should_stop` callback passed into the core driver
+  (cooperative — an in-flight candidate/sample always finishes first). Retains at most
+  `MAX_JOBS` (50) jobs, evicting the oldest already-terminal one first. Imports no
+  `fastapi` — pure threading/queue plumbing, unit-testable standalone.
+- **`serialize.py`** — `to_jsonable()`/`serialize_results()`: the numpy/complex/NaN →
+  strict-JSON conventions shared by every response (both the synchronous endpoints and
+  the job/WebSocket payloads). NaN/±Inf → `null`, `complex` → `{"re", "im"}`,
+  `numpy.ndarray` → nested `list`, `_`-prefixed dict keys and callables dropped.
+- **`cli.py`** — `add_cli_args(parser)`/`run_cli(args)`, the single source of the
+  `serve` subcommand's argument wiring (`--host`/`--port`/`--reload`/`--job-workers`),
+  shared by the `circuit-opt serve` subcommand and the standalone
+  `python -m circuitopt.service` entry point, mirroring the `explore`/`dataset`
+  single-source CLI pattern. Imports `fastapi`/`uvicorn` lazily inside `run_cli`, so
+  importing `circuitopt.service` (which `circuitopt/__main__.py` does eagerly for
+  subcommand registration) never requires the extra to be installed.
 
 ## Quick Example
 

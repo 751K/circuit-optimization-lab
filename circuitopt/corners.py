@@ -21,6 +21,7 @@ import itertools
 import numpy as np
 
 from .ac_solver import ac_solve
+from .circuit_loader import circuit_from_dict
 from .device_factory import CORNERS
 from .noise_solver import band_rms, noise_analysis
 from .topology import AFE_TOPO
@@ -141,34 +142,13 @@ def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
             for c in corners}
 
 
-def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
-                latch_dV=5.0, freqs=None, band=(0.05, 100.0), include_noise=True):
-    """Per-device mismatch MC at one process corner, seeded from the nominal op.
+def _mc_summary(rows, latch_dV, noise_evaluated, *, stopped_early=False):
+    """Build the MC summary/arrays payload from accumulated per-sample ``rows``.
 
-    Returns {"arrays": {metric: ndarray}, "latched": bool ndarray, "summary": ...}.
-    A run is "latched" when latch_dV exceeds the threshold; summary stats are over
-    the non-latched runs (mean/std/P5/P95) plus the latch_rate."""
-    if freqs is None:
-        freqs = _DEFAULT_FREQS
-    devices = [d for d, *_ in topo.devices]
-    rng = np.random.default_rng(seed)
-    nom = ac_solve(sizes, bias, freqs, corner=_base(base), nf=nf, topo=topo)
-    if nom is None:
-        raise RuntimeError(f"nominal {base!r} DC solve failed; cannot seed MC")
-    x0 = nom["dc_op"]
-    keys = ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV")
-    rows = {k: [] for k in keys}
-    noise_evaluated = 0
-    for _ in range(n):
-        cm = mismatch_corner(rng, devices, base=base)
-        m = metrics(sizes, bias, nf=nf, corner=cm, topo=topo, x0_guess=x0,
-                    freqs=freqs, band=band, include_noise=include_noise,
-                    noise_gate=lambda out: out["latch_dV"] <= latch_dV)
-        if m is None:
-            continue
-        noise_evaluated += int(m.get("_noise_evaluated", False))
-        for k in keys:
-            rows[k].append(m[k])
+    Shared by the completed and the early-stopped return paths so both emit the
+    identical structure (arrays / latched / summary); ``stopped_early`` only adds
+    the extra flag on the summary. Kept separate so cooperative cancellation can
+    reuse the exact same stats over however many samples have finished."""
     arr = {k: np.asarray(v, float) for k, v in rows.items()}
     latched = arr["latch_dV"] > latch_dV
     good = ~latched
@@ -181,4 +161,75 @@ def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
             summary[k] = {"mean": float(col.mean()), "std": float(col.std()),
                           "p5": float(np.percentile(col, 5)),
                           "p95": float(np.percentile(col, 95))}
-    return {"arrays": arr, "latched": latched, "summary": summary}
+    if stopped_early:
+        summary["stopped_early"] = True
+    out = {"arrays": arr, "latched": latched, "summary": summary}
+    if stopped_early:
+        out["stopped_early"] = True
+    return out
+
+
+def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
+                latch_dV=5.0, freqs=None, band=(0.05, 100.0), include_noise=True,
+                progress=None, should_stop=None):
+    """Per-device mismatch MC at one process corner, seeded from the nominal op.
+
+    Returns {"arrays": {metric: ndarray}, "latched": bool ndarray, "summary": ...}.
+    A run is "latched" when latch_dV exceeds the threshold; summary stats are over
+    the non-latched runs (mean/std/P5/P95) plus the latch_rate.
+
+    ``progress(i, n, partial)`` — optional callback fired after each of the ``n``
+    samples finishes: ``i`` is the 1-based sample index just completed, ``n`` the
+    total requested, and ``partial`` a lightweight running summary dict (the same
+    shape as the final ``summary``, over the samples done so far) so a UI can show
+    live stats. Default ``None`` disables the callback.
+    ``should_stop()`` — optional zero-arg predicate checked *before* each sample;
+    returning ``True`` finishes early and returns the stats over the samples already
+    completed, with ``"stopped_early": True`` added at both the top level and in the
+    summary. Cancellation is cooperative: a sample already in flight runs to
+    completion before the next check. Default ``None`` never stops.
+
+    With ``progress=None`` and ``should_stop=None`` the result is byte-for-byte
+    identical to the pre-hook behaviour (same seed → same arrays/summary)."""
+    if freqs is None:
+        freqs = _DEFAULT_FREQS
+    devices = [d for d, *_ in topo.devices]
+    rng = np.random.default_rng(seed)
+    nom = ac_solve(sizes, bias, freqs, corner=_base(base), nf=nf, topo=topo)
+    if nom is None:
+        raise RuntimeError(f"nominal {base!r} DC solve failed; cannot seed MC")
+    x0 = nom["dc_op"]
+    keys = ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV")
+    rows = {k: [] for k in keys}
+    noise_evaluated = 0
+    for i in range(n):
+        if should_stop is not None and should_stop():
+            return _mc_summary(rows, latch_dV, noise_evaluated, stopped_early=True)
+        cm = mismatch_corner(rng, devices, base=base)
+        m = metrics(sizes, bias, nf=nf, corner=cm, topo=topo, x0_guess=x0,
+                    freqs=freqs, band=band, include_noise=include_noise,
+                    noise_gate=lambda out: out["latch_dV"] <= latch_dV)
+        if m is not None:
+            noise_evaluated += int(m.get("_noise_evaluated", False))
+            for k in keys:
+                rows[k].append(m[k])
+        if progress is not None:
+            partial = _mc_summary(rows, latch_dV, noise_evaluated)["summary"]
+            progress(i + 1, n, partial)
+    return _mc_summary(rows, latch_dV, noise_evaluated)
+
+
+def mismatch_mc_from_dict(data, n=300, seed=0, corner="typical", freqs=None,
+                          band=(0.05, 100.0), progress=None, should_stop=None):
+    """Run a mismatch MC from a parsed circuit-JSON *dict*. Returns the
+    :func:`mismatch_mc` result dict.
+
+    The shared entry point for `circuit-opt mc` (via :meth:`__main__._cmd_mc`) and
+    the service's ``POST /api/v1/jobs/mc`` — both parse the circuit and call
+    :func:`mismatch_mc` through here, so the two surfaces can't drift. ``corner``
+    is the base process corner (typical/slow/fast). ``progress``/``should_stop``
+    are threaded straight through for the background-job hooks."""
+    spec = circuit_from_dict(data)
+    return mismatch_mc(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
+                       base=corner, n=n, seed=seed, freqs=freqs, band=band,
+                       progress=progress, should_stop=should_stop)

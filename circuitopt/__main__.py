@@ -46,15 +46,19 @@ from .chopper import (chopper_analysis, pmos_chopper_analysis,
                       pmos_chopper_pnoise, pmos_chopper_pss,
                       pmos_chopper_transient)
 from .circuit_loader import load_circuit_json
-from .corners import corner_table, mismatch_mc
+from .corners import corner_table, mismatch_mc_from_dict
 from .dataset import add_cli_args as dataset_add_cli_args
 from .dataset import run_cli as dataset_run_cli
 from .explore import add_cli_args as explore_add_cli_args
 from .explore import run_cli as explore_run_cli
 from .noise_solver import band_rms
+# The service subpackage's CLI glue is fastapi-free (fastapi/uvicorn are imported
+# lazily inside serve_run_cli), so importing it here never pulls the serve extra.
+from .service import add_cli_args as serve_add_cli_args
+from .service import run_cli as serve_run_cli
 
 _ANALYSIS_NAMES = ["ac", "noise", "transient", "pss", "pac", "pnoise"]
-_SUBCOMMANDS = ["run", "corners", "mc", "chopper", "explore", "plot", "dataset"]
+_SUBCOMMANDS = ["run", "corners", "mc", "chopper", "explore", "plot", "dataset", "serve"]
 _CHOPPER_LEVELS = ["ideal", "pmos", "lptv", "pss", "pac", "pnoise", "transient"]
 
 
@@ -277,6 +281,21 @@ def _cmd_dataset(args):
     return dataset_run_cli(args)
 
 
+# ── subcommand: serve ────────────────────────────────────────────────────────
+
+def _add_serve_parser(subparsers):
+    p = subparsers.add_parser(
+        "serve", help="Start the local FastAPI service over the solvers (needs the 'serve' extra)")
+    # Feature args come from the single source in circuitopt.service.cli so this
+    # subcommand can't drift from `python -m circuitopt.service`.
+    serve_add_cli_args(p)
+    return p
+
+
+def _cmd_serve(args):
+    return serve_run_cli(args)
+
+
 # ── subcommand: corners ──────────────────────────────────────────────────────
 
 def _add_corners_parser(subparsers):
@@ -350,7 +369,10 @@ def _add_mc_parser(subparsers):
 def _cmd_mc(args):
     _assert_numba_flag(args)
 
-    spec = _load_spec(args.circuit)
+    if not os.path.exists(args.circuit):
+        raise SystemExit(f"file not found: {args.circuit}")
+    with open(args.circuit, "r", encoding="utf-8") as f:
+        data = json.load(f)
     freqs = _freqs_from_args(args)
     lo, hi = args.noise_band
 
@@ -360,9 +382,10 @@ def _cmd_mc(args):
         print(f"  freqs: {args.freqs_start:.2g}–{args.freqs_stop:.2g} Hz ({args.freqs_num} pts)")
         print(f"  band:  {lo}–{hi} Hz")
 
-    mc = mismatch_mc(spec.sizes, spec.bias, nf=spec.nf,
-                     topo=spec.topology, base=args.corner,
-                     freqs=freqs, n=args.n, seed=args.seed)
+    # mismatch_mc_from_dict is the shared CLI/service entry (parses the circuit +
+    # calls mismatch_mc), so `circuit-opt mc` and POST /jobs/mc can't drift.
+    mc = mismatch_mc_from_dict(data, n=args.n, seed=args.seed, corner=args.corner,
+                               freqs=freqs, band=(lo, hi))
 
     summary = mc["summary"]
     latch_rate = float(mc["latched"].mean())
@@ -678,6 +701,7 @@ def main(argv=None):
     _add_chopper_parser(sub)
     _add_plot_parser(sub)
     _add_dataset_parser(sub)
+    _add_serve_parser(sub)
 
     # If --help/-h is the only argument, show the full subcommand listing
     if set(argv) <= {"--help", "-h"}:
@@ -715,6 +739,7 @@ def main(argv=None):
         "chopper": _cmd_chopper,
         "plot": _cmd_plot,
         "dataset": _cmd_dataset,
+        "serve": _cmd_serve,
     }
     handler = handlers.get(cmd)
     if handler is None:

@@ -40,7 +40,7 @@ from .device_factory import CircuitBinding
 from .device_model import (TransistorModel, NumbaParams, PDK, create_device,
                            create_transistor, register_model, register_pdk,
                            get_default_model_type, get_default_pdk, get_pdk,
-                           list_pdks, transistor_type)
+                           list_pdks, registered_models, transistor_type)
 from .noise_solver import band_rms, noise_analysis
 from .pac_solver import pac_solve
 from . import pmos_tft_model  # noqa: F401 — triggers register_pdk("at4000tg", …)
@@ -71,6 +71,7 @@ __all__ = [
     "get_default_pdk",
     "get_pdk",
     "list_pdks",
+    "registered_models",
     "transistor_type",
     # circuit loading
     "load_circuit_json",

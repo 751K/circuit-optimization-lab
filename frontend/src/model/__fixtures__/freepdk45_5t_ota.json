@@ -1,0 +1,30 @@
+{
+  "name": "freepdk45_5t_ota",
+  "description": "FreePDK45 (45nm, 1.0V) 5-transistor OTA: NMOS input pair M1/M2 -> PMOS diode/mirror load M3/M4 -> single-ended vout, NMOS tail M5. Evaluated by ngspice-C BSIM4 (the FreePDK45 oracle) through a cached characterization grid (core.ngspice_device). Validated: single-device Id/gm/gds are bit-exact vs ngspice op, and the OTA gain/BW match ngspice .ac on the equivalent netlist (see tests/test_freepdk45.py).",
+  "solved": ["tail", "n1", "vout"],
+  "rails": {"VDD": "VDD", "GND": 0.0, "vinp": "VCM", "vinn": "VCM", "vbias": "VB"},
+  "devices": [
+    {"name": "M1", "drain": "n1",   "gate": "vinp",  "source": "tail", "W": 0.5, "L": 0.1},
+    {"name": "M2", "drain": "vout", "gate": "vinn",  "source": "tail", "W": 0.5, "L": 0.1},
+    {"name": "M3", "drain": "n1",   "gate": "n1",    "source": "VDD",  "W": 0.5, "L": 0.1},
+    {"name": "M4", "drain": "vout", "gate": "n1",    "source": "VDD",  "W": 0.5, "L": 0.1},
+    {"name": "M5", "drain": "tail", "gate": "vbias", "source": "GND",  "W": 1.0, "L": 0.1}
+  ],
+  "models": {
+    "M1": {"type": "freepdk45.nmos"}, "M2": {"type": "freepdk45.nmos"},
+    "M3": {"type": "freepdk45.pmos", "vb": 1.0}, "M4": {"type": "freepdk45.pmos", "vb": 1.0},
+    "M5": {"type": "freepdk45.nmos"}
+  },
+  "bias": {"VDD": 1.0, "VCM": 0.55, "VB": 0.55},
+  "outputs": ["vout"],
+  "input_drives": {"M1": 1.0, "M2": -1.0},
+  "load_caps": [["vout", "GND", 2e-13]],
+  "dc_guesses": [
+    {"tail": 0.10, "n1": 0.45, "vout": 0.45},
+    {"tail": 0.15, "n1": 0.50, "vout": 0.50},
+    {"tail": 0.05, "n1": 0.40, "vout": 0.55}
+  ],
+  "analyses": {
+    "ac": {"freqs": {"start": 1000.0, "stop": 100000000000.0, "num": 121, "scale": "log"}}
+  }
+}

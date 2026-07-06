@@ -289,6 +289,19 @@ def get_model_class(model_type: str) -> Type[TransistorModel] | None:
     return _model_registry.get(model_type)
 
 
+def registered_models() -> Dict[str, str]:
+    """Snapshot of every registered model type -> its class's qualified name.
+
+    Read-only introspection accessor (a copy, not the live dict) for callers
+    that need to enumerate the model registry — e.g. the service layer's
+    ``/capabilities`` endpoint listing selectable model keys — without reaching
+    into the private ``_model_registry`` or importing concrete backend classes.
+    Does not touch registration; ordering follows insertion (registration) order.
+    """
+    return {name: f"{cls.__module__}.{cls.__qualname__}"
+            for name, cls in _model_registry.items()}
+
+
 def create_device(model_type: str, **kwargs) -> TransistorModel:
     """Create a transistor model instance by name.
 
