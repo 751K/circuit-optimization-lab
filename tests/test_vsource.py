@@ -9,14 +9,14 @@ round-trip + loader validation, the "no thermal noise" property, and the PSS gua
 import numpy as np
 import pytest
 
-from core.ac_solver import ac_solve
-from core.circuit_loader import circuit_from_dict, load_circuit_json
-from core.noise_solver import noise_analysis
-from core.pac_solver import pac_solve
-from core.pnoise_solver import pnoise_solve
-from core.pss_solver import pss_solve
-from core.topology import Topology
-from core.transient_solver import transient
+from circuitopt.ac_solver import ac_solve
+from circuitopt.circuit_loader import circuit_from_dict, load_circuit_json
+from circuitopt.noise_solver import noise_analysis
+from circuitopt.pac_solver import pac_solve
+from circuitopt.pnoise_solver import pnoise_solve
+from circuitopt.pss_solver import pss_solve
+from circuitopt.topology import Topology
+from circuitopt.transient_solver import transient
 
 _KB = 1.380649e-23
 _TEMP = 300.15

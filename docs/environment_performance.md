@@ -17,7 +17,7 @@
 
 ```bash
 CIRCUIT_USE_NUMBA=1 /opt/miniconda3/envs/daily/bin/python -c "
-import core.numba_kernels as nk
+import circuitopt.numba_kernels as nk
 k = nk._transient_solve_adaptive_gear2_impl
 print('jitted:', hasattr(k, 'py_func'), type(k).__name__)"
 # 期望: jitted: True CPUDispatcher   ← 已启用
@@ -26,7 +26,7 @@ print('jitted:', hasattr(k, 'py_func'), type(k).__name__)"
 
 ## 实测基准（daily 环境，`CIRCUIT_USE_NUMBA=1`，热启动）
 
-命令：`CIRCUIT_USE_NUMBA=1 /opt/miniconda3/envs/daily/bin/python -m core.calibration <case>`
+命令：`CIRCUIT_USE_NUMBA=1 /opt/miniconda3/envs/daily/bin/python -m circuitopt.calibration <case>`
 
 | 用例 | 分析 | 用时（Numba 热） | 无 Numba（解释版） |
 |---|---|---|---|
@@ -58,7 +58,7 @@ print('jitted:', hasattr(k, 'py_func'), type(k).__name__)"
    `calibration/chopper_design3_*/metadata.json`）。原来打靶一步收敛却要建一个有限差分
    雅可比 = topo.n 次整周期重积分；解析单值矩阵在同一次轨道 pass 里算出，gear2 积分
    **16 → 4 次**。PSS 阶段 3.56 s → **0.96 s**。收敛到同一不动点 → 结果 bit 级一致。
-2. **PNoise 时域 Floquet 伴随的 factor-once（Woodbury）**（`core/pnoise_solver.py`
+2. **PNoise 时域 Floquet 伴随的 factor-once（Woodbury）**（`circuitopt/pnoise_solver.py`
    `_time_domain_pnoise_adjoint`）。原来每个噪声频点在 N·ns 的块双对角 BE 算子上做一次
    完整稀疏 `splu`（37 频 = 37 次分解）。但 `F(γ)` 逐频只有那个 ns×ns 周期角块
    `-BT[0]/γ` 变——`splu` 参考频率 `F(γ0)` **一次**，逐频用秩-ns（Woodbury）修正角块。

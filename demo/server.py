@@ -46,8 +46,8 @@ def py_type(v):
         return [py_type(x) for x in v]
     return v
 
-from core.ac_solver import ac_solve
-from core.noise_solver import noise_analysis, band_rms
+from circuitopt.ac_solver import ac_solve
+from circuitopt.noise_solver import noise_analysis, band_rms
 
 app = Flask(__name__, static_folder=str(DEMO_DIR / "static"), static_url_path="/static")
 

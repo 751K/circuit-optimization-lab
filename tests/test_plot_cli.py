@@ -1,4 +1,4 @@
-"""Smoke tests for the ``python -m core plot`` subcommand wiring.
+"""Smoke tests for the ``python -m circuitopt plot`` subcommand wiring.
 
 The plot subcommand parses args and dispatches to ``examples.plot_transient`` /
 ``examples.plot_bode`` by ``kind``.  These tests pin the *wiring* — arg parsing,
@@ -12,7 +12,7 @@ import argparse
 
 import pytest
 
-from core.__main__ import _add_plot_parser, _cmd_plot
+from circuitopt.__main__ import _add_plot_parser, _cmd_plot
 
 
 def _parse(argv):

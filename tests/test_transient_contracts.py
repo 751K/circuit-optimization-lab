@@ -1,8 +1,8 @@
 import inspect
 
-from core import numba_kernels as nk
-from core import transient_profile as tp
-from core import transient_solver as ts
+from circuitopt import numba_kernels as nk
+from circuitopt import transient_profile as tp
+from circuitopt import transient_solver as ts
 
 
 def _param_names(func):

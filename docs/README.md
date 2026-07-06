@@ -18,8 +18,8 @@ physics-faithful simulation data*, no reusable *data-generator framework*, and n
 *ML-method framework* purpose-built for circuits. This project provides the whole chain
 as one open, reproducible pipeline — a Cadence-calibrated solver stack as the
 physics-faithful oracle → a provenance-tracked labeled-dataset generator
-([`core/dataset.py`](https://github.com/751K/circuit-optimization-lab/blob/main/core/dataset.py)) → an ML surrogate + screen-and-verify optimizer
-([`core/surrogate.py`](https://github.com/751K/circuit-optimization-lab/blob/main/core/surrogate.py), `surrogate_torch.py`, `optimize.py`).
+([`circuitopt/dataset.py`](https://github.com/751K/circuit-optimization-lab/blob/main/circuitopt/dataset.py)) → an ML surrogate + screen-and-verify optimizer
+([`circuitopt/surrogate.py`](https://github.com/751K/circuit-optimization-lab/blob/main/circuitopt/surrogate.py), `surrogate_torch.py`, `optimize.py`).
 Circuit in, data out, surrogate trained, design optimized, with no commercial simulator
 in the loop.
 
@@ -29,7 +29,7 @@ many dialogue turns is expensive and cannot run autonomously on-device. This pro
 a self-contained toolchain an LLM agent can call to **obtain simulation results, analyze
 and summarize them, and optimize a design** — the entire DC/AC/Noise/PSS/… loop, on the
 local machine, no external round-trip, no license. The JSON circuit format, the
-`python -m core` CLI, and the structured result dictionaries are deliberately shaped to
+`python -m circuitopt` CLI, and the structured result dictionaries are deliberately shaped to
 be machine-callable and machine-readable, so an agent drives the whole design loop from
 the local shell.
 
@@ -46,7 +46,7 @@ nodes, **SKY130** (130 nm, OpenVAF-compiled BSIM4 via an OSDI host) and **FreePD
 - **Corners & mismatch** — process corners, per-device mismatch Monte Carlo, latch screening.
 - **Multi-process** — OTFT (AT4000TG) + silicon SKY130 + FreePDK45 through one pipeline; two worked, end-to-end fully-differential OTA design cases ship as reports ([SKY130](sky130_fd_ota_design.md), [FreePDK45](freepdk45_fd_ota_design.md)).
 
-For solver internals, see [Core Solver Overview](core_overview.md).
+For solver internals, see [Core Solver Overview](module_overview.md).
 
 ---
 
@@ -57,7 +57,7 @@ For solver internals, see [Core Solver Overview](core_overview.md).
 python3 -m pip install -r requirements.txt
 
 # 2. Run your first circuit — one command
-python3 -m core examples/periodic_rc.json
+python3 -m circuitopt examples/periodic_rc.json
 
 # 4. Verify — run the AFE benchmark
 python3 -m benchmarks.bench_afe --warm-runs 1 --skip-noise
@@ -83,39 +83,39 @@ first use if absent.
 
 | Tool | Role in this project | Point at it with |
 |------|----------------------|------------------|
-| **[OpenVAF-Reloaded](https://github.com/751K/OpenVAF-Reloaded)** — a maintained fork of [OpenVAF](https://github.com/pascalkuthe/OpenVAF) | Compiles standard Verilog-A compact models (BSIM4, …) to a native `.osdi` shared library; the **SKY130** device path loads it through the OSDI host (`core/osdi_host.py`), driven by the in-repo `tools/vacompile.sh` wrapper | `OPENVAF_BIN` / `OPENVAF_ROOT` |
-| **[ngspice](https://ngspice.sourceforge.io/)** | Its built-in C-BSIM4 is the exact device evaluator / oracle for **FreePDK45** (`core/ngspice_char.py`), and resolves SKY130's binned parameter cards; invoked via the in-repo `tools/run-ngspice.sh` wrapper | `NGSPICE_BIN` |
+| **[OpenVAF-Reloaded](https://github.com/751K/OpenVAF-Reloaded)** — a maintained fork of [OpenVAF](https://github.com/pascalkuthe/OpenVAF) | Compiles standard Verilog-A compact models (BSIM4, …) to a native `.osdi` shared library; the **SKY130** device path loads it through the OSDI host (`circuitopt/osdi_host.py`), driven by the in-repo `tools/vacompile.sh` wrapper | `OPENVAF_BIN` / `OPENVAF_ROOT` |
+| **[ngspice](https://ngspice.sourceforge.io/)** | Its built-in C-BSIM4 is the exact device evaluator / oracle for **FreePDK45** (`circuitopt/ngspice_char.py`), and resolves SKY130's binned parameter cards; invoked via the in-repo `tools/run-ngspice.sh` wrapper | `NGSPICE_BIN` |
 | PDK card files (SKY130 via `volare`/`ciel`; FreePDK45 cards) | The process parameters themselves | `PDK_ROOT` |
 
 ### CLI Reference
 
-`python -m core` uses subcommands (backward compatible — bare `circuit.json` defaults to `run`):
+`python -m circuitopt` uses subcommands (backward compatible — bare `circuit.json` defaults to `run`):
 
 ```bash
 # ── Analysis dispatch (default: "run") ──
-python -m core examples/periodic_rc.json                          # all configured analyses
-python -m core examples/periodic_rc.json -a ac,noise,pss          # specific analyses
-python -m core run examples/periodic_rc.json -a ac,noise          # explicit subcommand
+python -m circuitopt examples/periodic_rc.json                          # all configured analyses
+python -m circuitopt examples/periodic_rc.json -a ac,noise,pss          # specific analyses
+python -m circuitopt run examples/periodic_rc.json -a ac,noise          # explicit subcommand
 
 # ── Design-space exploration ──
-python -m core examples/afe_explore.json --explore -n 500         # --explore flag (legacy)
-python -m core explore examples/afe_explore.json -n 500 --seed 1  # subcommand
+python -m circuitopt examples/afe_explore.json --explore -n 500         # --explore flag (legacy)
+python -m circuitopt explore examples/afe_explore.json -n 500 --seed 1  # subcommand
 
 # ── Process corners sweep ──
-python -m core corners examples/afe_explore.json                  # typ/slow/fast
-python -m core corners examples/afe_explore.json --freqs-num 61
+python -m circuitopt corners examples/afe_explore.json                  # typ/slow/fast
+python -m circuitopt corners examples/afe_explore.json --freqs-num 61
 
 # ── Mismatch Monte Carlo ──
-python -m core mc examples/afe_explore.json -n 200 --seed 1      # typical corner
-python -m core mc examples/afe_explore.json --corner slow -n 500
+python -m circuitopt mc examples/afe_explore.json -n 200 --seed 1      # typical corner
+python -m circuitopt mc examples/afe_explore.json --corner slow -n 500
 
 # ── Chopper analysis ──
-python -m core chopper examples/afe_explore.json --level ideal    # square-wave LPTV
-python -m core chopper examples/afe_explore.json --level pmos     # static-phase PMOS
-python -m core chopper examples/afe_explore.json --level lptv     # PMOS sideband fold
-python -m core chopper examples/afe_explore.json --level pss      # shooting PSS
-python -m core chopper examples/afe_explore.json --level pnoise   # PSS→PAC→PNoise
-python -m core chopper examples/afe_explore.json --level transient
+python -m circuitopt chopper examples/afe_explore.json --level ideal    # square-wave LPTV
+python -m circuitopt chopper examples/afe_explore.json --level pmos     # static-phase PMOS
+python -m circuitopt chopper examples/afe_explore.json --level lptv     # PMOS sideband fold
+python -m circuitopt chopper examples/afe_explore.json --level pss      # shooting PSS
+python -m circuitopt chopper examples/afe_explore.json --level pnoise   # PSS→PAC→PNoise
+python -m circuitopt chopper examples/afe_explore.json --level transient
 
 # Common options for all subcommands:
 #   --noise-band LO HI  IRN integration band (default: 0.05 100.0)
@@ -130,12 +130,12 @@ Before diving into the workflows, a one-minute map of the concepts:
 
 | Concept | What it is | Where it lives |
 |---------|-----------|----------------|
-| **Topology** | Circuit structure — which nodes exist, how devices connect, where inputs/outputs are | `core/topology.py`, or auto-generated from JSON |
+| **Topology** | Circuit structure — which nodes exist, how devices connect, where inputs/outputs are | `circuitopt/topology.py`, or auto-generated from JSON |
 | **Sizes** | `{device: (W_µm, L_µm)}` — transistor dimensions | JSON `sizes` field |
 | **NF** | Number of fingers (parallel transistor multiplier; increases current) | JSON `nf` field, or per-device in `devices[].NF` |
 | **Bias** | `{node: voltage}` — DC operating voltages at rail nodes | JSON `bias` field |
-| **Solver** | A function that takes topology + sizes + bias → results (gain, noise, waveforms, …) | `core/ac_solver.py`, `core/transient_solver.py`, etc. |
-| **Device Model** | Abstract interface (`TransistorModel`) — solvers call the interface, not a concrete model; swap models via factory | `core/device_model.py`, `core/pmos_tft_model.py` |
+| **Solver** | A function that takes topology + sizes + bias → results (gain, noise, waveforms, …) | `circuitopt/ac_solver.py`, `circuitopt/transient_solver.py`, etc. |
+| **Device Model** | Abstract interface (`TransistorModel`) — solvers call the interface, not a concrete model; swap models via factory | `circuitopt/device_model.py`, `circuitopt/pmos_tft_model.py` |
 
 Any solver call follows the same pattern:
 
@@ -158,9 +158,9 @@ All examples below are copy-paste ready. They use the locked AFE design from
 
 ```python
 import numpy as np
-from core.circuit_loader import load_circuit_json
-from core.ac_solver import ac_solve
-from core.noise_solver import noise_analysis, band_rms
+from circuitopt.circuit_loader import load_circuit_json
+from circuitopt.ac_solver import ac_solve
+from circuitopt.noise_solver import noise_analysis, band_rms
 
 # Load from JSON — no hard-coded node names in solver code
 spec = load_circuit_json("examples/afe_explore.json")
@@ -182,7 +182,7 @@ print(f"IRN (0.05–100 Hz): {irn_uv:.2f} µVrms")
 ### 2. Run a Transient Simulation
 
 ```python
-from core.transient_solver import transient
+from circuitopt.transient_solver import transient
 
 # 4 ms simulation, 0.5 mV step at t=0.5 ms
 t = np.linspace(0, 4e-3, 400)
@@ -216,7 +216,7 @@ for generic stiff switched-capacitor circuits.
 #### Level 1 — Ideal LPTV (fast, square-wave model)
 
 ```python
-from core.chopper import chopper_analysis
+from circuitopt.chopper import chopper_analysis
 
 chop_ideal = chopper_analysis(
     spec.sizes, spec.bias, freqs, f_chop=225.0,
@@ -229,7 +229,7 @@ print(f"Ideal chop: {chop_ideal['peak_dB']:.2f} dB,  "
 #### Level 2 — PMOS Switch (static phases, no PSS needed)
 
 ```python
-from core.chopper import pmos_chopper_analysis
+from circuitopt.chopper import pmos_chopper_analysis
 
 pmos = pmos_chopper_analysis(
     spec.sizes, spec.bias, freqs,
@@ -241,7 +241,7 @@ print(f"PMOS static chop: {pmos['peak_dB']:.2f} dB,  "
 #### Level 3 — Full PSS / PAC / PNoise (first-principles, matches Spectre)
 
 ```python
-from core.chopper import (pmos_chopper_pss, pmos_chopper_pac,
+from circuitopt.chopper import (pmos_chopper_pss, pmos_chopper_pac,
                            pmos_chopper_pnoise)
 
 # Step 1: PSS — find the periodic steady-state orbit
@@ -298,16 +298,16 @@ the default chopper PAC gain is now about +0.03%, and TD PNoise IRN is about
 (slow/typical/fast) were +1.81% / +1.05% / +0.66%; the TD-adjoint errors are now
 +0.02% / -0.00% / +0.57%. No calibration constants are used.
 `pmos_chopper_pac` / `pmos_chopper_pnoise` are chopper compatibility wrappers;
-generic periodic topologies can call `core.pac_solver.pac_solve` and
-`core.pnoise_solver.pnoise_solve` directly using the orbit returned by
+generic periodic topologies can call `circuitopt.pac_solver.pac_solve` and
+`circuitopt.pnoise_solver.pnoise_solve` directly using the orbit returned by
 `pss_solve` plus an `input_drive` mapping.
 
 **JSON dispatch** — when the circuit JSON has `periodic` and `analyses` blocks,
 run everything with one call:
 
 ```python
-from core.analysis_dispatch import run_analysis_suite
-from core.circuit_loader import load_circuit_json
+from circuitopt.analysis_dispatch import run_analysis_suite
+from circuitopt.circuit_loader import load_circuit_json
 
 spec = load_circuit_json("examples/periodic_rc.json")
 results = run_analysis_suite(spec)
@@ -320,8 +320,8 @@ JSON dispatch supports the same PAC switch for generic periodic circuits:
 ### 4. Design-Space Exploration / Optimization
 
 ```python
-from core.explore import explore
-from core.circuit_loader import load_circuit_json
+from circuitopt.explore import explore
+from circuitopt.circuit_loader import load_circuit_json
 
 spec = load_circuit_json("examples/afe_explore.json")
 
@@ -340,7 +340,7 @@ print(f"Candidates: {result['n_total']},  "
 Or from the command line:
 
 ```bash
-python -m core.explore examples/afe_explore.json --n 500 --seed 42
+python -m circuitopt.explore examples/afe_explore.json --n 500 --seed 42
 ```
 
 Results are exported as CSV and JSONL. The explore config in the JSON file
@@ -350,7 +350,7 @@ to enforce (gain > X, IRN < Y, etc.), and which objectives to optimize.
 ### 5. Process Corners & Mismatch
 
 ```python
-from core.corners import CORNERS, corner_table, mismatch_mc, latch_screen
+from circuitopt.corners import CORNERS, corner_table, mismatch_mc, latch_screen
 import numpy as np
 
 # Corner sweep — one design at typ/slow/fast
@@ -388,14 +388,14 @@ screen-and-verify:
 ```bash
 # 1. Build a labeled dataset from the config's "explore" block (every sample kept,
 #    including DC failures — a training set, not a filtered search result)
-python -m core dataset examples/single_stage.json -n 500 --out ds/run1
+python -m circuitopt dataset examples/single_stage.json -n 500 --out ds/run1
 
 # 2. Train a metric surrogate (gradient-boosted trees; needs `pip install -r requirements-ml.txt`)
-python -m core.surrogate train ds/run1.npz --out ds/run1.pkl
+python -m circuitopt.surrogate train ds/run1.npz --out ds/run1.pkl
 
 # 3. Screen a large pool with the surrogate, Pareto-select, and verify the
 #    shortlist on the actual calibrated solver
-python -m core.optimize examples/single_stage.json ds/run1.pkl -n 100000 --top-k 20
+python -m circuitopt.optimize examples/single_stage.json ds/run1.pkl -n 100000 --top-k 20
 # → screened 100000 designs with the surrogate in 1.64s (60,802/s)
 # →   feasible: 89038   Pareto front: 19
 # → verified top-19 on the solver in 0.45s (23.6 ms/design)
@@ -407,7 +407,7 @@ shortlist is trusted for a real design decision. `--filter label:lo:hi` on
 `surrogate train` restricts training to a region of interest (e.g. drop railed/
 collapsed designs that would otherwise dominate the fit). See
 [CLI Reference §1.7–1.8](cli_reference.md) for the full dataset/surrogate/optimize
-option reference, and `docs/core_overview.md` for the surrogate architecture and honest
+option reference, and `docs/module_overview.md` for the surrogate architecture and honest
 accuracy numbers.
 
 ### 7. Silicon PDKs (SKY130 + FreePDK45)
@@ -428,16 +428,16 @@ Silicon devices run through the exact same DC/AC/noise pipeline — including th
 ML-surrogate design loop above and cross-corner (`tt`/`ss`/`ff`/`sf`/`fs`) verification:
 
 ```bash
-python -m core dataset examples/sky130_5t_ota.json -n 400 --out ds/ota          # build a silicon dataset
-python -m core.surrogate train ds/ota.npz --filter gain_dB:0:60 --out ds/ota.pkl # train on the operating region
-python -m core.optimize examples/sky130_5t_ota.json ds/ota.pkl -n 50000 --top-k 10          # screen + verify (typical corner)
-python -m core.optimize examples/sky130_5t_ota.json ds/ota.pkl -n 50000 --corner ss          # re-verify at the slow corner
+python -m circuitopt dataset examples/sky130_5t_ota.json -n 400 --out ds/ota          # build a silicon dataset
+python -m circuitopt.surrogate train ds/ota.npz --filter gain_dB:0:60 --out ds/ota.pkl # train on the operating region
+python -m circuitopt.optimize examples/sky130_5t_ota.json ds/ota.pkl -n 50000 --top-k 10          # screen + verify (typical corner)
+python -m circuitopt.optimize examples/sky130_5t_ota.json ds/ota.pkl -n 50000 --corner ss          # re-verify at the slow corner
 ```
 
 On the complementary 5T OTA example, this screens 50,000 designs ~6,000× faster
 than the solver, confirms 9/10 shortlisted designs feasible on the solver, and the
 same designs hold (9/10) when re-verified at the slow (`ss`) corner. Needs the
-SKY130 PDK + OpenVAF + ngspice toolchain (see `docs/core_overview.md`); solvers
+SKY130 PDK + OpenVAF + ngspice toolchain (see `docs/module_overview.md`); solvers
 raise a clear error if it isn't installed. **Design note:** like any single-stage
 silicon amplifier, this example uses an active current-mirror load (for the DC
 operating point / gain) plus a capacitive load (for bandwidth) — a resistor-loaded
@@ -650,7 +650,7 @@ OpenVAF + ngspice + the SKY130 PDK; FreePDK45 wants ngspice + the FreePDK45 card
 compile / ngspice wrappers are vendored in-repo under `tools/`; only the binaries live
 outside. Install them and point `PDK_ROOT` plus the binaries — `OPENVAF_BIN` (or
 `OPENVAF_ROOT`, which resolves `$OPENVAF_ROOT/target/release/openvaf-r`) and
-`NGSPICE_BIN` — at them (see `docs/core_overview.md`). Without it, any circuit using a
+`NGSPICE_BIN` — at them (see `docs/module_overview.md`). Without it, any circuit using a
 `sky130.*` / `freepdk45.*` model type raises a clear error at first use; every other
 PDK (the default AT4000TG OTFT) is unaffected. Tests gated on the toolchain
 (`tests/test_sky130*.py`, `tests/test_freepdk45.py`, `tests/test_osdi_host.py`) skip
@@ -662,7 +662,7 @@ cleanly when it's absent.
 
 | Document | When to read it |
 |----------|----------------|
-| [Core Solver Overview](core_overview.md) | Understand how each solver works, import dependencies, and calibration data |
+| [Core Solver Overview](module_overview.md) | Understand how each solver works, import dependencies, and calibration data |
 | [JSON Circuit Format](json_circuit_format.md) | Full field-by-field reference for writing your own circuit JSON |
 | [CLI Reference](cli_reference.md) | Every subcommand and flag, including `dataset`/`surrogate`/`optimize` and the `models`/silicon-corner options |
 | [SKY130 FD-OTA design case](sky130_fd_ota_design.md) | End-to-end 130 nm fully-differential OTA: architecture → surrogate → optimize → PVT |

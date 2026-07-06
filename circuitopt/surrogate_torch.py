@@ -1,16 +1,16 @@
 """Differentiable metric surrogate (PyTorch MLP) — gradient-based design optimization.
 
-The GBT surrogate (:mod:`core.surrogate`) screens by brute force; a *differentiable*
+The GBT surrogate (:mod:`circuitopt.surrogate`) screens by brute force; a *differentiable*
 surrogate lets you optimize the design vector **directly** by following gradients of
 an objective through the model — a few hundred steps instead of 100k random samples.
 This is the "differentiable optimization loop" of the roadmap: a small MLP over
 standardized inputs/outputs (wide-range labels in log-space),
-trained on a ``core.dataset`` ``.npz``, then :func:`optimize_design` does projected
+trained on a ``circuitopt.dataset`` ``.npz``, then :func:`optimize_design` does projected
 gradient descent on the design under soft constraint penalties.
 
 PyTorch is an **optional** dependency (lazy-imported, like sklearn). On Apple Silicon
 the MPS device is picked automatically. The solvers stay the source of truth — a
-gradient-optimized design is still verified on the real solver (:mod:`core.optimize`).
+gradient-optimized design is still verified on the real solver (:mod:`circuitopt.optimize`).
 
 Env note: torch and the scipy-based solvers can live in different conda envs; this
 module only needs torch + the dataset ``.npz`` (no solver), so it trains wherever

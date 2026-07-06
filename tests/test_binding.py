@@ -21,18 +21,18 @@ import os
 import numpy as np
 import pytest
 
-from core import CircuitBinding
-from core.ac_solver import ac_solve
-from core.analysis_dispatch import run_analysis_suite
-from core.circuit_loader import load_circuit_json
-from core.device_factory import CORNERS, SILICON_CORNERS
-from core.ngspice_char import ngspice_binary
-from core.noise_solver import noise_analysis
-from core.pac_solver import pac_solve
-from core.pnoise_solver import pnoise_solve
-from core.pss_solver import pss_solve
-from core.topology import AFE_TOPO, Topology
-from core.transient_solver import transient
+from circuitopt import CircuitBinding
+from circuitopt.ac_solver import ac_solve
+from circuitopt.analysis_dispatch import run_analysis_suite
+from circuitopt.circuit_loader import load_circuit_json
+from circuitopt.device_factory import CORNERS, SILICON_CORNERS
+from circuitopt.ngspice_char import ngspice_binary
+from circuitopt.noise_solver import noise_analysis
+from circuitopt.pac_solver import pac_solve
+from circuitopt.pnoise_solver import pnoise_solve
+from circuitopt.pss_solver import pss_solve
+from circuitopt.topology import AFE_TOPO, Topology
+from circuitopt.transient_solver import transient
 
 
 # ── FreePDK45 availability gate (mirrors tests/test_freepdk45.py) ────────────

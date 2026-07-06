@@ -1,7 +1,7 @@
 import numpy as np
 
-from core.compiled_topology import CompiledTopology, TERM_INPUT, TERM_SOLVED
-from core.topology import Topology
+from circuitopt.compiled_topology import CompiledTopology, TERM_INPUT, TERM_SOLVED
+from circuitopt.topology import Topology
 
 
 def test_compiled_dc_residuals_match_topology_passive_kcl():

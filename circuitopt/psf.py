@@ -7,7 +7,7 @@ Cadence writes ASCII PSF (``spectre -format psfascii``) in three sections:
     VALUE    the data block, terminated by END
 
 This module turns each analysis output into plain numpy arrays / dicts for the
-calibration engine (:mod:`core.calibration`), and pulls provenance straight out
+calibration engine (:mod:`circuitopt.calibration`), and pulls provenance straight out
 of the HEADER so reference files are self-describing. It is solver-independent.
 
 Supported analyses:

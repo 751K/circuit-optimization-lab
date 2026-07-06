@@ -172,7 +172,7 @@ class CircuitBinding:
     Fields
     ------
     topo:
-        The :class:`~core.topology.Topology` (circuit structure). Typed loosely to
+        The :class:`~circuitopt.topology.Topology` (circuit structure). Typed loosely to
         avoid a hard import dependency on the topology module.
     model_types:
         Optional ``{device: model-registry key}`` map (e.g. ``freepdk45.nmos``).

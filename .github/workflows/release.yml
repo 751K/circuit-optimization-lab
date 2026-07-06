@@ -35,14 +35,13 @@ jobs:
           generate_release_notes: true
 
   # ── PyPI publishing (intentionally NOT enabled yet) ──────────────────────────
-  # KNOWN RELEASE DEBT (see pyproject.toml [tool.setuptools]): the installed
-  # top-level import name is the generic `core`, which can collide with other
-  # packages in a shared environment. That name MUST be renamed (e.g. to
-  # `circuit_opt`) before any public PyPI upload. Until then this workflow ships
-  # build artifacts to GitHub Releases only, never to PyPI.
+  # The former blocker (generic `core` top-level import name) was resolved in
+  # 0.2.0 by the rename to `circuitopt`. Remaining prerequisite: register the
+  # project on PyPI and configure trusted publishing for this repo. Until then
+  # this workflow ships build artifacts to GitHub Releases only, never to PyPI.
   #
-  # To enable PyPI later, add a job like the following (trusted publishing, no
-  # long-lived token) AFTER the rename lands:
+  # To enable PyPI, add a job like the following (trusted publishing, no
+  # long-lived token):
   #
   #   pypi:
   #     needs: release

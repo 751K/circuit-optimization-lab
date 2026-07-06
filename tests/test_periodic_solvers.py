@@ -1,14 +1,14 @@
 import numpy as np
 import pytest
 
-from core.numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_numba
-from core.adaptive_config import AdaptiveConfig, adaptive_lte_wrms, adaptive_next_h
-import core.numba_kernels as nk
-from core.pac_solver import pac_solve
-from core.pnoise_solver import pnoise_solve
-from core.pss_solver import pss_solve
-from core.transient_solver import transient
-from core.topology import Topology
+from circuitopt.numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_numba
+from circuitopt.adaptive_config import AdaptiveConfig, adaptive_lte_wrms, adaptive_next_h
+import circuitopt.numba_kernels as nk
+from circuitopt.pac_solver import pac_solve
+from circuitopt.pnoise_solver import pnoise_solve
+from circuitopt.pss_solver import pss_solve
+from circuitopt.transient_solver import transient
+from circuitopt.topology import Topology
 
 
 _KB = 1.380649e-23
@@ -274,7 +274,7 @@ def test_generic_pnoise_sparse_and_iterative_solvers_match_dense():
 
 
 def test_pnoise_reports_sparse_solver_degradation(monkeypatch):
-    import core.pnoise_solver as pns
+    import circuitopt.pnoise_solver as pns
 
     R = 1e5
     C = 1e-9
@@ -301,7 +301,7 @@ def test_pnoise_reports_sparse_solver_degradation(monkeypatch):
 
 
 def test_pnoise_reports_device_noise_degradation(monkeypatch):
-    from core.pmos_tft_model import PMOS_TFT
+    from circuitopt.pmos_tft_model import PMOS_TFT
 
     period = 1e-3
     t = np.linspace(0.0, period, 33)
@@ -341,7 +341,7 @@ def test_gear2_is_second_order_on_rc_lowpass():
     # BDF2/gear2 transient must converge ~2nd order (error ~h^2) on a linear RC
     # low-pass, vs backward-Euler's 1st order. This guards the gear2 integration
     # path used to close the chopper PAC switch-edge error.
-    from core.transient_solver import transient
+    from circuitopt.transient_solver import transient
     R, C = 1e6, 1e-9                       # RC = 1 ms
     topo = Topology(solved=["OUT"], devices=[], rails={"VIN": "VIN", "GND": 0.0},
                     outputs=("OUT",), resistors=[("R1", "VIN", "OUT", R)],
@@ -466,7 +466,7 @@ def test_reverse_biased_pass_switch_restores_not_pumps():
     # the old abs(Idc) flipped a reverse-biased switch into an anti-restoring pump
     # (the SC-LPF runaway: VMID ran 20 -> 333 V). Start the cap node above the
     # source and require it to relax back, never run away.
-    from core.transient_solver import transient
+    from circuitopt.transient_solver import transient
     topo = Topology(
         solved=["MID"],
         devices=[("M1", "MID", "VG", "VIN")],          # (name, drain, gate, source)

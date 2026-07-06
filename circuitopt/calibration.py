@@ -23,9 +23,9 @@ A case directory looks like::
       "tolerances": { ... }                        # overrides the defaults below
     }
 
-The CLI (``python -m core.calibration <case>/``) and ``tests/test_calibration.py``
-drive this module; see :mod:`core.psf` for the parsers and
-:mod:`core.cadence_netlist` for generating the reference netlists.
+The CLI (``python -m circuitopt.calibration <case>/``) and ``tests/test_calibration.py``
+drive this module; see :mod:`circuitopt.psf` for the parsers and
+:mod:`circuitopt.cadence_netlist` for generating the reference netlists.
 """
 from __future__ import annotations
 

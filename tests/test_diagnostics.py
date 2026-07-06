@@ -1,6 +1,6 @@
 """Solver-fallback diagnostics: the counter mechanics + a real zeroed-device hit.
 
-``core.diagnostics`` makes the solvers' deliberate exception-fallback paths
+``circuitopt.diagnostics`` makes the solvers' deliberate exception-fallback paths
 observable without changing any numerical result. These tests pin the counter
 API and prove that the model-eval "return zeroed gm/gds" path -- the one that can
 turn a diverged device into a plausible-but-wrong solve -- actually records a
@@ -10,8 +10,8 @@ import logging
 
 import pytest
 
-from core import diagnostics
-from core.device_model import create_device
+from circuitopt import diagnostics
+from circuitopt.device_model import create_device
 
 
 @pytest.fixture(autouse=True)
@@ -73,7 +73,7 @@ def test_note_never_raises_even_on_bad_input():
 
 
 def test_note_critical_first_sighting_logs_at_warning(caplog):
-    with caplog.at_level(logging.WARNING, logger="core.diagnostics"):
+    with caplog.at_level(logging.WARNING, logger="circuitopt.diagnostics"):
         diagnostics.note_critical("model.device_state_zeroed",
                                   RuntimeError("op solve failed"))
         diagnostics.note_critical("model.device_state_zeroed",

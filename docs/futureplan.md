@@ -1,12 +1,12 @@
 # 后续开发计划
 
-[English README](README.md) | [中文说明](README_zh.md) | [核心求解器概览](core_overview_zh.md)
+[English README](README.md) | [中文说明](README_zh.md) | [核心求解器概览](module_overview_zh.md)
 
 本项目有两个定位：①面向 ML-for-EDA 的开源基础设施（数据生成器框架 + ML 方法框架）；
 ②可供 LLM 本地调用的模拟电路设计工具链。当前基础已经就位：三个工艺（AT4000TG OTFT 校准锚 /
 SKY130 OSDI / FreePDK45 ngspice-C）、全分析栈（DC/AC/noise/transient/PSS/PAC/PNoise）、
 Cadence byte-gate 5/5、数据集→代理→优化闭环、两个硅 FD-OTA 全流程设计案例、`CircuitBinding`
-统一编程接口。已完成的细节见 `docs/core_overview.md`、`README.md` 和 git 历史；本文档只记录
+统一编程接口。已完成的细节见 `docs/module_overview.md`、`README.md` 和 git 历史；本文档只记录
 **未来方向**。
 
 ---
@@ -96,7 +96,7 @@ OSIRIS（87k 变体数据集，[arXiv:2601.19439](https://arxiv.org/abs/2601.194
    放进同一个训练/评测流水线，而不是每个拓扑各写一套 dataset 脚本。
 3. **主动学习闭环**——用代理的不确定度驱动采样，替代当前一次性 LHS 采样；
    现有 `dataset` 流水线已经具备逐候选打标签的能力，缺的是采样策略的反馈回路。
-4. **神经代理升级**——现有的 torch MLP（`core/surrogate_torch.py`）升级为
+4. **神经代理升级**——现有的 torch MLP（`circuitopt/surrogate_torch.py`）升级为
    不确定度感知（用于驱动上面的主动学习）、多任务（同时预测多个标签组）、
    跨拓扑迁移（减少新拓扑的数据需求）的模型。
 5. **公开数据集 + 基准发布**——固定 split + 复现脚本，让外部研究者可以直接
@@ -145,7 +145,7 @@ pip 打包、CI（GitHub Actions——全套测试和 byte-gate 所需的 fixtur
 
 ## 未完成的既有里程碑
 
-- **`evaluate` 双路径收敛为 binding-only**：`core.explore.evaluate` 目前
+- **`evaluate` 双路径收敛为 binding-only**：`circuitopt.explore.evaluate` 目前
   `model_types=`/`device_kwargs=` 旧 kwargs 与 `binding=` 新路径并存，内部调用者
   （`explore`/`dataset`/`optimize`/`surrogate_torch`）已经全部迁移到 binding，
   旧路径仅为外部脚本兼容保留。删除旧路径是公共 API 的破坏性变更，需要等外部调用面

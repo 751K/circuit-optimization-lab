@@ -6,7 +6,7 @@ Two layers live here:
   demo (kept as a readable correctness reference).
 * :func:`transient_osdi` — the full-fidelity path: marshals a compiled
   topology whose transistors are OSDI devices into
-  :func:`core.numba_kernels._osdi_transient_grid_impl`, a numba fixed-grid
+  :func:`circuitopt.numba_kernels._osdi_transient_grid_impl`, a numba fixed-grid
   BE/gear2 integrator that calls the compiled ``.osdi`` **inside** the
   nopython loop (fn pointers passed as runtime arguments — the old "OSDI can't
   live in the numba loop" assumption was disproven, see the
@@ -15,7 +15,7 @@ Two layers live here:
   device's internal nodes, so internal-node charge dynamics are integrated
   exactly (no quasi-static reduction).
 
-``core.transient_solver.transient`` routes here when the circuit binds OSDI
+``circuitopt.transient_solver.transient`` routes here when the circuit binds OSDI
 device models; the OTFT numba kernels are untouched (byte-gate safe).
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ def cs_transient(dev, vdd, r_load, c_load, vin, tgrid, *, vmin=1e-4):
 
     Circuit: ``dev`` source at ``vdd``, drain = ``vout``; ``r_load`` and ``c_load``
     from ``vout`` to ground; gate driven by ``vin(t)``.  ``dev`` is an
-    :class:`~core.osdi_device.OsdiDevice` biased with its bulk at ``vdd`` (pmos-style,
+    :class:`~circuitopt.osdi_device.OsdiDevice` biased with its bulk at ``vdd`` (pmos-style,
     so the device sources ``+|Id|`` into the drain node — matching the DC KCL sign).
 
     KCL at ``vout``:  ``|Id| - dQd/dt - vout/RL - CL·dvout/dt = 0`` (device drain charge
@@ -125,7 +125,7 @@ def transient_osdi(sizes, bias, tgrid, *, topo, nf=None, V0=None,
                    adaptive_iabstol=1e-12, adaptive_max_steps=200000):
     """Fixed-grid transient of an OSDI-device circuit (silicon Phase B).
 
-    Same result-dict shape as :func:`core.transient_solver.transient` for the
+    Same result-dict shape as :func:`circuitopt.transient_solver.transient` for the
     common fields (t / nodes / output / vout / nfail). Supports transistors
     (all bound to the *same* compiled ``.osdi``), resistors, capacitors, ideal
     current/voltage sources, controlled sources (VCCS/VCVS/CCCS/CCVS), and

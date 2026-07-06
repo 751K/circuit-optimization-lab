@@ -252,7 +252,7 @@ def _conversion_charge_caps(pss_result, internal_gate_states):
     ``Cgss(Vs,Vg,Vd)`` cross-coupling (``dC/dVd*dVd``-type terms) -- NOT the
     transient Q-stamp companion used to *integrate* the PSS orbit.  When
     PMOS_TFT gate1 caps are present, fold the conversion with that operator
-    (``charge_caps=False``), mirroring :mod:`core.pnoise_solver` which already
+    (``charge_caps=False``), mirroring :mod:`circuitopt.pnoise_solver` which already
     does this for noise.  Verified on Cadence's own slow chopper orbit: the
     ``C(V)*ddt(V)`` fold gives +0.05% vs the charge/Q collapse's -2.41% (the
     collapse's wrong cross-coupling was the slow-corner -1.9% PAC residual).
@@ -1509,7 +1509,7 @@ def pac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
     freqs
         Baseband PAC frequencies in Hz.
     pss_result
-        Result returned by :func:`core.pss_solver.pss_solve` or a wrapper that
+        Result returned by :func:`circuitopt.pss_solver.pss_solve` or a wrapper that
         preserves its fields. It must contain ``topology``, ``t``, ``nodes``,
         ``x0``, ``x_end``, and ``output``.
     input_drive

@@ -1,8 +1,8 @@
 import numpy as np
 
-from core.ac_solver import ac_solve
-from core.noise_solver import band_rms, noise_analysis
-from core.transient_solver import transient
+from circuitopt.ac_solver import ac_solve
+from circuitopt.noise_solver import band_rms, noise_analysis
+from circuitopt.transient_solver import transient
 
 
 SIZES = {

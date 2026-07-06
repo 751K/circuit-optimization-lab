@@ -1,4 +1,4 @@
-"""Smoke test for the surrogate-accelerated optimization loop (``core.optimize``).
+"""Smoke test for the surrogate-accelerated optimization loop (``circuitopt.optimize``).
 
 Gated on scikit-learn. Trains a tiny surrogate on a small single_stage dataset, then
 runs the screen → Pareto → verify loop and checks the report structure (the loop
@@ -10,9 +10,9 @@ import pytest
 
 pytest.importorskip("sklearn")
 
-import core.dataset as ds
-import core.optimize as opt
-import core.surrogate as sg
+import circuitopt.dataset as ds
+import circuitopt.optimize as opt
+import circuitopt.surrogate as sg
 
 CONFIG = "examples/single_stage.json"          # has explore constraints + objectives
 

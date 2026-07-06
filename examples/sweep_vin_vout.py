@@ -12,9 +12,9 @@ import numpy as np
 from scipy.optimize import fsolve
 import matplotlib.pyplot as plt
 
-from core.circuit_loader import load_circuit_json
-from core.compiled_topology import CompiledTopology
-from core.device_model import create_device
+from circuitopt.circuit_loader import load_circuit_json
+from circuitopt.compiled_topology import CompiledTopology
+from circuitopt.device_model import create_device
 
 
 def dc_solve_one(topo, bias, sizes, nf_map, gmin=1e-12):

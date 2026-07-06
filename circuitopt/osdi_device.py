@@ -1,7 +1,7 @@
 """``TransistorModel`` adapter over an OpenVAF-compiled OSDI model (e.g. BSIM4).
 
-Wraps :class:`core.osdi_host.Device` so a compiled Verilog-A compact model plugs
-into the solver stack through the standard :class:`~core.device_model.TransistorModel`
+Wraps :class:`circuitopt.osdi_host.Device` so a compiled Verilog-A compact model plugs
+into the solver stack through the standard :class:`~circuitopt.device_model.TransistorModel`
 interface. This is the bridge that lets a *silicon* PDK (SKY130) run inside the
 same AC / noise engine used for the OTFT — see the ``silicon-pdk-openvaf`` memory.
 
@@ -27,7 +27,7 @@ _VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF
 # The vacompile wrapper is vendored in-repo (self-contained); it resolves the
 # openvaf-r binary via OPENVAF_BIN / OPENVAF_ROOT at call time. VACOMPILE can
 # override the wrapper path itself (escape hatch for wheel installs where
-# ``core/../tools`` is not packaged).
+# ``circuitopt/../tools`` is not packaged).
 _VACOMPILE = os.environ.get(
     "VACOMPILE",
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tools", "vacompile.sh")))

@@ -29,10 +29,10 @@ Run directly for an AC + noise + transient summary:
 """
 import numpy as np
 
-from core.ac_solver import ac_solve
-from core.noise_solver import band_rms, noise_analysis
-from core.topology import AFE_TOPO, Topology
-from core.transient_solver import transient
+from circuitopt.ac_solver import ac_solve
+from circuitopt.noise_solver import band_rms, noise_analysis
+from circuitopt.topology import AFE_TOPO, Topology
+from circuitopt.transient_solver import transient
 
 
 # "Final locked" AFE design (matches docs/core_overview calibration).

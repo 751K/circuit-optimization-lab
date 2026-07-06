@@ -1,7 +1,7 @@
 """Silicon (OSDI) full-fidelity transient — Phase B validation.
 
-Validates ``core.osdi_transient.transient_osdi`` (routed through the standard
-``core.transient_solver.transient`` entry via ``model_types``) four ways:
+Validates ``circuitopt.osdi_transient.transient_osdi`` (routed through the standard
+``circuitopt.transient_solver.transient`` entry via ``model_types``) four ways:
 
 1. DC-hold: with constant inputs the 5T OTA sits at its DC operating point.
 2. Independent reference: a common-source PMOS step matches the pure-Python
@@ -20,8 +20,8 @@ import subprocess
 import numpy as np
 import pytest
 
-from core.ngspice_char import ngspice_binary
-from core.osdi_device import openvaf_binary
+from circuitopt.ngspice_char import ngspice_binary
+from circuitopt.osdi_device import openvaf_binary
 
 PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _NGSPICE_LIB = os.path.join(PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")
@@ -42,7 +42,7 @@ TSTEP, TSTOP, TEDGE = 2.5e-9, 2e-6, 0.2e-6
 
 
 def _cs_spec():
-    from core.circuit_loader import circuit_from_dict
+    from circuitopt.circuit_loader import circuit_from_dict
     return circuit_from_dict({
         "name": "cs_pmos_tran", "solved": ["VOUT"],
         "rails": {"VDD": "VDD", "GND": 0.0, "VG": "VGATE"},
@@ -58,7 +58,7 @@ def _cs_spec():
 
 
 def _cs_step(method="be"):
-    from core.transient_solver import transient
+    from circuitopt.transient_solver import transient
     spec = _cs_spec()
     tgrid = np.arange(0.0, TSTOP + TSTEP / 2, TSTEP)
     wave = np.where(tgrid < TEDGE, VG0, VG1)
@@ -70,9 +70,9 @@ def _cs_step(method="be"):
 
 def test_ota_dc_hold():
     """Constant inputs → the 5T OTA transient sits at its DC op (signs/assembly)."""
-    from core.ac_solver import ac_solve
-    from core.circuit_loader import circuit_from_dict
-    from core.transient_solver import transient
+    from circuitopt.ac_solver import ac_solve
+    from circuitopt.circuit_loader import circuit_from_dict
+    from circuitopt.transient_solver import transient
     with open(os.path.join(_EXAMPLES, "sky130_5t_ota.json")) as fh:
         spec = circuit_from_dict(json.load(fh))
     ac = ac_solve(spec.sizes, spec.bias, np.array([1.0]), topo=spec.topology,
@@ -90,8 +90,8 @@ def test_ota_dc_hold():
 
 def test_cs_step_matches_python_reference():
     """Kernel BE trajectory == the independent pure-Python BE demo."""
-    from core.osdi_transient import cs_transient
-    from core.sky130_model import Sky130Pfet
+    from circuitopt.osdi_transient import cs_transient
+    from circuitopt.sky130_model import Sky130Pfet
     tgrid, r = _cs_step("be")
     assert r["nfail"] == 0
     vout = r["nodes"]["VOUT"]
@@ -103,7 +103,7 @@ def test_cs_step_matches_python_reference():
 
 def test_cs_settling_matches_analytic_tau():
     """63% settling time == (RL‖ro)·CL small-signal time constant."""
-    from core.sky130_model import Sky130Pfet
+    from circuitopt.sky130_model import Sky130Pfet
     tgrid, r = _cs_step("gear2")
     vout = r["nodes"]["VOUT"]
     dev = Sky130Pfet(W=W, L=L, vb=VDD)
@@ -130,8 +130,8 @@ def test_gear2_matches_be_when_settled():
                     reason="OSDI-enabled ngspice not present")
 def test_cs_step_matches_ngspice(tmp_path):
     """Same card + same .osdi in ngspice .tran → trajectory oracle."""
-    from core.osdi_device import compile_va
-    from core.sky130_model import _BSIM4_VA, Sky130Pfet
+    from circuitopt.osdi_device import compile_va
+    from circuitopt.sky130_model import _BSIM4_VA, Sky130Pfet
     tgrid, r = _cs_step("gear2")
     vout = r["nodes"]["VOUT"]
     card = Sky130Pfet(W=W, L=L, vb=VDD)._osdi_card
@@ -172,8 +172,8 @@ def test_controlled_sources_silicon():
       VZ   = gamma*VBUF/RBUF   = VOUT  (CCVS, 5k*2/10k)
     so every derived node must track VOUT sample-for-sample through the step.
     """
-    from core.circuit_loader import circuit_from_dict
-    from core.transient_solver import transient
+    from circuitopt.circuit_loader import circuit_from_dict
+    from circuitopt.transient_solver import transient
     cfg = {
         "name": "cs_ctrl_src", "solved": ["VOUT", "VBUF", "NS", "VX", "VY", "VZ"],
         "rails": {"VDD": "VDD", "GND": 0.0, "VG": "VGATE"},
@@ -220,10 +220,10 @@ def test_mixed_model_libraries():
     single-model run's trajectory — an exact internal oracle for the two-lib
     fn-pointer dispatch.
     """
-    from core.circuit_loader import circuit_from_dict
-    from core.device_model import _model_registry
-    from core.osdi_device import OsdiDevice
-    from core.transient_solver import transient
+    from circuitopt.circuit_loader import circuit_from_dict
+    from circuitopt.device_model import _model_registry
+    from circuitopt.osdi_device import OsdiDevice
+    from circuitopt.transient_solver import transient
 
     class _B4Nfet(OsdiDevice):
         VA_PATH = os.path.join(VAF_ROOT, "integration_tests/BSIM4/bsim4.va")
@@ -285,7 +285,7 @@ def test_mixed_model_libraries():
 
 
 def test_three_libraries_rejected():
-    from core.transient_solver import osdi_model_names
+    from circuitopt.transient_solver import osdi_model_names
     assert osdi_model_names({"M1": "sky130.nmos"})  # sanity: resolver works
 
 
@@ -295,7 +295,7 @@ def test_adaptive_matches_fine_fixed_grid():
     The CS step settles with τ≈225 ns; the coarse grid samples every 100 ns,
     so the error-controlled substepping must resolve the transient internally.
     """
-    from core.transient_solver import transient
+    from circuitopt.transient_solver import transient
     spec = _cs_spec()
     t_coarse = np.arange(0.0, TSTOP + 5e-8, 1e-7)
     w_coarse = np.where(t_coarse < TEDGE, VG0, VG1)
@@ -324,7 +324,7 @@ def test_adaptive_matches_fine_fixed_grid():
 
 def test_adaptive_dc_hold_is_cheap():
     """Constant inputs: the adaptive integrator holds DC and grows its step."""
-    from core.transient_solver import transient
+    from circuitopt.transient_solver import transient
     spec = _cs_spec()
     tgrid = np.linspace(0.0, 2e-6, 21)
     wave = np.full_like(tgrid, VG0)

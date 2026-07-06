@@ -24,9 +24,9 @@ import time
 
 import numpy as np
 
-from core.chopper import pmos_chopper_pac, pmos_chopper_pnoise, pmos_chopper_pss
-from core.circuit_loader import load_circuit_json
-from core.numba_kernels import NUMBA_AVAILABLE
+from circuitopt.chopper import pmos_chopper_pac, pmos_chopper_pnoise, pmos_chopper_pss
+from circuitopt.circuit_loader import load_circuit_json
+from circuitopt.numba_kernels import NUMBA_AVAILABLE
 
 
 ROOT = Path(__file__).resolve().parents[1]

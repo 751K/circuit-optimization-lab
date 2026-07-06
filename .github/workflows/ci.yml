@@ -54,7 +54,7 @@ jobs:
         run: python -m pytest -q
 
   # ── Byte-gate: Cadence-calibration reproduction gate ──
-  # core.calibration --all exits 1 on any drift, so it doubles as a hard gate.
+  # circuitopt.calibration --all exits 1 on any drift, so it doubles as a hard gate.
   byte-gate:
     needs: lint
     runs-on: ubuntu-latest
@@ -70,4 +70,4 @@ jobs:
       - name: Calibration byte-gate
         env:
           RUN_SLOW_CHOPPER: "1"
-        run: python -m core.calibration --all
+        run: python -m circuitopt.calibration --all

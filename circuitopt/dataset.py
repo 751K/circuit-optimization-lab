@@ -1,6 +1,6 @@
 """Surrogate dataset builder — turn the validated solvers into a labeled training set.
 
-The solver stack is calibrated against Cadence, and :mod:`core.explore` already
+The solver stack is calibrated against Cadence, and :mod:`circuitopt.explore` already
 samples a design space and evaluates each candidate through it. A surrogate model
 needs the *same* samples, but as a dataset rather than a Pareto front. This module
 is the "Teacher simulator + Dataset builder" role of the ML-surrogate roadmap:
@@ -128,7 +128,7 @@ def _resolve_corner(name):
     """(shift-dict-or-None, canonical-name) from a corner name.
 
     ``None`` / ``"typical"`` → nominal (no shift, matching explore's default);
-    ``"slow"`` / ``"fast"`` → the :data:`core.corners.CORNERS` process shift."""
+    ``"slow"`` / ``"fast"`` → the :data:`circuitopt.corners.CORNERS` process shift."""
     if name is None or name == "typical":
         return None, "typical"
     if name not in CORNERS:
@@ -435,7 +435,7 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
     """Sample the design space and evaluate every candidate → dataset dict.
 
     Returns ``{"manifest": {...}, "rows": [row, ...]}`` where each ``row`` is a
-    :func:`_row`. Unlike :func:`core.explore.explore` this applies **no** constraint
+    :func:`_row`. Unlike :func:`circuitopt.explore.explore` this applies **no** constraint
     or Pareto filtering and always evaluates noise, so the result is a complete,
     failure-retaining teacher dataset. ``seed_fn(sizes, bias) -> x0`` optionally
     provides a per-candidate DC seed (as for the AC-coupled AFE testbench).
@@ -566,7 +566,7 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
 def load_dataset_config(path):
     """Return ``(config_dict, topo, sizes, bias, nf, ExploreConfig)`` from a JSON.
 
-    Like :func:`core.explore.load_explore_json` but also returns the raw config
+    Like :func:`circuitopt.explore.load_explore_json` but also returns the raw config
     dict so the manifest can hash the topology."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -701,8 +701,8 @@ def _format_summary(dataset):
 def add_cli_args(parser):
     """Register the dataset feature's own arguments on ``parser``.
 
-    Single source of truth for both ``python -m core.dataset`` and the
-    ``python -m core dataset`` subcommand — keeps the two CLI surfaces from
+    Single source of truth for both ``python -m circuitopt.dataset`` and the
+    ``python -m circuitopt dataset`` subcommand — keeps the two CLI surfaces from
     drifting. Feature-only: subcommand-level mechanisms (e.g. ``--no-numba``)
     stay with their host parser, not here."""
     parser.add_argument("config", help="JSON file carrying an 'explore' block")

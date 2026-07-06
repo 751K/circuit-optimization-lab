@@ -3,9 +3,9 @@ import copy
 import numpy as np
 import pytest
 
-import core.chopper as chopper_mod
-from core.circuit_loader import load_circuit_json
-from core.chopper import (
+import circuitopt.chopper as chopper_mod
+from circuitopt.circuit_loader import load_circuit_json
+from circuitopt.chopper import (
     build_afe_pmos_chopper,
     chopper_analysis,
     finite_edge_chopper_harmonics,
@@ -20,7 +20,7 @@ from core.chopper import (
     refine_chopper_tgrid,
     square_chopper_harmonics,
 )
-from core.topology import AFE_TOPO, Topology
+from circuitopt.topology import AFE_TOPO, Topology
 
 
 SIZES = {
@@ -686,7 +686,7 @@ def test_pmos_chopper_pac_gate1_numba_matches_python():
     # (_pac_linearize_orbit_gate1_impl). It must reproduce the pure-Python assembly
     # to numerical noise (the only diff is the nested cap-derivative FD's internal
     # solve warm-start). Guards future kernel edits.
-    import core.pac_solver as psp
+    import circuitopt.pac_solver as psp
     if psp.pac_linearize_orbit_gate1_numba is None:
         pytest.skip("numba unavailable")
     freqs = np.array([0.05, 1.0, 200.0])

@@ -25,13 +25,13 @@ circuit-opt run examples/periodic_rc.json --analysis ac
 
 ## Releasing / 发版
 
-1. Bump `version` in `pyproject.toml` (it is the single source; `core.__version__` reads it back).
+1. Bump `version` in `pyproject.toml` (it is the single source; `circuitopt.__version__` reads it back).
 2. Move the new items in `CHANGELOG.md` from `[Unreleased]` into a new `[X.Y.Z] - <date>` section.
 3. `git commit` the two files, then `git tag vX.Y.Z` and `git push --tags`.
 4. The `Release` workflow builds the sdist + wheel and attaches them to a GitHub Release automatically.
 
 Semantic versioning: in the 0.x phase, `minor` = new capability and `patch` = fix. The public API
-is the `core/__init__` export surface + the circuit JSON format + CLI flags. (PyPI publishing is
-deferred until the generic top-level `core` package is renamed — see `pyproject.toml`.)
+is the `circuitopt/__init__` export surface + the circuit JSON format + CLI flags. (PyPI publishing is
+deferred until the generic top-level `circuitopt` package is renamed — see `pyproject.toml`.)
 
 Licensed under the [MIT License](LICENSE).

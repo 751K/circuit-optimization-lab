@@ -1,7 +1,7 @@
 import numpy as np
 
-import core.ac_solver as ac_solver
-from core.numba_kernels import (
+import circuitopt.ac_solver as ac_solver
+from circuitopt.numba_kernels import (
     _capacitance_charges_impl,
     _capacitances_impl,
     _eval_currents_impl,
@@ -19,8 +19,8 @@ from core.numba_kernels import (
     pnoise_hb_blocks_numba,
     terminal_derivatives_numba,
 )
-import core.pmos_tft_model as pmos_tft_model
-from core.pmos_tft_model import PMOS_TFT
+import circuitopt.pmos_tft_model as pmos_tft_model
+from circuitopt.pmos_tft_model import PMOS_TFT
 
 
 def _kernel_args(t, Vs, Vd, Vg, Vs1, Vd1):

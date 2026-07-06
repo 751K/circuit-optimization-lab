@@ -1207,7 +1207,7 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
       V0    : optional initial solved-node vector.
       model_types / device_kwargs : optional per-device model binding (silicon).
                Circuits whose transistors are OSDI (compiled Verilog-A) devices
-               are routed to :func:`core.osdi_transient.transient_osdi` — the
+               are routed to :func:`circuitopt.osdi_transient.transient_osdi` — the
                default (OTFT) path is untouched when these are None.
     Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
     fields are included when those nodes exist.

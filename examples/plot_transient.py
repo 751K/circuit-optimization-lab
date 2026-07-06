@@ -9,7 +9,7 @@ Two figures (saved under ``results/`` by default):
   f_chop) vs. the RC-filtered differential output (the demodulated baseband with
   its residual chopping ripple).
 
-Run (also available as ``python -m core plot {afe,chopper,transient}``):
+Run (also available as ``python -m circuitopt plot {afe,chopper,transient}``):
 
     python examples/plot_transient.py                       # both
     python examples/plot_transient.py --afe --f0 20 --amp 1e-3
@@ -34,7 +34,7 @@ RESULTS = Path(__file__).resolve().parent.parent / "results"
 # ── AFE core: sine in → amplified sine out ────────────────────────────────────
 def plot_afe(f0: float = 10.0, amp: float = 0.5e-3, periods: float = 6.0,
              npts: int = 1200, out_dir: Path | str = RESULTS) -> Path:
-    from core.transient_solver import transient
+    from circuitopt.transient_solver import transient
     from examples.afe_testbench import build_afe_testbench, dc_seed
 
     topo, sizes, bias = build_afe_testbench()
@@ -73,8 +73,8 @@ def plot_afe(f0: float = 10.0, amp: float = 0.5e-3, periods: float = 6.0,
 def plot_chopper(f_chop: float = 225.0, input_diff: float = 1e-3,
                  case: str = "chopper_design3_typical",
                  out_dir: Path | str = RESULTS) -> Path:
-    from core.calibration import _sizes, load_reference, resolve_adaptive_config
-    from core.chopper import pmos_chopper_pss
+    from circuitopt.calibration import _sizes, load_reference, resolve_adaptive_config
+    from circuitopt.chopper import pmos_chopper_pss
 
     md = load_reference(RESULTS.parent / "calibration" / case)["metadata"]
     c = md["circuit"]; s = md.get("solver", {})

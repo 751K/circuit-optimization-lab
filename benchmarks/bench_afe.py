@@ -19,11 +19,11 @@ import time
 import numpy as np
 
 
-from core.ac_solver import ac_solve
-from core.circuit_loader import load_circuit_json
-from core.noise_solver import band_rms, noise_analysis
-from core.numba_kernels import NUMBA_AVAILABLE
-from core.transient_solver import transient
+from circuitopt.ac_solver import ac_solve
+from circuitopt.circuit_loader import load_circuit_json
+from circuitopt.noise_solver import band_rms, noise_analysis
+from circuitopt.numba_kernels import NUMBA_AVAILABLE
+from circuitopt.transient_solver import transient
 
 
 _ROOT = Path(__file__).resolve().parents[1]

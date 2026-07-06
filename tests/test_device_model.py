@@ -12,8 +12,8 @@ import warnings
 
 import pytest
 
-import core.device_model as dm
-from core.device_model import (
+import circuitopt.device_model as dm
+from circuitopt.device_model import (
     TransistorModel,
     create_device,
     create_transistor,
@@ -25,7 +25,7 @@ from core.device_model import (
     register_pdk,
     transistor_type,
 )
-from core.pmos_tft_model import PMOS_TFT
+from circuitopt.pmos_tft_model import PMOS_TFT
 
 
 def test_at4000tg_is_default_pdk_with_pmos():
@@ -163,14 +163,14 @@ def test_reloaded_class_same_qualname_is_silent(restore_registry):
     assert dm.get_model_class("pmos_tft") is reloaded
 
 
-def test_import_core_emits_no_override_warnings():
+def test_import_circuitopt_emits_no_override_warnings():
     """Full PDK registration in normal import order must be silent — the
-    anti-false-positive guard: `python -W error::RuntimeWarning -c 'import core'`
+    anti-false-positive guard: `python -W error::RuntimeWarning -c 'import circuitopt'`
     exits clean."""
     proc = subprocess.run(
-        [sys.executable, "-W", "error::RuntimeWarning", "-c", "import core"],
+        [sys.executable, "-W", "error::RuntimeWarning", "-c", "import circuitopt"],
         capture_output=True, text=True,
     )
     assert proc.returncode == 0, (
-        f"import core raised a RuntimeWarning:\n{proc.stderr}"
+        f"import circuitopt raised a RuntimeWarning:\n{proc.stderr}"
     )

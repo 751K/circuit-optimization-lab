@@ -12,7 +12,7 @@ no ``libngspice`` shared build is present. Instead we exploit that a batch ``.dc
 sweep evaluates thousands of bias points in one process (~0.03 s / 1000 points): one
 sweep per ``(model, W, L, corner)`` characterises the whole (Vgs, Vds, Vsb) space into
 a grid of Id / gm / gds / Cgs / Cgd, cached to ``data/pdk/freepdk45/*.npz``. Downstream
-:class:`core.ngspice_device.NgspiceDevice` interpolates that grid (µs / eval), so every
+:class:`circuitopt.ngspice_device.NgspiceDevice` interpolates that grid (µs / eval), so every
 value the solver sees is exact ngspice-C at the grid nodes. gm / gds / caps are read
 straight from ngspice op-vars (not differentiated), i.e. true ngspice-C quantities.
 

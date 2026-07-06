@@ -5,11 +5,11 @@ Each case uses a small linear testbench with exact closed-form results.
 import numpy as np
 import pytest
 
-from core.ac_solver import ac_solve
-from core.circuit_loader import circuit_from_dict
-from core.noise_solver import noise_analysis
-from core.topology import Topology
-from core.transient_solver import transient
+from circuitopt.ac_solver import ac_solve
+from circuitopt.circuit_loader import circuit_from_dict
+from circuitopt.noise_solver import noise_analysis
+from circuitopt.topology import Topology
+from circuitopt.transient_solver import transient
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 

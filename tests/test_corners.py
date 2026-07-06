@@ -1,4 +1,4 @@
-"""Lock the corner / mismatch / latch tooling (core.corners).
+"""Lock the corner / mismatch / latch tooling (circuitopt.corners).
 
 Includes the key robustness finding: the cross-coupled positive feedback can latch
 under mismatch, the worst-case latch_screen catches it, and a weak-feedback re-size
@@ -9,15 +9,15 @@ import sys
 
 import numpy as np
 
-import core.corners as corners_mod
-from core.corners import (
+import circuitopt.corners as corners_mod
+from circuitopt.corners import (
     CORNERS,
     corner_table,
     latch_screen,
     metrics,
     mismatch_mc,
 )
-from core.device_factory import dev_corner
+from circuitopt.device_factory import dev_corner
 
 # fast coarse grid for the test (the tools accept a freqs override)
 FREQS = np.logspace(-2, 4, 41)

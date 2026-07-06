@@ -18,8 +18,8 @@ import time
 
 import numpy as np
 
-from core.numba_kernels import NUMBA_AVAILABLE
-from core.pmos_tft_model import PMOS_TFT
+from circuitopt.numba_kernels import NUMBA_AVAILABLE
+from circuitopt.pmos_tft_model import PMOS_TFT
 
 # (Vs, Vd, Vg) bias points covering three operating regions.
 BIAS_POINTS = {

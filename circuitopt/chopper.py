@@ -57,7 +57,7 @@ from .transient_solver import transient
 # higher-order LPTV conversion (and a small cyclostationary noise increment). For
 # Cadence-grade accuracy use the first-principles harmonic-balance path
 # (`pmos_chopper_pss` -> `pmos_chopper_pac`/`pmos_chopper_pnoise`), which carries
-# NO empirical constants and is what `core/calibration.py` validates. The old
+# NO empirical constants and is what `circuitopt/calibration.py` validates. The old
 # Cadence-fit conversion-phase (24.93 deg) and noise-PSD-scale (1.0355) constants
 # were retired 2026-06-22 — they only patched this first-order approximation.
 _PMOS_CHOPPER_BARE_DC_SEED_CACHE_MAX = 64
@@ -1375,7 +1375,7 @@ def pmos_chopper_pac(sizes, bias, freqs, f_chop, *, pss_result=None,
     """PSS-assisted small-signal PAC for the PMOS chopper.
 
     Builds the chopper PSS orbit when needed, then delegates to
-    :func:`core.pac_solver.pac_solve`. By default this uses the time-domain
+    :func:`circuitopt.pac_solver.pac_solve`. By default this uses the time-domain
     shooting PAC kernel, which keeps the PMOS_TFT internal gate1 small-signal
     states and avoids HB sideband truncation. Set ``time_domain=False`` to use
     the analytic-adjoint HB conversion matrix as an explicit comparison path, or
@@ -1438,7 +1438,7 @@ def pmos_chopper_pnoise(sizes, bias, freqs, f_chop, *, pss_result=None, nf=None,
     """PSS-based LPTV periodic noise for the eight-PMOS chopper.
 
     This wrapper builds the chopper PSS orbit when needed, then delegates the
-    periodic-noise conversion to :func:`core.pnoise_solver.pnoise_solve`.
+    periodic-noise conversion to :func:`circuitopt.pnoise_solver.pnoise_solve`.
 
     The default ``time_domain=True`` uses the sparse Floquet-adjoint PNoise path,
     which removes the HB adjoint sideband-truncation error seen on the hard

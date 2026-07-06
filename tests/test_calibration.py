@@ -1,6 +1,6 @@
 """Cadence/Spectre calibration regression.
 
-Drives :mod:`core.calibration` against the archived reference data under
+Drives :mod:`circuitopt.calibration` against the archived reference data under
 ``calibration/`` (fresh Spectre 24.1.0.078). The amp case (DC/AC/noise) is calibrated
 to ~machine precision; the chopper PSS/PAC/PNoise cases match Cadence within ~1-2% on
 PAC baseband gain and integrated IRN across all three corners. Every case must PASS —
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from core.calibration import format_report, load_reference, run_calibration
+from circuitopt.calibration import format_report, load_reference, run_calibration
 
 AMP = "calibration/amp_design3_typical"
 CHOPPERS = [

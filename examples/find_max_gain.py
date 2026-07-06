@@ -6,9 +6,9 @@ Usage:
 """
 import numpy as np
 import matplotlib.pyplot as plt
-from core.circuit_loader import load_circuit_json
-from core.device_model import create_device
-from core.compiled_topology import CompiledTopology
+from circuitopt.circuit_loader import load_circuit_json
+from circuitopt.device_model import create_device
+from circuitopt.compiled_topology import CompiledTopology
 from scipy.optimize import fsolve
 
 

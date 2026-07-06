@@ -1,6 +1,6 @@
 """Corner table + mismatch Monte-Carlo for an AFE design, with a histogram figure.
 
-Thin driver over core.corners (the consolidated corner / mismatch / latch tools).
+Thin driver over circuitopt.corners (the consolidated corner / mismatch / latch tools).
 
 Usage:  python examples/mc_mismatch.py [n] [seed]
 Writes: results/mc_mismatch.png
@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from core.corners import corner_table, latch_screen, mismatch_mc
+from circuitopt.corners import corner_table, latch_screen, mismatch_mc
 
 # robust re-size: weak cross-coupled feedback (M12/M13) removes the slow-corner
 # latch-up; gain comes from the input pair + output ro instead of regeneration.

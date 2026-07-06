@@ -19,8 +19,8 @@ import subprocess
 import numpy as np
 import pytest
 
-from core.ngspice_char import ngspice_binary
-from core.osdi_device import openvaf_binary
+from circuitopt.ngspice_char import ngspice_binary
+from circuitopt.osdi_device import openvaf_binary
 
 PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _NGSPICE_LIB = os.path.join(PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")
@@ -42,14 +42,14 @@ NPTS = 401
 
 @pytest.fixture(scope="module")
 def spec():
-    from core.circuit_loader import circuit_from_dict
+    from circuitopt.circuit_loader import circuit_from_dict
     with open(_CFG_PATH) as fh:
         return circuit_from_dict(json.load(fh))
 
 
 @pytest.fixture(scope="module")
 def suite(spec):
-    from core.analysis_dispatch import run_analysis_suite
+    from circuitopt.analysis_dispatch import run_analysis_suite
     return run_analysis_suite(spec, selected=["transient", "pss", "pac", "pnoise"])
 
 
@@ -113,7 +113,7 @@ def test_dataset_chopper_labels(tmp_path, suite):
     ranges), so the pss/pac/pnoise labels must reproduce the suite fixture's
     numbers — same solvers, same validated ``analyses`` settings, threaded
     through ``build_dataset``'s suite runner."""
-    import core.dataset as ds
+    import circuitopt.dataset as ds
     with open(_CFG_PATH) as fh:
         cfg = json.load(fh)
     for var in cfg["explore"]["variables"].values():
@@ -142,10 +142,10 @@ def test_frozen_clock_lti_oracles(spec):
     stationary AC / noise analyses — validates the silicon linearization, HB
     conversion, adjoint, and noise fold end to end."""
     import copy
-    from core.analysis_dispatch import run_analysis_suite
-    from core.circuit_loader import circuit_from_dict
-    from core.pac_solver import pac_solve
-    from core.pnoise_solver import pnoise_solve
+    from circuitopt.analysis_dispatch import run_analysis_suite
+    from circuitopt.circuit_loader import circuit_from_dict
+    from circuitopt.pac_solver import pac_solve
+    from circuitopt.pnoise_solver import pnoise_solve
     with open(_CFG_PATH) as fh:
         cfg = copy.deepcopy(json.load(fh))
     cfg["periodic"]["inputs"]["clk"] = {"type": "constant", "value": 1.8}
@@ -172,9 +172,9 @@ def test_frozen_clock_lti_oracles(spec):
 @pytest.mark.skipif(ngspice_binary() is None,
                     reason="OSDI-enabled ngspice not present")
 def test_chopper_gain_matches_ngspice(spec, suite, tmp_path):
-    from core.device_factory import build_devices
-    from core.osdi_device import compile_va
-    from core.sky130_model import _BSIM4_VA
+    from circuitopt.device_factory import build_devices
+    from circuitopt.osdi_device import compile_va
+    from circuitopt.sky130_model import _BSIM4_VA
     with open(_CFG_PATH) as fh:
         cfg = json.load(fh)
     wrappers = build_devices(spec.sizes, nf=spec.nf, topo=spec.topology,

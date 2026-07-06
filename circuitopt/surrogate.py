@@ -1,7 +1,7 @@
 """Baseline metric surrogate — a fast ML approximation of a labeled dataset.
 
 Fits one gradient-boosted-tree regressor per label (scikit-learn
-``HistGradientBoostingRegressor``) on a dataset built by :mod:`core.dataset`, and
+``HistGradientBoostingRegressor``) on a dataset built by :mod:`circuitopt.dataset`, and
 scores held-out accuracy against the teacher solver. This is the first ML layer of
 the surrogate roadmap: the calibrated solvers stay the
 source of truth; the surrogate only *screens* candidates orders of magnitude faster
@@ -14,9 +14,9 @@ imported lazily with a clear message if missing::
 
 Usage::
 
-    python -m core.surrogate train results/datasets/afe/afe_typical_train.npz \\
+    python -m circuitopt.surrogate train results/datasets/afe/afe_typical_train.npz \\
         --test results/datasets/afe/afe_typical_test.npz --out results/models/afe.pkl
-    python -m core.surrogate predict results/models/afe.pkl --x 65000,70,3500,30.5,10.0
+    python -m circuitopt.surrogate predict results/models/afe.pkl --x 65000,70,3500,30.5,10.0
 """
 from __future__ import annotations
 
@@ -75,11 +75,11 @@ def load_multi_corner(npz_paths, *, finite_only=True):
     """Stack several per-corner datasets into one training set for a PVT-spanning model.
 
     Each corner's **physical process shift** ``(pvt0, pbeta0)`` (from
-    :data:`core.corners.CORNERS`, keyed by the dataset manifest's ``corner``) is
+    :data:`circuitopt.corners.CORNERS`, keyed by the dataset manifest's ``corner``) is
     appended to ``X`` as two design columns — a continuous, physically-meaningful
     encoding (not a one-hot label), so the model can *interpolate* across corners.
     Returns ``(X_aug, Y, var_names + ['pvt0','pbeta0'], label_names)``."""
-    from core.device_factory import CORNERS
+    from circuitopt.device_factory import CORNERS
     Xs, Ys, var_names, label_names = [], [], None, None
     for path in npz_paths:
         X, Y, var_names, label_names, manifest = load_xy(path, finite_only=finite_only)
@@ -175,7 +175,7 @@ def score(Ytrue, Ypred, label_names):
 def save(surrogate, path):
     # Persist a plain dict (sklearn estimators + lists) rather than the Surrogate
     # instance: the wrapper class would pickle as ``__main__.Surrogate`` when trained
-    # via ``python -m core.surrogate`` and then fail to unpickle from any other entry
+    # via ``python -m circuitopt.surrogate`` and then fail to unpickle from any other entry
     # point. The estimators' own classes live in sklearn, so they load anywhere.
     _require_sklearn()
     import os
@@ -265,7 +265,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description="Baseline metric surrogate (train / predict).")
     sub = p.add_subparsers(dest="cmd", required=True)
     tr = sub.add_parser("train", help="Fit a surrogate on a dataset .npz and score a test set")
-    tr.add_argument("train_npz", help="training dataset .npz (from `core dataset`)")
+    tr.add_argument("train_npz", help="training dataset .npz (from `circuitopt dataset`)")
     tr.add_argument("--test", default=None, help="held-out test dataset .npz")
     tr.add_argument("--out", default=None, help="save the fitted surrogate here (joblib)")
     tr.add_argument("--max-iter", type=int, default=400, help="HGBR boosting iterations")

@@ -1,4 +1,4 @@
-"""Smoke test for the baseline metric surrogate (``core.surrogate``).
+"""Smoke test for the baseline metric surrogate (``circuitopt.surrogate``).
 
 Gated on the optional scikit-learn dependency. Trains a tiny surrogate on a
 synthetic monotone relationship, checks it learns (high R²) and predicts the right
@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("sklearn")
-import core.surrogate as sg
+import circuitopt.surrogate as sg
 
 
 def _synthetic(n=400, seed=0):
@@ -59,7 +59,7 @@ def test_filter_rows_region_of_interest():
 def test_load_multi_corner_appends_shift_features(tmp_path):
     import json
 
-    from core.corners import CORNERS
+    from circuitopt.corners import CORNERS
 
     def _write(path, corner, n=3):
         X = np.arange(n * 2, dtype=float).reshape(n, 2)

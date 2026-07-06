@@ -19,8 +19,8 @@ Cadence; here we isolate the factor-once shortcut.
 import numpy as np
 import pytest
 
-from core import diagnostics
-from core.pnoise_solver import _time_domain_pnoise_adjoint
+from circuitopt import diagnostics
+from circuitopt.pnoise_solver import _time_domain_pnoise_adjoint
 
 
 def _synthetic_linearization(ns=3, N=64, fundamental=225.0, seed=0):

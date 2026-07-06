@@ -2,7 +2,7 @@
 
 The ``run`` / ``explore`` / ``dataset`` / ``plot`` subcommands already have CLI
 coverage; these three did not. They are exercised here the same way a user runs
-them — as a real ``python -m core …`` subprocess from the repo root — so the full
+them — as a real ``python -m circuitopt …`` subprocess from the repo root — so the full
 path (argv routing, spec load, solver call, summary print, exit code) is checked,
 not just arg parsing. Scale is pinned to the minimum that still produces output
 (``--freqs-num`` tiny, ``-n 2``, chopper ``ideal`` level with a small harmonic
@@ -25,9 +25,9 @@ _MISSING = "examples/__does_not_exist__.json"
 
 
 def _run(*args, timeout=90):
-    """Run ``python -m core <args>`` from the repo root, capturing output."""
+    """Run ``python -m circuitopt <args>`` from the repo root, capturing output."""
     return subprocess.run(
-        [sys.executable, "-m", "core", *args],
+        [sys.executable, "-m", "circuitopt", *args],
         cwd=str(_REPO_ROOT),
         capture_output=True,
         text=True,

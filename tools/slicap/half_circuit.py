@@ -40,9 +40,9 @@ print("=" * 70)
 print("Step 1: DC operating point & small-signal parameters")
 print("=" * 70)
 
-from core.topology import AFE_TOPO
-from core.ac_solver import ac_solve
-from core.device_model import create_device
+from circuitopt.topology import AFE_TOPO
+from circuitopt.ac_solver import ac_solve
+from circuitopt.device_model import create_device
 
 ac_result = ac_solve(SIZES, BIAS, np.array([1.0]), topo=AFE_TOPO)
 dc = ac_result["dc_op"]

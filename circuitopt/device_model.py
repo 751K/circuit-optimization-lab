@@ -208,7 +208,7 @@ class TransistorModel(ABC):
     TRANSIENT_BACKEND: str | None = None
     """Which specialised transient integrator this model routes to, or ``None``
     to use the generic (OTFT numba) transient path.  ``"osdi"`` routes the
-    circuit to :func:`core.osdi_transient.transient_osdi`."""
+    circuit to :func:`circuitopt.osdi_transient.transient_osdi`."""
 
     # ── Auxiliary (optional; subclasses may override or set as attributes) ─
 
@@ -339,7 +339,7 @@ class PDK:
         devices: ``{polarity: TransistorModel subclass}`` — e.g.
             ``{"pmos": PMOS_TFT}``.  A future process adds ``"nmos"`` here.
         corners: Optional process-shift presets ``{name: {param: value}}``.
-            The corner authority currently lives in :mod:`core.corners`, so
+            The corner authority currently lives in :mod:`circuitopt.corners`, so
             this stays empty unless a PDK ships its own.
     """
     name: str

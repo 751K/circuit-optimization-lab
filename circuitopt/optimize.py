@@ -7,11 +7,11 @@ calibrated solver *disposes* (final word on the shortlist). This is the payoff o
 the surrogate roadmap: fast refinement without giving up sign-off accuracy on
 the designs you actually keep.
 
-Needs the optional scikit-learn dependency (via :mod:`core.surrogate`).
+Needs the optional scikit-learn dependency (via :mod:`circuitopt.surrogate`).
 
 Usage::
 
-    python -m core.optimize examples/afe_explore.json results/models/afe_typical.pkl \\
+    python -m circuitopt.optimize examples/afe_explore.json results/models/afe_typical.pkl \\
         -n 100000 --top-k 20
 """
 from __future__ import annotations

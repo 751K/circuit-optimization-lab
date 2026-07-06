@@ -2,7 +2,7 @@
 
 FreePDK45's BSIM4 ``version = 4.0`` cards diverge ~30 % from our BSIM4.8 OSDI VA
 (version-independently), so FreePDK45 binds to ngspice-C via a cached
-characterisation grid (:mod:`core.ngspice_device`) rather than the OSDI host. The
+characterisation grid (:mod:`circuitopt.ngspice_device`) rather than the OSDI host. The
 oracle is therefore ngspice itself: these tests pin that (1) a device's Id/gm/gds
 reproduce a direct ngspice ``.op`` at the grid nodes, and (2) a 5T OTA through the
 project's ``ac_solve`` matches ngspice's own ``.ac`` on the equivalent netlist.
@@ -17,7 +17,7 @@ import tempfile
 import numpy as np
 import pytest
 
-from core.ngspice_char import ngspice_binary
+from circuitopt.ngspice_char import ngspice_binary
 
 PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _FP45 = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
@@ -52,7 +52,7 @@ def _ngspice_op(model, card, W, L, vd, vg, vs, vb):
 
 
 def test_pdk_registered():
-    from core.device_model import create_transistor, list_pdks
+    from circuitopt.device_model import create_transistor, list_pdks
     assert "freepdk45" in list_pdks()
     n = create_transistor("nmos", pdk="freepdk45", W=0.09, L=0.05, corner="nom")
     p = create_transistor("pmos", pdk="freepdk45", W=0.09, L=0.05, corner="nom", vb=1.0)
@@ -61,7 +61,7 @@ def test_pdk_registered():
 
 def test_nmos_matches_ngspice_op():
     """Grid-node Id/gm/gds are exact ngspice-C (this is the model==oracle anchor)."""
-    from core.device_model import create_transistor
+    from circuitopt.device_model import create_transistor
     card = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
     n = create_transistor("nmos", pdk="freepdk45", W=0.09, L=0.05, corner="nom")
     # (Vs,Vd,Vg)=(0,0.5,0.7) is on the 25 mV grid → no interpolation error
@@ -74,7 +74,7 @@ def test_nmos_matches_ngspice_op():
 
 
 def test_pmos_matches_ngspice_op():
-    from core.device_model import create_transistor
+    from circuitopt.device_model import create_transistor
     card = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "PMOS_VTG.inc")
     p = create_transistor("pmos", pdk="freepdk45", W=0.09, L=0.05, corner="nom", vb=1.0)
     # |Vgs|=0.7,|Vds|=0.5,Vsb=0: Vs=1.0, Vd=0.5, Vg=0.3, bulk=1.0
@@ -88,7 +88,7 @@ def test_pmos_matches_ngspice_op():
 
 def test_corners_shift_threshold():
     """ss/ff corners select different cards → higher/lower drive than nom."""
-    from core.device_model import create_transistor
+    from circuitopt.device_model import create_transistor
     kw = dict(pdk="freepdk45", W=0.09, L=0.05)
     i_nom = create_transistor("nmos", corner="nom", **kw).get_Idc(0.0, 0.5, 0.7)
     i_ss = create_transistor("nmos", corner="ss", **kw).get_Idc(0.0, 0.5, 0.7)
@@ -98,8 +98,8 @@ def test_corners_shift_threshold():
 
 def test_ota_ac_matches_ngspice(tmp_path):
     """The 5T OTA through ac_solve matches ngspice .ac on the equivalent netlist."""
-    from core.ac_solver import ac_solve
-    from core.circuit_loader import circuit_from_dict
+    from circuitopt.ac_solver import ac_solve
+    from circuitopt.circuit_loader import circuit_from_dict
     cfg = json.load(open(_CFG))
     spec = circuit_from_dict(cfg)
     freqs = np.logspace(3, 11, 121)
@@ -159,7 +159,7 @@ def test_noise_matches_ngspice():
     """get_noise_psd (grid-interpolated) tracks a direct ngspice .noise fit — the
     thermal (BSIM4 tnoimod, 45 nm velocity-sat excess) and 1/f coefficient are the
     real ngspice-C values, not an 8/3·kT·gm estimate."""
-    from core.device_model import create_transistor
+    from circuitopt.device_model import create_transistor
     card = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
     n = create_transistor("nmos", pdk="freepdk45", W=0.5, L=0.1, corner="nom")
     s_th, s_fl = n.get_noise_psd(0.0, 0.5, 0.6, frequency=1.0)
@@ -174,7 +174,7 @@ def test_noise_matches_ngspice():
 
 
 def test_grid_cache_roundtrips(tmp_path):
-    from core.ngspice_char import characterize
+    from circuitopt.ngspice_char import characterize
     card = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
     g1 = characterize(card, "NMOS_VTG", "nmos", 0.09, 0.05, "nom", vdd=1.0)
     g2 = characterize(card, "NMOS_VTG", "nmos", 0.09, 0.05, "nom", vdd=1.0)   # cache hit
@@ -186,7 +186,7 @@ def test_extract_w_matches_true_w():
     """extract_w characterises one reference-W grid and linearly scales the actual W;
     for a wide device it reproduces the true per-W card to <2 % (BSIM4 W-linearity),
     which is what makes the dataset/optimizer W sweeps cheap."""
-    from core.device_model import create_transistor
+    from circuitopt.device_model import create_transistor
     vs, vd, vg = 0.0, 0.5, 0.55
     true = create_transistor("nmos", pdk="freepdk45", W=4.0, L=0.1, corner="nom")
     scal = create_transistor("nmos", pdk="freepdk45", W=4.0, L=0.1, corner="nom",
@@ -200,7 +200,7 @@ def test_extract_w_matches_true_w():
 def test_temperature_shifts_current():
     """The temperature kwarg re-characterises the card at that °C (BSIM4 temp eqns).
     Above threshold, mobility roll-off dominates → Id falls with temperature."""
-    from core.device_model import create_transistor
+    from circuitopt.device_model import create_transistor
     kw = dict(pdk="freepdk45", W=1.0, L=0.1, corner="nom")
     i27 = abs(create_transistor("nmos", temperature=300.15, **kw).get_Idc(0.0, 0.5, 0.7))
     i90 = abs(create_transistor("nmos", temperature=363.15, **kw).get_Idc(0.0, 0.5, 0.7))
@@ -226,8 +226,8 @@ def test_fd_ota_ac_matches_ngspice(tmp_path):
     ngspice's own .ac on the equivalent netlist. Passband gain and PM match tightly;
     UGBW reads ~8 % high because the grid AC model omits drain/source junction caps
     (Cdb/Csb) that ngspice includes, so the crossing is pinned only to <12 %."""
-    from core.ac_solver import ac_solve
-    from core.circuit_loader import circuit_from_dict
+    from circuitopt.ac_solver import ac_solve
+    from circuitopt.circuit_loader import circuit_from_dict
     cfg = json.load(open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
                                       "examples", "freepdk45_fd_ota.json")))
     spec = circuit_from_dict(cfg)
@@ -285,8 +285,8 @@ def test_fd_ota_ac_matches_ngspice(tmp_path):
 def test_fd_ota_meets_spec():
     """The optimized FreePDK45 FD-OTA testbench meets its headline specs through the
     project's ac_solve: passband gain > 40 dB and UGBW > 100 MHz (single-pole rolloff)."""
-    from core.ac_solver import ac_solve
-    from core.circuit_loader import circuit_from_dict
+    from circuitopt.ac_solver import ac_solve
+    from circuitopt.circuit_loader import circuit_from_dict
     cfg = json.load(open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
                                       "examples", "freepdk45_fd_ota.json")))
     spec = circuit_from_dict(cfg)
@@ -314,7 +314,7 @@ def test_run_ngspice_surfaces_failure(tmp_path):
     The deck ``.include``s a path that does not exist; ngspice aborts, so
     ``_run_ngspice`` re-raises with the deck purpose, return code, and the tail
     of ngspice's stderr/stdout so the root cause is visible at the call site."""
-    from core.ngspice_char import _run_ngspice
+    from circuitopt.ngspice_char import _run_ngspice
     cir = str(tmp_path / "bad.cir")
     out_txt = str(tmp_path / "out.txt")
     missing = str(tmp_path / "does_not_exist.inc")

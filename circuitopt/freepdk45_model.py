@@ -5,7 +5,7 @@ level-54 ``.model`` cards marked ``version = 4.0`` with nom/ss/ff corners. Its
 oracle is ngspice's built-in C-BSIM4: that version is what the cards were tuned
 for, and our OpenVAF BSIM4.8 VA computes ~30 % different I-V on these aggressive
 45 nm cards (version-independently — proven by mutating the card version). So
-FreePDK45 binds to :class:`core.ngspice_device.NgspiceDevice` (ngspice-C via a
+FreePDK45 binds to :class:`circuitopt.ngspice_device.NgspiceDevice` (ngspice-C via a
 cached characterisation grid), NOT the OSDI host used by SKY130.
 
 Registered as the ``"freepdk45"`` PDK with ``default=False`` — additive, the OTFT

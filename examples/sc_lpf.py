@@ -19,7 +19,7 @@ input-referred noise match Cadence Spectre within ~2%.
 above its source. The transient device current must keep its signed Verilog-A
 sign there — an earlier abs(Idc) stamp turned the reverse-biased switch into an
 anti-restoring pump that ran VMID/VOUT off to a spurious ~333 V / rail-clipped
-orbit. core/transient_solver.py now always uses the signed current.)
+orbit. circuitopt/transient_solver.py now always uses the signed current.)
 
 Usage:
   python examples/sc_lpf.py                # PSS + PAC + PNoise, verify
@@ -31,11 +31,11 @@ import argparse
 
 import numpy as np
 
-from core.pac_solver import pac_solve
-from core.pnoise_solver import pnoise_solve
-from core.pss_solver import pss_solve
-from core.topology import Topology
-from core.transient_solver import transient
+from circuitopt.pac_solver import pac_solve
+from circuitopt.pnoise_solver import pnoise_solve
+from circuitopt.pss_solver import pss_solve
+from circuitopt.topology import Topology
+from circuitopt.transient_solver import transient
 
 # ── circuit parameters ───────────────────────────────────────────────────
 F_CLK = 1000.0          # clock frequency (Hz)

@@ -4,8 +4,8 @@ Binds the OSDI 0.4 ABI (``openvaf/osdi/header/osdi_0_4.h`` in the OpenVAF-Reload
 tree) via :mod:`ctypes` so the solver can call a compiled Verilog-A compact model
 (e.g. BSIM4) in-process. This is the bridge behind a silicon PDK: OpenVAF compiles
 the standard model ``.va`` → native ``.osdi``; this module loads it and exposes a
-single-device evaluator; :mod:`core.osdi_device` adapts that onto
-:class:`~core.device_model.TransistorModel`.
+single-device evaluator; :mod:`circuitopt.osdi_device` adapts that onto
+:class:`~circuitopt.device_model.TransistorModel`.
 
 **This slice** loads a ``.osdi``, self-checks the struct binding against the
 module's exported ``OSDI_DESCRIPTOR_SIZE``, and enumerates each descriptor's nodes,
@@ -14,7 +14,7 @@ is built on top of the structures defined here.
 
 Run standalone to introspect a model::
 
-    python -m core.osdi_host /path/to/bsim4.osdi
+    python -m circuitopt.osdi_host /path/to/bsim4.osdi
 """
 from __future__ import annotations
 
@@ -850,7 +850,7 @@ class Device:
 
 def _main(argv: List[str]) -> int:
     if len(argv) != 2:
-        print("usage: python -m core.osdi_host <model.osdi>")
+        print("usage: python -m circuitopt.osdi_host <model.osdi>")
         return 2
     osdi = load_osdi(argv[1])
     print(f"{osdi.path}  (OSDI {osdi.version[0]}.{osdi.version[1]})")

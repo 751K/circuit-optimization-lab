@@ -1,12 +1,12 @@
 # JSON Circuit Description Format
 
-[Project Overview](README.md) | [Core Solver Overview](core_overview.md) | [中文版](json_circuit_format_zh.md)
+[Project Overview](README.md) | [Core Solver Overview](module_overview.md) | [中文版](json_circuit_format_zh.md)
 
 ## Purpose
 
 The JSON circuit description separates topology, sizes, bias, and analysis metadata
 from Python source code. Swap circuits by changing JSON files instead of editing
-`core/ac_solver.py`, `core/noise_solver.py`, or `core/transient_solver.py`.
+`circuitopt/ac_solver.py`, `circuitopt/noise_solver.py`, or `circuitopt/transient_solver.py`.
 
 Schema file:
 
@@ -167,7 +167,7 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
 
 - `type` — a model-registry key, `"<pdk>.<polarity>"` (e.g. `"sky130.nmos"`,
   `"sky130.pmos"`, `"freepdk45.nmos"`, `"at4000tg.pmos"`). See
-  `core.device_model.register_pdk`.
+  `circuitopt.device_model.register_pdk`.
 - Remaining keys are forwarded to the device constructor. For SKY130 devices:
   `vb` (bulk bias, volts; default 0), `corner` (SKY130 process corner —
   `tt`/`ss`/`ff`/`sf`/`fs`; default `tt`), `extract_w` (µm — resolve the SKY130
@@ -180,7 +180,7 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
   45 nm cards (version-independently), so FreePDK45 cannot use the SKY130 OSDI path.
   Instead the oracle is **ngspice-C itself**: each device characterises its
   `(model, W, L, corner)` once via a batch ngspice `.dc` sweep into a cached
-  Id/gm/gds/Cgs/Cgd grid (`core.ngspice_char` / `core.ngspice_device`) and
+  Id/gm/gds/Cgs/Cgd grid (`circuitopt.ngspice_char` / `circuitopt.ngspice_device`) and
   interpolates it — so every value is exact ngspice-C at the grid nodes. Noise is
   likewise exact ngspice-C (a `.noise` characterisation per bias → S_thermal +
   S_flicker@1Hz, log-space interpolated; validated within ~5 % of ngspice `.noise`
@@ -198,7 +198,7 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
   silicon OTA binds NMOS/PMOS devices independently. See `examples/sky130_5t_ota.json`.
 - The SKY130 / FreePDK45 PDKs need an external toolchain (OpenVAF + ngspice + the PDK
   files); solver calls raise a clear error if it is not installed. See the
-  "Silicon PDK / OSDI layer" section in [Core Solver Overview](core_overview.md).
+  "Silicon PDK / OSDI layer" section in [Core Solver Overview](module_overview.md).
 
 ### `bias`
 
@@ -498,12 +498,12 @@ Supported waveform forms:
 ### `analyses`
 
 Optional. Unified analysis-dispatch configuration. Calling
-`core.analysis_dispatch.run_analysis_suite(spec)` runs configured analyses in
+`circuitopt.analysis_dispatch.run_analysis_suite(spec)` runs configured analyses in
 the fixed order `ac -> noise -> transient -> pss -> pac -> pnoise`; PAC/PNoise
 automatically reuse or create the required PSS result.
 
 The authoritative option registry for `transient` / `pss` / `pac` / `pnoise`
-lives in `core.analysis_options`. `analysis_dispatch.py` derives forwarded
+lives in `circuitopt.analysis_options`. `analysis_dispatch.py` derives forwarded
 solver kwargs and defaults from that registry, and the JSON schema is regression
 tested against the same registry so new solver options do not silently drift.
 Unknown keys in an `analyses` block are rejected with an error (a typo such as
@@ -586,7 +586,7 @@ frequency; enable them with
 
 The JSON dispatch `pnoise` entry is the generic HB path. The chopper helper
 `pmos_chopper_pnoise(...)` now defaults to the TD-adjoint PNoise path for Cadence
-alignment; use that wrapper, or call `core.pnoise_solver.pnoise_solve(...,
+alignment; use that wrapper, or call `circuitopt.pnoise_solver.pnoise_solve(...,
 time_domain=True)` directly, when the truncation-free chopper PNoise path is
 required.
 
@@ -594,9 +594,9 @@ required.
 
 Optional. Design-space exploration configuration — variables to sweep with ranges,
 feasibility constraints (gain, BW, IRN, power, area), and optimization objectives.
-Consumed by `core.explore` (sample → evaluate → constrain → Pareto-select),
-`core.dataset` (sample → evaluate every candidate, no filtering — a labeled training
-set), and `core.optimize` (screen a trained surrogate → verify the shortlist on the
+Consumed by `circuitopt.explore` (sample → evaluate → constrain → Pareto-select),
+`circuitopt.dataset` (sample → evaluate every candidate, no filtering — a labeled training
+set), and `circuitopt.optimize` (screen a trained surrogate → verify the shortlist on the
 solver).
 
 ```json
@@ -626,7 +626,7 @@ solver).
 
 **Target syntax** — beyond `"DEV.W"` / `"DEV.L"` / `"DEV.NF"` (device sizes) and a
 bare bias key, `targets` supports structural design axes (each rebuilds the circuit
-per candidate; consumed by `core.dataset`/`core.optimize`, not by `core.explore`):
+per candidate; consumed by `circuitopt.dataset`/`circuitopt.optimize`, not by `circuitopt.explore`):
 
 | Target | Axis | Notes |
 |--------|------|-------|
@@ -657,10 +657,10 @@ Load and run:
 ```python
 import numpy as np
 
-from core.circuit_loader import load_circuit_json
-from core.ac_solver import ac_solve
-from core.noise_solver import noise_analysis
-from core.transient_solver import transient
+from circuitopt.circuit_loader import load_circuit_json
+from circuitopt.ac_solver import ac_solve
+from circuitopt.noise_solver import noise_analysis
+from circuitopt.transient_solver import transient
 
 spec = load_circuit_json("examples/single_stage.json")
 freqs = np.logspace(0, 4, 121)
@@ -677,8 +677,8 @@ tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
 Or run the analyses configured inside the JSON:
 
 ```python
-from core.analysis_dispatch import run_analysis_suite
-from core.circuit_loader import load_circuit_json
+from circuitopt.analysis_dispatch import run_analysis_suite
+from circuitopt.circuit_loader import load_circuit_json
 
 spec = load_circuit_json("examples/periodic_rc.json")
 results = run_analysis_suite(spec)
@@ -704,7 +704,7 @@ Supported:
 
 Supported (model abstraction):
 
-- Device model registry (`core/device_model.py`) — ``TransistorModel`` ABC + factory.
+- Device model registry (`circuitopt/device_model.py`) — ``TransistorModel`` ABC + factory.
   New model types can be added without modifying solver code.
 - NMOS and PMOS, both PDKs: the AT4000TG OTFT (PMOS-only) and silicon SKY130
   (nmos + pmos, via an OpenVAF-compiled BSIM4 through an OSDI host).

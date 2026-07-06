@@ -1,4 +1,4 @@
-"""Smoke test for the differentiable PyTorch surrogate (``core.surrogate_torch``).
+"""Smoke test for the differentiable PyTorch surrogate (``circuitopt.surrogate_torch``).
 
 Gated on a *working* torch: skips where torch is absent or its numpy ABI is broken
 (e.g. the daily env's numpy-2 vs torch-built-for-numpy-1 mismatch); runs in the mps
@@ -15,7 +15,7 @@ try:                                    # daily's torch imports but can't touch 
 except Exception:                       # pragma: no cover
     pytest.skip("torch/numpy interop broken in this env", allow_module_level=True)
 
-import core.surrogate_torch as st
+import circuitopt.surrogate_torch as st
 
 
 def _synthetic(n=500, seed=0):

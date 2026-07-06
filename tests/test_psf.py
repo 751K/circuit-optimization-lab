@@ -1,7 +1,7 @@
-"""Direct unit tests for the generic PSFASCII parser (:mod:`core.psf`).
+"""Direct unit tests for the generic PSFASCII parser (:mod:`circuitopt.psf`).
 
-``core.psf`` is the read side of the whole Cadence calibration chain: the
-byte-gate in :mod:`core.calibration` loads every Spectre reference file through
+``circuitopt.psf`` is the read side of the whole Cadence calibration chain: the
+byte-gate in :mod:`circuitopt.calibration` loads every Spectre reference file through
 these parsers, so a parser regression surfaces as a mysterious "calibration
 FAIL" far from its root cause. Until now the parser had only *indirect* coverage
 via ``test_calibration.py`` (which also runs the full solver stack). These tests
@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from core import psf
+from circuitopt import psf
 
 # Fixture roots, anchored off this file so cwd doesn't matter.
 _CAL = Path(__file__).resolve().parent.parent / "calibration"
@@ -334,7 +334,7 @@ def test_truncated_ac_returns_partial_current_behavior(tmp_path):
         complex(-6.977473507513711e+00, 1.359962934080744e-04), rel=1e-12)
 
 
-# ── contract with core.calibration ───────────────────────────────────────────
+# ── contract with circuitopt.calibration ───────────────────────────────────────────
 
 def test_calibration_contract_amp_ac_transfer():
     """The differential transfer calibration.compare_ac builds from parse_ac

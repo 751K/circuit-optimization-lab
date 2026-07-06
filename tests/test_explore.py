@@ -1,8 +1,8 @@
 import numpy as np
 
-from core.corners import CORNERS
-import core.explore as explore_mod
-from core.explore import (
+from circuitopt.corners import CORNERS
+import circuitopt.explore as explore_mod
+from circuitopt.explore import (
     Variable,
     apply_variables,
     explore,

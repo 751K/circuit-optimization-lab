@@ -1,4 +1,4 @@
-"""Validate core.osdi_host against ngspice on an OpenVAF-compiled BSIM4 model.
+"""Validate circuitopt.osdi_host against ngspice on an OpenVAF-compiled BSIM4 model.
 
 The OpenVAF compiler, the OSDI-enabled ngspice, and the BSIM4 Verilog-A source
 live outside this repo (see the ``silicon-pdk-openvaf`` project memory). The
@@ -17,8 +17,8 @@ import subprocess
 
 import pytest
 
-from core.ngspice_char import ngspice_binary
-from core.osdi_device import openvaf_binary
+from circuitopt.ngspice_char import ngspice_binary
+from circuitopt.osdi_device import openvaf_binary
 
 VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
 _TOOLS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools")
@@ -46,12 +46,12 @@ def osdi_path(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def dev(osdi_path):
-    from core.osdi_host import load_osdi, Device
+    from circuitopt.osdi_host import load_osdi, Device
     return Device(load_osdi(osdi_path), CARD)
 
 
 def test_introspection(osdi_path):
-    from core.osdi_host import load_osdi
+    from circuitopt.osdi_host import load_osdi
     m = load_osdi(osdi_path).model()
     assert m.name == "bsim4va"
     assert m.terminals == ["d", "g", "s", "b"]
@@ -108,12 +108,12 @@ def test_dc_matches_ngspice(dev, osdi_path, tmp_path):
     assert id_host == pytest.approx(id_ng, rel=1e-3)     # model == oracle
 
 
-# ── TransistorModel ABC adapter (core.osdi_device) ───────────────────────
+# ── TransistorModel ABC adapter (circuitopt.osdi_device) ───────────────────────
 class _Nfet:
     """Test binding of the BSIM4 model as an OsdiDevice subclass (built lazily)."""
     @staticmethod
     def cls():
-        from core.osdi_device import OsdiDevice
+        from circuitopt.osdi_device import OsdiDevice
 
         class Nfet(OsdiDevice):
             VA_PATH = BSIM4_VA

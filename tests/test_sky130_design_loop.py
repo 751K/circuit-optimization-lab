@@ -14,11 +14,11 @@ import os
 import numpy as np
 import pytest
 
-from core.ac_solver import ac_solve
-from core.circuit_loader import load_circuit_json, models_from_config
-from core.dataset import run_from_config, to_arrays
-from core.device_factory import apply_silicon_corner
-from core.osdi_device import openvaf_binary
+from circuitopt.ac_solver import ac_solve
+from circuitopt.circuit_loader import load_circuit_json, models_from_config
+from circuitopt.dataset import run_from_config, to_arrays
+from circuitopt.device_factory import apply_silicon_corner
+from circuitopt.osdi_device import openvaf_binary
 
 _PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _HAVE = os.path.exists(os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")) \
@@ -56,7 +56,7 @@ def test_dataset_is_silicon(dataset):
 
 def test_surrogate_learns_operating_region(dataset):
     """Trained on the operating region, the surrogate predicts silicon gain tightly."""
-    sg = pytest.importorskip("core.surrogate")
+    sg = pytest.importorskip("circuitopt.surrogate")
     X, Y, vn, ln, _, _ = to_arrays(dataset)
     Xf, Yf = sg.filter_rows(X, Y, ln, {"gain_dB": (20.0, 60.0)})   # drop railed corners
     rng = np.random.default_rng(0)
@@ -71,8 +71,8 @@ def test_surrogate_learns_operating_region(dataset):
 def test_optimize_screens_and_verifies(dataset, tmp_path):
     """The optimizer screens a big pool with the surrogate and the solver-verify pass
     confirms real feasible silicon OTA designs (the screen-and-verify payoff)."""
-    sg = pytest.importorskip("core.surrogate")
-    from core import optimize as opt
+    sg = pytest.importorskip("circuitopt.surrogate")
+    from circuitopt import optimize as opt
     X, Y, vn, ln, _, _ = to_arrays(dataset)
     model = sg.train(X, Y, vn, ln)                          # full model: knows the railed region
     pkl = tmp_path / "ota.pkl"

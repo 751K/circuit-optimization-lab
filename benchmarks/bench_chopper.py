@@ -24,14 +24,14 @@ import time
 
 import numpy as np
 
-from core.chopper import (
+from circuitopt.chopper import (
     chopper_analysis,
     finite_edge_chopper_harmonics,
     pmos_chopper_analysis,
     pmos_chopper_lptv_analysis,
     pmos_chopper_transient,
 )
-from core.numba_kernels import NUMBA_AVAILABLE
+from circuitopt.numba_kernels import NUMBA_AVAILABLE
 
 # ── fixed AFE design (locked, from bench_afe.py) ──────────────────────
 SIZES = {

@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from core.pss_solver import pss_solve
-from core.topology import Topology
+from circuitopt.pss_solver import pss_solve
+from circuitopt.topology import Topology
 
 
 def test_pss_rejects_nonperiodic_input_boundary():
@@ -89,7 +89,7 @@ def test_pss_reuses_converged_stabilization_period(monkeypatch):
         return {"t": tgrid, "nodes": {"A": vals}, "output": vals, "vout": vals,
                 "nfail": 0}
 
-    monkeypatch.setattr("core.pss_solver.transient", fake_transient)
+    monkeypatch.setattr("circuitopt.pss_solver.transient", fake_transient)
 
     result = pss_solve(
         {}, {}, period, topo=topo, tgrid=t, V0=np.array([0.42]),
@@ -126,7 +126,7 @@ def test_pss_reuses_broyden_jacobian_after_first_fd_build(monkeypatch):
         return {"t": tgrid, "nodes": nodes, "output": nodes["A"], "vout": nodes["A"],
                 "nfail": 0}
 
-    monkeypatch.setattr("core.pss_solver.transient", fake_transient)
+    monkeypatch.setattr("circuitopt.pss_solver.transient", fake_transient)
 
     common = dict(
         topo=topo,

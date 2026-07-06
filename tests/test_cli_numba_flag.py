@@ -1,11 +1,11 @@
 """Tests for the ``--no-numba`` CLI flag wiring (regression: dead-flag bug).
 
-``core.numba_kernels`` bakes ``USE_NUMBA``/``NUMBA_AVAILABLE`` from
-``CIRCUIT_USE_NUMBA`` at *import time*. Under ``python -m core …`` the package
-``core/__init__.py`` runs first and its solver imports pull ``numba_kernels`` in
+``circuitopt.numba_kernels`` bakes ``USE_NUMBA``/``NUMBA_AVAILABLE`` from
+``CIRCUIT_USE_NUMBA`` at *import time*. Under ``python -m circuitopt …`` the package
+``circuitopt/__init__.py`` runs first and its solver imports pull ``numba_kernels`` in
 transitively, so setting the env var inside a ``_cmd_*`` handler was too late and
 ``--no-numba`` silently no-oped. The fix is an argv pre-scan in
-``core/__init__.py`` (before those imports) plus a ``_assert_numba_flag`` guard
+``circuitopt/__init__.py`` (before those imports) plus a ``_assert_numba_flag`` guard
 that fails loudly if the flag is requested but Numba is still active.
 
 These tests pin:
@@ -22,16 +22,16 @@ from pathlib import Path
 
 import pytest
 
-from core.__main__ import _assert_numba_flag
+from circuitopt.__main__ import _assert_numba_flag
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CIRCUIT = "examples/periodic_rc.json"
 
 
 def _run_cli(*extra):
-    """Run ``python -m core run <circuit> --analysis ac --quiet [extra]``."""
+    """Run ``python -m circuitopt run <circuit> --analysis ac --quiet [extra]``."""
     return subprocess.run(
-        [sys.executable, "-m", "core", "run", _CIRCUIT,
+        [sys.executable, "-m", "circuitopt", "run", _CIRCUIT,
          "--analysis", "ac", "--quiet", *extra],
         cwd=str(_REPO_ROOT),
         capture_output=True,
@@ -46,8 +46,8 @@ def test_no_numba_run_succeeds_and_forces_pure_python():
     driver = (
         "import sys; "
         f"sys.argv = ['prog','run','{_CIRCUIT}','--analysis','ac','--no-numba','--quiet']; "
-        "import core.__main__ as m; m.main(); "
-        "from core import numba_kernels as nk; "
+        "import circuitopt.__main__ as m; m.main(); "
+        "from circuitopt import numba_kernels as nk; "
         "print('USE_NUMBA', nk.USE_NUMBA)"
     )
     proc = subprocess.run(
@@ -73,7 +73,7 @@ def test_assert_numba_flag_fires_when_numba_still_active():
     # In *this* process Numba was never disabled, so numba_kernels.USE_NUMBA is
     # whatever the default is. Skip if this environment has no Numba (then the
     # guard would correctly stay silent and there is nothing to trip).
-    from core import numba_kernels
+    from circuitopt import numba_kernels
     if not numba_kernels.USE_NUMBA:
         pytest.skip("Numba already disabled in this process; guard has nothing to trip")
 

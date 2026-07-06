@@ -1,10 +1,10 @@
-"""Tests for the surrogate dataset builder (``core.dataset``).
+"""Tests for the surrogate dataset builder (``circuitopt.dataset``).
 
 These pin the dataset *contract* a downstream surrogate depends on: a stable,
 versioned schema, provenance in the manifest, failure-retaining rows (every sample
 kept — a DC failure is a label, not a dropped point), JSON-valid output (no NaN
 tokens), and determinism for a fixed ``(config, seed)``. The underlying physics is
-:mod:`core.explore`'s, already tested; here we test only the dataset layer.
+:mod:`circuitopt.explore`'s, already tested; here we test only the dataset layer.
 """
 import json
 import os
@@ -12,10 +12,10 @@ import os
 import numpy as np
 import pytest
 
-import core.dataset as ds
-from core.dataset import (_finite_or_none, _resolve_corner, _row, _topology_hash,
+import circuitopt.dataset as ds
+from circuitopt.dataset import (_finite_or_none, _resolve_corner, _row, _topology_hash,
                           build_dataset, load_dataset_config, to_arrays)
-from core.ngspice_char import ngspice_binary
+from circuitopt.ngspice_char import ngspice_binary
 
 CONFIG = "examples/single_stage.json"
 
@@ -340,14 +340,14 @@ def test_target_kind_classifies_axes():
 
 
 def test_corner_shift_from_sampled_vars():
-    from core.explore import Variable
+    from circuitopt.explore import Variable
     cvars = [Variable("pvt0", -1, 1), Variable("pbeta0", -1, 1)]
     assert ds._corner_shift(cvars, {"pvt0": 0.1, "pbeta0": -0.2}, None) == \
         {"pvt0": 0.1, "pbeta0": -0.2}
 
 
 def test_corner_axis_samples_process_shift():
-    from core.explore import Variable
+    from circuitopt.explore import Variable
     data, topo, sizes, bias, nf, cfg = load_dataset_config(CONFIG)   # single_stage (PMOS)
     cfg.variables += [Variable("pvt0", -0.2, 0.2), Variable("pbeta0", -0.5, 0.5)]
     d = build_dataset(topo, sizes, bias, nf, cfg, n=5, seed=0,
@@ -361,7 +361,7 @@ def test_corner_axis_samples_process_shift():
 
 
 def test_patch_structural_applies_and_isolates():
-    from core.explore import Variable
+    from circuitopt.explore import Variable
     cfg = _struct_config()
     struct = [Variable("CL.C", 1e-12, 5e-10), Variable("periodic.frequency", 500, 2000)]
     patched = ds._patch_structural(cfg, struct,
@@ -374,8 +374,8 @@ def test_patch_structural_applies_and_isolates():
 
 
 def test_cap_axis_flows_into_rebuilt_topology():
-    from core.circuit_loader import circuit_from_dict
-    from core.explore import Variable
+    from circuitopt.circuit_loader import circuit_from_dict
+    from circuitopt.explore import Variable
     patched = ds._patch_structural(_struct_config(), [Variable("CL.C", 0, 1)],
                                    {"CL.C": 3.33e-9})
     caps = circuit_from_dict(patched).topology.capacitors
@@ -403,7 +403,7 @@ def test_build_dataset_structural_axes(tmp_path):
 
 
 def test_structural_axis_needs_config_dict():
-    from core.explore import ExploreConfig, Variable
+    from circuitopt.explore import ExploreConfig, Variable
     cfg = ExploreConfig([Variable("CL.C", 1e-12, 5e-10)], {}, {"area": "min"},
                         (0.05, 100.0), np.logspace(-2, 3, 11))
     with pytest.raises(ValueError, match="config"):
@@ -420,7 +420,7 @@ def test_freqs_override():
 def test_dataset_cli_end_to_end(tmp_path):
     import argparse
 
-    from core.__main__ import _add_dataset_parser, _cmd_dataset
+    from circuitopt.__main__ import _add_dataset_parser, _cmd_dataset
 
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="command")

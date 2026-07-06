@@ -1,8 +1,8 @@
 # Core Solver Overview
 
-[Project overview](README.md) | [中文说明](README_zh.md) | [中文版](core_overview_zh.md)
+[Project overview](README.md) | [中文说明](README_zh.md) | [中文版](module_overview_zh.md)
 
-This document introduces the current `core/` solver stack. The code is a compact local implementation of an AT4000TG OTFT ECG AFE solver, calibrated against Cadence/Spectre behavior. It is intended as the first concrete backend of the broader local circuit optimization flow.
+This document introduces the current `circuitopt/` solver stack. The code is a compact local implementation of an AT4000TG OTFT ECG AFE solver, calibrated against Cadence/Spectre behavior. It is intended as the first concrete backend of the broader local circuit optimization flow.
 
 ## Scope
 
@@ -22,7 +22,7 @@ The current solver stack covers:
   PSS, PAC, and PNoise behavior.
 
 The implementation is intentionally small and self-contained. It currently has
-39 Python files under `core/`, including `__init__.py`, the CLI entry
+39 Python files under `circuitopt/`, including `__init__.py`, the CLI entry
 `__main__.py`, calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
 modules, the main solver stack, an ML-surrogate layer (dataset builder, surrogate
 training, screen-and-verify optimizer), and two silicon PDKs — SKY130 (via an
@@ -32,7 +32,7 @@ same `TransistorModel` interface as the original AT4000TG OTFT model.
 ## File Structure
 
 ```text
-core/
+circuitopt/
   topology.py          Circuit topology source of truth.
   compiled_topology.py Runtime-compiled topology/index/stamp metadata.
   circuit_loader.py    JSON circuit description loader.
@@ -146,7 +146,7 @@ Defines the abstract device‑model interface that decouples solvers from concre
 
 - **`TransistorModel` (ABC)** — seven abstract methods (`get_Idc`, `get_op`, `get_capacitances`, `get_capacitance_charges_from_op`, `get_capacitance_branch_terms_from_op`, `get_noise_psd`, `get_numba_params`); `get_ss_params` provides a finite‑difference default that subclasses can override.
 - **`NumbaParams` (frozen dataclass)** — the 16 scalar parameters extracted once per device and passed to numba‑accelerated transient kernels.
-- **Backend-capability class attributes** — generic solvers dispatch on *capabilities*, never on a concrete backend type (no `isinstance(dev, OsdiDevice)`). `HAS_TERMINAL_LINEARIZATION` (default `False`) advertises the full quasi-static 4×4 terminal `(G, C)` stamp used by the periodic PAC/PNoise linearizer; `OsdiDevice` overrides it to `True`. `TRANSIENT_BACKEND` (default `None`, meaning the generic OTFT numba transient path) names a specialised integrator to route to instead; `OsdiDevice` sets it to `"osdi"`, which `transient_solver.py` reads to route to `core.osdi_transient.transient_osdi`.
+- **Backend-capability class attributes** — generic solvers dispatch on *capabilities*, never on a concrete backend type (no `isinstance(dev, OsdiDevice)`). `HAS_TERMINAL_LINEARIZATION` (default `False`) advertises the full quasi-static 4×4 terminal `(G, C)` stamp used by the periodic PAC/PNoise linearizer; `OsdiDevice` overrides it to `True`. `TRANSIENT_BACKEND` (default `None`, meaning the generic OTFT numba transient path) names a specialised integrator to route to instead; `OsdiDevice` sets it to `"osdi"`, which `transient_solver.py` reads to route to `circuitopt.osdi_transient.transient_osdi`.
 - **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. `get_model_class(model_type)` is a public read-only registry accessor so solvers can inspect a model's capability flags without importing a concrete backend class. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged. `register_model()` still *replaces* an existing entry on re-registration (intentional swap-in, e.g. a test stub, keeps working silently), but a genuine collision — a different class (by `__module__.__qualname__`) taking over an already-occupied name, e.g. two PDK modules racing for the same alias — now emits a `RuntimeWarning` before overwriting; a repeat import or `importlib.reload` of the *same* class stays silent.
 
 ### `device_factory.py`
@@ -241,16 +241,16 @@ sets `CIRCUIT_USE_NUMBA=1` at import time (set `CIRCUIT_USE_NUMBA=0` to opt out)
 
 The flag is **baked at import time**: `USE_NUMBA`/`NUMBA_AVAILABLE` are fixed
 constants computed once when `numba_kernels` is first imported, so setting the
-env var afterwards is a silent no-op. `core/__init__.py` pre-scans `sys.argv`
+env var afterwards is a silent no-op. `circuitopt/__init__.py` pre-scans `sys.argv`
 for `--no-numba` and sets `CIRCUIT_USE_NUMBA=0` *before* its solver imports pull
-in `numba_kernels` transitively — under `python -m core …` this `__init__` runs
+in `numba_kernels` transitively — under `python -m circuitopt …` this `__init__` runs
 before `__main__.py`, so the CLI flag takes effect. Each `__main__.py`
 subcommand handler then calls `_assert_numba_flag(args)`, which raises
 `SystemExit` if `--no-numba` was requested but `numba_kernels.USE_NUMBA` is
 still `True` — turning a defeated pre-scan (e.g. calling `main()` programmatically
 after something already imported a solver module) into a loud failure instead
 of a silently-ignored flag. Disabling Numba from Python code (not the CLI) must
-set `CIRCUIT_USE_NUMBA=0` **before** `import core`.
+set `CIRCUIT_USE_NUMBA=0` **before** `import circuitopt`.
 
 At present, the accelerated paths are PMOS current evaluation, internal-node
 Newton iterations, bias-dependent capacitance evaluation, AC/PNoise
@@ -375,7 +375,7 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   high-impedance internal nodes. Generic transient/PSS calls still default to
   the charge-conservative Q-stamp.
 - `pmos_chopper_pac(...)` is a compatibility wrapper over the generic
-  `core.pac_solver.pac_solve(...)`. The generic solver still defaults to the
+  `circuitopt.pac_solver.pac_solve(...)`. The generic solver still defaults to the
   analytic-adjoint HB path, but the chopper wrapper defaults to the time-domain
   Floquet path (`method="pss_time_domain"`): it builds the one-period monodromy
   once in time domain, then solves a small quasi-periodic boundary system per
@@ -392,7 +392,7 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   shooting path. Static PSS orbits automatically reduce to ordinary `ac_solve`,
   avoiding PAC transient runs.
 - `pmos_chopper_pnoise(...)` is a compatibility wrapper over the generic
-  `core.pnoise_solver.pnoise_solve(...)`. For chopper verification it defaults to
+  `circuitopt.pnoise_solver.pnoise_solve(...)`. For chopper verification it defaults to
   the time-domain Floquet adjoint: solve the sparse periodic adjoint BVP
   directly, then reuse the existing cyclostationary device/resistor noise fold.
   This removes the HB-adjoint sideband-truncation error. The harmonic-balance
@@ -547,7 +547,7 @@ Solves the time-domain response of the topology-defined system using backward Eu
   `AdaptiveConfig` and shared by transient/PSS/chopper paths. PSS additionally
   uses `adaptive_freeze_factor` from the same config.
   The adaptive LTE policy constants and Python helpers live in
-  `core/adaptive_config.py`; Numba keeps a compiled mirror for performance, with
+  `circuitopt/adaptive_config.py`; Numba keeps a compiled mirror for performance, with
   tests checking the two implementations agree. Newton failure rejects now shrink
   the candidate step, while zero-error accepted steps may grow it.
 - `max_step`, `max_retry_subdivisions`, `fallback_full_jacobian`, and
@@ -640,11 +640,11 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
 - A variable's `targets` can drive several keys at once, keeping matched pairs
   (M7=M8, ...) identical so the AFE's symmetric DC continuation stays on the
   physical branch.
-- Results export to CSV and JSONL; a CLI runs `python -m core.explore <config.json>`.
+- Results export to CSV and JSONL; a CLI runs `python -m circuitopt.explore <config.json>`.
 - Silicon corner routing (`SKY130_CORNERS`/`SILICON_CORNERS`/`apply_silicon_corner`) now lives in
   `device_factory.py`; `explore.py` imports it from there rather than defining it.
 - `add_cli_args(parser)` / `run_cli(args)` are the single source of the CLI argument definitions —
-  both the `python -m core explore` subcommand and the standalone `python -m core.explore` entry
+  both the `python -m circuitopt explore` subcommand and the standalone `python -m circuitopt.explore` entry
   point call the same two functions, so the two surfaces cannot drift apart (see
   [`cli_reference.md`](cli_reference.md)).
 
@@ -658,7 +658,7 @@ otherwise get re-derived in every sweep. The `CORNERS` data itself (global proce
 `typical` / `slow` / `fast` as `pvt0`/`pbeta0`, from the PDK monte.scs sections; e.g.
 slow = `{"pvt0": -0.2259, "pbeta0": -0.54}`) now lives in `device_factory.py`, the shared
 leaf device layer; `corners.py` imports it from there (`from .device_factory import CORNERS`)
-so existing `from core.corners import CORNERS` call sites keep working unchanged. What stays
+so existing `from circuitopt.corners import CORNERS` call sites keep working unchanged. What stays
 in `corners.py` is the mismatch/latch machinery built on top of it:
 
 - `mismatch_corner(rng, devices, base)` — per-device random `mvt0`/`mbeta0` on top of
@@ -708,7 +708,7 @@ accelerates the *screening* of a large candidate pool.
   a continuous-PVT training axis). Like `explore.py`, `dataset.py` imports silicon corner
   routing (`SKY130_CORNERS`, `apply_silicon_corner`) from `device_factory.py` rather than
   defining it, and exposes the same `add_cli_args(parser)` / `run_cli(args)` pair so the
-  `python -m core dataset` subcommand and the standalone `python -m core.dataset` entry
+  `python -m circuitopt dataset` subcommand and the standalone `python -m circuitopt.dataset` entry
   point share one argument definition.
 - **`surrogate.py`** — `HistGradientBoostingRegressor` (optional `scikit-learn`
   dependency) trained per label, with automatic log-space fitting for labels spanning
@@ -813,7 +813,7 @@ match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see th
   4.5; the VA source is 4.8 — a realistic 130 nm process, not SkyWater's bit-exact
   sign-off model, which is the right tradeoff for optimizer generalization).
 
-`core/circuit_loader.py`'s optional `models` block (`{"M1": {"type": "sky130.nmos",
+`circuitopt/circuit_loader.py`'s optional `models` block (`{"M1": {"type": "sky130.nmos",
 ...}}`) binds specific devices in a JSON circuit to a non-default PDK, so a mixed
 OTFT+silicon (or all-silicon) circuit is just configuration — see
 [JSON Circuit Description](json_circuit_format.md).
@@ -823,9 +823,9 @@ OTFT+silicon (or all-silicon) circuit is just configuration — see
 ```python
 import numpy as np
 
-from core.ac_solver import ac_solve
-from core.noise_solver import noise_analysis, band_rms
-from core.transient_solver import transient
+from circuitopt.ac_solver import ac_solve
+from circuitopt.noise_solver import noise_analysis, band_rms
+from circuitopt.transient_solver import transient
 
 sizes = {
     "M6": (2264, 78),
@@ -867,9 +867,9 @@ New circuits can be loaded from JSON. The field-level format is documented in
 ```python
 import numpy as np
 
-from core.circuit_loader import load_circuit_json
-from core.ac_solver import ac_solve
-from core.transient_solver import transient
+from circuitopt.circuit_loader import load_circuit_json
+from circuitopt.ac_solver import ac_solve
+from circuitopt.transient_solver import transient
 
 spec = load_circuit_json("examples/single_stage.json")
 freqs = np.logspace(0, 4, 121)
@@ -926,7 +926,7 @@ is about 1.8 ms when noise reuses the AC result.
 
 ## Calibration Status
 
-The current core was calibrated against Cadence Spectre 24.1 for the AT4000TG AFE use case. The observed agreement in the original project included:
+The current solver stack was calibrated against Cadence Spectre 24.1 for the AT4000TG AFE use case. The observed agreement in the original project included:
 
 - Typical and corner AC behavior within approximately 0.01 dB for gain.
 - Input-referred noise within a few percent across validated cases.

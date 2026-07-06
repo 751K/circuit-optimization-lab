@@ -33,7 +33,7 @@ class CircuitSpec:
     def binding(self) -> CircuitBinding:
         """Bundle this spec's structure + process binding + default DC seed.
 
-        Returns a :class:`core.device_factory.CircuitBinding` capturing ``topo``,
+        Returns a :class:`circuitopt.device_factory.CircuitBinding` capturing ``topo``,
         ``model_types``, ``device_kwargs``, ``nf`` and the default DC seed (the
         first dict ``dc_guess``, matching the inline seed each analysis uses), so a
         caller can pass ``binding=`` instead of threading the whole cluster.
@@ -94,7 +94,7 @@ def _load_models(raw_models, devices):
 
     ``{"M1": {"type": "sky130.nmos", "vb": 1.8}}`` becomes
     ``({"M1": "sky130.nmos"}, {"M1": {"vb": 1.8}})``. ``type`` names a model-registry
-    key (see :func:`core.device_model.register_pdk`); the remaining keys are forwarded
+    key (see :func:`circuitopt.device_model.register_pdk`); the remaining keys are forwarded
     to the device constructor. Devices absent from the block fall back to the default
     PDK, so the block is purely additive (an OTFT config omits it entirely)."""
     model_types, device_kwargs = {}, {}

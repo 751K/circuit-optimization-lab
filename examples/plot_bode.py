@@ -11,7 +11,7 @@ Two figures (saved under ``results/`` by default):
 
 Both magnitudes are complex (``result["response"]``) so phase is real, not a stub.
 
-Run (also available as ``python -m core plot {ac,pac,bode}``):
+Run (also available as ``python -m circuitopt plot {ac,pac,bode}``):
 
     python examples/plot_bode.py                    # both
     python examples/plot_bode.py --ac --npts 401
@@ -77,8 +77,8 @@ def _draw_bode(freqs, H, title, color, path):
 # ── plain AC: AFE amplifier frequency response ────────────────────────────────
 def plot_ac(case: str = "amp_design3_typical", fmin: float = 1e-2, fmax: float = 1e4,
             npts: int = 241, out_dir: Path | str = RESULTS) -> Path:
-    from core.ac_solver import ac_solve
-    from core.calibration import _sizes, load_reference
+    from circuitopt.ac_solver import ac_solve
+    from circuitopt.calibration import _sizes, load_reference
 
     md = load_reference(RESULTS.parent / "calibration" / case)["metadata"]
     sizes = _sizes(md); bias = dict(md["circuit"]["bias"]); nf = md["circuit"].get("nf", 1)
@@ -99,8 +99,8 @@ def plot_ac(case: str = "amp_design3_typical", fmin: float = 1e-2, fmax: float =
 def plot_pac(case: str = "chopper_design3_typical", f_chop: float | None = None,
              fmin: float = 1e-1, fmax: float = 2000.0, npts: int = 61,
              out_dir: Path | str = RESULTS) -> Path:
-    from core.calibration import _sizes, load_reference, resolve_adaptive_config
-    from core.chopper import pmos_chopper_pac, pmos_chopper_pss
+    from circuitopt.calibration import _sizes, load_reference, resolve_adaptive_config
+    from circuitopt.chopper import pmos_chopper_pac, pmos_chopper_pss
 
     md = load_reference(RESULTS.parent / "calibration" / case)["metadata"]
     c = md["circuit"]; s = md.get("solver", {})

@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
-from core.circuit_loader import load_circuit_json
+from circuitopt.circuit_loader import load_circuit_json
 
 
 def profile(label: str, fn, *, sort_by: str = "cumtime", top: int = 25):
@@ -50,8 +50,8 @@ def main():
     vin = np.where(t >= 0.5e-3, 30.65 - 0.5e-3, 30.65)
 
     # ── 1. DC + AC + Noise (warm) ──
-    from core.ac_solver import ac_solve
-    from core.noise_solver import noise_analysis, band_rms
+    from circuitopt.ac_solver import ac_solve
+    from circuitopt.noise_solver import noise_analysis, band_rms
 
     def _ac_noise():
         ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
@@ -63,7 +63,7 @@ def main():
     profile("DC+AC+Noise 121pt (warm)", _ac_noise)
 
     # ── 2. Transient 400 steps (BE, default) ──
-    from core.transient_solver import transient
+    from circuitopt.transient_solver import transient
 
     def _tran_be():
         return transient(spec.sizes, spec.bias, t, vip, vin, topo=spec.topology, nf=spec.nf)
@@ -80,7 +80,7 @@ def main():
     profile("Transient gear2 400 steps (warm)", _tran_gear2, top=30)
 
     # ── 4. Chopper ideal LPTV ──
-    from core.chopper import chopper_analysis
+    from circuitopt.chopper import chopper_analysis
 
     def _chop_ideal():
         return chopper_analysis(spec.sizes, spec.bias, freqs, f_chop=225.0,
@@ -90,9 +90,9 @@ def main():
     profile("Chopper ideal LPTV 121pt (warm)", _chop_ideal)
 
     # ── 5. Explore batch (50 candidates, AC only) ──
-    from core.explore import explore
+    from circuitopt.explore import explore
 
-    from core.explore import ExploreConfig, Variable
+    from circuitopt.explore import ExploreConfig, Variable
 
     cfg = ExploreConfig(
         variables={
@@ -113,7 +113,7 @@ def main():
     profile("Explore 50 candidates (warm)", _explore)
 
     # ── 6. Corner + MC summary ──
-    from core.corners import corner_table, mismatch_mc, CORNERS
+    from circuitopt.corners import corner_table, mismatch_mc, CORNERS
 
     def _corners():
         return corner_table(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)

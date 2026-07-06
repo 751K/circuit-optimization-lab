@@ -1,9 +1,9 @@
 """``TransistorModel`` backed by ngspice-C via a cached characterisation grid.
 
 For FreePDK45 the oracle is ngspice's built-in C-BSIM4 (its ``version = 4.0`` cards
-diverge ~30 % from our BSIM4.8 OSDI VA — see :mod:`core.ngspice_char`). This adapter
+diverge ~30 % from our BSIM4.8 OSDI VA — see :mod:`circuitopt.ngspice_char`). This adapter
 makes ngspice the evaluator: a device characterises its ``(model, W, L, corner)`` once
-into a (Vsb, Vds, Vgs) grid of Id / gm / gds / Cgs / Cgd (:func:`core.ngspice_char.characterize`,
+into a (Vsb, Vds, Vgs) grid of Id / gm / gds / Cgs / Cgd (:func:`circuitopt.ngspice_char.characterize`,
 exact ngspice-C at the nodes), then answers the ABC's Phase-A methods by interpolating
 that grid — µs / eval, so the DC Newton and AC/noise sweeps run at solver speed.
 

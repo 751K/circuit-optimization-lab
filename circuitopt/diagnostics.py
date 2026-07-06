@@ -41,7 +41,7 @@ import logging
 import os
 import threading
 
-logger = logging.getLogger("core.diagnostics")
+logger = logging.getLogger("circuitopt.diagnostics")
 
 _lock = threading.Lock()
 _counts: dict[str, int] = {}

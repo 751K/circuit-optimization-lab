@@ -5,23 +5,23 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import core.analysis_dispatch as dispatch_mod
-from core.ac_solver import ac_solve
-from core.analysis_options import (
+import circuitopt.analysis_dispatch as dispatch_mod
+from circuitopt.ac_solver import ac_solve
+from circuitopt.analysis_options import (
     known_keys,
     option_names,
     schema_properties,
     validate_analysis_cfg,
 )
-from core.analysis_dispatch import run_analysis_suite
-from core.circuit_loader import circuit_from_dict, load_circuit_json
-from core.corners import CORNERS
-from core.noise_solver import _KB, _TEMP, band_rms, noise_analysis
-from core.pac_solver import pac_solve
-from core.pnoise_solver import pnoise_solve
-from core.pss_solver import pss_solve
-from core.topology import AFE_TOPO
-from core.transient_solver import transient
+from circuitopt.analysis_dispatch import run_analysis_suite
+from circuitopt.circuit_loader import circuit_from_dict, load_circuit_json
+from circuitopt.corners import CORNERS
+from circuitopt.noise_solver import _KB, _TEMP, band_rms, noise_analysis
+from circuitopt.pac_solver import pac_solve
+from circuitopt.pnoise_solver import pnoise_solve
+from circuitopt.pss_solver import pss_solve
+from circuitopt.topology import AFE_TOPO
+from circuitopt.transient_solver import transient
 
 
 ROOT = Path(__file__).resolve().parents[1]

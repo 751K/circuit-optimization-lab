@@ -34,11 +34,11 @@ Homepage = "https://github.com/751K/circuit-optimization-lab"
 Repository = "https://github.com/751K/circuit-optimization-lab"
 
 [project.optional-dependencies]
-# Optional feature groups. Each maps to a real lazy import in core/ (or demo/):
-#   ml       core/surrogate.py   (GBT surrogate + optimize loop; joblib for persist)
-#   torch    core/surrogate_torch.py  (differentiable surrogate; heavier)
-#   plot     core/__main__.py plot subcommand + examples/plot_*.py
-#   parquet  core/dataset.py     (optional .parquet dataset export)
+# Optional feature groups. Each maps to a real lazy import in circuitopt/ (or demo/):
+#   ml       circuitopt/surrogate.py   (GBT surrogate + optimize loop; joblib for persist)
+#   torch    circuitopt/surrogate_torch.py  (differentiable surrogate; heavier)
+#   plot     circuitopt/__main__.py plot subcommand + examples/plot_*.py
+#   parquet  circuitopt/dataset.py     (optional .parquet dataset export)
 #   demo     demo/server.py      (Flask AFE Tuner web app)
 ml = [
     "scikit-learn>=1.3",
@@ -77,14 +77,12 @@ all = [
 ]
 
 [project.scripts]
-circuit-opt = "core.__main__:main"
+circuit-opt = "circuitopt.__main__:main"
 
 [tool.setuptools]
-# KNOWN RELEASE DEBT: the installed top-level import name is the generic `core`,
-# which can collide with anything else named `core` in a shared environment.
-# This MUST be renamed (e.g. to `circuit_opt`) before any public PyPI release;
-# the rename touches every intra-repo `from core.…` import, so it is deferred.
-packages = ["core"]
+# Top-level import name. Renamed from the generic `core` in 0.2.0 — this was the
+# blocker for public PyPI publishing (name collisions in shared environments).
+packages = ["circuitopt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

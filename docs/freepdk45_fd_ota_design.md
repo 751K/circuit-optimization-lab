@@ -1,7 +1,7 @@
 # FreePDK45 全差分 OTA:完整设计流程报告
 
 用本仓库工具链在 **FreePDK45(45 nm, 1.0 V)** 上从零走完的设计案例——器件由
-**ngspice-C BSIM4**(FreePDK45 的 oracle,经缓存特性化网格 `core.ngspice_device`)精确
+**ngspice-C BSIM4**(FreePDK45 的 oracle,经缓存特性化网格 `circuitopt.ngspice_device`)精确
 求值,配合 dataset/surrogate/optimize 的 ML 筛选管线。测试台:
 [examples/freepdk45_fd_ota.json](https://github.com/751K/circuit-optimization-lab/blob/main/examples/freepdk45_fd_ota.json)(其中尺寸即最终优化设计,
 直接可复现)。方法沿用 SKY130 案例([docs/sky130_fd_ota_design.md](sky130_fd_ota_design.md)),
@@ -29,7 +29,7 @@
 
 ### 2.1 OTA 架构:全差分单级望远镜级联(telescopic cascode)。为什么?
 
-先做单管特性化(`core.device_model.create_transistor` 直接探 ngspice-C BSIM4)定标:
+先做单管特性化(`circuitopt.device_model.create_transistor` 直接探 ngspice-C BSIM4)定标:
 
 - FreePDK45 NMOS Vth ≈ 0.38 V、PMOS |Vth| ≈ 0.47 V(1.0 V 轨);
 - **单管本征增益 gm/gds 在 L = 0.1 µm 仅 ~28–38 dB**,L = 0.2 µm 才升到 ~42–48 dB——
@@ -168,7 +168,7 @@ UGBW 为 ac_solve 值;按 §4.5 校 ~−8% 得 ngspice ~119–121 MHz,全角仍 
 
 ```bash
 # 单点验证(需要 PDK_ROOT 指向 FreePDK45 卡 + ngspice)
-python -m core run examples/freepdk45_fd_ota.json -a ac,noise
+python -m circuitopt run examples/freepdk45_fd_ota.json -a ac,noise
 ```
 
 流程脚本(dataset→surrogate→screen→verify→polish、Pareto、27 角 PVT)见本会话 scratchpad
@@ -179,4 +179,4 @@ python -m core run examples/freepdk45_fd_ota.json -a ac,noise
 - dataset/筛选阶段给器件加 `extract_w=1.0`(参考 W 特性化 + 线性 W 缩放,单器件误差 ~0.7%),
   免逐候选 ngspice 重表征;**终选设计务必逐 W 真卡复核**。
 - FreePDK45 器件评估器是 ngspice-C(非 SKY130 的 OSDI VA)——见
-  [freepdk45-ngspice-eval 记忆](https://github.com/751K/circuit-optimization-lab/blob/main/README.md) 与 `core/ngspice_char.py` 头注。
+  [freepdk45-ngspice-eval 记忆](https://github.com/751K/circuit-optimization-lab/blob/main/README.md) 与 `circuitopt/ngspice_char.py` 头注。

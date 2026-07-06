@@ -203,7 +203,7 @@ ANALYSIS_OPTIONS = {
 }
 
 
-# Keys the dispatch layer (core.analysis_dispatch) consumes itself, i.e. legal in
+# Keys the dispatch layer (circuitopt.analysis_dispatch) consumes itself, i.e. legal in
 # an ``analyses`` block but NOT part of any solver's option registry above.  These
 # are read directly out of ``cfg`` by run_analysis_suite / _run_transient / etc.
 # and never reach ``solver_kwargs``.  They must be listed here so that

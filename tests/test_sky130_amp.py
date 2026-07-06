@@ -11,11 +11,11 @@ import os
 import numpy as np
 import pytest
 
-import core
-from core.ac_solver import ac_solve
-from core.noise_solver import noise_analysis
-from core.osdi_device import openvaf_binary
-from core.topology import Topology
+import circuitopt
+from circuitopt.ac_solver import ac_solve
+from circuitopt.noise_solver import noise_analysis
+from circuitopt.osdi_device import openvaf_binary
+from circuitopt.topology import Topology
 
 _PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
 _HAVE = os.path.exists(os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")) \
@@ -53,7 +53,7 @@ def test_silicon_noise_matches_device_psd():
     r = noise_analysis(_SIZES, _BIAS, freqs, topo=_amp(), model_types=_MT, device_kwargs=_DK)
     assert r is not None
     vout = r["dc"]["vout"]
-    pf = core.create_transistor("pmos", pdk="sky130", W=10.0, L=0.15, vb=1.8)
+    pf = circuitopt.create_transistor("pmos", pdk="sky130", W=10.0, L=0.15, vb=1.8)
     ro = 1.0 / pf.get_ss_params(1.8, vout, _BIAS["VIN"])["gds"]
     zout = _RL * ro / (_RL + ro)
     s_th, s_fl1 = pf.get_noise_psd(1.8, vout, _BIAS["VIN"], 1.0)
@@ -104,8 +104,8 @@ def test_complementary_5t_ota_differential_gain():
 def test_silicon_transient_settles_to_dc_with_rc_tau():
     """Phase B: pure-Python backward-Euler OSDI transient settles to the DC op with
     the right RC time constant."""
-    from core.osdi_transient import cs_transient
-    pmos = core.create_transistor("pmos", pdk="sky130", W=10.0, L=0.15, vb=1.8)
+    from circuitopt.osdi_transient import cs_transient
+    pmos = circuitopt.create_transistor("pmos", pdk="sky130", W=10.0, L=0.15, vb=1.8)
     CL = 1e-12
     tg = np.linspace(0, 20e-9, 160)
     vout = cs_transient(pmos, 1.8, _RL, CL, lambda t: 0.5 if t <= 0 else 0.51, tg)

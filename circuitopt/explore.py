@@ -481,8 +481,8 @@ def _format_summary(results):
 def add_cli_args(parser):
     """Register the explore feature's own arguments on ``parser``.
 
-    Single source of truth for both ``python -m core.explore`` and the
-    ``python -m core explore`` subcommand — keeps the two CLI surfaces from
+    Single source of truth for both ``python -m circuitopt.explore`` and the
+    ``python -m circuitopt explore`` subcommand — keeps the two CLI surfaces from
     drifting. Feature-only: subcommand-level mechanisms (e.g. ``--no-numba``)
     stay with their host parser, not here.
 

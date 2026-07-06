@@ -37,7 +37,7 @@ nav:
       - JSON Circuit Format: json_circuit_format.md
       - CLI Reference: cli_reference.md
   - Architecture:
-      - Core Overview: core_overview.md
+      - Module Overview: module_overview.md
   - Design Cases:
       - SKY130 FD-OTA: sky130_fd_ota_design.md
       - FreePDK45 FD-OTA: freepdk45_fd_ota_design.md
@@ -48,7 +48,7 @@ nav:
       - Future Plan: futureplan.md
   - 中文文档:
       - 项目说明: README_zh.md
-      - 核心求解器概览: core_overview_zh.md
+      - 核心求解器概览: module_overview_zh.md
       - JSON 电路描述格式: json_circuit_format_zh.md
 
 markdown_extensions:

@@ -8,11 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-在 0.x 阶段，公共 API 定义为 `core/__init__` 的导出面 + circuit JSON 格式 + CLI flags；
+在 0.x 阶段，公共 API 定义为 `circuitopt/__init__` 的导出面 + circuit JSON 格式 + CLI flags；
 minor 版本引入新能力，patch 版本为修复。See the "Releasing / 发版" section of the root
 `README.md` for the release convention.
 
 ## [Unreleased]
+
+### Changed
+- **破坏性 / BREAKING** — 顶层导入包由泛化的 `core` 更名为 `circuitopt`
+  （`import circuitopt`、`python -m circuitopt …`、`python -m circuitopt.calibration` 等）。
+  PyPI 分发名（`circuit-optimization`）与 `circuit-opt` 命令行入口不变。此前因包名
+  过于通用而推迟的 PyPI 发布随之解锁。
+  Top-level import package renamed from the generic `core` to `circuitopt`; the PyPI
+  distribution name and the `circuit-opt` console script are unchanged. This unblocks
+  public PyPI publishing.
 
 ## [0.1.0] - 2026-07-05
 

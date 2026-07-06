@@ -3,23 +3,23 @@
 Usage::
 
     # Analysis dispatch (default)
-    python -m core examples/periodic_rc.json
-    python -m core examples/periodic_rc.json -a ac,noise,pss
+    python -m circuitopt examples/periodic_rc.json
+    python -m circuitopt examples/periodic_rc.json -a ac,noise,pss
 
     # Exploration
-    python -m core examples/afe_explore.json --explore -n 300
+    python -m circuitopt examples/afe_explore.json --explore -n 300
 
     # Corners
-    python -m core corners examples/afe_explore.json
-    python -m core corners examples/afe_explore.json --corner slow --freqs-num 61
+    python -m circuitopt corners examples/afe_explore.json
+    python -m circuitopt corners examples/afe_explore.json --corner slow --freqs-num 61
 
     # Mismatch Monte Carlo
-    python -m core mc examples/afe_explore.json -n 300 --seed 1
-    python -m core mc examples/afe_explore.json --corner typical --quiet
+    python -m circuitopt mc examples/afe_explore.json -n 300 --seed 1
+    python -m circuitopt mc examples/afe_explore.json --corner typical --quiet
 
     # Chopper analysis
-    python -m core chopper examples/afe_explore.json --level ideal
-    python -m core chopper examples/afe_explore.json --level pss --f-chop 225
+    python -m circuitopt chopper examples/afe_explore.json --level ideal
+    python -m circuitopt chopper examples/afe_explore.json --level pss --f-chop 225
 """
 from __future__ import annotations
 
@@ -31,9 +31,9 @@ import sys
 import numpy as np
 
 # ── Numba flag pre-scan backstop ──────────────────────────────────────────────
-# The authoritative `--no-numba` pre-scan lives in core/__init__.py, which runs
+# The authoritative `--no-numba` pre-scan lives in circuitopt/__init__.py, which runs
 # (and bakes numba_kernels' USE_NUMBA flag via its transitive solver imports)
-# *before* this module executes under `python -m core`. This repeat here is a
+# *before* this module executes under `python -m circuitopt`. This repeat here is a
 # cheap backstop for any path that reaches __main__ without that having run; it
 # must still precede the solver imports below. If both are somehow bypassed,
 # _assert_numba_flag() turns the silent no-op into a loud SystemExit.
@@ -64,9 +64,9 @@ def _assert_numba_flag(args):
     """Fail loudly if ``--no-numba`` was requested but Numba is still active.
 
     The real work is done by the argv pre-scan at module top (it sets
-    CIRCUIT_USE_NUMBA=0 before ``core.numba_kernels`` is imported and bakes its
+    CIRCUIT_USE_NUMBA=0 before ``circuitopt.numba_kernels`` is imported and bakes its
     flags). This guard is a tripwire: if someone reorders the imports, imports a
-    solver module before ``core.__main__``, or otherwise defeats the pre-scan,
+    solver module before ``circuitopt.__main__``, or otherwise defeats the pre-scan,
     the flag would silently no-op again. Checking the *baked* value here converts
     that silent failure into a loud one instead of a wrong-but-quiet run.
     """
@@ -76,9 +76,9 @@ def _assert_numba_flag(args):
     if numba_kernels.USE_NUMBA:
         raise SystemExit(
             "--no-numba was requested but Numba is already active "
-            "(core.numba_kernels.USE_NUMBA is True). The CIRCUIT_USE_NUMBA flag "
+            "(circuitopt.numba_kernels.USE_NUMBA is True). The CIRCUIT_USE_NUMBA flag "
             "is baked when numba_kernels is first imported; a solver module was "
-            "imported before core.__main__'s argv pre-scan could set it."
+            "imported before circuitopt.__main__'s argv pre-scan could set it."
         )
 
 
@@ -247,7 +247,7 @@ def _cmd_run(args):
 def _add_explore_parser(subparsers):
     p = subparsers.add_parser("explore", help="Run design-space exploration")
     # Feature args (positional + sampling/corner/output/quiet) come from the single
-    # source in core.explore so this subcommand can't drift from `python -m core.explore`.
+    # source in circuitopt.explore so this subcommand can't drift from `python -m circuitopt.explore`.
     explore_add_cli_args(p)
     # Subcommand-level mechanism — not a feature arg, so it stays here.
     p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
@@ -264,8 +264,8 @@ def _cmd_explore(args):
 def _add_dataset_parser(subparsers):
     p = subparsers.add_parser(
         "dataset", help="Build a labeled surrogate dataset from an 'explore' config")
-    # Feature args come from the single source in core.dataset so this subcommand
-    # can't drift from `python -m core.dataset`.
+    # Feature args come from the single source in circuitopt.dataset so this subcommand
+    # can't drift from `python -m circuitopt.dataset`.
     dataset_add_cli_args(p)
     # Subcommand-level mechanism — not a feature arg, so it stays here.
     p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
