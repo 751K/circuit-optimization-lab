@@ -7,11 +7,11 @@ analysis of the 10-T fully-differential AFE.
 
 ```bash
 # Numeric validation (fast, for cross-checking)
-/opt/miniconda3/envs/daily/bin/python tools/slicap/full_circuit.py
-/opt/miniconda3/envs/daily/bin/python tools/slicap/half_circuit.py
+python tools/slicap/full_circuit.py
+python tools/slicap/half_circuit.py
 
 # Symbolic derivation (design equations with ~17 free parameters)
-/opt/miniconda3/envs/daily/bin/python tools/slicap/half_circuit.py --sym
+python tools/slicap/half_circuit.py --sym
 ```
 
 ## Files
@@ -57,9 +57,9 @@ The 2.1% p₂ error is from simplified Cgd cross-coupling terms (transcapacitor 
 
 ## Environment
 
-- Python: `/opt/miniconda3/envs/daily/bin/python3`
+- Python: the active virtual environment
 - SLiCAP: v5.0.3
-- Project root: `/Volumes/MacoutDsik/Code/Circuit_Optimizaion`
+- Project root: derived from each script's `__file__`
 - Netlists: `cir/*.cir` (SLiCAP looks here)
 
 ## SLiCAP Syntax Notes

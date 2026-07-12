@@ -11,7 +11,7 @@ a realistic 130 nm process, not SkyWater's bit-exact sign-off model.
 Registered as the ``"sky130"`` PDK with ``default=False`` — the AT4000TG OTFT stays the
 default process, so this is purely additive (the amp/chopper byte-gate is untouched).
 
-Extraction needs the SKY130 PDK + OSDI-ngspice (external drive); resolved cards are
+Extraction needs the SKY130 PDK + OpenVAF/ngspice toolchain; resolved cards are
 cached under ``data/pdk/sky130/`` so re-use needs no toolchain. Override locations with
 ``PDK_ROOT`` / ``OPENVAF_ROOT`` / ``NGSPICE_BIN``.
 """
@@ -26,15 +26,16 @@ from typing import Dict
 
 from .device_model import register_pdk
 from .osdi_device import OsdiDevice
+from .toolchain import (bsim4_va_path, ngspice_binary as _resolve_ngspice_binary,
+                        pdk_root)
 
-_PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
+_PDK_ROOT = pdk_root()
 _NGSPICE_LIB = os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")
-_VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
 # run-ngspice wrapper is vendored in-repo; RUN_NGSPICE env overrides the path.
 _RUN_NGSPICE = os.environ.get(
     "RUN_NGSPICE",
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tools", "run-ngspice.sh")))
-_BSIM4_VA = os.path.join(_VAF_ROOT, "integration_tests/BSIM4/bsim4.va")
+_BSIM4_VA = bsim4_va_path() or ""
 _CARD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/pdk/sky130")
 
 _SUBCKT = {"nmos": "sky130_fd_pr__nfet_01v8", "pmos": "sky130_fd_pr__pfet_01v8"}
@@ -45,7 +46,8 @@ _LINE = re.compile(r"\s*([a-zA-Z]\w*)\s+([-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*$")
 
 
 def _ngspice():
-    return _RUN_NGSPICE if os.path.exists(_RUN_NGSPICE) else os.environ.get("NGSPICE_BIN", "ngspice")
+    return _RUN_NGSPICE if os.path.exists(_RUN_NGSPICE) else \
+        (_resolve_ngspice_binary() or "ngspice")
 
 
 _card_memo: Dict[tuple, Dict[str, float]] = {}

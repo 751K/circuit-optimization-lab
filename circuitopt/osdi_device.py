@@ -10,8 +10,8 @@ methods AC / noise / DC solvers call on the model object. The transient-only hoo
 (charge companion, numba params) raise :class:`NotImplementedError` — silicon
 transient/chopper is deferred Phase B (the `.osdi` can't live inside the numba loop).
 
-The OpenVAF toolchain lives on the external drive; compilation is lazy (only when a
-device is first built) so importing this module never needs the toolchain.
+The OpenVAF toolchain is resolved portably from environment variables, a virtual
+environment, or ``PATH``. Compilation is lazy, so importing needs no toolchain.
 """
 from __future__ import annotations
 
@@ -22,8 +22,9 @@ from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
 from .device_model import TransistorModel
+from .toolchain import (openvaf_binary as _resolve_openvaf_binary,
+                        osdi_cache_dir)
 
-_VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
 # The vacompile wrapper is vendored in-repo (self-contained); it resolves the
 # openvaf-r binary via OPENVAF_BIN / OPENVAF_ROOT at call time. VACOMPILE can
 # override the wrapper path itself (escape hatch for wheel installs where
@@ -31,24 +32,18 @@ _VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF
 _VACOMPILE = os.environ.get(
     "VACOMPILE",
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tools", "vacompile.sh")))
-_OSDI_CACHE_DIR = os.environ.get(
-    "OSDI_CACHE_DIR", os.path.join(_VAF_ROOT, ".osdi_cache"))
+_OSDI_CACHE_DIR = osdi_cache_dir()
 
 
 def openvaf_binary() -> Optional[str]:
     """Path to the openvaf-r compiler binary, or ``None`` if not reachable.
 
-    Mirrors ``tools/vacompile.sh``'s resolution: ``$OPENVAF_BIN`` if set, else
-    ``$OPENVAF_ROOT/target/release/openvaf-r`` (``OPENVAF_ROOT`` defaults to the
-    external-drive checkout). Returns ``None`` when the binary is absent, so
+    Mirrors ``tools/vacompile.sh``: explicit binary/root, virtual environment,
+    then ``PATH``. Returns ``None`` when the binary is absent, so
     callers/tests can gate the silicon path on the *real* dependency rather than
     on the presence of the (always-vendored) wrapper script.
     """
-    env_bin = os.environ.get("OPENVAF_BIN")
-    if env_bin:
-        return env_bin if os.access(env_bin, os.X_OK) else None
-    cand = os.path.join(_VAF_ROOT, "target", "release", "openvaf-r")
-    return cand if os.access(cand, os.X_OK) else None
+    return _resolve_openvaf_binary()
 
 _lib_cache: Dict[str, object] = {}       # va_path -> OsdiLibrary
 _lib_lock = threading.Lock()
@@ -89,20 +84,18 @@ def _shared_device(va_path: str, module: Optional[str], card: Dict[str, float],
 
 def compile_va(va_path: str, *, cache_dir: Optional[str] = None) -> str:
     """Compile a ``.va`` to ``.osdi`` via the OpenVAF wrapper (cached by mtime)."""
-    if not os.path.exists(_VACOMPILE):
+    compiler = openvaf_binary()
+    if compiler is None:
         raise RuntimeError(
-            f"OpenVAF compiler wrapper not found at {_VACOMPILE}; set VACOMPILE")
-    if openvaf_binary() is None:
-        raise RuntimeError(
-            "openvaf-r compiler not found; set OPENVAF_BIN to the binary or "
-            "OPENVAF_ROOT to its checkout (expects "
-            "$OPENVAF_ROOT/target/release/openvaf-r)")
+            "openvaf-r compiler not found; set OPENVAF_BIN/OPENVAF_ROOT, install "
+            "openvaf-r in the active virtual environment, or put it on PATH")
     cache_dir = cache_dir or _OSDI_CACHE_DIR
     os.makedirs(cache_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(va_path))[0]
     osdi = os.path.join(cache_dir, stem + ".osdi")
     if not (os.path.exists(osdi) and os.path.getmtime(osdi) >= os.path.getmtime(va_path)):
-        subprocess.run([_VACOMPILE, va_path, "-o", osdi], check=True, capture_output=True)
+        command = _VACOMPILE if os.path.exists(_VACOMPILE) else compiler
+        subprocess.run([command, va_path, "-o", osdi], check=True, capture_output=True)
     return osdi
 
 

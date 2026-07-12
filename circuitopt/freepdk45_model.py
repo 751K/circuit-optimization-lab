@@ -10,9 +10,11 @@ cached characterisation grid), NOT the OSDI host used by SKY130.
 
 Registered as the ``"freepdk45"`` PDK with ``default=False`` — additive, the OTFT
 stays default and SKY130 keeps its OSDI path. Corners ``nom``/``ss``/``ff`` select
-the matching card directory. Cards live on the external drive
-(``PDK_ROOT/freepdk45/models_<corner>/``); characterisation is lazy + cached under
-``data/pdk/freepdk45/`` so reuse needs no ngspice.
+the matching card directory. Cards resolve under
+``PDK_ROOT/freepdk45/models_<corner>/`` or the active/project virtual environment;
+characterisation is lazy + cached under
+``data/pdk/freepdk45/`` so reuse needs no ngspice. Full-circuit transient bypasses
+the grid and runs the same cards directly through ngspice for complete BSIM4 charge.
 """
 from __future__ import annotations
 
@@ -20,8 +22,9 @@ import os
 
 from .device_model import register_pdk
 from .ngspice_device import NgspiceDevice
+from .toolchain import pdk_root
 
-_PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
+_PDK_ROOT = pdk_root()
 _FP45_DIR = os.path.join(_PDK_ROOT, "freepdk45")
 _VDD = 1.0                      # FreePDK45 nominal supply
 

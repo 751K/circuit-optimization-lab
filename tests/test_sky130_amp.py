@@ -4,7 +4,7 @@ Phase A end-to-end: a common-source SKY130 PMOS amp (source at VDD → matches t
 solver's +Id-at-drain convention; bulk at VDD via ``vb``) solves DC, its AC gain
 equals the analytic ``gm*(RL||ro)``, and its output noise equals
 ``device_S_id*Zout^2 + resistor``. Needs the SKY130 PDK + OpenVAF + ngspice
-(external drive), so it skips cleanly in CI.
+(optional local toolchain), so it skips cleanly in CI.
 """
 import os
 
@@ -15,11 +15,12 @@ import circuitopt
 from circuitopt.ac_solver import ac_solve
 from circuitopt.noise_solver import noise_analysis
 from circuitopt.osdi_device import openvaf_binary
+from circuitopt.toolchain import bsim4_va_path, pdk_root
 from circuitopt.topology import Topology
 
-_PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
+_PDK_ROOT = pdk_root()
 _HAVE = os.path.exists(os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")) \
-    and openvaf_binary() is not None
+    and openvaf_binary() is not None and bsim4_va_path() is not None
 pytestmark = pytest.mark.skipif(not _HAVE, reason="SKY130 PDK / OpenVAF toolchain not present")
 
 _RL = 5e3

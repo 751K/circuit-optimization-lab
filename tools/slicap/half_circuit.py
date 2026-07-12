@@ -14,13 +14,14 @@ Half-circuit mapping (diff mode, NET2 = NET20 = 0):
   M6, M11:  tail current sources → open (virtual ground at both ends)
 
 Usage:
-  /opt/miniconda3/envs/daily/bin/python tools/slicap/half_circuit.py          # numeric
-  /opt/miniconda3/envs/daily/bin/python tools/slicap/half_circuit.py --sym    # symbolic
+  python tools/slicap/half_circuit.py          # numeric
+  python tools/slicap/half_circuit.py --sym    # symbolic
 """
 
 import sys, os
+from pathlib import Path
 
-PROJECT = "/Volumes/MacoutDsik/Code/Circuit_Optimizaion"
+PROJECT = Path(__file__).resolve().parents[2]
 os.chdir(PROJECT)
 
 import numpy as np

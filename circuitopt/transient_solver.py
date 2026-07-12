@@ -1139,6 +1139,14 @@ def osdi_model_names(model_types):
     return tuple(names)
 
 
+def freepdk45_model_names(model_types):
+    """Names in a ``model_types`` map bound to the FreePDK45 ngspice oracle."""
+    if not model_types:
+        return ()
+    return tuple(name for name, mt in model_types.items()
+                 if str(mt).startswith("freepdk45."))
+
+
 def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float],
               tgrid: np.ndarray, vip: Any = None, vin: Any = None,
               nf: int | Mapping[str, int] | None = None, V0: Any = None,
@@ -1223,6 +1231,21 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         device_kwargs=device_kwargs)
     if topo is None:
         topo = AFE_TOPO
+    if freepdk45_model_names(model_types):
+        from .ngspice_transient import transient_ngspice
+        _inputs = inputs
+        if _inputs is None:
+            _inputs = {}
+            if vip is not None:
+                _inputs["vip"] = vip
+            if vin is not None:
+                _inputs["vin"] = vin
+        return transient_ngspice(
+            sizes, bias, tgrid, topo=topo, nf=nf, V0=V0, inputs=_inputs,
+            node_inputs=node_inputs, current_inputs=current_inputs,
+            corner=corner, model_types=model_types, device_kwargs=device_kwargs,
+            integration_method=integration_method, max_step=max_step,
+        )
     if osdi_model_names(model_types):
         from .osdi_transient import transient_osdi
         _inputs = inputs

@@ -2,7 +2,7 @@
 
 SKY130 params are resolved by ngspice and fed to the OpenVAF-compiled BSIM4 (see the
 ``silicon-pdk-openvaf`` memory). These tests need the SKY130 PDK + OSDI-ngspice +
-OpenVAF (external drive), so they skip cleanly in CI. The registration itself
+OpenVAF, so they skip cleanly in CI. The registration itself
 (``register_pdk("sky130", …)``) is import-time and always exercised by ``import circuitopt``.
 """
 import os
@@ -11,10 +11,12 @@ import pytest
 
 import circuitopt
 from circuitopt.osdi_device import openvaf_binary
+from circuitopt.toolchain import bsim4_va_path, pdk_root
 
-PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
+PDK_ROOT = pdk_root()
 _NGSPICE_LIB = os.path.join(PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")
-_HAVE = os.path.exists(_NGSPICE_LIB) and openvaf_binary() is not None
+_HAVE = os.path.exists(_NGSPICE_LIB) and openvaf_binary() is not None \
+    and bsim4_va_path() is not None
 
 
 def test_sky130_registered_but_not_default():

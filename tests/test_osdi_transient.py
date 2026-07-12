@@ -22,14 +22,15 @@ import pytest
 
 from circuitopt.ngspice_char import ngspice_binary
 from circuitopt.osdi_device import openvaf_binary
+from circuitopt.toolchain import bsim4_va_path, openvaf_source_path, pdk_root
 
-PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
+PDK_ROOT = pdk_root()
 _NGSPICE_LIB = os.path.join(PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")
-VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
 _TOOLS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools")
 _VACOMPILE = os.path.join(_TOOLS, "vacompile.sh")
 RUN_NGSPICE = os.path.join(_TOOLS, "run-ngspice.sh")
-_HAVE = os.path.exists(_NGSPICE_LIB) and openvaf_binary() is not None
+_HAVE = os.path.exists(_NGSPICE_LIB) and openvaf_binary() is not None \
+    and bsim4_va_path() is not None
 
 pytestmark = pytest.mark.skipif(
     not _HAVE, reason="SKY130 PDK / OpenVAF toolchain not present")
@@ -226,13 +227,13 @@ def test_mixed_model_libraries():
     from circuitopt.transient_solver import transient
 
     class _B4Nfet(OsdiDevice):
-        VA_PATH = os.path.join(VAF_ROOT, "integration_tests/BSIM4/bsim4.va")
+        VA_PATH = openvaf_source_path("integration_tests", "BSIM4", "bsim4.va") or ""
         MODULE = "bsim4va"
         BASE_CARD = {"toxe": 4.148e-9, "vth0": 0.4, "u0": 0.04}
         TYPE = 1
 
     class _B3Nfet(OsdiDevice):
-        VA_PATH = os.path.join(VAF_ROOT, "integration_tests/BSIM3/bsim3.va")
+        VA_PATH = openvaf_source_path("integration_tests", "BSIM3", "bsim3.va") or ""
         MODULE = "bsim3_va"
         BASE_CARD = {"tox": 4.1e-9, "vth0": 0.45}
         TYPE = 1

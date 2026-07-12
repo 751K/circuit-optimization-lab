@@ -792,8 +792,10 @@ model==oracle: single-device op bit-exact vs ngspice `.op`, a 5T OTA through
 `ac_solve` within 0.05 dB / 0.3 % of ngspice's own `.ac`, and output noise within
 ~5 % of ngspice `.noise`. Noise is also exact ngspice-C — `characterize_noise` runs a
 `.noise` per coarse-grid bias (CCVS transimpedance → drain-noise PSD, fit S_id=A+B/f
-→ S_thermal + S_flicker@1Hz, log-space interpolated). DC+AC+noise; no transient/PSS on
-this path. The grid AC model carries Cgs/Cgd but **not** the drain/source junction caps
+→ S_thermal + S_flicker@1Hz, log-space interpolated). The fast grid handles DC+AC+noise;
+``transient()`` routes FreePDK45 circuits to ``ngspice_transient.py`` for native
+full-charge BSIM4 `.tran`. PSS/PAC/PNoise are not yet connected to that backend. The
+grid AC model carries Cgs/Cgd but **not** the drain/source junction caps
 Cdb/Csb, so a whole-OTA `ac_solve` reads ~8 % high on UGBW vs ngspice's own `.ac` (gain/PM
 match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see the FD-OTA case).
 

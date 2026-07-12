@@ -1,0 +1,92 @@
+{
+  "name": "freepdk45_sar3",
+  "description": "3-bit fully differential common-mode-switching SAR ADC. Dual 4C/2C/1C/1C-dummy CDACs sample a differential input, FreePDK45 CMOS transmission gates release both top plates, and a transistor-level 5T comparator resolves each bit. circuitopt replays ngspice .tran for every physical comparator decision.",
+  "solved": [
+    "TOPP", "TOPN", "B2P", "B1P", "B0P", "BDP",
+    "B2N", "B1N", "B0N", "BDN", "tail", "n1", "vout"
+  ],
+  "rails": {
+    "VDD": "VDD",
+    "GND": 0.0,
+    "VCM": "VCM",
+    "VBIAS": "VBIAS"
+  },
+  "devices": [
+    {"name": "MSNP", "drain": "TOPP", "gate": "GND", "source": "VCM", "W": 1.0, "L": 0.05},
+    {"name": "MSPP", "drain": "TOPP", "gate": "VDD", "source": "VCM", "W": 1.0, "L": 0.05},
+    {"name": "MSNN", "drain": "TOPN", "gate": "GND", "source": "VCM", "W": 1.0, "L": 0.05},
+    {"name": "MSPN", "drain": "TOPN", "gate": "VDD", "source": "VCM", "W": 1.0, "L": 0.05},
+    {"name": "M1", "drain": "n1", "gate": "TOPP", "source": "tail", "W": 1.0, "L": 0.1},
+    {"name": "M2", "drain": "vout", "gate": "TOPN", "source": "tail", "W": 1.0, "L": 0.1},
+    {"name": "M3", "drain": "n1", "gate": "n1", "source": "VDD", "W": 1.0, "L": 0.1},
+    {"name": "M4", "drain": "vout", "gate": "n1", "source": "VDD", "W": 1.0, "L": 0.1},
+    {"name": "M5", "drain": "tail", "gate": "VBIAS", "source": "GND", "W": 2.0, "L": 0.1}
+  ],
+  "models": {
+    "MSNP": {"type": "freepdk45.nmos"},
+    "MSPP": {"type": "freepdk45.pmos", "vb": 1.0},
+    "MSNN": {"type": "freepdk45.nmos"},
+    "MSPN": {"type": "freepdk45.pmos", "vb": 1.0},
+    "M1": {"type": "freepdk45.nmos"},
+    "M2": {"type": "freepdk45.nmos"},
+    "M3": {"type": "freepdk45.pmos", "vb": 1.0},
+    "M4": {"type": "freepdk45.pmos", "vb": 1.0},
+    "M5": {"type": "freepdk45.nmos"}
+  },
+  "bias": {"VDD": 1.0, "VCM": 0.5, "VBIAS": 0.55},
+  "outputs": ["vout"],
+  "capacitors": [
+    ["C2P", "TOPP", "B2P", 4e-14],
+    ["C1P", "TOPP", "B1P", 2e-14],
+    ["C0P", "TOPP", "B0P", 1e-14],
+    ["CDP", "TOPP", "BDP", 1e-14],
+    ["C2N", "TOPN", "B2N", 4e-14],
+    ["C1N", "TOPN", "B1N", 2e-14],
+    ["C0N", "TOPN", "B0N", 1e-14],
+    ["CDN", "TOPN", "BDN", 1e-14],
+    ["COUT", "vout", "GND", 2e-14]
+  ],
+  "vsources": [
+    ["VB2P", "B2P", "GND", "b2p"],
+    ["VB1P", "B1P", "GND", "b1p"],
+    ["VB0P", "B0P", "GND", "b0p"],
+    ["VBDP", "BDP", "GND", "bdp"],
+    ["VB2N", "B2N", "GND", "b2n"],
+    ["VB1N", "B1N", "GND", "b1n"],
+    ["VB0N", "B0N", "GND", "b0n"],
+    ["VBDN", "BDN", "GND", "bdn"]
+  ],
+  "transient_inputs": {
+    "MSNP": "sample",
+    "MSPP": "sample_b",
+    "MSNN": "sample",
+    "MSPN": "sample_b"
+  },
+  "dc_guesses": [
+    {
+      "TOPP": 0.5, "TOPN": 0.5,
+      "B2P": 0.5, "B1P": 0.5, "B0P": 0.5, "BDP": 0.5,
+      "B2N": 0.5, "B1N": 0.5, "B0N": 0.5, "BDN": 0.5,
+      "tail": 0.1, "n1": 0.5, "vout": 0.5
+    }
+  ],
+  "adc": {
+    "type": "sar",
+    "n_bits": 3,
+    "vref": 1.0,
+    "input_common_mode": 0.5,
+    "bit_inputs": ["b2p", "b1p", "b0p"],
+    "bit_inputs_bar": ["b2n", "b1n", "b0n"],
+    "dummy_input": "bdp",
+    "dummy_input_bar": "bdn",
+    "sample_input": "sample",
+    "sample_bar_input": "sample_b",
+    "comparator_node": "vout",
+    "comparator_threshold": 0.5,
+    "high_means_clear": true,
+    "sample_end": 1e-8,
+    "bit_period": 2e-8,
+    "edge_time": 2e-10,
+    "points_per_period": 100
+  }
+}

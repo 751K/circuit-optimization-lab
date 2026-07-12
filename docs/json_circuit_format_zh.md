@@ -185,7 +185,9 @@ examples/periodic_rc.json
   log 空间插值,5T OTA 上验证在 ngspice `.noise` 的 ~5% 内）。器件键:`vb`（NMOS=0,PMOS=VDD=1.0）、
   `corner`（`nom`/`ss`/`ff`,独立卡文件;默认 `nom`）、`extract_w`（µm——参考宽度表征一次、线性缩放
   实际 `W`,<0.7% vs 逐 W 真卡,使 dataset/优化器的 W 扫描保持纯插值）、`temperature`（开尔文,按该
-  温度重表征卡做 PVT）、`NF`。DC + AC + 噪声（此路径无瞬态/PSS）;网格 AC 模型不含漏/源结电容
+  温度重表征卡做 PVT）、`NF`。快速网格负责 DC + AC + 噪声；统一 `transient()` 检测到 FreePDK45
+  后会自动生成完整四端网表并调用 `circuitopt.ngspice_transient`，由 ngspice 原生 BSIM4 处理
+  `Qg/Qd/Qs/Qb`、结电容和开关电荷。PSS/PAC/PNoise 尚未接入此 ngspice 后端。网格 AC 模型不含漏/源结电容
   （Cdb/Csb）,故整机 `ac_solve` 的 UGBW 比 ngspice 自己的 `.ac` 偏高 ~8%——头条数字取 ngspice 值。
   卡在 `PDK_ROOT/freepdk45/` 下;见 `examples/freepdk45_5t_ota.json`（简单）与
   `examples/freepdk45_fd_ota.json`（全差分 OTA 设计案例,[docs/freepdk45_fd_ota_design.md](freepdk45_fd_ota_design.md)）。
@@ -208,6 +210,26 @@ examples/periodic_rc.json
 ```
 
 如果某个 rail 写成 `"VDD": "VDD"`，但 `bias` 里没有 `"VDD"`，求解时会失败。
+
+### `adc`
+
+可选。定义闭环 SAR 转换工作流；电路本体仍由普通 `devices`/`capacitors`/`vsources` 描述。
+`bit_inputs`/`bit_inputs_bar` 是差分 CDAC 的 MSB→LSB PWL 源 key，比较器判决来自真实 transient 节点。
+
+```json
+"adc": {
+  "type": "sar", "n_bits": 3, "vref": 1.0, "input_common_mode": 0.5,
+  "bit_inputs": ["b2p", "b1p", "b0p"],
+  "bit_inputs_bar": ["b2n", "b1n", "b0n"],
+  "dummy_input": "bdp", "dummy_input_bar": "bdn",
+  "sample_input": "sample", "sample_bar_input": "sample_b",
+  "comparator_node": "vout", "comparator_threshold": 0.5,
+  "sample_end": 1e-8, "bit_period": 2e-8, "edge_time": 2e-10
+}
+```
+
+执行入口是 `circuit-opt adc`；`--vin` 做单次转换，`--sweep` 计算 DNL/INL，`--sine`
+计算 SNDR/SFDR/ENOB。完整示例见 `examples/freepdk45_sar3.json`。
 
 ### `outputs`
 
@@ -600,6 +622,7 @@ examples/sc_lpf.json              # 开关电容低通（两相，PMOS 开关 + 
 examples/afe_explore.json         # 10 管 AFE 含 explore 配置
 examples/periodic_rc.json         # 纯 RC 周期 PSS/PAC/PNoise dispatch
 examples/sky130_5t_ota.json       # 硅 SKY130 互补 5T OTA —— `models` 块 + explore/dataset/optimize
+examples/freepdk45_sar3.json      # FreePDK45 全差分 3-bit SAR ADC —— 全电荷 .tran + DNL/INL/ENOB
 ```
 
 可以这样加载并运行：
@@ -656,12 +679,12 @@ pnoise_irn = results["pnoise"]["irn_uV_band"]
   （nmos + pmos，经 OpenVAF 编译的 BSIM4，通过 OSDI 宿主接入）。
 - 通过 `models` 字段做逐器件模型绑定——混合 OTFT/硅电路（不覆盖时默认 PDK 仍是
   ``"at4000tg.pmos"``）。
-- 硅 DC/AC/noise，外加一个基础性（后向欧拉）的硅瞬态实现。
+- 硅 DC/AC/noise；SKY130 走 OSDI 瞬态，FreePDK45 走原生 ngspice 全电荷瞬态。
 
 尚未支持：
 
-- 硅器件上的开关 / 时变元件（SKY130 的 ``.osdi`` 模型不能进 numba 的
-  transient/PSS/PAC/PNoise 循环——chopper 类分析目前仅支持 OTFT）。
+- FreePDK45 的 PSS/PAC/PNoise（当前 ngspice 后端只接入 `.tran`）。
+- ADC transient noise、FreePDK45 逐器件 mismatch、版图寄生提取和晶体管级 SAR 数字状态机。
 - 多输出同时分析。
 - 层次化子电路。
 - SPICE 语法解析。

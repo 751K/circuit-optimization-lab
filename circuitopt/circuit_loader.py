@@ -29,6 +29,7 @@ class CircuitSpec:
     analyses: dict | None = None
     model_types: dict | None = None      # device name -> model-registry key (e.g. "sky130.nmos")
     device_kwargs: dict | None = None    # device name -> extra ctor kwargs (vb, corner, ...)
+    adc: dict | None = None              # optional ADC conversion workflow configuration
 
     def binding(self) -> CircuitBinding:
         """Bundle this spec's structure + process binding + default DC seed.
@@ -469,12 +470,16 @@ def circuit_from_dict(data):
     analyses = data.get("analyses")
     if analyses is not None and not isinstance(analyses, dict):
         raise ValueError("analyses must be an object")
+    adc = data.get("adc")
+    if adc is not None and not isinstance(adc, dict):
+        raise ValueError("adc must be an object")
     model_types, device_kwargs = _load_models(data.get("models"), devices)
     return CircuitSpec(
         name=name, topology=topo, sizes=sizes, bias=bias, nf=nf,
         periodic=dict(periodic) if periodic is not None else None,
         analyses=dict(analyses) if analyses is not None else None,
         model_types=model_types or None, device_kwargs=device_kwargs or None,
+        adc=dict(adc) if adc is not None else None,
     )
 
 

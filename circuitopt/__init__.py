@@ -50,6 +50,11 @@ from .pnoise_solver import pnoise_solve
 from .pss_solver import pss_solve
 from .topology import Topology
 from .transient_solver import transient
+from .adc import (average_supply_power, average_waveform_source_power,
+                  code_density_metrics, decode_bit_waveforms, dynamic_metrics,
+                  static_ramp_metrics)
+from .sar import (run_sar_conversion, run_sar_signal, run_sar_sweep,
+                  sar_input_waveforms, sar_time_grid)
 
 # ``explore`` is *not* re-exported here because ``circuitopt.explore`` already refers
 # to the ``circuitopt.explore`` *module*.  Use ``from circuitopt.explore import explore``

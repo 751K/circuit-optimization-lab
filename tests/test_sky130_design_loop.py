@@ -4,7 +4,7 @@ End-to-end proof that a silicon (SKY130) circuit runs through the *whole* ML des
 pipeline via the config ``models`` block: the dataset builder labels it, the surrogate
 learns its operating-region metrics, and the optimizer screens a large candidate pool
 and verifies the shortlist on the Cadence-calibrated solver — including a cross-corner
-(tt vs ss) check. Needs the SKY130 PDK + OpenVAF + ngspice (external drive), so it skips
+(tt vs ss) check. Needs the optional SKY130 PDK + OpenVAF + ngspice toolchain, so it skips
 cleanly in CI. See the ``silicon-pdk-openvaf`` memory.
 """
 import importlib.util
@@ -19,10 +19,12 @@ from circuitopt.circuit_loader import load_circuit_json, models_from_config
 from circuitopt.dataset import run_from_config, to_arrays
 from circuitopt.device_factory import apply_silicon_corner
 from circuitopt.osdi_device import openvaf_binary
+from circuitopt.toolchain import bsim4_va_path, pdk_root
 
-_PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
+_PDK_ROOT = pdk_root()
 _HAVE = os.path.exists(os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")) \
     and openvaf_binary() is not None \
+    and bsim4_va_path() is not None \
     and importlib.util.find_spec("sklearn") is not None  # design loop trains a surrogate
 pytestmark = pytest.mark.skipif(
     not _HAVE, reason="SKY130 PDK / OpenVAF toolchain / scikit-learn not present")

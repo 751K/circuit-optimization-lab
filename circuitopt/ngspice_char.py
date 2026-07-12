@@ -16,9 +16,10 @@ a grid of Id / gm / gds / Cgs / Cgd, cached to ``data/pdk/freepdk45/*.npz``. Dow
 value the solver sees is exact ngspice-C at the grid nodes. gm / gds / caps are read
 straight from ngspice op-vars (not differentiated), i.e. true ngspice-C quantities.
 
-The ngspice binary + FreePDK45 cards live on the external drive; characterisation is
-lazy (only on first use of a geometry) so importing this module needs no toolchain.
-Override locations with ``PDK_ROOT`` / ``NGSPICE_BIN``.
+The ngspice binary + FreePDK45 cards are resolved from explicit environment variables,
+then the project ``.venv``, then legacy/PATH locations. Characterisation is lazy (only
+on first use of a geometry), so importing this module needs no toolchain. Override with
+``PDK_ROOT`` / ``NGSPICE_BIN``.
 """
 from __future__ import annotations
 
@@ -31,7 +32,9 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-_PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
+from .toolchain import ngspice_binary as _resolve_ngspice_binary, pdk_root
+
+_PDK_ROOT = pdk_root()
 _FP45_DIR = os.path.join(_PDK_ROOT, "freepdk45")
 # The run-ngspice wrapper is vendored in-repo (self-contained); it resolves the
 # ngspice binary via NGSPICE_BIN at call time. RUN_NGSPICE can override the
@@ -48,22 +51,18 @@ _OPVARS = ("id", "gm", "gds", "cgs", "cgd")
 def _ngspice() -> str:
     if os.path.exists(_RUN_NGSPICE):
         return _RUN_NGSPICE
-    return os.environ.get("NGSPICE_BIN", "ngspice")
+    return _resolve_ngspice_binary() or "ngspice"
 
 
 def ngspice_binary() -> "str | None":
     """The ngspice executable the wrapper would run, or ``None`` if unreachable.
 
-    Mirrors ``tools/run-ngspice.sh``: ``$NGSPICE_BIN`` if set (default is the
-    external-drive build), else ``ngspice`` on ``PATH``. Returns ``None`` when
+    Mirrors ``tools/run-ngspice.sh``: ``$NGSPICE_BIN``, active/project virtual
+    environment, then ``PATH``. Returns ``None`` when
     no runnable binary exists, so tests can gate on the *real* ngspice
     dependency rather than on the presence of the (always-vendored) wrapper.
     """
-    import shutil
-    env_bin = os.environ.get("NGSPICE_BIN", "/Volumes/MacoutDsik/ngspice/install/bin/ngspice")
-    if os.access(env_bin, os.X_OK):
-        return env_bin
-    return shutil.which("ngspice")
+    return _resolve_ngspice_binary()
 
 
 def _run_ngspice(cir: str, out_txt: str, timeout: float, what: str) -> None:

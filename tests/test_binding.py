@@ -33,10 +33,11 @@ from circuitopt.pnoise_solver import pnoise_solve
 from circuitopt.pss_solver import pss_solve
 from circuitopt.topology import AFE_TOPO, Topology
 from circuitopt.transient_solver import transient
+from circuitopt.toolchain import pdk_root
 
 
 # ── FreePDK45 availability gate (mirrors tests/test_freepdk45.py) ────────────
-PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
+PDK_ROOT = pdk_root()
 _FP45 = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
 _HAVE_FP45 = os.path.exists(_FP45) and ngspice_binary() is not None
 _requires_fp45 = pytest.mark.skipif(

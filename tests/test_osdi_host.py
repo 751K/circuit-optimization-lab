@@ -19,16 +19,16 @@ import pytest
 
 from circuitopt.ngspice_char import ngspice_binary
 from circuitopt.osdi_device import openvaf_binary
+from circuitopt.toolchain import bsim4_va_path
 
-VAF_ROOT = os.environ.get("OPENVAF_ROOT", "/Volumes/MacoutDsik/Code/VAF/OpenVAF-Reloaded")
 _TOOLS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools")
 VACOMPILE = os.path.join(_TOOLS, "vacompile.sh")
 RUN_NGSPICE = os.path.join(_TOOLS, "run-ngspice.sh")
-BSIM4_VA = os.path.join(VAF_ROOT, "integration_tests/BSIM4/bsim4.va")
+BSIM4_VA = bsim4_va_path() or ""
 
 _HAVE_COMPILER = openvaf_binary() is not None and os.path.exists(BSIM4_VA)
 pytestmark = pytest.mark.skipif(
-    not _HAVE_COMPILER, reason="OpenVAF/BSIM4 toolchain not present (external-drive only)")
+    not _HAVE_COMPILER, reason="OpenVAF/BSIM4 toolchain not present")
 
 # A minimal but working NMOS card; l/w/nf are BSIM4 *model* params in this VA.
 CARD = dict(type=1, l=0.15e-6, w=1.0e-6, toxe=4.148e-9, vth0=0.4, u0=0.04)

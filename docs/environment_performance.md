@@ -1,6 +1,6 @@
 # 运行环境与性能基准
 
-> 一句话：**跑性能一定要用装了 Numba 的 conda `daily` 环境**。base 环境没有 Numba，
+> 一句话：**跑性能一定要用装了 Numba 的项目虚拟环境**。不含 Numba 的解释器
 > 会静默回落到解释版内核，chopper 慢约 **28×**（7.5s → 221s），容易误判为“变慢了”。
 
 ## 为什么环境会决定快慢
@@ -9,14 +9,13 @@
   `import` 不到时，代码**静默回落**到解释版 `_impl` 内核（单源化后同一份源码既是
   JIT 核也是纯 Python 核：数值内核只存在一份 `_impl`，Numba 在时 JIT、不在时即其
   `.py_func`/原始纯 Python 形式）。功能照常、结果一致，但慢一个数量级。
-- 本机 base 解释器 `/opt/miniconda3/bin/python` **没装 Numba**；
-  conda `daily` 环境（`/opt/miniconda3/envs/daily/bin/python`，Numba 0.61 / NumPy 2.1 /
-  Py 3.12）有。
+- 推荐先 `source .venv/bin/activate`；路径不写死，Numba/NumPy/Python 的实际版本以
+  当前环境为准。
 
 ### 确认 Numba 真的在跑
 
 ```bash
-CIRCUIT_USE_NUMBA=1 /opt/miniconda3/envs/daily/bin/python -c "
+CIRCUIT_USE_NUMBA=1 python -c "
 import circuitopt.numba_kernels as nk
 k = nk._transient_solve_adaptive_gear2_impl
 print('jitted:', hasattr(k, 'py_func'), type(k).__name__)"
@@ -24,9 +23,9 @@ print('jitted:', hasattr(k, 'py_func'), type(k).__name__)"
 # 若为   jitted: False function      ← 走的是解释版，慢 28×
 ```
 
-## 实测基准（daily 环境，`CIRCUIT_USE_NUMBA=1`，热启动）
+## 实测基准（Numba 环境，`CIRCUIT_USE_NUMBA=1`，热启动）
 
-命令：`CIRCUIT_USE_NUMBA=1 /opt/miniconda3/envs/daily/bin/python -m circuitopt.calibration <case>`
+命令：`CIRCUIT_USE_NUMBA=1 python -m circuitopt.calibration <case>`
 
 | 用例 | 分析 | 用时（Numba 热） | 无 Numba（解释版） |
 |---|---|---|---|

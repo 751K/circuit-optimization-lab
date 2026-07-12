@@ -7,9 +7,11 @@ into a (Vsb, Vds, Vgs) grid of Id / gm / gds / Cgs / Cgd (:func:`circuitopt.ngsp
 exact ngspice-C at the nodes), then answers the ABC's Phase-A methods by interpolating
 that grid — µs / eval, so the DC Newton and AC/noise sweeps run at solver speed.
 
-**Scope (Phase A):** DC + small-signal (gm/gds) + capacitances + noise. The transient
-hooks raise :class:`NotImplementedError` (silicon transient stays the OSDI/OTFT path;
-the grid carries no charge companion). gm / gds / Cgs / Cgd are read straight from
+**Grid scope:** DC + small-signal (gm/gds) + capacitances + noise. The grid-level
+transient hooks raise :class:`NotImplementedError` because it carries no charge
+companion; complete FreePDK45 circuits are instead routed by ``transient()`` to
+the direct-ngspice full-charge backend in :mod:`circuitopt.ngspice_transient`.
+gm / gds / Cgs / Cgd are read straight from
 ngspice op-vars (Cgs = −dQg/dVs, Cgd = −dQg/dVd — the same definition the OSDI host
 uses), i.e. true ngspice-C quantities, not differentiated interpolants.
 """

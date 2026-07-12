@@ -10,6 +10,10 @@
       "type": "string",
       "description": "Human-readable circuit name."
     },
+    "description": {
+      "type": "string",
+      "description": "Human-readable circuit description."
+    },
     "solved": {
       "type": "array",
       "description": "Unknown node names solved by DC/AC/noise/transient.",
@@ -161,6 +165,10 @@
       "$ref": "#/$defs/analyses",
       "description": "Optional analysis dispatch configuration."
     },
+    "adc": {
+      "$ref": "#/$defs/adc",
+      "description": "Optional ADC conversion workflow configuration."
+    },
     "explore": {
       "$ref": "#/$defs/explore",
       "description": "Optional design-space exploration spec (see core/explore.py)."
@@ -171,6 +179,31 @@
     }
   },
   "$defs": {
+    "adc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "n_bits", "vref", "bit_inputs", "sample_input", "sample_bar_input", "comparator_node", "comparator_threshold", "sample_end", "bit_period", "edge_time"],
+      "properties": {
+        "type": {"const": "sar"},
+        "n_bits": {"type": "integer", "minimum": 1},
+        "vref": {"$ref": "#/$defs/positiveNumber"},
+        "bit_inputs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/name"}},
+        "bit_inputs_bar": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/name"}},
+        "dummy_input": {"$ref": "#/$defs/name"},
+        "dummy_input_bar": {"$ref": "#/$defs/name"},
+        "input_common_mode": {"type": "number"},
+        "sample_input": {"$ref": "#/$defs/name"},
+        "sample_bar_input": {"$ref": "#/$defs/name"},
+        "comparator_node": {"$ref": "#/$defs/name"},
+        "comparator_threshold": {"type": "number"},
+        "high_means_clear": {"type": "boolean"},
+        "sample_end": {"$ref": "#/$defs/positiveNumber"},
+        "bit_period": {"$ref": "#/$defs/positiveNumber"},
+        "edge_time": {"$ref": "#/$defs/positiveNumber"},
+        "points_per_period": {"type": "integer", "minimum": 8},
+        "power_rails": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/name"}}
+      }
+    },
     "models": {
       "type": "object",
       "description": "Device name -> {type, ...ctor kwargs}. 'type' is a model-registry key such as 'sky130.nmos'/'sky130.pmos'.",

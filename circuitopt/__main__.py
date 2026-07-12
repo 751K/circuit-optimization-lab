@@ -58,7 +58,7 @@ from .service import add_cli_args as serve_add_cli_args
 from .service import run_cli as serve_run_cli
 
 _ANALYSIS_NAMES = ["ac", "noise", "transient", "pss", "pac", "pnoise"]
-_SUBCOMMANDS = ["run", "corners", "mc", "chopper", "explore", "plot", "dataset", "serve"]
+_SUBCOMMANDS = ["run", "corners", "mc", "chopper", "adc", "explore", "plot", "dataset", "serve"]
 _CHOPPER_LEVELS = ["ideal", "pmos", "lptv", "pss", "pac", "pnoise", "transient"]
 
 
@@ -667,6 +667,97 @@ def _cmd_plot(args):
     return outs
 
 
+# ── subcommand: ADC conversion ───────────────────────────────────────────────
+
+def _add_adc_parser(subparsers):
+    p = subparsers.add_parser(
+        "adc", help="Run a closed-loop transistor-level ADC conversion or ramp sweep")
+    p.add_argument("circuit", help="Path to a circuit JSON carrying an 'adc' block")
+    p.add_argument("--vin", type=float, default=0.5,
+                   help="single conversion input voltage (default: 0.5 V)")
+    p.add_argument("--sweep", type=int, default=None, metavar="N",
+                   help="run N uniformly spaced ramp samples instead of one conversion")
+    p.add_argument("--sine", type=int, default=None, metavar="N",
+                   help="run an N-sample coherent sine conversion and FFT metrics")
+    p.add_argument("--tone-bin", type=int, default=3,
+                   help="coherent sine FFT bin (default: 3)")
+    p.add_argument("--sample-rate", type=float, default=10e6,
+                   help="reported ADC sample rate in Hz (default: 10e6)")
+    p.add_argument("--amplitude", type=float, default=None,
+                   help="sine peak amplitude (default: 0.45*vref)")
+    p.add_argument("--offset", type=float, default=None,
+                   help="sine DC offset (default: 0.5*vref)")
+    p.add_argument("--corner", default=None, choices=["nom", "ss", "ff"],
+                   help="FreePDK45 process corner override")
+    _add_output_arg(p)
+    p.add_argument("--quiet", action="store_true", help="Suppress summary output")
+    return p
+
+
+def _jsonable(value):
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()
+                if not callable(v) and not str(k).startswith("_")}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    return value
+
+
+def _cmd_adc(args):
+    from .sar import run_sar_conversion, run_sar_signal, run_sar_sweep
+    spec = _load_spec(args.circuit)
+    if spec.adc is None:
+        raise SystemExit("circuit JSON has no 'adc' workflow block")
+    if args.sweep is not None and args.sine is not None:
+        raise SystemExit("choose only one of --sweep or --sine")
+    if args.sine is not None:
+        if args.sine < 8:
+            raise SystemExit("--sine requires at least 8 samples")
+        vref = float(spec.adc["vref"])
+        offset = 0.5 * vref if args.offset is None else args.offset
+        amplitude = 0.45 * vref if args.amplitude is None else args.amplitude
+        phase = 2.0 * np.pi * args.tone_bin * np.arange(args.sine) / args.sine
+        vin = offset + amplitude * np.sin(phase)
+        if np.min(vin) < 0.0 or np.max(vin) > vref:
+            raise SystemExit("sine input leaves the ADC range [0, vref]")
+        result = run_sar_signal(
+            spec, vin, args.sample_rate, corner=args.corner,
+            fundamental_bin=args.tone_bin)
+        metrics = result["metrics"]
+        if not args.quiet:
+            print(
+                f"SAR sine: {args.sine} samples  SNDR={metrics['sndr_db']:.2f} dB  "
+                f"SFDR={metrics['sfdr_db']:.2f} dB  ENOB={metrics['enob']:.2f}  "
+                f"power={result['average_power_w'] * 1e6:.2f} uW")
+    elif args.sweep is None:
+        result = run_sar_conversion(spec, args.vin, corner=args.corner)
+        if not args.quiet:
+            bits = "".join(str(int(v)) for v in result["bits"])
+            print(f"SAR: Vin={result['vin']:.6g} V  code={result['code']}  bits={bits}")
+    else:
+        if args.sweep < (1 << int(spec.adc["n_bits"])):
+            raise SystemExit("--sweep must contain at least 2**n_bits samples")
+        vref = float(spec.adc["vref"])
+        vin = (np.arange(args.sweep) + 0.5) * vref / args.sweep
+        result = run_sar_sweep(spec, vin, corner=args.corner)
+        metrics = result["metrics"]
+        if not args.quiet:
+            print(
+                f"SAR sweep: {args.sweep} conversions  "
+                f"max|DNL|={metrics['max_abs_dnl']:.3f} LSB  "
+                f"max|INL|={metrics['max_abs_inl']:.3f} LSB  "
+                f"missing={len(metrics['missing_codes'])}")
+    if args.output:
+        os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
+        with open(args.output, "w") as fh:
+            json.dump(_jsonable(result), fh, indent=2, default=str)
+        if not args.quiet:
+            print(f"wrote {args.output}")
+    return result
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def _is_subcommand(arg):
@@ -699,6 +790,7 @@ def main(argv=None):
     _add_corners_parser(sub)
     _add_mc_parser(sub)
     _add_chopper_parser(sub)
+    _add_adc_parser(sub)
     _add_plot_parser(sub)
     _add_dataset_parser(sub)
     _add_serve_parser(sub)
@@ -737,6 +829,7 @@ def main(argv=None):
         "corners": _cmd_corners,
         "mc": _cmd_mc,
         "chopper": _cmd_chopper,
+        "adc": _cmd_adc,
         "plot": _cmd_plot,
         "dataset": _cmd_dataset,
         "serve": _cmd_serve,

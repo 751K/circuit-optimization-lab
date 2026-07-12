@@ -14,6 +14,9 @@
 | `python -m circuitopt corners <circuit.json>` | 工艺角扫描（typ/slow/fast） |
 | `python -m circuitopt mc <circuit.json> -n 300` | 逐器件 mismatch Monte Carlo |
 | `python -m circuitopt chopper <circuit.json> --level pss` | Chopper 分析（7 个层级） |
+| `python -m circuitopt adc examples/freepdk45_sar3.json --vin 0.7` | FreePDK45 SAR 单次闭环转换 |
+| `python -m circuitopt adc examples/freepdk45_sar3.json --sweep 65` | ADC ramp + DNL/INL/missing code |
+| `python -m circuitopt adc examples/freepdk45_sar3.json --sine 32` | ADC 正弦码流 + SNDR/SFDR/ENOB/功耗 |
 | `python -m circuitopt plot [all\|transient\|bode\|afe\|chopper\|ac\|pac]` | 出图：瞬态波形 + AC/PAC Bode（PNG） |
 | `python -m circuitopt dataset <circuit.json> -n 500 --out ds/run1` | 生成 surrogate 训练集（provenance + 失败样本保留） |
 | `python -m circuitopt.surrogate train <ds>.npz --test <ds>.npz --out m.pkl` | 训练指标 surrogate（GBT，可选 sklearn 依赖） |
@@ -47,11 +50,9 @@
 | `python examples/sc_lpf.py` | 开关电容 LPF 瞬态仿真 |
 | `python tools/calibrate_switch.py gen/parse` | Chopper 开关 Cadence vs 本地校准 |
 
----
-
 ## 1. 主 CLI：`python -m circuitopt`
 
-入口文件 `circuitopt/__main__.py`，支持 7 个子命令。默认兼容旧用法（无子命令时自动路由到 `run`）。
+入口文件 `circuitopt/__main__.py`，支持 9 个子命令。默认兼容旧用法（无子命令时自动路由到 `run`）。
 
 ### 1.1 `run` — 分析调度（默认子命令）
 
@@ -93,7 +94,23 @@ Running ac,noise analyses for examples/afe_explore.json
 
 ---
 
-### 1.2 `explore` — 设计空间探索
+### 1.2 `adc` — FreePDK45 SAR 转换
+
+读取 JSON 顶层 `adc` 块。每一位都从采样阶段重放完整 ngspice `.tran`，在配置的判决时刻读取
+晶体管级比较器输出，再决定 CDAC trial bit 保留或清除；不是理想量化器替代。
+
+```bash
+python -m circuitopt adc examples/freepdk45_sar3.json --vin 0.7
+python -m circuitopt adc examples/freepdk45_sar3.json --sweep 65 --corner ss
+python -m circuitopt adc examples/freepdk45_sar3.json --sine 32 --tone-bin 3 --sample-rate 10e6
+```
+
+`--sweep` 至少为 `2**n_bits`；密集 ramp 才能分辨 transition/DNL/INL。`--sine` 支持
+`--amplitude`、`--offset`，并输出 SNDR、SFDR、ENOB 与平均功耗。
+
+---
+
+### 1.3 `explore` — 设计空间探索
 
 对电路 JSON 的 `"explore"` 块做参数采样 → AC-first 评估 → 约束过滤 → Pareto 选择。
 
@@ -128,7 +145,7 @@ python -m circuitopt examples/afe_explore.json --explore -n 300
 
 ---
 
-### 1.3 `corners` — 工艺角扫描
+### 1.4 `corners` — 工艺角扫描
 
 对 typ/slow/fast 三个全局 corner 各跑一次 AC+Noise。
 
@@ -164,7 +181,7 @@ wrote results/corners.csv
 
 ---
 
-### 1.4 `mc` — Mismatch Monte Carlo
+### 1.5 `mc` — Mismatch Monte Carlo
 
 逐器件参数失配 MC 采样 + 确定性 latch 筛查。
 
@@ -205,7 +222,7 @@ wrote results/mc.json
 
 ---
 
-### 1.5 `chopper` — Chopper 分析
+### 1.6 `chopper` — Chopper 分析
 
 8-PMOS AFE chopper 的 7 层分析，从理想方波 LPTV 到第一性原理 PSS/PAC/PNoise。
 
@@ -255,7 +272,7 @@ python -m circuitopt chopper examples/afe_explore.json --level pnoise --f-chop 2
 | `--no-numba` | flag | — | 禁用 Numba |
 | `--quiet` | flag | — | 不打印进度 |
 
-### 1.6 `plot` — 信号出图
+### 1.7 `plot` — 信号出图
 
 把瞬态波形和 AC/PAC Bode 渲染成 PNG（默认写到 `results/`）。绘制的是已标定的 AFE/chopper
 参考设计（`calibration/` 下的 case），不需要传 circuit JSON。需要 `matplotlib`（可选依赖）。
@@ -291,7 +308,7 @@ python -m circuitopt plot pac --npts 121 --out-dir /tmp/plots
 
 ---
 
-### 1.7 `dataset` — Surrogate 训练集生成
+### 1.8 `dataset` — Surrogate 训练集生成
 
 对电路 JSON 的 `"explore"` 块采样，把每个候选点跑过已标定的求解器，产出带 provenance 的
 `(设计参数 → 指标)` 标注数据集。与 `explore` 的区别：**不做约束/Pareto 过滤**（每个样本都保留，
@@ -375,7 +392,7 @@ python -m circuitopt dataset examples/sky130_chopper.json --labels pss,pac,pnois
 `structural` 轴（cap/resistor/clock）在 `dataset` **和** `optimize` 校验阶段都逐候选重建电路
 （共享 `dataset.candidate_circuit()`），扫到的无源值在最终 solver 校验里也生效。
 
-### 1.8 硅 PDK 器件绑定 `models` 块 + 硅设计闭环
+### 1.9 硅 PDK 器件绑定 `models` 块 + 硅设计闭环
 
 配置里的 **`models` 块**把某个器件绑到非默认 PDK 模型（如硅 SKY130），其余器件仍用默认 OTFT
 （纯增量，OTFT 数值 byte-identical）。`type` 是模型注册键，其余键透传给器件构造：
@@ -407,12 +424,12 @@ python -m circuitopt.optimize examples/sky130_5t_ota.json ota.pkl -n 50000 --top
 python -m circuitopt.optimize examples/sky130_5t_ota.json ota.pkl -n 50000 --corner ss # 跨工艺角复验（慢角）
 ```
 
-需外置盘的 OpenVAF/ngspice/SKY130 工具链（见 `silicon-pdk-openvaf` 记忆）。工作区 surrogate 精度
+需可选的 OpenVAF/ngspice/SKY130 工具链。工作区 surrogate 精度
 （gain/power/bw/irn/area 中位误差 ≈1%）；筛选比 solver 快约 6000×，solver 校验保证入围设计真实可行。
 两个全差分 OTA 完整设计案例见 [SKY130 FD-OTA](sky130_fd_ota_design.md)、
 [FreePDK45 FD-OTA](freepdk45_fd_ota_design.md)（FreePDK45 案例含整机对 ngspice `.ac` 的交叉核对）。
 
-### 1.9 `serve` — 本地 FastAPI 服务
+### 1.10 `serve` — 本地 FastAPI 服务
 
 把求解器栈跑成一个本地 HTTP 服务（需 `pip install -e ".[serve]"` 装 `serve` extra）：
 

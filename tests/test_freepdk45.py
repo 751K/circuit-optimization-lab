@@ -18,8 +18,9 @@ import numpy as np
 import pytest
 
 from circuitopt.ngspice_char import ngspice_binary
+from circuitopt.toolchain import pdk_root
 
-PDK_ROOT = os.environ.get("PDK_ROOT", "/Volumes/MacoutDsik/pdk")
+PDK_ROOT = pdk_root()
 _FP45 = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
 _RUN = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools", "run-ngspice.sh")
 _HAVE = os.path.exists(_FP45) and ngspice_binary() is not None

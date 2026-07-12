@@ -188,8 +188,11 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
   (`nom`/`ss`/`ff`, shipped as separate card files; default `nom`), `extract_w`
   (µm — characterise once at this reference width and linearly scale the actual `W`,
   <0.7 % vs the true per-W card, so dataset/optimizer W-sweeps stay pure interpolation),
-  `temperature` (kelvin; re-characterises the card at that °C for PVT), `NF`. DC + AC +
-  noise (no transient/PSS on this path); the grid AC model omits drain/source junction
+  `temperature` (kelvin; re-characterises the card at that °C for PVT), `NF`. The fast
+  grid handles DC + AC + noise. Unified ``transient()`` automatically routes a complete
+  FreePDK45 circuit to ``circuitopt.ngspice_transient``, where native ngspice BSIM4
+  integrates four-terminal charge and junction capacitance. PSS/PAC/PNoise are not yet
+  connected to this ngspice backend. The grid AC model omits drain/source junction
   caps (Cdb/Csb) so a whole-OTA `ac_solve` reads ~8 % high on UGBW vs ngspice's own
   `.ac` — quote the ngspice value. Cards live under `PDK_ROOT/freepdk45/`; see
   `examples/freepdk45_5t_ota.json` (simple) and `examples/freepdk45_fd_ota.json`
@@ -214,6 +217,14 @@ Optional but usually needed. Supplies numeric values for `rails` string referenc
 ```
 
 If a rail references a key not in `bias`, the solve will fail.
+
+### `adc`
+
+Optional closed-loop SAR workflow configuration. The circuit itself still uses the
+ordinary `devices`/`capacitors`/`vsources` fields. Differential `bit_inputs` and
+`bit_inputs_bar` name CDAC PWL keys from MSB to LSB; decisions are read from the
+physical transient comparator node. Run it with `circuit-opt adc --vin`, `--sweep`,
+or `--sine`. See `examples/freepdk45_sar3.json` for the complete configuration.
 
 ### `outputs`
 
@@ -650,6 +661,7 @@ examples/sc_lpf.json              # Switched-capacitor LPF (2-phase, PMOS switch
 examples/afe_explore.json         # 10-transistor AFE with explore config
 examples/periodic_rc.json         # Passive RC with PSS/PAC/PNoise dispatch
 examples/sky130_5t_ota.json       # Silicon SKY130 complementary 5T OTA — `models` block + explore/dataset/optimize
+examples/freepdk45_sar3.json      # FreePDK45 differential 3-bit SAR — full-charge .tran + ADC metrics
 ```
 
 Load and run:
@@ -710,12 +722,12 @@ Supported (model abstraction):
   (nmos + pmos, via an OpenVAF-compiled BSIM4 through an OSDI host).
 - Per-device model binding via the ``models`` field — mixed OTFT/silicon circuits
   (default PDK stays ``"at4000tg.pmos"`` unless overridden).
-- Silicon DC/AC/noise, plus a foundational (backward-Euler) silicon transient.
+- Silicon DC/AC/noise; SKY130 uses OSDI transient and FreePDK45 uses native ngspice full-charge transient.
 
 Not yet supported:
 
-- Switched / time‑varying elements on silicon devices (SKY130's ``.osdi`` model can't
-  run inside the numba transient/PSS/PAC/PNoise loop — chopper analyses stay OTFT-only).
+- FreePDK45 PSS/PAC/PNoise (the ngspice backend currently implements `.tran`).
+- ADC transient noise, per-device FreePDK45 mismatch, layout parasitic extraction, and transistor-level SAR digital control.
 - Multi-output simultaneous analysis.
 - Hierarchical subcircuits.
 - SPICE syntax parsing.

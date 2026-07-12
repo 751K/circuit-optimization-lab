@@ -89,6 +89,11 @@ first use if absent.
 | **[ngspice](https://ngspice.sourceforge.io/)** | Its built-in C-BSIM4 is the exact device evaluator / oracle for **FreePDK45** (`circuitopt/ngspice_char.py`), and resolves SKY130's binned parameter cards; invoked via the in-repo `tools/run-ngspice.sh` wrapper | `NGSPICE_BIN` |
 | PDK card files (SKY130 via `volare`/`ciel`; FreePDK45 cards) | The process parameters themselves | `PDK_ROOT` |
 
+Resolution contains no machine-specific absolute paths: explicit environment variables
+win, followed by the active `VIRTUAL_ENV`, project `.venv`, and finally `PATH` for
+executables. Project-local conventions are `.venv/ngspice/bin/ngspice`, `.venv/pdk/`,
+and `.venv/bin/openvaf-r`; `BSIM4_VA` can independently point at the model source.
+
 ### CLI Reference
 
 `python -m circuitopt` uses subcommands (backward compatible — bare `circuit.json` defaults to `run`):
@@ -456,6 +461,13 @@ ngspice-C at the nodes, µs/eval). It supports `extract_w` (fast W-sweeps) and
 → 600-sample GBT surrogate → screen/verify/polish → whole-OTA cross-check against
 ngspice's own `.ac` → 27-corner PVT — landing a fully-differential telescopic OTA at
 **58.9 dB / 119.9 MHz / 17 µW** (all metrics vs the ngspice oracle).
+
+FreePDK45 transient automatically bypasses the small-signal grid, renders a complete
+four-terminal MOS netlist, and runs native ngspice `.tran`, retaining BSIM4 terminal
+charge, junction capacitance, and switching behavior. `examples/freepdk45_sar3.json`
+demonstrates a differential CDAC, CMOS sampling gates, transistor-level comparator,
+and Python SAR controller in a closed loop. Its current 65-point ramp measures
+`max|DNL|=0.108 LSB`, `max|INL|=0.062 LSB`, with no missing codes.
 
 ---
 

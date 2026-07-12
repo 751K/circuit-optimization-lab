@@ -13,13 +13,14 @@ Two modes:
   - symbolic: keep params as {symbols} → design equations
 
 Usage:
-  /opt/miniconda3/envs/daily/bin/python tools/slicap/full_circuit.py          # numeric
-  /opt/miniconda3/envs/daily/bin/python tools/slicap/full_circuit.py --sym    # symbolic
+  python tools/slicap/full_circuit.py          # numeric
+  python tools/slicap/full_circuit.py --sym    # symbolic
 """
 
 import sys, os
+from pathlib import Path
 
-PROJECT = "/Volumes/MacoutDsik/Code/Circuit_Optimizaion"
+PROJECT = Path(__file__).resolve().parents[2]
 os.chdir(PROJECT)
 
 SYMBOLIC = "--sym" in sys.argv
