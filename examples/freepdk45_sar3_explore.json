@@ -1,0 +1,20 @@
+{
+  "description": "Standalone SAR-ADC design-space exploration config for the 3-bit FreePDK45 example. Varies the comparator input-pair width, the tail-current device width, and the matched CDAC unit-cap groups, then Pareto-selects on static linearity vs. power. Run: `circuit-opt adc examples/freepdk45_sar3.json --explore examples/freepdk45_sar3_explore.json -n 16 --workers 4`.",
+  "circuit": "freepdk45_sar3.json",
+  "sweep_points": 8,
+  "variables": {
+    "in_pair_W": {"min": 0.8, "max": 1.6, "round": 2, "targets": ["W:M1", "W:M2"]},
+    "tail_W":    {"min": 1.5, "max": 3.0, "round": 2, "targets": ["W:M5"]},
+    "cap_msb":   {"min": 3.6e-14, "max": 4.4e-14, "targets": ["C:C2P", "C:C2N"]},
+    "cap_mid":   {"min": 1.8e-14, "max": 2.2e-14, "targets": ["C:C1P", "C:C1N"]},
+    "cap_lsb":   {"min": 0.9e-14, "max": 1.1e-14, "targets": ["C:C0P", "C:C0N"]}
+  },
+  "constraints": {
+    "missing_codes": {"max": 0},
+    "monotonic": {"min": 1}
+  },
+  "objectives": {
+    "max_abs_dnl": "min",
+    "power_uw": "min"
+  }
+}

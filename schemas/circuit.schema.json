@@ -139,6 +139,36 @@
         ]
       }
     },
+    "vcvs": {
+      "type": "array",
+      "description": "Voltage-controlled voltage sources; V_p - V_q = mu*(V_cp - V_cn), adds a branch current.",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/vcvsObject"},
+          {"$ref": "#/$defs/vcvsTuple"}
+        ]
+      }
+    },
+    "cccs": {
+      "type": "array",
+      "description": "Current-controlled current sources; I_p->q = beta * I(ctrl_name branch source).",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/cccsObject"},
+          {"$ref": "#/$defs/cccsTuple"}
+        ]
+      }
+    },
+    "ccvs": {
+      "type": "array",
+      "description": "Current-controlled voltage sources; V_p - V_q = gamma * I(ctrl_name branch source), adds a branch current.",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/ccvsObject"},
+          {"$ref": "#/$defs/ccvsTuple"}
+        ]
+      }
+    },
     "dc_guesses": {
       "type": "array",
       "description": "Optional DC initial guesses; each object maps solved node to voltage.",
@@ -201,7 +231,34 @@
         "bit_period": {"$ref": "#/$defs/positiveNumber"},
         "edge_time": {"$ref": "#/$defs/positiveNumber"},
         "points_per_period": {"type": "integer", "minimum": 8},
-        "power_rails": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/name"}}
+        "power_rails": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/name"}},
+        "clock": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["input"],
+          "properties": {
+            "input": {"$ref": "#/$defs/name"},
+            "high": {"type": "number"},
+            "low": {"type": "number"},
+            "eval_before": {"$ref": "#/$defs/positiveNumber"},
+            "reset_hold": {"type": "number", "minimum": 0}
+          }
+        },
+        "mismatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sigma_vth0": {"type": "number", "minimum": 0},
+            "sigma_vth0_nmos": {"type": "number", "minimum": 0},
+            "sigma_vth0_pmos": {"type": "number", "minimum": 0},
+            "w0": {"$ref": "#/$defs/positiveNumber"},
+            "l0": {"$ref": "#/$defs/positiveNumber"},
+            "sigma_cu": {"type": "number", "minimum": 0},
+            "c_unit": {"$ref": "#/$defs/positiveNumber"},
+            "dnl_threshold": {"$ref": "#/$defs/positiveNumber"},
+            "inl_threshold": {"$ref": "#/$defs/positiveNumber"}
+          }
+        }
       }
     },
     "models": {
@@ -726,6 +783,83 @@
       "items": false,
       "minItems": 6,
       "maxItems": 6
+    },
+    "vcvsObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "p", "q", "cp", "cn", "mu"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "p": {"$ref": "#/$defs/name"},
+        "q": {"$ref": "#/$defs/name"},
+        "cp": {"$ref": "#/$defs/name"},
+        "cn": {"$ref": "#/$defs/name"},
+        "mu": {"type": "number"}
+      }
+    },
+    "vcvsTuple": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"type": "number"}
+      ],
+      "items": false,
+      "minItems": 6,
+      "maxItems": 6
+    },
+    "cccsObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "p", "q", "ctrl_name", "beta"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "p": {"$ref": "#/$defs/name"},
+        "q": {"$ref": "#/$defs/name"},
+        "ctrl_name": {"$ref": "#/$defs/name"},
+        "beta": {"type": "number"}
+      }
+    },
+    "cccsTuple": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"type": "number"}
+      ],
+      "items": false,
+      "minItems": 5,
+      "maxItems": 5
+    },
+    "ccvsObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "p", "q", "ctrl_name", "gamma"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "p": {"$ref": "#/$defs/name"},
+        "q": {"$ref": "#/$defs/name"},
+        "ctrl_name": {"$ref": "#/$defs/name"},
+        "gamma": {"type": "number"}
+      }
+    },
+    "ccvsTuple": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"$ref": "#/$defs/name"},
+        {"type": "number"}
+      ],
+      "items": false,
+      "minItems": 5,
+      "maxItems": 5
     },
     "vsourceObject": {
       "type": "object",

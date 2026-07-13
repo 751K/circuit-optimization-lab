@@ -42,6 +42,9 @@ from .device_model import (TransistorModel, NumbaParams, PDK, create_device,
                            get_default_model_type, get_default_pdk, get_pdk,
                            list_pdks, registered_models, transistor_type)
 from .noise_solver import band_rms, noise_analysis
+from .ngspice_ac import (ac_ngspice, ac_response, dc_gain_db, gain_margin_db,
+                        loop_gain_ngspice, noise_ngspice, op_ngspice,
+                        peak_gain_db, phase_margin, unity_gain_freq)
 from .pac_solver import pac_solve
 from . import pmos_tft_model  # noqa: F401 — triggers register_pdk("at4000tg", …)
 from . import sky130_model    # noqa: F401 — triggers register_pdk("sky130", …)
@@ -55,10 +58,14 @@ from .adc import (average_supply_power, average_waveform_source_power,
                   static_ramp_metrics)
 from .sar import (run_sar_conversion, run_sar_signal, run_sar_sweep,
                   sar_input_waveforms, sar_time_grid)
+from .sar_mc import sar_mismatch_mc
+from .sar_explore import (apply_sar_variables, evaluate_sar,
+                          load_sar_explore_json, sar_explore_from_dict)
 
-# ``explore`` is *not* re-exported here because ``circuitopt.explore`` already refers
-# to the ``circuitopt.explore`` *module*.  Use ``from circuitopt.explore import explore``
-# or ``circuitopt.explore.explore(...)`` to reach the design-exploration function.
+# ``explore`` / ``sar_explore`` (the driver functions) are *not* re-exported here
+# because ``circuitopt.explore`` / ``circuitopt.sar_explore`` already refer to the
+# *modules*. Use ``from circuitopt.explore import explore`` /
+# ``from circuitopt.sar_explore import sar_explore`` to reach the driver functions.
 # All other top-level names exported below have no module-name collision.
 
 __all__ = [
@@ -91,7 +98,29 @@ __all__ = [
     "noise_analysis",
     "band_rms",
     "transient",
+    # full-circuit ngspice oracles (FreePDK45)
+    "ac_ngspice",
+    "noise_ngspice",
+    "op_ngspice",
+    "loop_gain_ngspice",
+    "ac_response",
+    "dc_gain_db",
+    "peak_gain_db",
+    "unity_gain_freq",
+    "phase_margin",
+    "gain_margin_db",
     "pss_solve",
     "pac_solve",
     "pnoise_solve",
+    # SAR ADC workflow
+    "run_sar_conversion",
+    "run_sar_sweep",
+    "run_sar_signal",
+    "sar_input_waveforms",
+    "sar_time_grid",
+    "sar_mismatch_mc",
+    "evaluate_sar",
+    "apply_sar_variables",
+    "load_sar_explore_json",
+    "sar_explore_from_dict",
 ]

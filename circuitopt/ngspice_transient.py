@@ -11,60 +11,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-import re
 import tempfile
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from .device_factory import apply_silicon_corner, dev_nf
+from .device_factory import apply_silicon_corner
+from .freepdk45_model import FREEPDK45_CORNERS
 from .ngspice_char import _run_ngspice
-from .toolchain import pdk_root
-
-
-_IDENT = re.compile(r"[^A-Za-z0-9_.$]")
-
-
-def _ident(value: Any) -> str:
-    text = _IDENT.sub("_", str(value))
-    return text or "unnamed"
-
-
-def _element(prefix: str, name: str) -> str:
-    value = _ident(name)
-    return value if value[:1].lower() == prefix.lower() else prefix + value
-
-
-def _rail_value(topo, bias, name: str) -> float:
-    ref = topo.rails[name]
-    if isinstance(ref, str):
-        if ref not in bias:
-            raise ValueError(f"rail {name!r} references missing bias value {ref!r}")
-        return float(bias[ref])
-    return float(ref)
-
-
-def _pwl_lines(name: str, p: str, q: str, tgrid, values) -> list[str]:
-    t = np.asarray(tgrid, float)
-    v = np.asarray(values, float)
-    if v.shape != t.shape:
-        raise ValueError(f"waveform {name!r} shape {v.shape} != tgrid shape {t.shape}")
-    if t[0] > 0.0:
-        t = np.insert(t, 0, 0.0)
-        v = np.insert(v, 0, v[0])
-    pairs = [f"{tx:.17g} {vx:.17g}" for tx, vx in zip(t, v)]
-    lines = [f"{name} {p} {q} PWL("]
-    for pos in range(0, len(pairs), 6):
-        suffix = ")" if pos + 6 >= len(pairs) else ""
-        lines.append("+ " + " ".join(pairs[pos:pos + 6]) + suffix)
-    return lines
-
-
-def _current_input(item):
-    if isinstance(item, Mapping):
-        return str(item["p"]), str(item["q"]), str(item["input"])
-    p, q, key = item
-    return str(p), str(q), str(key)
+from .ngspice_render import (
+    _current_input, _element, _ident, _pwl_lines, build_node_map, include_lines,
+    nodeset_line, render_controlled, render_devices, render_passives,
+    render_rail_sources, resolve_common_temperature, resolve_freepdk45_cards)
 
 
 @dataclass(frozen=True)
@@ -91,8 +49,20 @@ def render_freepdk45_transient_netlist(
     device_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
     integration_method: str = "be",
     max_step: float | None = None,
+    mismatch: Mapping[str, float] | None = None,
+    extra_options: Mapping[str, Any] | None = None,
 ) -> RenderedTransient:
-    """Render a complete FreePDK45 ``.tran`` deck and its output-column map."""
+    """Render a complete FreePDK45 ``.tran`` deck and its output-column map.
+
+    ``mismatch`` maps a device name to a threshold-voltage offset in volts, emitted
+    as the BSIM4 instance parameter ``delvto`` on that transistor's M-line. This is
+    the injection hook for per-instance Vth mismatch Monte-Carlo (see
+    :mod:`circuitopt.sar_mc`): ``delvto`` shifts the flat-band/Vth of that one
+    instance without touching the shared model card, so paired devices stay
+    independent. ``None`` (or an all-zero map) renders the byte-identical nominal
+    deck — zero offsets are skipped rather than emitted as ``delvto=0`` so a
+    zero-sigma trial reproduces the nominal netlist exactly.
+    """
     tgrid = np.asarray(tgrid, float)
     if tgrid.ndim != 1 or len(tgrid) < 2 or tgrid[0] < 0.0 or np.any(np.diff(tgrid) <= 0.0):
         raise ValueError("tgrid must be one-dimensional, non-negative, and strictly increasing")
@@ -103,76 +73,41 @@ def render_freepdk45_transient_netlist(
     device_kwargs, solver_corner = apply_silicon_corner(
         model_types, device_kwargs, corner)
     if solver_corner not in (None, {}):
-        raise ValueError(f"FreePDK45 transient requires nom/ss/ff corner, got {corner!r}")
+        raise ValueError(
+            f"FreePDK45 transient requires a silicon corner from "
+            f"{sorted(FREEPDK45_CORNERS)}, got {corner!r}")
     device_kwargs = {k: dict(v) for k, v in (device_kwargs or {}).items()}
+    mismatch = {str(k): float(v) for k, v in (mismatch or {}).items()}
 
     device_names = {name for name, *_ in topo.devices}
-    missing = sorted(device_names - set(model_types))
-    if missing:
-        raise NotImplementedError(
-            "ngspice FreePDK45 transient requires every transistor to be explicitly "
-            f"bound to freepdk45; missing model bindings: {', '.join(missing)}")
-    bad = {name: mt for name, mt in model_types.items()
-           if name in device_names and not str(mt).startswith("freepdk45.")}
-    if bad:
-        raise NotImplementedError(
-            "mixed FreePDK45/other-model ngspice transient is not supported: "
-            + ", ".join(f"{k}={v}" for k, v in sorted(bad.items())))
+    unknown_mismatch = sorted(set(mismatch) - device_names)
+    if unknown_mismatch:
+        raise ValueError(
+            f"mismatch references unknown devices: {', '.join(unknown_mismatch)}")
 
-    corners = {str(device_kwargs.get(name, {}).get("corner", "nom"))
-               for name in device_names}
-    if not corners <= {"nom", "ss", "ff"} or len(corners) != 1:
-        raise ValueError(f"one common FreePDK45 corner is required, got {sorted(corners)}")
-    process_corner = next(iter(corners))
-    temperatures = {float(device_kwargs.get(name, {}).get("temperature", 300.15))
-                    for name in device_names}
-    if len(temperatures) != 1:
-        raise ValueError("ngspice uses one circuit temperature; per-device temperatures differ")
-    temp_c = next(iter(temperatures)) - 273.15
+    # Per-polarity corner card resolution (nom/tt/ss/ff + mixed sf/fs) and the single
+    # common circuit temperature — shared with the .ac/.noise/.op oracles.
+    _corner, cards, _pol = resolve_freepdk45_cards(model_types, device_kwargs, device_names)
+    temp_c = resolve_common_temperature(device_kwargs, device_names)
 
-    card_dir = os.path.join(pdk_root(), "freepdk45", f"models_{process_corner}")
-    cards = {
-        "nmos": os.path.join(card_dir, "NMOS_VTG.inc"),
-        "pmos": os.path.join(card_dir, "PMOS_VTG.inc"),
-    }
-    used_polarities = {str(model_types[name]).rsplit(".", 1)[-1] for name in device_names}
-    if not used_polarities <= {"nmos", "pmos"}:
-        raise ValueError(f"unknown FreePDK45 transistor types: {sorted(used_polarities)}")
-    for polarity in used_polarities:
-        if not os.path.isfile(cards[polarity]):
-            raise RuntimeError(f"FreePDK45 model card not found: {cards[polarity]}; set PDK_ROOT")
-
-    # SPICE identifiers are case-insensitive. Keep one stable mapping and reject
-    # collisions instead of silently shorting two topology nodes together.
-    all_nodes = list(topo.solved) + list(topo.rails)
-    node_map = {name: "n_" + _ident(name) for name in all_nodes}
-    lowered = [value.lower() for value in node_map.values()]
-    if len(lowered) != len(set(lowered)):
-        raise ValueError("topology contains node names that collide in ngspice")
-
-    def node(name: str) -> str:
-        if name in node_inputs or name in topo.idx:
-            return node_map[name]
-        return "0" if _rail_value(topo, bias, name) == 0.0 else node_map[name]
+    node_map, node = build_node_map(topo, bias, node_inputs)
 
     lines = ["* circuitopt FreePDK45 full-charge transient"]
-    for polarity in sorted(used_polarities):
-        lines.append(f'.include "{cards[polarity]}"')
+    lines.extend(include_lines(cards))
     method = str(integration_method).lower()
     if method not in {"be", "gear2"}:
         raise ValueError(f"integration_method must be 'be' or 'gear2', got {method!r}")
     lines.append(f".options temp={temp_c:g} method=gear maxord={1 if method == 'be' else 2}")
+    if extra_options:
+        # e.g. {"reltol": 1e-5, "vntol": 1e-9} — tighter solver tolerances for
+        # sub-0.1% settling measurements (ngspice's default reltol=1e-3 leaves a
+        # ~100 uV numerical band on ~0.5 V nodes). None/{} renders byte-identically.
+        opts = " ".join(f"{k}={v:g}" if isinstance(v, (int, float)) else f"{k}={v}"
+                        for k, v in extra_options.items())
+        lines.append(f".options {opts}")
 
-    branch_vectors: list[tuple[str, str]] = []
-    for rail in topo.rails:
-        if rail in node_inputs:
-            continue
-        value = _rail_value(topo, bias, rail)
-        if value == 0.0:
-            continue
-        source = _element("V", "rail_" + rail)
-        lines.append(f"{source} {node(rail)} 0 {value:.17g}")
-        branch_vectors.append((f"rail:{rail}", source))
+    rail_lines, branch_vectors = render_rail_sources(topo, bias, node_inputs, node)
+    lines.extend(rail_lines)
 
     def waveform(key: str):
         if key not in inputs:
@@ -199,95 +134,27 @@ def render_freepdk45_transient_netlist(
         lines.extend(_pwl_lines(source, gate_nodes[name], "0", tgrid, waveform(str(key))))
         branch_vectors.append((f"gate:{name}", source))
 
-    for name, d, g, s in topo.devices:
-        model_type = str(model_types[name])
-        polarity = model_type.rsplit(".", 1)[-1]
-        model = "NMOS_VTG" if polarity == "nmos" else "PMOS_VTG"
-        kwargs = device_kwargs.get(name, {})
-        vb = float(kwargs.get("vb", 0.0))
-        if vb == 0.0:
-            bulk = "0"
-        else:
-            matching_rail = next((rail for rail in topo.rails
-                                  if rail not in node_inputs
-                                  and _rail_value(topo, bias, rail) == vb), None)
-            if matching_rail is not None:
-                bulk = node(matching_rail)
-            else:
-                bulk = "n_bulk_" + _ident(name)
-                source = _element("V", "bulk_" + name)
-                lines.append(f"{source} {bulk} 0 {vb:.17g}")
-                branch_vectors.append((f"bulk:{name}", source))
-        W, L = sizes[name]
-        gate = gate_nodes.get(name, node(g))
-        lines.append(
-            f"{_element('M', name)} {node(d)} {gate} {node(s)} {bulk} {model} "
-            f"w={float(W):.17g}u l={float(L):.17g}u nf={dev_nf(nf, name)}")
+    dev_lines, dev_branches = render_devices(
+        topo, sizes, bias, node_inputs, node, nf=nf, model_types=model_types,
+        device_kwargs=device_kwargs, mismatch=mismatch, gate_nodes=gate_nodes)
+    lines.extend(dev_lines)
+    branch_vectors.extend(dev_branches)
 
-    for name, a, b, value in topo.resistors:
-        lines.append(f"{_element('R', name)} {node(a)} {node(b)} {float(value):.17g}")
-    cap_seen = set()
-    for pos, (a, b, value) in enumerate(topo.load_caps):
-        cname = _element("C", f"load_{pos}")
-        lines.append(f"{cname} {node(a)} {node(b)} {float(value):.17g}")
-        cap_seen.add(cname.lower())
-    for name, a, b, value in topo.capacitors:
-        cname = _element("C", name)
-        if cname.lower() in cap_seen:
-            raise ValueError(f"duplicate capacitor name after ngspice mapping: {name!r}")
-        lines.append(f"{cname} {node(a)} {node(b)} {float(value):.17g}")
-        cap_seen.add(cname.lower())
-    for name, p, q, value in topo.isources:
-        lines.append(f"{_element('I', name)} {node(p)} {node(q)} {float(value):.17g}")
+    lines.extend(render_passives(topo, node))
 
-    controlled_names = {
-        name: _element("V", name) for name, *_ in topo.vsources
-    }
-    controlled_names.update({
-        name: _element("E", name) for name, *_ in topo.vcvs
-    })
-    controlled_names.update({
-        name: _element("H", name) for name, *_ in topo.ccvs
-    })
-    for name, p, q, value in topo.vsources:
-        source = controlled_names[name]
-        if isinstance(value, str):
-            lines.extend(_pwl_lines(source, node(p), node(q), tgrid, waveform(value)))
-        else:
-            lines.append(f"{source} {node(p)} {node(q)} {float(value):.17g}")
-        branch_vectors.append((name, source))
-    for name, p, q, cp, cn, mu in topo.vcvs:
-        source = controlled_names[name]
-        lines.append(f"{source} {node(p)} {node(q)} {node(cp)} {node(cn)} {float(mu):.17g}")
-        branch_vectors.append((name, source))
-    for name, p, q, ctrl_name, gamma in topo.ccvs:
-        source = controlled_names[name]
-        ctrl = controlled_names.get(ctrl_name)
-        if ctrl is None:
-            raise ValueError(f"CCVS {name!r} references unavailable source {ctrl_name!r}")
-        lines.append(f"{source} {node(p)} {node(q)} {ctrl} {float(gamma):.17g}")
-        branch_vectors.append((name, source))
-    for name, p, q, cp, cn, gm in topo.vccs:
-        lines.append(
-            f"{_element('G', name)} {node(p)} {node(q)} {node(cp)} {node(cn)} {float(gm):.17g}")
-    for name, p, q, ctrl_name, beta in topo.cccs:
-        ctrl = controlled_names.get(ctrl_name)
-        if ctrl is None:
-            raise ValueError(f"CCCS {name!r} references unavailable source {ctrl_name!r}")
-        lines.append(f"{_element('F', name)} {node(p)} {node(q)} {ctrl} {float(beta):.17g}")
+    ctrl_lines, ctrl_branches, _names = render_controlled(
+        topo, node, tgrid=tgrid, waveform_fn=waveform)
+    lines.extend(ctrl_lines)
+    branch_vectors.extend(ctrl_branches)
 
     for pos, item in enumerate(current_inputs):
         p, q, key = _current_input(item)
         source = _element("I", f"wave_{pos}")
         lines.extend(_pwl_lines(source, node(p), node(q), tgrid, waveform(key)))
 
-    if V0 is not None:
-        values = np.asarray(V0, float)
-        if values.ndim != 1 or len(values) < topo.n:
-            raise ValueError("V0 must contain at least one value per solved node")
-        lines.append(".nodeset " + " ".join(
-            f"v({node_map[name]})={values[pos]:.17g}"
-            for pos, name in enumerate(topo.solved)))
+    nodeset = nodeset_line(topo, node_map, V0)
+    if nodeset is not None:
+        lines.append(nodeset)
 
     print_step = float(np.min(np.diff(tgrid)))
     tmax = print_step if max_step is None else float(max_step)
@@ -315,9 +182,13 @@ def transient_ngspice(
     sizes, bias, tgrid, *, topo, nf=None, V0=None, inputs=None,
     node_inputs=None, current_inputs=None, corner=None, model_types=None,
     device_kwargs=None, integration_method="be", max_step=None,
-    timeout: float = 300.0,
+    mismatch=None, extra_options=None, timeout: float = 300.0,
 ):
-    """Run a FreePDK45 full-charge transient and return circuitopt waveforms."""
+    """Run a FreePDK45 full-charge transient and return circuitopt waveforms.
+
+    ``mismatch`` is threaded straight to
+    :func:`render_freepdk45_transient_netlist` as per-device ``delvto`` offsets.
+    """
     requested_t = np.asarray(tgrid, float)
     with tempfile.TemporaryDirectory(prefix="circuitopt-fp45-tran-") as td:
         output_path = os.path.join(td, "waveforms.dat")
@@ -327,7 +198,7 @@ def transient_ngspice(
             nf=nf, V0=V0, inputs=inputs, node_inputs=node_inputs,
             current_inputs=current_inputs, corner=corner, model_types=model_types,
             device_kwargs=device_kwargs, integration_method=integration_method,
-            max_step=max_step,
+            max_step=max_step, mismatch=mismatch, extra_options=extra_options,
         )
         with open(deck_path, "w", encoding="ascii") as fh:
             fh.write(rendered.netlist)

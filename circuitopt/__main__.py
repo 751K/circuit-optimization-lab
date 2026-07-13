@@ -189,7 +189,8 @@ def _add_run_parser(subparsers):
     )
     p.add_argument("--corner", default=None,
                    help="Process corner override: OTFT typical|slow|fast, or silicon "
-                        "tt|ss|ff|sf|fs (SKY130) / nom|ss|ff (FreePDK45)")
+                        "tt|ss|ff|sf|fs (SKY130) / nom|tt|ss|ff|sf|fs (FreePDK45; sf = "
+                        "NMOS slow + PMOS fast, fs the reverse)")
     _add_noise_band_arg(p)
     _add_output_arg(p)
     p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
@@ -673,12 +674,16 @@ def _add_adc_parser(subparsers):
     p = subparsers.add_parser(
         "adc", help="Run a closed-loop transistor-level ADC conversion or ramp sweep")
     p.add_argument("circuit", help="Path to a circuit JSON carrying an 'adc' block")
-    p.add_argument("--vin", type=float, default=0.5,
-                   help="single conversion input voltage (default: 0.5 V)")
+    p.add_argument("--vin", type=float, default=None,
+                   help="single conversion input voltage (the default mode; runs at "
+                        "0.5 V when no mode flag is given at all)")
     p.add_argument("--sweep", type=int, default=None, metavar="N",
                    help="run N uniformly spaced ramp samples instead of one conversion")
     p.add_argument("--sine", type=int, default=None, metavar="N",
                    help="run an N-sample coherent sine conversion and FFT metrics")
+    p.add_argument("--mc", type=int, default=None, metavar="N",
+                   help="run an N-trial per-instance mismatch Monte-Carlo (uses the "
+                        "circuit's adc.mismatch config; --seed/--workers/--corner apply)")
     p.add_argument("--tone-bin", type=int, default=3,
                    help="coherent sine FFT bin (default: 3)")
     p.add_argument("--sample-rate", type=float, default=10e6,
@@ -689,6 +694,20 @@ def _add_adc_parser(subparsers):
                    help="sine DC offset (default: 0.5*vref)")
     p.add_argument("--corner", default=None, choices=["nom", "ss", "ff"],
                    help="FreePDK45 process corner override")
+    p.add_argument("--explore", default=None, metavar="CONFIG",
+                   help="run ADC design-space exploration from a standalone SAR-explore "
+                        "config JSON (mutually exclusive with --vin/--sweep/--sine/--mc)")
+    p.add_argument("-n", "--n", type=int, default=50,
+                   help="explore: number of candidates (default: 50)")
+    p.add_argument("--seed", type=int, default=0, help="explore: RNG seed")
+    p.add_argument("--workers", type=int, default=1,
+                   help="parallel conversions (sweep/sine) or candidates (explore); "
+                        "default 1 (serial). Bit decisions within a conversion stay serial.")
+    p.add_argument("--csv", default=None, help="explore: write candidate rows to this CSV")
+    p.add_argument("--jsonl", default=None, help="explore: write candidate rows to this JSONL")
+    p.add_argument("--plot", nargs="?", const="results", default=None, metavar="DIR",
+                   help="render the figure(s) matching the run mode into DIR "
+                        "(default: results/); needs matplotlib")
     _add_output_arg(p)
     p.add_argument("--quiet", action="store_true", help="Suppress summary output")
     return p
@@ -705,13 +724,106 @@ def _jsonable(value):
     return value
 
 
+def _cmd_adc_explore(args):
+    """ADC design-space exploration path of the ``adc`` subcommand (``--explore``)."""
+    from .sar_explore import (format_sar_summary, load_sar_explore_json,
+                              sar_explore, sar_write_csv, sar_write_jsonl)
+    if not os.path.exists(args.explore):
+        raise SystemExit(f"file not found: {args.explore}")
+    if not os.path.exists(args.circuit):
+        raise SystemExit(f"file not found: {args.circuit}")
+    spec, cfg = load_sar_explore_json(args.explore, circuit_path=args.circuit)
+
+    def progress(done, total):
+        if not args.quiet:
+            print(f"\r  evaluating {done}/{total}", end="", flush=True)
+
+    if not args.quiet:
+        print(f"ADC explore {args.explore}  (circuit={args.circuit}, n={args.n}, "
+              f"workers={args.workers})")
+    results = sar_explore(spec, cfg, n=args.n, seed=args.seed, corner=args.corner,
+                          workers=args.workers, progress=progress)
+    if not args.quiet:
+        print()
+    print(format_sar_summary(results))
+    if args.csv:
+        os.makedirs(os.path.dirname(os.path.abspath(args.csv)) or ".", exist_ok=True)
+        sar_write_csv(results, args.csv)
+        if not args.quiet:
+            print(f"wrote {args.csv}")
+    if args.jsonl:
+        os.makedirs(os.path.dirname(os.path.abspath(args.jsonl)) or ".", exist_ok=True)
+        sar_write_jsonl(results, args.jsonl)
+        if not args.quiet:
+            print(f"wrote {args.jsonl}")
+    return results
+
+
+_ADC_PLOT_FUNCS = {"vin": "plot_sar_conversion", "sweep": "plot_sar_static",
+                   "sine": "plot_sar_spectrum", "mc": "plot_sar_mc"}
+
+
+def _adc_plot(args, mode, result, spec):
+    """Render the ADC figure matching ``mode`` into ``args.plot`` (a no-op when unset).
+
+    matplotlib is an optional dep, so a missing install degrades with the same clean
+    SystemExit message style as ``_cmd_plot``.
+    """
+    if getattr(args, "plot", None) is None:
+        return
+    try:
+        from examples import plot_adc as pad
+    except ImportError as exc:                          # matplotlib is an optional dep
+        raise SystemExit(f"plotting needs matplotlib ({exc}); pip install matplotlib")
+    func = getattr(pad, _ADC_PLOT_FUNCS[mode])
+    path = func(result, spec.adc, out_dir=args.plot) if mode == "vin" \
+        else func(result, out_dir=args.plot)
+    if not args.quiet:
+        print(f"wrote {path}")
+    return path
+
+
 def _cmd_adc(args):
     from .sar import run_sar_conversion, run_sar_signal, run_sar_sweep
+    # ── run-mode mutual exclusion ──
+    # Exactly one of the five run modes may be requested; --vin's default is None so
+    # an explicit `--vin 0.5` counts as choosing the single-conversion mode (bare
+    # `adc circuit.json` still falls back to a 0.5 V conversion below).
+    given = [flag for flag, value in (("--vin", args.vin), ("--sweep", args.sweep),
+                                      ("--sine", args.sine), ("--mc", args.mc),
+                                      ("--explore", args.explore))
+             if value is not None]
+    if len(given) > 1:
+        raise SystemExit(f"choose only one run mode: {' and '.join(given)} "
+                         "are mutually exclusive")
+    # ── ADC design-space exploration ──
+    if args.explore is not None:
+        return _cmd_adc_explore(args)
     spec = _load_spec(args.circuit)
     if spec.adc is None:
         raise SystemExit("circuit JSON has no 'adc' workflow block")
-    if args.sweep is not None and args.sine is not None:
-        raise SystemExit("choose only one of --sweep or --sine")
+    # ── mismatch Monte-Carlo ──
+    if args.mc is not None:
+        from .sar_mc import sar_mismatch_mc
+        if args.mc < 1:
+            raise SystemExit("--mc requires at least one trial")
+        result = sar_mismatch_mc(spec, n=args.mc, seed=args.seed, corner=args.corner,
+                                 workers=args.workers)
+        summary = result["summary"]
+        if not args.quiet:
+            print(
+                f"SAR mismatch MC: n={summary['n']}  yield={summary['yield'] * 100:.1f}%  "
+                f"monotonic={summary['monotonic_rate'] * 100:.0f}%  "
+                f"max|DNL| worst={summary['max_abs_dnl']['worst']:.3f} LSB  "
+                f"max|INL| worst={summary['max_abs_inl']['worst']:.3f} LSB")
+        _adc_plot(args, "mc", result, spec)
+        if args.output:
+            os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
+            with open(args.output, "w") as fh:
+                json.dump(_jsonable(result), fh, indent=2, default=str)
+            if not args.quiet:
+                print(f"wrote {args.output}")
+        return result
     if args.sine is not None:
         if args.sine < 8:
             raise SystemExit("--sine requires at least 8 samples")
@@ -724,7 +836,7 @@ def _cmd_adc(args):
             raise SystemExit("sine input leaves the ADC range [0, vref]")
         result = run_sar_signal(
             spec, vin, args.sample_rate, corner=args.corner,
-            fundamental_bin=args.tone_bin)
+            fundamental_bin=args.tone_bin, workers=args.workers)
         metrics = result["metrics"]
         if not args.quiet:
             print(
@@ -732,7 +844,8 @@ def _cmd_adc(args):
                 f"SFDR={metrics['sfdr_db']:.2f} dB  ENOB={metrics['enob']:.2f}  "
                 f"power={result['average_power_w'] * 1e6:.2f} uW")
     elif args.sweep is None:
-        result = run_sar_conversion(spec, args.vin, corner=args.corner)
+        vin = 0.5 if args.vin is None else args.vin     # bare `adc circuit.json` default
+        result = run_sar_conversion(spec, vin, corner=args.corner)
         if not args.quiet:
             bits = "".join(str(int(v)) for v in result["bits"])
             print(f"SAR: Vin={result['vin']:.6g} V  code={result['code']}  bits={bits}")
@@ -741,7 +854,7 @@ def _cmd_adc(args):
             raise SystemExit("--sweep must contain at least 2**n_bits samples")
         vref = float(spec.adc["vref"])
         vin = (np.arange(args.sweep) + 0.5) * vref / args.sweep
-        result = run_sar_sweep(spec, vin, corner=args.corner)
+        result = run_sar_sweep(spec, vin, corner=args.corner, workers=args.workers)
         metrics = result["metrics"]
         if not args.quiet:
             print(
@@ -749,6 +862,8 @@ def _cmd_adc(args):
                 f"max|DNL|={metrics['max_abs_dnl']:.3f} LSB  "
                 f"max|INL|={metrics['max_abs_inl']:.3f} LSB  "
                 f"missing={len(metrics['missing_codes'])}")
+    mode = "sine" if args.sine is not None else ("vin" if args.sweep is None else "sweep")
+    _adc_plot(args, mode, result, spec)
     if args.output:
         os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
         with open(args.output, "w") as fh:

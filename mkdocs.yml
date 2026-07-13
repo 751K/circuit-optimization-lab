@@ -42,6 +42,7 @@ nav:
   - Design Cases:
       - SKY130 FD-OTA: sky130_fd_ota_design.md
       - FreePDK45 FD-OTA: freepdk45_fd_ota_design.md
+      - FreePDK45 SAR ADC: freepdk45_sar_design.md
       - AFE Design Equations: afe_design_equations.md
   - Performance:
       - Environment & Benchmarks: environment_performance.md

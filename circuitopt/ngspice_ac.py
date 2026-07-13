@@ -1,0 +1,406 @@
+"""Full-circuit FreePDK45 oracles through ngspice: ``.ac`` / ``.noise`` / ``.op``.
+
+The local grid solvers (:mod:`circuitopt.ac_solver`, :mod:`circuitopt.noise_solver`)
+carry only Cgs/Cgd on their device model, so on FreePDK45 they read ~8 % optimistic
+UGBW (drain/source junction caps omitted — see ``docs/freepdk45_fd_ota_design.md`` §4.5).
+These oracles instead render the COMPLETE circuit and let ngspice's C-BSIM4 — the
+FreePDK45 oracle — run the analysis with full charge, so AC bandwidth, phase margin,
+noise and operating-region checks are the true silicon-card numbers.
+
+All four entry points share the deck renderer in :mod:`circuitopt.ngspice_render`
+(the same one the ``.tran`` backend uses), so device M-lines, R/C, controlled sources,
+rails, per-polarity corner routing (nom/tt/ss/ff + mixed sf/fs), temperature and the
+supply bias are rendered identically across analyses.
+
+Public API
+----------
+``ac_ngspice``      — complex transfer to nodes over an ``.ac dec`` sweep.
+``noise_ngspice``   — output / input-referred noise PSD + integrated band rms.
+``op_ngspice``      — per-device operating point with a saturation-region check.
+``loop_gain_ngspice`` — Middlebrook single-voltage-injection loop gain + PM/GM.
+plus response helpers ``dc_gain_db`` / ``unity_gain_freq`` / ``phase_margin`` /
+``gain_margin_db`` / ``ac_response``.
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import tempfile
+
+import numpy as np
+
+from .device_factory import apply_silicon_corner
+from .ngspice_char import _ngspice, _run_ngspice
+from .ngspice_render import (
+    _element, build_node_map, include_lines, nodeset_line, render_controlled,
+    render_devices, render_passives, render_rail_sources, resolve_common_temperature,
+    resolve_freepdk45_cards, seed_vector)
+
+
+# ── shared network deck (everything above the `.control` block) ─────────────────
+def _network_deck(topo, sizes, bias, *, header, nf, model_types, device_kwargs,
+                  corner, temperature, x0_guess, ac=None):
+    """Render the circuit network (includes, options, rails, devices, passives,
+    controlled sources, ``.nodeset`` seed) shared by ``.ac``/``.noise``/``.op``.
+
+    ``ac`` maps an AC-stimulus source name (a rail name or an ideal-vsource name) to
+    ``(magnitude, phase_deg)``. Returns ``(lines, node_map, node)``."""
+    model_types = dict(model_types or {})
+    device_kwargs, solver_corner = apply_silicon_corner(model_types, device_kwargs, corner)
+    if solver_corner not in (None, {}):
+        raise ValueError(f"FreePDK45 ngspice analysis needs a silicon corner, got {corner!r}")
+    device_kwargs = {k: dict(v) for k, v in (device_kwargs or {}).items()}
+    device_names = {name for name, *_ in topo.devices}
+
+    _corner, cards, _pol = resolve_freepdk45_cards(model_types, device_kwargs, device_names)
+    temp_c = resolve_common_temperature(device_kwargs, device_names, temperature)
+    node_map, node = build_node_map(topo, bias, node_inputs=None)
+
+    lines = [header, *include_lines(cards), f".options temp={temp_c:g}"]
+    rail_lines, _bv = render_rail_sources(topo, bias, None, node, ac=ac)
+    lines.extend(rail_lines)
+    dev_lines, _b2 = render_devices(topo, sizes, bias, None, node, nf=nf,
+                                    model_types=model_types, device_kwargs=device_kwargs)
+    lines.extend(dev_lines)
+    lines.extend(render_passives(topo, node))
+    ctrl_lines, _b3, _names = render_controlled(topo, node, ac=ac)
+    lines.extend(ctrl_lines)
+
+    seed = seed_vector(topo, x0_guess)
+    ns = nodeset_line(topo, node_map, seed)
+    if ns is not None:
+        lines.append(ns)
+    return lines, node_map, node
+
+
+def _resolve_source_name(topo, name: str) -> str:
+    """Deck element name for an AC stimulus / noise input reference: an ideal
+    vsource ``name`` renders as ``_element('V', name)``; a rail renders as
+    ``_element('V', 'rail_'+name)``. Accepts either topology name."""
+    if any(vs[0] == name for vs in topo.vsources):
+        return name          # render_rail_sources/render_controlled key AC by topo name
+    if name in topo.rails:
+        return name
+    raise ValueError(f"AC/noise source {name!r} is neither a vsource nor a rail")
+
+
+def _stimulus_deck_element(topo, name: str) -> str:
+    """The actual SPICE element name (for ``.noise <src>``) of a stimulus source."""
+    if any(vs[0] == name for vs in topo.vsources):
+        return _element("V", name)
+    if name in topo.rails:
+        return _element("V", "rail_" + name)
+    raise ValueError(f"source {name!r} is neither a vsource nor a rail")
+
+
+# ── .ac ─────────────────────────────────────────────────────────────────────────
+def ac_ngspice(sizes, bias, *, topo, acmag, fstart, fstop, points=20,
+               out_nodes=None, nf=None, model_types=None, device_kwargs=None,
+               corner=None, temperature=None, x0_guess=None, timeout=300.0):
+    """Full-circuit ngspice ``.ac dec`` — complex node transfer over frequency.
+
+    ``acmag`` maps a stimulus source (a rail name or an ideal-vsource name) to
+    ``(magnitude, phase_deg)``; a differential drive is two sources with opposite
+    phase (e.g. ``{"VINP": (0.5, 0), "VINN": (0.5, 180)}``). The DC operating point
+    is found from the circuit's bias (seed the multistable OTA via ``x0_guess`` →
+    ``.nodeset``), then ``.ac dec <points> <fstart> <fstop>`` runs.
+
+    Returns ``{"freq": f, "nodes": {name: complex[]}, "acmag": ...}`` — one complex
+    array per recorded node (default every solved node, or ``out_nodes``). Combine
+    with :func:`ac_response` and the ``dc_gain_db`` / ``unity_gain_freq`` /
+    ``phase_margin`` helpers. Temperature (K), corner (incl. sf/fs) and supply bias
+    are all honored.
+    """
+    acmag = {k: (float(v[0]), float(v[1])) for k, v in dict(acmag or {}).items()}
+    ac = {_resolve_source_name(topo, k): v for k, v in acmag.items()}
+    record = list(out_nodes) if out_nodes is not None else list(topo.solved)
+    for name in record:
+        if name not in topo.idx:
+            raise ValueError(f"ac_ngspice out node {name!r} is not a solved node")
+
+    lines, node_map, _node = _network_deck(
+        topo, sizes, bias, header="* circuitopt FreePDK45 full-circuit .ac",
+        nf=nf, model_types=model_types, device_kwargs=device_kwargs, corner=corner,
+        temperature=temperature, x0_guess=x0_guess, ac=ac)
+
+    with tempfile.TemporaryDirectory(prefix="circuitopt-fp45-ac-") as td:
+        out_path = os.path.join(td, "ac.dat")
+        deck_path = os.path.join(td, "deck.cir")
+        vecs = []
+        for name in record:
+            vecs.append(f"real(v({node_map[name]}))")
+            vecs.append(f"imag(v({node_map[name]}))")
+        lines.extend([
+            ".control", "set filetype=ascii", "set wr_singlescale", "set wr_vecnames",
+            f"ac dec {int(points):d} {float(fstart):.17g} {float(fstop):.17g}",
+            f"wrdata {out_path} " + " ".join(vecs),
+            ".endc", ".end",
+        ])
+        with open(deck_path, "w", encoding="ascii") as fh:
+            fh.write("\n".join(lines) + "\n")
+        _run_ngspice(deck_path, out_path, timeout=timeout, what="FreePDK45 full-circuit .ac")
+        raw = np.loadtxt(out_path, skiprows=1, ndmin=2)
+
+    freq = raw[:, 0]
+    nodes = {}
+    for i, name in enumerate(record):
+        re = raw[:, 1 + 2 * i]
+        im = raw[:, 2 + 2 * i]
+        nodes[name] = re + 1j * im
+    return {"freq": freq, "nodes": nodes, "acmag": acmag}
+
+
+def ac_response(result, out, ref=None, *, vin=1.0):
+    """Complex transfer ``(V(out) [- V(ref)]) / vin`` from an :func:`ac_ngspice` result.
+
+    ``out``/``ref`` name recorded solved nodes (``ref`` gives a differential output);
+    ``vin`` normalises by the differential input magnitude (1.0 leaves node voltages)."""
+    nodes = result["nodes"]
+    resp = np.asarray(nodes[out], complex)
+    if ref is not None:
+        resp = resp - np.asarray(nodes[ref], complex)
+    return resp / float(vin)
+
+
+# ── response metrics ────────────────────────────────────────────────────────────
+def dc_gain_db(freq, resp):
+    """Low-frequency gain in dB (magnitude of *resp* at the lowest swept frequency).
+
+    NB: for an AC-coupled input this is on the high-pass slope, not the passband —
+    use :func:`peak_gain_db` for the mid-band gain of a bandpass response."""
+    resp = np.asarray(resp, complex)
+    mag = float(np.abs(resp[int(np.argmin(np.asarray(freq, float)))]))
+    return 20.0 * np.log10(max(mag, 1e-300))
+
+
+def peak_gain_db(freq, resp):
+    """Maximum magnitude of *resp* over the sweep, in dB — the passband gain of a
+    band-pass (AC-coupled) or low-pass response."""
+    return 20.0 * np.log10(max(float(np.max(np.abs(np.asarray(resp, complex)))), 1e-300))
+
+
+def unity_gain_freq(freq, resp):
+    """Unity-gain (0 dB) crossover frequency [Hz] — first |resp|=1 crossing above the
+    peak, log-interpolated. ``nan`` if the response never reaches unity."""
+    freq = np.asarray(freq, float)
+    mag = np.abs(np.asarray(resp, complex))
+    order = np.argsort(freq)
+    freq, mag = freq[order], mag[order]
+    ipk = int(np.argmax(mag))
+    if mag[ipk] < 1.0:
+        return float("nan")
+    for i in range(ipk + 1, len(mag)):
+        if mag[i] <= 1.0:
+            f0, f1 = freq[i - 1], freq[i]
+            g0, g1 = np.log10(max(mag[i - 1], 1e-300)), np.log10(max(mag[i], 1e-300))
+            if f0 <= 0 or f1 <= 0 or g1 == g0:
+                return float(f1)
+            x0, x1 = np.log10(f0), np.log10(f1)
+            x = x0 + (0.0 - g0) * (x1 - x0) / (g1 - g0)   # log10|H| = 0
+            return float(10.0 ** np.clip(x, min(x0, x1), max(x0, x1)))
+    return float("nan")
+
+
+def _phase_deg_unwrapped(freq, resp):
+    freq = np.asarray(freq, float)
+    order = np.argsort(freq)
+    ph = np.unwrap(np.angle(np.asarray(resp, complex)[order]))
+    return freq[order], np.degrees(ph)
+
+
+def phase_margin(freq, resp):
+    """Phase margin [deg] of a forward or loop response *resp* under unity feedback.
+
+    ``PM = 180 + (phase(resp) at UGBW - phase(resp) at the peak-gain frequency)``. The
+    passband/peak phase is the reference so an inverting (passband phase ≈ ±180°) or
+    AC-coupled band-pass amplifier reports the physical margin — e.g. the FD-OTA
+    passband phase is -179° and PM comes out ~84°, not ~-95°. For a plain low-pass
+    loop gain the peak sits at DC with phase 0, so this reduces to ``180 + phase(UGBW)``.
+    ``nan`` if there is no unity crossing."""
+    fu = unity_gain_freq(freq, resp)
+    if not np.isfinite(fu):
+        return float("nan")
+    f, ph = _phase_deg_unwrapped(freq, resp)
+    mag = np.abs(np.asarray(resp, complex))[np.argsort(np.asarray(freq, float))]
+    ph_ref = ph[int(np.argmax(mag))]
+    ph_u = float(np.interp(np.log10(fu), np.log10(f), ph))
+    return 180.0 + (ph_u - ph_ref)
+
+
+def gain_margin_db(freq, resp):
+    """Gain margin [dB] = -20log10|resp| at the -180° phase crossing. ``nan`` if the
+    phase never reaches -180° within the sweep."""
+    freq = np.asarray(freq, float)
+    resp = np.asarray(resp, complex)
+    order = np.argsort(freq)
+    ph = np.degrees(np.unwrap(np.angle(resp[order])))
+    mag_db = 20.0 * np.log10(np.maximum(np.abs(resp[order]), 1e-300))
+    for i in range(1, len(ph)):
+        if (ph[i - 1] + 180.0) * (ph[i] + 180.0) <= 0.0 and ph[i] != ph[i - 1]:
+            w = (-180.0 - ph[i - 1]) / (ph[i] - ph[i - 1])
+            return float(-(mag_db[i - 1] + w * (mag_db[i] - mag_db[i - 1])))
+    return float("nan")
+
+
+# ── .noise ──────────────────────────────────────────────────────────────────────
+def noise_ngspice(sizes, bias, *, topo, out, src, fstart, fstop, points=20,
+                  ref=None, band=None, nf=None, model_types=None, device_kwargs=None,
+                  corner=None, temperature=None, x0_guess=None, timeout=300.0):
+    """Full-circuit ngspice ``.noise`` — output & input-referred PSD + band rms.
+
+    ``out``/``ref`` are solved-node names — ``v(out)`` single-ended or ``v(out,ref)``
+    differential. ``src`` names the input source (a rail or an ideal vsource); it is
+    driven ``ac 1`` so ngspice's ``inoise`` is meaningful. ``band=(f_lo, f_hi)`` (Hz)
+    sets the integration band for the reported rms (defaults to the full sweep).
+
+    Returns ``{"freq", "onoise_psd" [V^2/Hz], "inoise_psd", "onoise_rms", "inoise_rms",
+    "band"}``. PSD = ngspice spectrum² (its ``*noise_spectrum`` vectors are amplitude
+    densities, V/√Hz or A/√Hz — squared here to a power density). rms is
+    ``sqrt(∫ PSD df)`` over ``band`` (trapezoid on the swept grid)."""
+    ac = {_resolve_source_name(topo, src): (1.0, 0.0)}
+    for name in (out, ref):
+        if name is not None and name not in topo.idx:
+            raise ValueError(f"noise_ngspice node {name!r} is not a solved node")
+
+    lines, node_map, _node = _network_deck(
+        topo, sizes, bias, header="* circuitopt FreePDK45 full-circuit .noise",
+        nf=nf, model_types=model_types, device_kwargs=device_kwargs, corner=corner,
+        temperature=temperature, x0_guess=x0_guess, ac=ac)
+
+    out_expr = f"v({node_map[out]}" + (f",{node_map[ref]})" if ref is not None else ")")
+    src_elem = _stimulus_deck_element(topo, src)
+    with tempfile.TemporaryDirectory(prefix="circuitopt-fp45-noise-") as td:
+        out_path = os.path.join(td, "noise.dat")
+        deck_path = os.path.join(td, "deck.cir")
+        lines.extend([
+            ".control", "set filetype=ascii", "set wr_singlescale", "set wr_vecnames",
+            f"noise {out_expr} {src_elem} dec {int(points):d} "
+            f"{float(fstart):.17g} {float(fstop):.17g}",
+            "setplot noise1",
+            f"wrdata {out_path} onoise_spectrum inoise_spectrum",
+            ".endc", ".end",
+        ])
+        with open(deck_path, "w", encoding="ascii") as fh:
+            fh.write("\n".join(lines) + "\n")
+        _run_ngspice(deck_path, out_path, timeout=timeout,
+                     what="FreePDK45 full-circuit .noise")
+        raw = np.loadtxt(out_path, skiprows=1, ndmin=2)
+
+    freq = raw[:, 0]
+    onoise_psd = raw[:, 1] ** 2       # spectrum is amplitude density → square to PSD
+    inoise_psd = raw[:, 2] ** 2
+    lo, hi = (float(band[0]), float(band[1])) if band else (float(freq[0]), float(freq[-1]))
+    mask = (freq >= lo) & (freq <= hi)
+    onoise_rms = float(np.sqrt(np.trapezoid(onoise_psd[mask], freq[mask]))) if mask.sum() > 1 else 0.0
+    inoise_rms = float(np.sqrt(np.trapezoid(inoise_psd[mask], freq[mask]))) if mask.sum() > 1 else 0.0
+    return {"freq": freq, "onoise_psd": onoise_psd, "inoise_psd": inoise_psd,
+            "onoise_rms": onoise_rms, "inoise_rms": inoise_rms, "band": (lo, hi)}
+
+
+# ── .op ──────────────────────────────────────────────────────────────────────────
+_OP_PARAMS = ("vds", "vgs", "vdsat", "id", "gm", "gds")
+
+
+def _run_ngspice_capture(deck_path: str, timeout: float, what: str) -> str:
+    proc = subprocess.run([_ngspice(), "-b", deck_path], capture_output=True,
+                          text=True, timeout=timeout)
+    if proc.returncode != 0:
+        tail = ((proc.stderr or "") + (proc.stdout or "")).strip()[-800:]
+        raise RuntimeError(f"ngspice {what} failed (rc {proc.returncode})\n{tail}")
+    return (proc.stdout or "") + "\n" + (proc.stderr or "")
+
+
+def op_ngspice(sizes, bias, *, topo, margin=0.0, nf=None, model_types=None,
+               device_kwargs=None, corner=None, temperature=None, x0_guess=None,
+               timeout=120.0):
+    """Full-circuit ngspice ``.op`` — per-device operating point + saturation check.
+
+    Runs ``.op`` (seed the DC with ``x0_guess`` → ``.nodeset`` for a multistable OTA)
+    and harvests ngspice op-vars per transistor. Returns
+    ``{device: {"vds", "vgs", "vdsat", "id", "gm", "gds", "region_ok"}}`` where
+    ``region_ok = |vds| >= |vdsat| + margin`` — the saturation-region test, with the
+    absolute values handling NMOS/PMOS polarity uniformly (``margin`` in volts,
+    default 0). Devices whose op-vars ngspice does not report are omitted."""
+    lines, _node_map, _node = _network_deck(
+        topo, sizes, bias, header="* circuitopt FreePDK45 full-circuit .op",
+        nf=nf, model_types=model_types, device_kwargs=device_kwargs, corner=corner,
+        temperature=temperature, x0_guess=x0_guess)
+
+    dev_names = [name for name, *_ in topo.devices]
+    prints = []
+    for name in dev_names:
+        elem = _element("M", name).lower()
+        for p in _OP_PARAMS:
+            prints.append(f"print @{elem}[{p}]")
+    lines.extend([".control", "op", *prints, ".endc", ".end"])
+
+    import re as _re
+    with tempfile.TemporaryDirectory(prefix="circuitopt-fp45-op-") as td:
+        deck_path = os.path.join(td, "deck.cir")
+        with open(deck_path, "w", encoding="ascii") as fh:
+            fh.write("\n".join(lines) + "\n")
+        text = _run_ngspice_capture(deck_path, timeout=timeout, what="FreePDK45 .op")
+
+    # ngspice prints a scalar as "@m1[vds] = 3.5e-01"
+    pat = _re.compile(r"@(\w+)\[(\w+)\]\s*=\s*([-+0-9.eEnaN]+)")
+    raw = {}
+    for m in pat.finditer(text):
+        elem, param, val = m.group(1).lower(), m.group(2).lower(), m.group(3)
+        try:
+            raw.setdefault(elem, {})[param] = float(val)
+        except ValueError:
+            continue
+    out = {}
+    for name in dev_names:
+        elem = _element("M", name).lower()
+        vals = raw.get(elem)
+        if not vals or "vds" not in vals or "vdsat" not in vals:
+            continue
+        rec = {p: vals.get(p, float("nan")) for p in _OP_PARAMS}
+        rec["region_ok"] = bool(abs(rec["vds"]) >= abs(rec["vdsat"]) + float(margin))
+        out[name] = rec
+    return out
+
+
+# ── loop gain (Middlebrook single voltage injection) ────────────────────────────
+def loop_gain_ngspice(sizes, bias, *, topo, inject, fstart, fstop, points=20,
+                      nf=None, model_types=None, device_kwargs=None, corner=None,
+                      temperature=None, x0_guess=None, timeout=300.0):
+    """Loop gain T(f) by Middlebrook single voltage injection through ``inject``.
+
+    ``inject`` names an ideal vsource placed IN SERIES in the loop, between the
+    driver-side node (its ``q`` terminal — low impedance, e.g. a stage output) and the
+    DUT-input node (its ``p`` terminal — high impedance, e.g. a transistor gate); its
+    DC value is 0 so the loop is closed for biasing. This one testbench-side ideal
+    source is all that is needed — no loop-breaking inductor. The source is driven
+    ``ac 1`` and the loop gain is read as ``T = -V(p_side)/V(q_side)`` at the break
+    (exact when the injection sits at a high-Z/low-Z boundary).
+
+    Use it for a feedback amplifier's differential loop (break at an input-pair gate)
+    and for a CMFB loop (break at the common-mode control gate) — see
+    ``docs/ngspice_oracles.md``. Returns ``{"freq", "loop_gain" (complex T),
+    "gain_db", "phase_deg", "ugf", "pm", "gm_db"}``."""
+    vs = next((v for v in topo.vsources if v[0] == inject), None)
+    if vs is None:
+        raise ValueError(f"loop_gain_ngspice: {inject!r} is not an ideal vsource in the topology")
+    _name, p, q, _val = vs
+    if p not in topo.idx or q not in topo.idx:
+        raise ValueError("loop injection source must break between two solved nodes")
+
+    result = ac_ngspice(
+        sizes, bias, topo=topo, acmag={inject: (1.0, 0.0)}, fstart=fstart, fstop=fstop,
+        points=points, out_nodes=[p, q], nf=nf, model_types=model_types,
+        device_kwargs=device_kwargs, corner=corner, temperature=temperature,
+        x0_guess=x0_guess, timeout=timeout)
+    freq = result["freq"]
+    vp = result["nodes"][p]
+    vq = result["nodes"][q]
+    T = -vq / vp
+    return {
+        "freq": freq, "loop_gain": T,
+        "gain_db": 20.0 * np.log10(np.maximum(np.abs(T), 1e-300)),
+        "phase_deg": _phase_deg_unwrapped(freq, T)[1],
+        "ugf": unity_gain_freq(freq, T),
+        "pm": phase_margin(freq, T),
+        "gm_db": gain_margin_db(freq, T),
+    }

@@ -229,7 +229,48 @@ examples/periodic_rc.json
 ```
 
 执行入口是 `circuit-opt adc`；`--vin` 做单次转换，`--sweep` 计算 DNL/INL，`--sine`
-计算 SNDR/SFDR/ENOB。完整示例见 `examples/freepdk45_sar3.json`。
+计算 SNDR/SFDR/ENOB。完整示例见 `examples/freepdk45_sar3.json`（静态 5T 比较器）与
+`examples/freepdk45_sar6.json`（6-bit，时钟同步 StrongARM 比较器）。
+
+#### `adc.clock`
+
+可选。为**时钟同步动态（StrongARM）比较器**生成选通波形。配置后
+`sar_input_waveforms` 会生成名为 `input` 的波形 key：静息在 `low`（复位），在每个
+bit 的 `decision_time` 附近脉冲到 `high`（评估）——锁存器在 CDAC 建立期间预充、判决
+时刻再生。经 `transient_inputs` 用该 key 驱动时钟尾管/输出复位管的栅。省略该块即完全
+复现静态比较器行为（不生成任何时钟波形，`examples/freepdk45_sar3.json` 渲染出的网表
+逐字节不变）。
+
+```json
+"clock": {"input": "clk", "high": 1.0, "low": 0.0,
+          "eval_before": 3e-9, "reset_hold": 1e-9}
+```
+
+- `input`——必填，选通波形的 transient key。
+- `high` / `low`——评估/复位电平 [V]；默认 `high = adc.vref`、`low = 0`。
+- `eval_before`——每个 `decision_time` 前多少秒拉高（默认 `0.3 * bit_period`）；必须
+  小于 `bit_period/2 - edge_time`，保证被试 CDAC 电容切换完成后锁存器才采样。
+- `reset_hold`——每个 `decision_time` 后多少秒复位（默认 `0.1 * bit_period`）。
+
+#### `adc.mismatch`
+
+可选。FreePDK45/ngspice SAR 的逐器件失配蒙特卡洛配置，由 `circuitopt.sar_mismatch_mc`
+使用。所有 sigma 默认 `0.0`，因此省略该块（或全部置零）即复现标称转换。
+
+```json
+"mismatch": {
+  "sigma_vth0": 5e-3, "w0": 1.0, "l0": 0.05,
+  "sigma_cu": 0.01, "c_unit": 1e-14,
+  "dnl_threshold": 0.5, "inl_threshold": 0.5
+}
+```
+
+- `sigma_vth0`——晶体管阈值电压 sigma [V]，定义在参考面积 `w0*l0` 上；逐器件按
+  `sigma_vth0 / sqrt(W*L / (w0*l0))`（Pelgrom 面积律）缩放，作为 BSIM4 实例参数
+  `delvto` 注入。`sigma_vth0_nmos`/`sigma_vth0_pmos` 可分别覆盖 N/P 管。
+- `sigma_cu`——CDAC 单位电容相对 sigma（定义在 `c_unit`）；容值 `C` 的电容相对 sigma 为
+  `sigma_cu / sqrt(C / c_unit)`（二进制加权电容由多个单位电容并联，匹配更好）。
+- `dnl_threshold` / `inl_threshold`——良率判定的 |DNL|/|INL| 上限，单位 LSB（默认 0.5）。
 
 ### `outputs`
 

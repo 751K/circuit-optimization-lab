@@ -1,0 +1,21 @@
+* circuitopt FreePDK45 full-charge transient
+.include "{{FP45}}/models_ss/NMOS_VTG.inc"
+.include "{{FP45}}/models_ss/PMOS_VTG.inc"
+.options temp=27 method=gear maxord=1
+Vrail_VDD n_VDD 0 1
+Vrail_vinp n_vinp 0 0.55000000000000004
+Vrail_vinn n_vinn 0 0.55000000000000004
+Vrail_vbias n_vbias 0 0.55000000000000004
+M1 n_n1 n_vinp n_tail 0 NMOS_VTG w=0.5u l=0.10000000000000001u nf=1
+M2 n_vout n_vinn n_tail 0 NMOS_VTG w=0.5u l=0.10000000000000001u nf=1
+M3 n_n1 n_n1 n_VDD n_VDD PMOS_VTG w=0.5u l=0.10000000000000001u nf=1
+M4 n_vout n_n1 n_VDD n_VDD PMOS_VTG w=0.5u l=0.10000000000000001u nf=1
+M5 n_tail n_vbias 0 0 NMOS_VTG w=1u l=0.10000000000000001u nf=1
+Cload_0 n_vout 0 2.0000000000000001e-13
+.control
+set wr_singlescale
+set wr_vecnames
+tran 9.9999999999999903e-10 1e-08 0 9.9999999999999903e-10
+wrdata OUT.dat v(n_tail) v(n_n1) v(n_vout) i(Vrail_VDD) i(Vrail_vinp) i(Vrail_vinn) i(Vrail_vbias)
+.endc
+.end

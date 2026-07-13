@@ -17,6 +17,8 @@
 | `python -m circuitopt adc examples/freepdk45_sar3.json --vin 0.7` | FreePDK45 SAR 单次闭环转换 |
 | `python -m circuitopt adc examples/freepdk45_sar3.json --sweep 65` | ADC ramp + DNL/INL/missing code |
 | `python -m circuitopt adc examples/freepdk45_sar3.json --sine 32` | ADC 正弦码流 + SNDR/SFDR/ENOB/功耗 |
+| `python -m circuitopt adc examples/freepdk45_sar3.json --mc 32` | ADC 逐器件 mismatch MC + yield/DNL/INL |
+| `python -m circuitopt adc examples/freepdk45_sar3.json --vin 0.7 --plot` | ADC 出图：转换/静态/频谱/MC（PNG） |
 | `python -m circuitopt plot [all\|transient\|bode\|afe\|chopper\|ac\|pac]` | 出图：瞬态波形 + AC/PAC Bode（PNG） |
 | `python -m circuitopt dataset <circuit.json> -n 500 --out ds/run1` | 生成 surrogate 训练集（provenance + 失败样本保留） |
 | `python -m circuitopt.surrogate train <ds>.npz --test <ds>.npz --out m.pkl` | 训练指标 surrogate（GBT，可选 sklearn 依赖） |
@@ -103,10 +105,56 @@ Running ac,noise analyses for examples/afe_explore.json
 python -m circuitopt adc examples/freepdk45_sar3.json --vin 0.7
 python -m circuitopt adc examples/freepdk45_sar3.json --sweep 65 --corner ss
 python -m circuitopt adc examples/freepdk45_sar3.json --sine 32 --tone-bin 3 --sample-rate 10e6
+python -m circuitopt adc examples/freepdk45_sar3.json --sweep 65 --workers 4
+python -m circuitopt adc examples/freepdk45_sar3.json --mc 32 --seed 1 --workers 8
+python -m circuitopt adc examples/freepdk45_sar3.json --vin 0.7 --plot results/
 ```
 
 `--sweep` 至少为 `2**n_bits`；密集 ramp 才能分辨 transition/DNL/INL。`--sine` 支持
-`--amplitude`、`--offset`，并输出 SNDR、SFDR、ENOB 与平均功耗。
+`--amplitude`、`--offset`，并输出 SNDR、SFDR、ENOB 与平均功耗。`--mc N` 跑 N 次逐器件
+mismatch Monte-Carlo（用电路 `adc.mismatch` 配置，`--seed`/`--workers`/`--corner` 生效），
+输出 yield / 单调率 / 最坏 DNL·INL。`--vin`/`--sweep`/`--sine`/`--mc` 四选一。
+
+**`--plot [DIR]`（默认 `results/`）** — 转换结束后按运行模式渲染对应 SAR ADC 图到 DIR 并打印
+路径（需 matplotlib，缺失时与 `plot` 子命令一致地干净退出）。每种模式各一类图（见
+`examples/plot_adc.py`）：
+
+| 模式 | 图 | 内容 |
+|------|-----|------|
+| `--vin` | `adc_sar_conversion.png` | 单次转换逻辑分析视图：采样/逐位 CDAC 驱动(+clk)/顶板/比较器节点，标注每位物理判决时刻与最终码 |
+| `--sweep` | `adc_sar_static.png` | 传输阶梯 + 逐码 DNL + 逐 transition INL（±0.5 LSB 参考线、缺码标记、max\|DNL\|/max\|INL\|） |
+| `--sine` | `adc_sar_spectrum.png` | 归一化到基波的 dBc 功率谱（线性频率轴），标注基波 + 2..5 次谐波，附 SNDR/SNR/SFDR/ENOB |
+| `--mc` | `adc_sar_mc.png` | max\|DNL\|/max\|INL\|/offset 直方图，阈值线 + yield 标注；非单调 trial 的 ∞ 落入显式溢出桶 |
+
+`--workers N`：并行独立转换（`--sweep`/`--sine`）或 MC trial（`--mc`）。每次转换互相独立、每个
+ngspice `.tran` 在独立临时目录里以子进程运行（释放 GIL），因此线程池可近线性加速；单次转换内部的
+逐位判决始终串行。`N=1`（默认）为原串行路径，任意 worker 数结果保序、与串行一致。
+
+**ADC 设计空间探索（`--explore`）** — 对 SAR 电路做尺寸/电容参数采样 → 逐候选跑码心静态扫描
+→ 约束过滤 → Pareto 选择，是 `explore` 子命令的 ADC 版。配置为独立 JSON（含 `"circuit"`
+指向电路 JSON、`variables`/`constraints`/`objectives`，可选 `sweep_points`、`dynamic`）。
+
+```bash
+python -m circuitopt adc examples/freepdk45_sar3.json \
+    --explore examples/freepdk45_sar3_explore.json -n 16 --workers 4 \
+    --csv out.csv --jsonl out.jsonl
+```
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--mc` | int | — | 逐器件 mismatch Monte-Carlo trial 数（与 `--vin/--sweep/--sine` 互斥） |
+| `--plot` | dir | — | 按模式渲染 SAR ADC 图到该目录（省略取值时默认 `results/`；需 matplotlib） |
+| `--explore` | path | — | SAR 探索配置 JSON（与 `--vin/--sweep/--sine/--mc` 互斥；位置电路参数为准） |
+| `-n`, `--n` | int | `50` | 候选数量 |
+| `--seed` | int | `0` | 采样随机种子（explore/mc 通用） |
+| `--workers` | int | `1` | 并行度：转换（sweep/sine）、MC trial（mc）或候选（explore）；转换内逐位判决仍串行 |
+| `--csv` | path | — | explore：候选行写入该 CSV |
+| `--jsonl` | path | — | explore：候选行写入该 JSONL |
+
+目标/约束指标：`max_abs_dnl`、`max_abs_inl`、`missing_codes`、`monotonic`、`power_uw`、
+`conv_time_ns`、`energy_per_conv_pj`，以及配置 `"dynamic"` 时的 `enob`、`sndr_db`、`sfdr_db`。
+变量目标：尺寸 `"W:M1"`/`"L:M1"`/`"NF:M1"`（或 `"M1.W"`）、电容 `"C:C0P"`、或裸偏置键；
+一个变量可驱动多个目标（匹配对/电容组）。
 
 ---
 

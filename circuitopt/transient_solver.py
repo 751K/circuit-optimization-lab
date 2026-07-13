@@ -1170,7 +1170,8 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
               adaptive_vabstol: float = 1e-6,
               adaptive_iabstol: float = 1e-12, adaptive_max_steps: int = 200000,
               adaptive_h0: float | None = None, adaptive_config: Any = None, *,
-              binding: CircuitBinding | None = None) -> dict:
+              binding: CircuitBinding | None = None,
+              mismatch: Mapping[str, float] | None = None) -> dict:
     """Backward-Euler (default) or gear2/BDF2 transient.
 
       integration_method : "be" (backward-Euler, 1st order; the default for the
@@ -1225,6 +1226,13 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         it. ``dc_seed`` is not consumed here (transient seeds from ``V0``, a
         solved-node vector, not the DC-op dict). binding=None reproduces the legacy
         path exactly.
+
+    mismatch : optional ``{device: delvto[V]}`` per-instance threshold-voltage
+        offset map, only meaningful on the FreePDK45/ngspice path where it is
+        emitted as the BSIM4 instance parameter ``delvto`` (see
+        :func:`circuitopt.ngspice_transient.render_freepdk45_transient_netlist`).
+        Rejected for the local-solver paths, which have no per-instance Vth knob.
+        ``None`` reproduces the legacy netlist exactly.
     """
     topo, nf, corner, model_types, device_kwargs, _ = resolve_binding(
         binding, topo=topo, nf=nf, corner=corner, model_types=model_types,
@@ -1245,7 +1253,12 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
             node_inputs=node_inputs, current_inputs=current_inputs,
             corner=corner, model_types=model_types, device_kwargs=device_kwargs,
             integration_method=integration_method, max_step=max_step,
+            mismatch=mismatch,
         )
+    if mismatch:
+        raise NotImplementedError(
+            "per-instance delvto mismatch is only supported on the FreePDK45 "
+            "ngspice transient path")
     if osdi_model_names(model_types):
         from .osdi_transient import transient_osdi
         _inputs = inputs

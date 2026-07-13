@@ -1,6 +1,7 @@
 """Closed-loop SAR conversion driven by full-charge transient simulations."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -62,7 +63,47 @@ def _sar_config(spec: CircuitSpec, override=None) -> dict:
     if bit_inputs_bar is not None and ((cfg["dummy_input"] is None) !=
                                        (cfg["dummy_input_bar"] is None)):
         raise ValueError("differential dummy inputs must be provided as a pair")
+    cfg["clock"] = _clock_config(cfg)
     return cfg
+
+
+def _clock_config(cfg: Mapping) -> dict | None:
+    """Resolve the optional ``adc.clock`` strobe block for a clocked comparator.
+
+    Backward compatible: absent ``clock`` -> ``None`` and
+    :func:`sar_input_waveforms` emits no clock key, so a static-comparator SAR
+    (e.g. ``freepdk45_sar3``) renders a byte-identical netlist. When present, a
+    single strobe waveform (key ``clock.input``) is generated that rests at
+    ``low`` and pulses to ``high`` around every bit's ``decision_time`` so a
+    dynamic latch (StrongARM) precharges during CDAC settling and evaluates at the
+    decision instant. Because ``run_sar_conversion`` reads the comparator only at
+    the trial bit's ``decision_time`` and replays each bit from t=0, one fixed
+    per-bit strobe pattern (independent of ``trial_index`` and the decisions)
+    serves every replay.
+    """
+    clock = cfg.get("clock")
+    if clock is None:
+        return None
+    clock = dict(clock)
+    period = cfg["bit_period"]
+    edge = cfg["edge_time"]
+    ck = {
+        "input": str(_required(clock, "input")),
+        "high": float(clock.get("high", cfg["vref"])),
+        "low": float(clock.get("low", 0.0)),
+        "eval_before": float(clock.get("eval_before", 0.3 * period)),
+        "reset_hold": float(clock.get("reset_hold", 0.1 * period)),
+    }
+    if ck["high"] <= ck["low"]:
+        raise ValueError("adc.clock.high must exceed adc.clock.low")
+    # rise = decision_time - eval_before must fall after the trial cap has switched
+    # (trial_start + edge = decision_time - 0.5*period + edge) so the latch samples a
+    # settled differential; keep eval_before < half a period (minus one edge).
+    if not 0.0 < ck["eval_before"] < 0.5 * period - edge:
+        raise ValueError("adc.clock.eval_before must be in (0, bit_period/2 - edge_time)")
+    if ck["reset_hold"] < 0.0 or ck["eval_before"] + ck["reset_hold"] >= period:
+        raise ValueError("adc.clock.eval_before + reset_hold must be below one bit_period")
+    return ck
 
 
 def sar_time_grid(spec: CircuitSpec, config=None) -> np.ndarray:
@@ -148,16 +189,35 @@ def sar_input_waveforms(spec: CircuitSpec, vin: float, decisions: Sequence[int |
         out[cfg["dummy_input_bar"]] = _wave(tgrid, [
             (0.0, sampled_n), (hold_start, sampled_n), (hold_done, common_mode),
             (tstop, common_mode)])
+    if cfg["clock"] is not None:
+        ck = cfg["clock"]
+        events = [(0.0, ck["low"])]
+        for bit in range(cfg["n_bits"]):
+            decision_time = sample_end + (bit + 1.0) * period
+            rise = decision_time - ck["eval_before"]
+            fall = decision_time + ck["reset_hold"]
+            events.extend([
+                (rise - edge, ck["low"]), (rise, ck["high"]),
+                (fall, ck["high"]), (fall + edge, ck["low"]),
+            ])
+        events.append((tstop, ck["low"]))
+        out[ck["input"]] = _wave(tgrid, events)
     return out
 
 
 def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
-                       corner: str | None = None) -> dict:
+                       corner: str | None = None,
+                       mismatch: Mapping[str, float] | None = None) -> dict:
     """Run one closed-loop SAR conversion using physical comparator decisions.
 
     Each bit replays the conversion from sampling through that decision. Replaying
     preserves ngspice's device and capacitor state exactly while allowing Python
     to update future CDAC controls from the comparator result.
+
+    ``mismatch`` is an optional ``{device: delvto[V]}`` per-instance Vth-offset map
+    threaded to every replayed transient (see :mod:`circuitopt.sar_mc`); ``None``
+    reproduces the nominal conversion exactly. Capacitor mismatch is applied
+    upstream by perturbing ``spec`` itself, so it needs no argument here.
     """
     cfg = _sar_config(spec, config)
     if not 0.0 <= vin <= cfg["vref"]:
@@ -171,7 +231,7 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
             spec, vin, decisions, bit, config=cfg, tgrid=tgrid)
         result = transient(
             spec.sizes, spec.bias, tgrid, binding=binding, inputs=waveforms,
-            integration_method="gear2", max_step=cfg["edge_time"],
+            integration_method="gear2", max_step=cfg["edge_time"], mismatch=mismatch,
         )
         node = cfg["comparator_node"]
         if node not in result["nodes"]:
@@ -191,7 +251,7 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
         spec, vin, decisions, cfg["n_bits"] - 1, config=cfg, tgrid=tgrid)
     result = transient(
         spec.sizes, spec.bias, tgrid, binding=binding, inputs=waveforms,
-        integration_method="gear2", max_step=cfg["edge_time"],
+        integration_method="gear2", max_step=cfg["edge_time"], mismatch=mismatch,
     )
     bits = np.asarray(decisions, np.int8)
     weights = 1 << np.arange(cfg["n_bits"] - 1, -1, -1, dtype=np.int64)
@@ -226,15 +286,50 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
     }
 
 
+def _run_independent_conversions(run, values, workers: int) -> list:
+    """Evaluate an ordered batch of *independent* conversions, optionally threaded.
+
+    Every SAR conversion here (one sweep/signal sample) is independent of the others
+    — no shared mutable state, since :func:`run_sar_conversion` rebuilds its
+    ``spec.binding().at_corner(corner)`` per call and every ngspice ``.tran`` runs in
+    its own :class:`TemporaryDirectory`. The work is ngspice-subprocess-bound (the
+    subprocess ``wait`` releases the GIL), so a :class:`ThreadPoolExecutor` gives a
+    near-linear speed-up without the pickling cost of processes.
+
+    ``workers == 1`` keeps today's exact serial list-comprehension path.
+    ``ex.map`` preserves input order, so any worker count returns a byte-identical,
+    order-preserving result. Bit decisions *within* a conversion stay sequential —
+    only whole conversions are parallelised.
+    """
+    if workers is None or workers < 1:
+        raise ValueError("workers must be a positive integer")
+    if workers == 1:
+        return [run(value) for value in values]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(run, values))
+
+
 def run_sar_sweep(spec: CircuitSpec, vin_values, *, config=None,
-                  corner: str | None = None) -> dict:
-    """Convert a monotonic input sweep and calculate SAR static linearity."""
+                  corner: str | None = None,
+                  mismatch: Mapping[str, float] | None = None,
+                  workers: int = 1) -> dict:
+    """Convert a monotonic input sweep and calculate SAR static linearity.
+
+    ``mismatch`` (per-instance ``{device: delvto[V]}``) is forwarded to every
+    conversion; ``None`` reproduces the nominal sweep.
+
+    ``workers`` parallelises the independent conversions across a thread pool
+    (see :func:`_run_independent_conversions`); ``workers=1`` (default) is the
+    serial path and any worker count is order-preserving and byte-identical to it.
+    """
     cfg = _sar_config(spec, config)
     vin = np.asarray(vin_values, float)
     if vin.ndim != 1 or len(vin) < 2 or np.any(np.diff(vin) <= 0.0):
         raise ValueError("vin_values must be a strictly increasing one-dimensional array")
-    conversions = [run_sar_conversion(spec, value, config=cfg, corner=corner)
-                   for value in vin]
+    conversions = _run_independent_conversions(
+        lambda value: run_sar_conversion(spec, value, config=cfg, corner=corner,
+                                         mismatch=mismatch),
+        vin, workers)
     codes = np.array([item["code"] for item in conversions], np.int64)
     metrics = static_ramp_metrics(
         vin, codes, cfg["n_bits"], vmin=0.0, vmax=cfg["vref"])
@@ -249,14 +344,21 @@ def run_sar_sweep(spec: CircuitSpec, vin_values, *, config=None,
 
 
 def run_sar_signal(spec: CircuitSpec, vin_values, sample_rate: float, *, config=None,
-                   corner: str | None = None, fundamental_bin: int | None = None) -> dict:
-    """Convert an arbitrary sampled signal and calculate dynamic ADC metrics."""
+                   corner: str | None = None, fundamental_bin: int | None = None,
+                   workers: int = 1) -> dict:
+    """Convert an arbitrary sampled signal and calculate dynamic ADC metrics.
+
+    ``workers`` parallelises the independent per-sample conversions across a thread
+    pool; ``workers=1`` (default) is the serial path and any worker count is
+    order-preserving and byte-identical to it.
+    """
     cfg = _sar_config(spec, config)
     vin = np.asarray(vin_values, float)
     if vin.ndim != 1 or len(vin) < 8:
         raise ValueError("vin_values must contain at least eight samples")
-    conversions = [run_sar_conversion(spec, value, config=cfg, corner=corner)
-                   for value in vin]
+    conversions = _run_independent_conversions(
+        lambda value: run_sar_conversion(spec, value, config=cfg, corner=corner),
+        vin, workers)
     codes = np.array([item["code"] for item in conversions], np.int64)
     return {
         "vin": vin,

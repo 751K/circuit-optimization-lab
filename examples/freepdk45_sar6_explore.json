@@ -1,0 +1,11 @@
+{
+  "circuit": "freepdk45_sar6.json",
+  "sweep_points": 64,
+  "variables": {
+    "comp_pair_W": {"min": 3.0, "max": 8.0, "round": 1, "targets": ["W:MIP", "W:MIN"]},
+    "unit_cap": {"min": 1.6e-15, "max": 2.4e-15, "targets": ["C:C0P", "C:C0N"]},
+    "switch_W": {"min": 0.5, "max": 2.0, "round": 2, "targets": ["W:MSNP", "W:MSPP", "W:MSNN", "W:MSPN"]}
+  },
+  "constraints": {"missing_codes": {"max": 0}, "monotonic": {"min": 1}},
+  "objectives": {"max_abs_dnl": "min", "power_uw": "min"}
+}

@@ -1,0 +1,739 @@
+{
+  "name": "freepdk45_mdac_ota_dmloop",
+  "description": "Differential-loop gain of the OTA closed by the MDAC Cs/Cf network (beta~1/9): differential Middlebrook injection (Vinj at the + gate break, mirror VCVS at the - gate break). PM from loop_gain_ngspice(inject='Vinj') must be > 60 deg at all PVT.",
+  "solved": [
+    "IB",
+    "NBC",
+    "VBNC",
+    "PB",
+    "PX",
+    "VBPC",
+    "VCM",
+    "VREF1",
+    "VCMIN",
+    "CMR",
+    "TAIL",
+    "A1",
+    "A2",
+    "O1",
+    "O2",
+    "B1",
+    "B2",
+    "OUTP",
+    "OUTN",
+    "MZ1",
+    "MZ2",
+    "CTRL1",
+    "CMT1",
+    "CMT2",
+    "NSNS1",
+    "CTRL2",
+    "CMB",
+    "CMS",
+    "NSNS2",
+    "INP",
+    "INN",
+    "INPD",
+    "INND"
+  ],
+  "rails": {
+    "VDD": "VDD",
+    "GND": 0.0
+  },
+  "bias": {
+    "VDD": 1.0
+  },
+  "devices": [
+    {
+      "name": "MBN",
+      "drain": "IB",
+      "gate": "IB",
+      "source": "GND",
+      "W": 12.0,
+      "L": 0.2,
+      "NF": 6
+    },
+    {
+      "name": "MPRN",
+      "drain": "PB",
+      "gate": "IB",
+      "source": "GND",
+      "W": 12.0,
+      "L": 0.2,
+      "NF": 6
+    },
+    {
+      "name": "MPR",
+      "drain": "PB",
+      "gate": "PB",
+      "source": "VDD",
+      "W": 14.0,
+      "L": 0.2,
+      "NF": 7
+    },
+    {
+      "name": "MPC",
+      "drain": "VBNC",
+      "gate": "PB",
+      "source": "VDD",
+      "W": 14.0,
+      "L": 0.2,
+      "NF": 7
+    },
+    {
+      "name": "MCND",
+      "drain": "VBNC",
+      "gate": "VBNC",
+      "source": "NBC",
+      "W": 5.9,
+      "L": 0.15
+    },
+    {
+      "name": "MCPD",
+      "drain": "VBPC",
+      "gate": "VBPC",
+      "source": "PX",
+      "W": 19.0,
+      "L": 0.15,
+      "NF": 10
+    },
+    {
+      "name": "MNC",
+      "drain": "VBPC",
+      "gate": "IB",
+      "source": "GND",
+      "W": 12.0,
+      "L": 0.2,
+      "NF": 6
+    },
+    {
+      "name": "MREPP",
+      "drain": "VREF1",
+      "gate": "PB",
+      "source": "VDD",
+      "W": 76.0,
+      "L": 0.2,
+      "NF": 38
+    },
+    {
+      "name": "MREP",
+      "drain": "VREF1",
+      "gate": "VREF1",
+      "source": "GND",
+      "W": 17.5,
+      "L": 0.14,
+      "NF": 9
+    },
+    {
+      "name": "MCMP",
+      "drain": "VCMIN",
+      "gate": "PB",
+      "source": "VDD",
+      "W": 28.0,
+      "L": 0.2,
+      "NF": 14
+    },
+    {
+      "name": "MCMD",
+      "drain": "VCMIN",
+      "gate": "VCMIN",
+      "source": "CMR",
+      "W": 8.5,
+      "L": 0.16,
+      "NF": 4
+    },
+    {
+      "name": "M0",
+      "drain": "TAIL",
+      "gate": "IB",
+      "source": "GND",
+      "W": 3000.0,
+      "L": 0.2,
+      "NF": 1500
+    },
+    {
+      "name": "M1",
+      "drain": "A1",
+      "gate": "INP",
+      "source": "TAIL",
+      "W": 560.0,
+      "L": 0.16,
+      "NF": 280
+    },
+    {
+      "name": "M2",
+      "drain": "A2",
+      "gate": "INN",
+      "source": "TAIL",
+      "W": 560.0,
+      "L": 0.16,
+      "NF": 280
+    },
+    {
+      "name": "M3",
+      "drain": "O1",
+      "gate": "VBNC",
+      "source": "A1",
+      "W": 700.0,
+      "L": 0.15,
+      "NF": 350
+    },
+    {
+      "name": "M4",
+      "drain": "O2",
+      "gate": "VBNC",
+      "source": "A2",
+      "W": 700.0,
+      "L": 0.15,
+      "NF": 350
+    },
+    {
+      "name": "M5",
+      "drain": "O1",
+      "gate": "VBPC",
+      "source": "B1",
+      "W": 2250.0,
+      "L": 0.15,
+      "NF": 1125
+    },
+    {
+      "name": "M6",
+      "drain": "O2",
+      "gate": "VBPC",
+      "source": "B2",
+      "W": 2250.0,
+      "L": 0.15,
+      "NF": 1125
+    },
+    {
+      "name": "M7",
+      "drain": "B1",
+      "gate": "CTRL1",
+      "source": "VDD",
+      "W": 650.0,
+      "L": 0.13,
+      "NF": 325
+    },
+    {
+      "name": "M8",
+      "drain": "B2",
+      "gate": "CTRL1",
+      "source": "VDD",
+      "W": 650.0,
+      "L": 0.13,
+      "NF": 325
+    },
+    {
+      "name": "M9",
+      "drain": "OUTN",
+      "gate": "O1",
+      "source": "GND",
+      "W": 585.0,
+      "L": 0.14,
+      "NF": 292
+    },
+    {
+      "name": "M10",
+      "drain": "OUTP",
+      "gate": "O2",
+      "source": "GND",
+      "W": 585.0,
+      "L": 0.14,
+      "NF": 292
+    },
+    {
+      "name": "M11",
+      "drain": "OUTN",
+      "gate": "CTRL2",
+      "source": "VDD",
+      "W": 1870.0,
+      "L": 0.14,
+      "NF": 935
+    },
+    {
+      "name": "M12",
+      "drain": "OUTP",
+      "gate": "CTRL2",
+      "source": "VDD",
+      "W": 1870.0,
+      "L": 0.14,
+      "NF": 935
+    },
+    {
+      "name": "MRZ1",
+      "drain": "MZ1",
+      "gate": "VDD",
+      "source": "O1",
+      "W": 48.0,
+      "L": 0.05,
+      "NF": 24
+    },
+    {
+      "name": "MRZ2",
+      "drain": "MZ2",
+      "gate": "VDD",
+      "source": "O2",
+      "W": 48.0,
+      "L": 0.05,
+      "NF": 24
+    },
+    {
+      "name": "MS1",
+      "drain": "NSNS1",
+      "gate": "O1",
+      "source": "CMT1",
+      "W": 90.0,
+      "L": 0.12,
+      "NF": 45
+    },
+    {
+      "name": "MS2",
+      "drain": "CTRL1",
+      "gate": "VREF1",
+      "source": "CMT1",
+      "W": 90.0,
+      "L": 0.12,
+      "NF": 45
+    },
+    {
+      "name": "MS3",
+      "drain": "NSNS1",
+      "gate": "O2",
+      "source": "CMT2",
+      "W": 90.0,
+      "L": 0.12,
+      "NF": 45
+    },
+    {
+      "name": "MS4",
+      "drain": "CTRL1",
+      "gate": "VREF1",
+      "source": "CMT2",
+      "W": 90.0,
+      "L": 0.12,
+      "NF": 45
+    },
+    {
+      "name": "MT1",
+      "drain": "CMT1",
+      "gate": "IB",
+      "source": "GND",
+      "W": 70.0,
+      "L": 0.2,
+      "NF": 35
+    },
+    {
+      "name": "MT2",
+      "drain": "CMT2",
+      "gate": "IB",
+      "source": "GND",
+      "W": 70.0,
+      "L": 0.2,
+      "NF": 35
+    },
+    {
+      "name": "MDL1",
+      "drain": "CTRL1",
+      "gate": "CTRL1",
+      "source": "VDD",
+      "W": 20.0,
+      "L": 0.1,
+      "NF": 10
+    },
+    {
+      "name": "MDS1",
+      "drain": "NSNS1",
+      "gate": "NSNS1",
+      "source": "VDD",
+      "W": 20.0,
+      "L": 0.1,
+      "NF": 10
+    },
+    {
+      "name": "MRA",
+      "drain": "NSNS2",
+      "gate": "CMS",
+      "source": "CMB",
+      "W": 60.0,
+      "L": 0.12,
+      "NF": 30
+    },
+    {
+      "name": "MRB",
+      "drain": "CTRL2",
+      "gate": "VCM",
+      "source": "CMB",
+      "W": 60.0,
+      "L": 0.12,
+      "NF": 30
+    },
+    {
+      "name": "MTB",
+      "drain": "CMB",
+      "gate": "IB",
+      "source": "GND",
+      "W": 100.0,
+      "L": 0.2,
+      "NF": 50
+    },
+    {
+      "name": "MDL2",
+      "drain": "CTRL2",
+      "gate": "CTRL2",
+      "source": "VDD",
+      "W": 35.0,
+      "L": 0.14,
+      "NF": 18
+    },
+    {
+      "name": "MDS2",
+      "drain": "NSNS2",
+      "gate": "NSNS2",
+      "source": "VDD",
+      "W": 35.0,
+      "L": 0.14,
+      "NF": 18
+    }
+  ],
+  "models": {
+    "MBN": {
+      "type": "freepdk45.nmos"
+    },
+    "MPRN": {
+      "type": "freepdk45.nmos"
+    },
+    "MPR": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "MPC": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "MCND": {
+      "type": "freepdk45.nmos"
+    },
+    "MCPD": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "MNC": {
+      "type": "freepdk45.nmos"
+    },
+    "MREPP": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "MREP": {
+      "type": "freepdk45.nmos"
+    },
+    "MCMP": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "MCMD": {
+      "type": "freepdk45.nmos"
+    },
+    "M0": {
+      "type": "freepdk45.nmos"
+    },
+    "M1": {
+      "type": "freepdk45.nmos"
+    },
+    "M2": {
+      "type": "freepdk45.nmos"
+    },
+    "M3": {
+      "type": "freepdk45.nmos"
+    },
+    "M4": {
+      "type": "freepdk45.nmos"
+    },
+    "M5": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "M6": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "M7": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "M8": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "M9": {
+      "type": "freepdk45.nmos"
+    },
+    "M10": {
+      "type": "freepdk45.nmos"
+    },
+    "M11": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "M12": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "MRZ1": {
+      "type": "freepdk45.nmos"
+    },
+    "MRZ2": {
+      "type": "freepdk45.nmos"
+    },
+    "MS1": {
+      "type": "freepdk45.nmos"
+    },
+    "MS2": {
+      "type": "freepdk45.nmos"
+    },
+    "MS3": {
+      "type": "freepdk45.nmos"
+    },
+    "MS4": {
+      "type": "freepdk45.nmos"
+    },
+    "MT1": {
+      "type": "freepdk45.nmos"
+    },
+    "MT2": {
+      "type": "freepdk45.nmos"
+    },
+    "MDL1": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "MDS1": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "MRA": {
+      "type": "freepdk45.nmos"
+    },
+    "MRB": {
+      "type": "freepdk45.nmos"
+    },
+    "MTB": {
+      "type": "freepdk45.nmos"
+    },
+    "MDL2": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    },
+    "MDS2": {
+      "type": "freepdk45.pmos",
+      "vb": 1.0
+    }
+  },
+  "current_sources": [
+    [
+      "Iref",
+      "VDD",
+      "IB",
+      2e-05
+    ]
+  ],
+  "capacitors": [
+    {
+      "name": "CC1",
+      "a": "OUTN",
+      "b": "MZ1",
+      "C": 1e-12
+    },
+    {
+      "name": "CC2",
+      "a": "OUTP",
+      "b": "MZ2",
+      "C": 1e-12
+    },
+    {
+      "name": "CFS1",
+      "a": "OUTP",
+      "b": "CMS",
+      "C": 1.5e-13
+    },
+    {
+      "name": "CFS2",
+      "a": "OUTN",
+      "b": "CMS",
+      "C": 1.5e-13
+    },
+    {
+      "name": "COUT1",
+      "a": "OUTP",
+      "b": "GND",
+      "C": 1.5e-12
+    },
+    {
+      "name": "COUT2",
+      "a": "OUTN",
+      "b": "GND",
+      "C": 1.5e-12
+    },
+    {
+      "name": "CL1",
+      "a": "OUTP",
+      "b": "GND",
+      "C": 5e-13
+    },
+    {
+      "name": "CL2",
+      "a": "OUTN",
+      "b": "GND",
+      "C": 5e-13
+    },
+    {
+      "name": "CF1",
+      "a": "OUTP",
+      "b": "INPD",
+      "C": 3.25e-13
+    },
+    {
+      "name": "CS1",
+      "a": "INPD",
+      "b": "VCM",
+      "C": 2.6e-12
+    },
+    {
+      "name": "CF2",
+      "a": "OUTN",
+      "b": "INND",
+      "C": 3.25e-13
+    },
+    {
+      "name": "CS2",
+      "a": "INND",
+      "b": "VCM",
+      "C": 2.6e-12
+    }
+  ],
+  "resistors": [
+    {
+      "name": "RVCM1",
+      "a": "VDD",
+      "b": "VCM",
+      "R": 60000.0
+    },
+    {
+      "name": "RVCM2",
+      "a": "VCM",
+      "b": "GND",
+      "R": 60000.0
+    },
+    {
+      "name": "RS1",
+      "a": "OUTP",
+      "b": "CMS",
+      "R": 100000.0
+    },
+    {
+      "name": "RS2",
+      "a": "OUTN",
+      "b": "CMS",
+      "R": 100000.0
+    },
+    {
+      "name": "RNC",
+      "a": "NBC",
+      "b": "GND",
+      "R": 12000.0
+    },
+    {
+      "name": "RCP",
+      "a": "VDD",
+      "b": "PX",
+      "R": 14000.0
+    },
+    {
+      "name": "RCM",
+      "a": "CMR",
+      "b": "GND",
+      "R": 5500.0
+    },
+    {
+      "name": "RDC1",
+      "a": "INPD",
+      "b": "VCMIN",
+      "R": 2000000.0
+    },
+    {
+      "name": "RDC2",
+      "a": "INND",
+      "b": "VCMIN",
+      "R": 2000000.0
+    }
+  ],
+  "vsources": [
+    [
+      "Vinj",
+      "INP",
+      "INPD",
+      0.0
+    ]
+  ],
+  "vcvs": [
+    {
+      "name": "Emir",
+      "p": "INN",
+      "q": "INND",
+      "cp": "INPD",
+      "cn": "INP",
+      "mu": 1.0
+    }
+  ],
+  "outputs": [
+    "OUTP",
+    "OUTN"
+  ],
+  "dc_guesses": [
+    {
+      "IB": 0.45,
+      "NBC": 0.28,
+      "VBNC": 0.72,
+      "PB": 0.55,
+      "PX": 0.72,
+      "VBPC": 0.30000000000000004,
+      "VCM": 0.5,
+      "VREF1": 0.48,
+      "VCMIN": 0.56,
+      "CMR": 0.12,
+      "TAIL": 0.13,
+      "A1": 0.26,
+      "A2": 0.26,
+      "O1": 0.48,
+      "O2": 0.48,
+      "B1": 0.87,
+      "B2": 0.87,
+      "OUTP": 0.5,
+      "OUTN": 0.5,
+      "MZ1": 0.5,
+      "MZ2": 0.5,
+      "CTRL1": 0.55,
+      "CMT1": 0.11,
+      "CMT2": 0.11,
+      "NSNS1": 0.5800000000000001,
+      "CTRL2": 0.5800000000000001,
+      "CMB": 0.11,
+      "CMS": 0.5,
+      "NSNS2": 0.5800000000000001,
+      "INP": 0.57,
+      "INN": 0.57,
+      "INPD": 0.57,
+      "INND": 0.57
+    }
+  ],
+  "analyses": {
+    "ac": {
+      "freqs": {
+        "start": 1000.0,
+        "stop": 50000000000.0,
+        "num": 81,
+        "scale": "log"
+      }
+    }
+  }
+}

@@ -71,7 +71,7 @@ def test_capabilities(client):
     corners = cap["corners"]
     assert set(corners["otft"]) == {"typical", "slow", "fast"}
     assert set(corners["sky130"]) == {"tt", "ss", "ff", "sf", "fs"}
-    assert set(corners["freepdk45"]) == {"nom", "ss", "ff"}
+    assert set(corners["freepdk45"]) == {"nom", "tt", "ss", "ff", "sf", "fs"}
 
 
 # ── validate ──────────────────────────────────────────────────────────────────

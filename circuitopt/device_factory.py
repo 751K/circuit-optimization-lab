@@ -126,8 +126,9 @@ def get_ss_params(W: float, L: float, Vs: float, Vd: float, Vg: float,
 # per-device constructor kwarg), a different mechanism from the OTFT continuous PVT
 # shift the solvers apply via ``corner=``. :func:`apply_silicon_corner` keeps the two
 # separate: a silicon corner name is routed onto silicon devices, an OTFT corner is
-# left for the solver shift path. SKY130 uses tt/ss/ff/sf/fs; FreePDK45 ships
-# nom/ss/ff card directories (nom == typical).
+# left for the solver shift path. SKY130 uses tt/ss/ff/sf/fs; FreePDK45 accepts
+# nom/tt/ss/ff/sf/fs (tt == nom; sf/fs mix the per-polarity card directories — see
+# circuitopt.freepdk45_model).
 SKY130_CORNERS = frozenset({"tt", "ss", "ff", "sf", "fs"})
 SILICON_CORNERS = SKY130_CORNERS | {"nom"}
 _SILICON_PREFIXES = ("sky130", "freepdk45")
@@ -146,14 +147,18 @@ def apply_silicon_corner(
     solver corner is cleared (``None``) — silicon ignores the OTFT PVT shift. Otherwise
     (an OTFT corner name / shift-map / ``None``) the device kwargs pass through unchanged
     and ``corner`` is returned for the solver path. A circuit is single-process, so the
-    shared ``ss``/``ff`` names route onto whichever silicon family the devices declare."""
-    if not isinstance(corner, str) or corner not in SILICON_CORNERS:
+    shared ``ss``/``ff`` names route onto whichever silicon family the devices declare.
+    Silicon corner names are matched case-insensitively and stamped in canonical
+    lowercase (``"SF"`` routes as ``"sf"``), so both silicon device paths see one
+    spelling; non-silicon strings pass through unchanged for the OTFT path."""
+    key = corner.lower() if isinstance(corner, str) else corner
+    if not isinstance(key, str) or key not in SILICON_CORNERS:
         return device_kwargs, corner
     mt = model_types or {}
     dk = {name: dict(kw) for name, kw in (device_kwargs or {}).items()}
     for name, model in mt.items():
         if str(model).startswith(_SILICON_PREFIXES):
-            dk.setdefault(name, {})["corner"] = corner
+            dk.setdefault(name, {})["corner"] = key
     return dk, None
 
 

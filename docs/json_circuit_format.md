@@ -224,7 +224,56 @@ Optional closed-loop SAR workflow configuration. The circuit itself still uses t
 ordinary `devices`/`capacitors`/`vsources` fields. Differential `bit_inputs` and
 `bit_inputs_bar` name CDAC PWL keys from MSB to LSB; decisions are read from the
 physical transient comparator node. Run it with `circuit-opt adc --vin`, `--sweep`,
-or `--sine`. See `examples/freepdk45_sar3.json` for the complete configuration.
+or `--sine`. See `examples/freepdk45_sar3.json` (static 5T comparator) and
+`examples/freepdk45_sar6.json` (6-bit, clocked StrongARM comparator) for complete
+configurations.
+
+#### `adc.clock`
+
+Optional comparator strobe for a **clocked dynamic (StrongARM) comparator**. When
+present, `sar_input_waveforms` generates the named waveform key: it rests at `low`
+and pulses to `high` around every bit's `decision_time`, so a dynamic latch
+precharges while the CDAC settles and evaluates at the decision instant. Drive the
+clocked tail / output-reset devices from that key via `transient_inputs`. Omitting
+the block reproduces the static-comparator behaviour (no clock waveform emitted, so
+`examples/freepdk45_sar3.json` renders a byte-identical netlist).
+
+```json
+"clock": {"input": "clk", "high": 1.0, "low": 0.0,
+          "eval_before": 3e-9, "reset_hold": 1e-9}
+```
+
+- `input` — required transient waveform key for the strobe.
+- `high` / `low` — asserted (evaluate) / deasserted (reset) levels [V]; default
+  `high = adc.vref`, `low = 0`.
+- `eval_before` — seconds before each `decision_time` that the strobe rises
+  (default `0.3 * bit_period`); must be `< bit_period/2 - edge_time` so the tested
+  CDAC bit has already switched when the latch samples.
+- `reset_hold` — seconds after each `decision_time` before the strobe resets
+  (default `0.1 * bit_period`).
+
+#### `adc.mismatch`
+
+Optional per-instance mismatch Monte-Carlo config for the FreePDK45/ngspice SAR
+path, consumed by `circuitopt.sar_mismatch_mc`. Every sigma defaults to `0.0`, so
+omitting the block (or leaving sigmas zero) reproduces the nominal conversion.
+
+```json
+"mismatch": {
+  "sigma_vth0": 5e-3, "w0": 1.0, "l0": 0.05,
+  "sigma_cu": 0.01, "c_unit": 1e-14,
+  "dnl_threshold": 0.5, "inl_threshold": 0.5
+}
+```
+
+- `sigma_vth0` — transistor threshold-voltage sigma [V] at the reference area
+  `w0*l0`; per device it scales as `sigma_vth0 / sqrt(W*L / (w0*l0))` (Pelgrom area
+  law) and is injected as the BSIM4 instance parameter `delvto`. `sigma_vth0_nmos`
+  / `sigma_vth0_pmos` override it per polarity.
+- `sigma_cu` — CDAC unit-capacitor relative sigma at `c_unit`; a cap of value `C`
+  gets relative sigma `sigma_cu / sqrt(C / c_unit)` (binary-weighted caps are
+  paralleled units and match better).
+- `dnl_threshold` / `inl_threshold` — |DNL|/|INL| yield limits in LSB (default 0.5).
 
 ### `outputs`
 

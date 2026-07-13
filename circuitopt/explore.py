@@ -482,33 +482,42 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
 
 
 # ── output ────────────────────────────────────────────────────────────────
-def _flat_rows(results):
+def _flat_rows(results, metrics=None):
+    """Flatten a results dict to (rows, fieldnames).
+
+    ``metrics`` names the per-candidate metric columns; it defaults to this module's
+    AC :data:`METRICS` so every existing caller is byte-for-byte unchanged. The SAR
+    ADC explorer (:mod:`circuitopt.sar_explore`), whose candidates carry a different
+    metric set, passes its own tuple here so it can reuse ``write_csv``/``write_jsonl``
+    verbatim instead of duplicating them. Metric keys absent from a candidate render
+    as blank/``None`` rather than raising, so a mixed metric set is tolerated."""
+    metric_names = METRICS if metrics is None else tuple(metrics)
     var_names = results["variables"]
     rows = []
     for c in results["candidates"]:
         row = {"idx": c["idx"]}
         for name in var_names:
             row[f"var_{name}"] = c["vars"].get(name)
-        for m in METRICS:
-            row[m] = c["metrics"][m] if c["metrics"] else None
+        for m in metric_names:
+            row[m] = c["metrics"].get(m) if c["metrics"] else None
         row["converged"] = int(c["converged"])
         row["feasible"] = int(c["feasible"])
         row["pareto"] = int(c["pareto"])
         rows.append(row)
-    return rows, ["idx"] + [f"var_{n}" for n in var_names] + list(METRICS) + \
+    return rows, ["idx"] + [f"var_{n}" for n in var_names] + list(metric_names) + \
         ["converged", "feasible", "pareto"]
 
 
-def write_csv(results, path):
-    rows, fields = _flat_rows(results)
+def write_csv(results, path, metrics=None):
+    rows, fields = _flat_rows(results, metrics)
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
 
 
-def write_jsonl(results, path):
-    rows, _ = _flat_rows(results)
+def write_jsonl(results, path, metrics=None):
+    rows, _ = _flat_rows(results, metrics)
     with open(path, "w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row) + "\n")
