@@ -29,7 +29,7 @@ WebSocket 进度/取消），均为薄适配层，直接调用 `run_analysis_sui
 底座（同步分析端点 + explore/mc 任务化 + WebSocket 进度 + 取消）已经就绪，剩下按需推进：
 
 - **更多能力接入**：`optimize`/`dataset` 任务化（目前只有 `explore`/`mc` 走了
-  job 模型）；结果缓存和器件表征网格（SKY130/FreePDK45 的 `.npz` 缓存）的管理接口。
+  job 模型）；结果缓存和器件表征网格（SKY130/FreePDK45/TSMC28HPC+ 缓存）的管理接口。
 - **鉴权 / 多用户**：当前是本地单用户、无鉴权、无持久化设计（进程重启清空任务历史）；
   如果要支持局域网内多客户端或长期运行的 daemon，需要补鉴权和持久化。
 - **与 GUI/MCP 的衔接**：服务层已提供 `GET /api/v1/capabilities` 作为 GUI 下拉框的

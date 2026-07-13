@@ -21,13 +21,13 @@ The current solver stack covers:
 - Cadence/Spectre-oriented validation for operating point, AC, noise, transient,
   PSS, PAC, and PNoise behavior.
 
-The implementation is intentionally small and self-contained. It currently has
-39 Python files directly under `circuitopt/` (45 including the `service/`
-subpackage), including `__init__.py`, the CLI entry `__main__.py`,
+The implementation is intentionally small and self-contained. Its modules include
+`__init__.py`, the CLI entry `__main__.py`,
 calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
 modules, the main solver stack, an ML-surrogate layer (dataset builder, surrogate
-training, screen-and-verify optimizer), two silicon PDKs — SKY130 (via an
-OpenVAF/OSDI bridge) and FreePDK45 (via an ngspice-C evaluator) — plugged into the
+training, screen-and-verify optimizer), three silicon PDKs — SKY130 (via an
+OpenVAF/OSDI bridge), FreePDK45 (via an ngspice-C evaluator), and TSMC28HPC+
+(via a portable ngspice process adapter) — plugged into the
 same `TransistorModel` interface as the original AT4000TG OTFT model, and an
 optional local HTTP service layer (`circuitopt/service/`) over the whole stack.
 
@@ -40,7 +40,7 @@ circuitopt/
   circuit_loader.py    JSON circuit description loader.
   device_model.py      TransistorModel ABC + NumbaParams + model factory/registry + PDK/polarity layer.
   device_factory.py    Device build/resolve layer (build_devices, get_ss_params) + corner routing
-                        (OTFT CORNERS, SKY130/FreePDK45 apply_silicon_corner). Leaf module: depends
+                        (OTFT CORNERS, silicon apply_silicon_corner). Leaf module: depends
                         only on device_model.
   pmos_tft_model.py    AT4000TG PMOS-OTFT compact-model implementation.
   numba_kernels.py     Optional Numba-accelerated scalar kernels.
@@ -72,9 +72,11 @@ circuitopt/
   osdi_device.py       TransistorModel adapter over an OSDI-hosted compact model (bridges any OSDI PDK into the solver stack).
   osdi_transient.py    Backward-Euler transient for OSDI devices (outside the numba loop).
   sky130_model.py      SKY130 nfet/pfet PDK: BSIM4 param-card extraction (via ngspice) + PDK registration.
-  ngspice_char.py      FreePDK45 evaluator: batch ngspice .dc/.noise characterization → cached (Vsb,Vds,Vgs) grid.
+  ngspice_char.py      Model-card evaluator: batch ngspice .dc/.noise characterization → cached (Vsb,Vds,Vgs) grid.
   ngspice_device.py    TransistorModel over a cached ngspice grid (interpolated Id/gm/gds/caps/noise; extract_w + temperature).
+  ngspice_process.py   Process-adapter protocol: deck preamble, instance syntax, op vectors, simulator flags.
   freepdk45_model.py   FreePDK45 nmos/pmos PDK: corner-card binding + PDK registration (ngspice-C evaluator).
+  tsmc28_model.py      TSMC28HPC+ core nmos/pmos binding: nch_mac/pch_mac + HSPICE library closure.
   service/             Optional local FastAPI HTTP service layer (the `serve` extra) — see below.
     __init__.py        Re-exports CLI glue only; never imports fastapi (import circuitopt stays fastapi-free).
     app.py             create_app() — /api/v1 routes (health/capabilities/validate/solve/jobs/*); thin adapter, no numerics.
@@ -122,7 +124,9 @@ osdi_transient.py    <- diagnostics, numba_kernels, osdi_host, compiled_topology
 sky130_model.py      <- device_model, osdi_device
 ngspice_char.py      <- no internal dependency; ngspice subprocess + numpy only
 ngspice_device.py    <- device_model, ngspice_char; optional scipy at runtime
+ngspice_process.py   <- device_model
 freepdk45_model.py   <- device_model, ngspice_device
+tsmc28_model.py      <- device_model, ngspice_device, ngspice_process, toolchain
 service/app.py       <- analysis_dispatch, analysis_options, circuit_loader, device_factory, device_model,
                         freepdk45_model, service/jobs, service/serialize; optional fastapi/pydantic at import time
 service/jobs.py      <- explore, corners, service/serialize; no fastapi (pure threading/queue)
@@ -802,8 +806,9 @@ match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see th
 - **`ngspice_char.py`** — the batch characterizer. `characterize()` sweeps `.dc vg vd` per
   Vsb slice (op-vars `@m[id/gm/gds/cgs/cgd]`); `characterize_noise()` runs one `.noise` per
   coarse bias. Both take a `temp_c` (`.options temp`, keyed into the cache — 27 °C stays
-  tag-free so nominal caches persist) and cache to `data/pdk/freepdk45/*.npz`, so reuse needs
-  no ngspice. Both run through a shared `_run_ngspice()` helper that makes failures explicit:
+  tag-free so nominal caches persist) and cache under a process namespace such as
+  `data/pdk/freepdk45/` or `data/pdk/tsmc28hpcp/`, so reuse needs no ngspice. Both run
+  through a shared `_run_ngspice()` helper that makes failures explicit:
   a non-zero ngspice return code, or a silently-missing output file on return code 0, raises
   `RuntimeError` carrying the tail of ngspice's stderr — instead of the batch decks and output
   files (now built under a `tempfile.TemporaryDirectory()`, not bare `mktemp`) going missing
@@ -815,10 +820,30 @@ match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see th
   interpolation. `temperature` (Kelvin kwarg) → `temp_c` re-characterizes the card physically.
   Cgs/Cgd from the ngspice C-matrix (`Cgs=-cgs`, `Cgd=-cgd`); transient hooks `NotImplementedError`.
 - **`freepdk45_model.py`** — `Fp45Nfet`/`Fp45Pfet(NgspiceDevice)` + `register_pdk("freepdk45",
-  ...)`. `corner` (nom/ss/ff) selects the card directory `PDK_ROOT/freepdk45/models_<corner>/`.
-  `FREEPDK45_CORNERS = ("nom", "ss", "ff")` is the public tuple of legal corner names; the service
+  ...)`. `corner` supports nom/tt/ss/ff/sf/fs and selects card directories per polarity.
+  `FREEPDK45_CORNERS` is the public tuple of legal corner names; the service
   layer's `GET /api/v1/capabilities` reads it directly (alongside `device_factory.SKY130_CORNERS`
   and `device_factory.CORNERS`) rather than hardcoding the three corner families.
+
+### TSMC28HPC+ process adapter (`ngspice_process.py` / `tsmc28_model.py`)
+
+`NgspiceProcessAdapter` isolates foundry-specific netlist semantics from circuitopt's
+topology and solvers. An adapter supplies model-card preamble lines, MOS instance
+syntax, hierarchical operating-point vectors, corner validation, cache namespace,
+and extra ngspice command arguments. FreePDK45 keeps its legacy flat-card path;
+TSMC28HPC+ uses the adapter path without embedding any model parameters in source.
+
+`Tsmc28HpcpAdapter` targets the 0.9 V `nch_mac` / `pch_mac` core wrappers in the
+licensed 1d8 HSPICE deck. It expands the required `setup`, process corner, `global`,
+`total`, and `stat` `.lib` sections and starts ngspice with
+`-D ngbehavior=hsa`. `NF` is characterized natively inside the foundry wrapper;
+hierarchical `@m.x*.main[...]` vectors provide Id/gm/gds/capacitance and full-circuit
+`.op` data. Full `.tran`, `.ac`, `.noise`, and `.op` share this same adapter and deck.
+
+The default portable model entry is
+`PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l`, which is Git-ignored.
+Resolution priority is `TSMC28_MODEL_DIR`, `TSMC28_PDK_ROOT`, that project-local
+entry, then `PDK_ROOT/tsmc28hpcp`. See [TSMC28HPC+ Local Adapter](tsmc28hpcp.md).
 
 - **`osdi_host.py`** — a ctypes host for the **OSDI 0.4 ABI**, the simulator-independent
   C interface [OpenVAF](https://github.com/pascalkuthe/OpenVAF) compiles Verilog-A

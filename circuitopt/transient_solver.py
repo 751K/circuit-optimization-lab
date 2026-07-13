@@ -1139,12 +1139,23 @@ def osdi_model_names(model_types):
     return tuple(names)
 
 
-def freepdk45_model_names(model_types):
-    """Names in a ``model_types`` map bound to the FreePDK45 ngspice oracle."""
+def ngspice_model_names(model_types):
+    """Names bound to a direct-ngspice full-charge transient backend."""
     if not model_types:
         return ()
-    return tuple(name for name, mt in model_types.items()
-                 if str(mt).startswith("freepdk45."))
+    from .device_model import get_model_class
+    names = []
+    for name, mt in model_types.items():
+        cls = get_model_class(mt)
+        if cls is not None and getattr(cls, "TRANSIENT_BACKEND", None) == "ngspice":
+            names.append(name)
+    return tuple(names)
+
+
+def freepdk45_model_names(model_types):
+    """Compatibility alias for callers that previously queried ngspice routing."""
+    return tuple(name for name in ngspice_model_names(model_types)
+                 if str(model_types[name]).startswith("freepdk45."))
 
 
 def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float],
@@ -1227,10 +1238,10 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         solved-node vector, not the DC-op dict). binding=None reproduces the legacy
         path exactly.
 
-    mismatch : optional ``{device: delvto[V]}`` per-instance threshold-voltage
-        offset map, only meaningful on the FreePDK45/ngspice path where it is
-        emitted as the BSIM4 instance parameter ``delvto`` (see
-        :func:`circuitopt.ngspice_transient.render_freepdk45_transient_netlist`).
+    mismatch : optional ``{device: delta_vth[V]}`` per-instance threshold-voltage
+        offset map on the model-card ngspice path. Each process adapter emits its
+        supported instance parameter (``delvto`` for FreePDK45, ``_delvto`` for
+        TSMC28HPC+; see :mod:`circuitopt.ngspice_transient`).
         Rejected for the local-solver paths, which have no per-instance Vth knob.
         ``None`` reproduces the legacy netlist exactly.
     """
@@ -1239,7 +1250,7 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         device_kwargs=device_kwargs)
     if topo is None:
         topo = AFE_TOPO
-    if freepdk45_model_names(model_types):
+    if ngspice_model_names(model_types):
         from .ngspice_transient import transient_ngspice
         _inputs = inputs
         if _inputs is None:
@@ -1257,7 +1268,7 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         )
     if mismatch:
         raise NotImplementedError(
-            "per-instance delvto mismatch is only supported on the FreePDK45 "
+            "per-instance threshold mismatch is only supported on the model-card "
             "ngspice transient path")
     if osdi_model_names(model_types):
         from .osdi_transient import transient_osdi

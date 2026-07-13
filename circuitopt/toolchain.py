@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from glob import glob
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -38,6 +39,37 @@ def pdk_root() -> str:
         return _absolute(configured)
     candidates = [os.path.join(root, "pdk") for root in _venv_roots()]
     return next((path for path in candidates if os.path.isdir(path)), candidates[0])
+
+
+def tsmc28_model_dir() -> str:
+    """TSMC28HPC+ HSPICE model directory without embedding a machine path.
+
+    Resolution order is ``TSMC28_MODEL_DIR``, ``TSMC28_PDK_ROOT``, the portable
+    project-local ``PDK/tsmc28hpcp``, then ``PDK_ROOT/tsmc28hpcp``. A root may
+    itself be the HSPICE model directory, a normal installed PDK containing
+    ``models/hspice``, or the outer directory of an iPDK delivery. The returned
+    fallback is deterministic even before the PDK is installed; callers provide
+    the actionable missing-file error.
+    """
+    configured_dir = os.environ.get("TSMC28_MODEL_DIR")
+    if configured_dir:
+        return _absolute(configured_dir)
+    configured_root = os.environ.get("TSMC28_PDK_ROOT")
+    if configured_root:
+        roots = [_absolute(configured_root)]
+    else:
+        roots = [
+            os.path.join(PROJECT_ROOT, "PDK", "tsmc28hpcp"),
+            os.path.join(pdk_root(), "tsmc28hpcp"),
+        ]
+    roots = list(dict.fromkeys(roots))
+    candidates = []
+    for root in roots:
+        candidates.extend([root, os.path.join(root, "models", "hspice")])
+        candidates.extend(sorted(glob(os.path.join(root, "*", "models", "hspice"))))
+    model_file = "cln28hpcp_1d8_elk_v1d0_2p2.l"
+    return next((path for path in candidates
+                 if os.path.isfile(os.path.join(path, model_file))), candidates[0])
 
 
 def ngspice_binary() -> str | None:

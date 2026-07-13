@@ -126,12 +126,11 @@ def get_ss_params(W: float, L: float, Vs: float, Vd: float, Vg: float,
 # per-device constructor kwarg), a different mechanism from the OTFT continuous PVT
 # shift the solvers apply via ``corner=``. :func:`apply_silicon_corner` keeps the two
 # separate: a silicon corner name is routed onto silicon devices, an OTFT corner is
-# left for the solver shift path. SKY130 uses tt/ss/ff/sf/fs; FreePDK45 accepts
-# nom/tt/ss/ff/sf/fs (tt == nom; sf/fs mix the per-polarity card directories — see
-# circuitopt.freepdk45_model).
+# left for the solver shift path. SKY130 and TSMC28HPC+ use tt/ss/ff/sf/fs;
+# FreePDK45 also accepts nom (tt == nom; sf/fs mix per-polarity card directories).
 SKY130_CORNERS = frozenset({"tt", "ss", "ff", "sf", "fs"})
 SILICON_CORNERS = SKY130_CORNERS | {"nom"}
-_SILICON_PREFIXES = ("sky130", "freepdk45")
+_SILICON_PREFIXES = ("sky130", "freepdk45", "tsmc28hpcp")
 
 
 def apply_silicon_corner(
@@ -142,8 +141,8 @@ def apply_silicon_corner(
     """Route a silicon corner onto silicon devices; leave OTFT corners for the solver.
 
     Returns ``(device_kwargs, solver_corner)``. When ``corner`` names a silicon corner
-    (SKY130 ``tt/ss/ff/sf/fs`` or FreePDK45 ``nom/ss/ff``), it is stamped as
-    ``corner=<name>`` on every ``sky130.*`` / ``freepdk45.*`` device's kwargs and the
+    (SKY130/TSMC ``tt/ss/ff/sf/fs`` or FreePDK45 including ``nom``), it is stamped as
+    ``corner=<name>`` on every supported silicon device's kwargs and the
     solver corner is cleared (``None``) — silicon ignores the OTFT PVT shift. Otherwise
     (an OTFT corner name / shift-map / ``None``) the device kwargs pass through unchanged
     and ``corner`` is returned for the solver path. A circuit is single-process, so the

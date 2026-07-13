@@ -49,6 +49,7 @@ from .pac_solver import pac_solve
 from . import pmos_tft_model  # noqa: F401 — triggers register_pdk("at4000tg", …)
 from . import sky130_model    # noqa: F401 — triggers register_pdk("sky130", …)
 from . import freepdk45_model  # noqa: F401 — triggers register_pdk("freepdk45", …)
+from . import tsmc28_model  # noqa: F401 — triggers register_pdk("tsmc28hpcp", …)
 from .pnoise_solver import pnoise_solve
 from .pss_solver import pss_solve
 from .topology import Topology
@@ -98,7 +99,7 @@ __all__ = [
     "noise_analysis",
     "band_rms",
     "transient",
-    # full-circuit ngspice oracles (FreePDK45)
+    # full-circuit model-card ngspice oracles
     "ac_ngspice",
     "noise_ngspice",
     "op_ngspice",

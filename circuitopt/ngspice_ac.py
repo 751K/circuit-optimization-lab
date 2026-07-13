@@ -1,11 +1,11 @@
-"""Full-circuit FreePDK45 oracles through ngspice: ``.ac`` / ``.noise`` / ``.op``.
+"""Full-circuit model-card oracles through ngspice: ``.ac`` / ``.noise`` / ``.op``.
 
 The local grid solvers (:mod:`circuitopt.ac_solver`, :mod:`circuitopt.noise_solver`)
 carry only Cgs/Cgd on their device model, so on FreePDK45 they read ~8 % optimistic
 UGBW (drain/source junction caps omitted — see ``docs/freepdk45_fd_ota_design.md`` §4.5).
-These oracles instead render the COMPLETE circuit and let ngspice's C-BSIM4 — the
-FreePDK45 oracle — run the analysis with full charge, so AC bandwidth, phase margin,
-noise and operating-region checks are the true silicon-card numbers.
+These oracles instead render the complete circuit and let ngspice run the analysis
+against the selected process adapter, so AC bandwidth, phase margin, noise and
+operating-region checks include the model deck's full device behavior.
 
 All four entry points share the deck renderer in :mod:`circuitopt.ngspice_render`
 (the same one the ``.tran`` backend uses), so device M-lines, R/C, controlled sources,
@@ -32,9 +32,9 @@ import numpy as np
 from .device_factory import apply_silicon_corner
 from .ngspice_char import _ngspice, _run_ngspice
 from .ngspice_render import (
-    _element, build_node_map, include_lines, nodeset_line, render_controlled,
+    _element, build_node_map, nodeset_line, render_controlled,
     render_devices, render_passives, render_rail_sources, resolve_common_temperature,
-    resolve_freepdk45_cards, seed_vector)
+    resolve_ngspice_preamble, seed_vector)
 
 
 # ── shared network deck (everything above the `.control` block) ─────────────────
@@ -44,7 +44,7 @@ def _network_deck(topo, sizes, bias, *, header, nf, model_types, device_kwargs,
     controlled sources, ``.nodeset`` seed) shared by ``.ac``/``.noise``/``.op``.
 
     ``ac`` maps an AC-stimulus source name (a rail name or an ideal-vsource name) to
-    ``(magnitude, phase_deg)``. Returns ``(lines, node_map, node)``."""
+    ``(magnitude, phase_deg)``. Returns ``(lines, node_map, node, adapter)``."""
     model_types = dict(model_types or {})
     device_kwargs, solver_corner = apply_silicon_corner(model_types, device_kwargs, corner)
     if solver_corner not in (None, {}):
@@ -52,15 +52,17 @@ def _network_deck(topo, sizes, bias, *, header, nf, model_types, device_kwargs,
     device_kwargs = {k: dict(v) for k, v in (device_kwargs or {}).items()}
     device_names = {name for name, *_ in topo.devices}
 
-    _corner, cards, _pol = resolve_freepdk45_cards(model_types, device_kwargs, device_names)
+    adapter, _corner, preamble = resolve_ngspice_preamble(
+        model_types, device_kwargs, device_names)
     temp_c = resolve_common_temperature(device_kwargs, device_names, temperature)
     node_map, node = build_node_map(topo, bias, node_inputs=None)
 
-    lines = [header, *include_lines(cards), f".options temp={temp_c:g}"]
+    lines = [header, *preamble, f".options temp={temp_c:g}"]
     rail_lines, _bv = render_rail_sources(topo, bias, None, node, ac=ac)
     lines.extend(rail_lines)
     dev_lines, _b2 = render_devices(topo, sizes, bias, None, node, nf=nf,
-                                    model_types=model_types, device_kwargs=device_kwargs)
+                                    model_types=model_types, device_kwargs=device_kwargs,
+                                    adapter=adapter)
     lines.extend(dev_lines)
     lines.extend(render_passives(topo, node))
     ctrl_lines, _b3, _names = render_controlled(topo, node, ac=ac)
@@ -70,7 +72,7 @@ def _network_deck(topo, sizes, bias, *, header, nf, model_types, device_kwargs,
     ns = nodeset_line(topo, node_map, seed)
     if ns is not None:
         lines.append(ns)
-    return lines, node_map, node
+    return lines, node_map, node, adapter
 
 
 def _resolve_source_name(topo, name: str) -> str:
@@ -118,7 +120,7 @@ def ac_ngspice(sizes, bias, *, topo, acmag, fstart, fstop, points=20,
         if name not in topo.idx:
             raise ValueError(f"ac_ngspice out node {name!r} is not a solved node")
 
-    lines, node_map, _node = _network_deck(
+    lines, node_map, _node, adapter = _network_deck(
         topo, sizes, bias, header="* circuitopt FreePDK45 full-circuit .ac",
         nf=nf, model_types=model_types, device_kwargs=device_kwargs, corner=corner,
         temperature=temperature, x0_guess=x0_guess, ac=ac)
@@ -138,7 +140,9 @@ def ac_ngspice(sizes, bias, *, topo, acmag, fstart, fstop, points=20,
         ])
         with open(deck_path, "w", encoding="ascii") as fh:
             fh.write("\n".join(lines) + "\n")
-        _run_ngspice(deck_path, out_path, timeout=timeout, what="FreePDK45 full-circuit .ac")
+        _run_ngspice(
+            deck_path, out_path, timeout=timeout, what="full-circuit .ac",
+            extra_args=adapter.command_args if adapter is not None else ())
         raw = np.loadtxt(out_path, skiprows=1, ndmin=2)
 
     freq = raw[:, 0]
@@ -262,7 +266,7 @@ def noise_ngspice(sizes, bias, *, topo, out, src, fstart, fstop, points=20,
         if name is not None and name not in topo.idx:
             raise ValueError(f"noise_ngspice node {name!r} is not a solved node")
 
-    lines, node_map, _node = _network_deck(
+    lines, node_map, _node, adapter = _network_deck(
         topo, sizes, bias, header="* circuitopt FreePDK45 full-circuit .noise",
         nf=nf, model_types=model_types, device_kwargs=device_kwargs, corner=corner,
         temperature=temperature, x0_guess=x0_guess, ac=ac)
@@ -283,7 +287,8 @@ def noise_ngspice(sizes, bias, *, topo, out, src, fstart, fstop, points=20,
         with open(deck_path, "w", encoding="ascii") as fh:
             fh.write("\n".join(lines) + "\n")
         _run_ngspice(deck_path, out_path, timeout=timeout,
-                     what="FreePDK45 full-circuit .noise")
+                     what="full-circuit .noise",
+                     extra_args=adapter.command_args if adapter is not None else ())
         raw = np.loadtxt(out_path, skiprows=1, ndmin=2)
 
     freq = raw[:, 0]
@@ -301,8 +306,9 @@ def noise_ngspice(sizes, bias, *, topo, out, src, fstart, fstop, points=20,
 _OP_PARAMS = ("vds", "vgs", "vdsat", "id", "gm", "gds")
 
 
-def _run_ngspice_capture(deck_path: str, timeout: float, what: str) -> str:
-    proc = subprocess.run([_ngspice(), "-b", deck_path], capture_output=True,
+def _run_ngspice_capture(deck_path: str, timeout: float, what: str,
+                         extra_args=()) -> str:
+    proc = subprocess.run([_ngspice(), *extra_args, "-b", deck_path], capture_output=True,
                           text=True, timeout=timeout)
     if proc.returncode != 0:
         tail = ((proc.stderr or "") + (proc.stdout or "")).strip()[-800:]
@@ -321,17 +327,21 @@ def op_ngspice(sizes, bias, *, topo, margin=0.0, nf=None, model_types=None,
     ``region_ok = |vds| >= |vdsat| + margin`` — the saturation-region test, with the
     absolute values handling NMOS/PMOS polarity uniformly (``margin`` in volts,
     default 0). Devices whose op-vars ngspice does not report are omitted."""
-    lines, _node_map, _node = _network_deck(
+    lines, _node_map, _node, adapter = _network_deck(
         topo, sizes, bias, header="* circuitopt FreePDK45 full-circuit .op",
         nf=nf, model_types=model_types, device_kwargs=device_kwargs, corner=corner,
         temperature=temperature, x0_guess=x0_guess)
 
     dev_names = [name for name, *_ in topo.devices]
     prints = []
+    vectors = {}
     for name in dev_names:
-        elem = _element("M", name).lower()
+        elem = _element("X" if adapter is not None else "M", name).lower()
         for p in _OP_PARAMS:
-            prints.append(f"print @{elem}[{p}]")
+            vector = (adapter.op_vector(elem, p) if adapter is not None
+                      else f"@{elem}[{p}]")
+            vectors.setdefault(name, {})[p] = vector[1:].lower()
+            prints.append(f"print {vector}")
     lines.extend([".control", "op", *prints, ".endc", ".end"])
 
     import re as _re
@@ -339,24 +349,25 @@ def op_ngspice(sizes, bias, *, topo, margin=0.0, nf=None, model_types=None,
         deck_path = os.path.join(td, "deck.cir")
         with open(deck_path, "w", encoding="ascii") as fh:
             fh.write("\n".join(lines) + "\n")
-        text = _run_ngspice_capture(deck_path, timeout=timeout, what="FreePDK45 .op")
+        text = _run_ngspice_capture(
+            deck_path, timeout=timeout, what="full-circuit .op",
+            extra_args=adapter.command_args if adapter is not None else ())
 
     # ngspice prints a scalar as "@m1[vds] = 3.5e-01"
-    pat = _re.compile(r"@(\w+)\[(\w+)\]\s*=\s*([-+0-9.eEnaN]+)")
+    pat = _re.compile(r"@([^\s=]+)\s*=\s*([-+0-9.eEnaN]+)")
     raw = {}
     for m in pat.finditer(text):
-        elem, param, val = m.group(1).lower(), m.group(2).lower(), m.group(3)
+        vector, val = m.group(1).lower(), m.group(2)
         try:
-            raw.setdefault(elem, {})[param] = float(val)
+            raw[vector] = float(val)
         except ValueError:
             continue
     out = {}
     for name in dev_names:
-        elem = _element("M", name).lower()
-        vals = raw.get(elem)
-        if not vals or "vds" not in vals or "vdsat" not in vals:
+        vals = {p: raw.get(vector) for p, vector in vectors[name].items()}
+        if vals.get("vds") is None or vals.get("vdsat") is None:
             continue
-        rec = {p: vals.get(p, float("nan")) for p in _OP_PARAMS}
+        rec = {p: vals[p] if vals[p] is not None else float("nan") for p in _OP_PARAMS}
         rec["region_ok"] = bool(abs(rec["vds"]) >= abs(rec["vdsat"]) + float(margin))
         out[name] = rec
     return out

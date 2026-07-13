@@ -1,18 +1,41 @@
-# Full-circuit ngspice oracles (FreePDK45)
+# Full-circuit ngspice oracles (FreePDK45 and TSMC28HPC+)
 
-The local grid solvers (`ac_solve`, `noise_analysis`) evaluate FreePDK45 through a
-cached device model that carries only `Cgs`/`Cgd` — no drain/source junction caps —
-so on 45 nm they read ~8 % optimistic UGBW (see `freepdk45_fd_ota_design.md` §4.5).
-For sign-off numbers, four oracles render the **complete** circuit and let ngspice's
-C-BSIM4 (the FreePDK45 oracle) run the analysis with full charge. They live in
+The local grid solvers (`ac_solve`, `noise_analysis`) evaluate model-card processes
+through cached device characterization. For sign-off-style numbers, four oracles
+render the **complete** circuit and let ngspice run the original compact-model deck
+with full charge. They live in
 `circuitopt/ngspice_ac.py` and share the deck renderer in `circuitopt/ngspice_render.py`
-with the existing `.tran` backend, so device M-lines, R/C, E/G/F/H controlled sources,
+with the `.tran` backend, so device M/X lines, R/C, E/G/F/H controlled sources,
 rails, per-polarity corner routing, temperature and supply bias render identically.
+
+FreePDK45's local grid carries only `Cgs`/`Cgd`, so its 45 nm FD-OTA reads about 8%
+optimistic UGBW versus the complete deck (see `freepdk45_fd_ota_design.md` §4.5).
+Use the full-circuit oracle whenever junction charge, exact bandwidth, switching, or
+foundry wrapper behavior matters.
 
 All four honor: **temperature** (`temperature=` in Kelvin → `.options temp=`),
 **corner** (`corner=` including the mixed `sf`/`fs`, via `binding.at_corner(...)` or
 directly), and **supply** (through `bias`). A multistable OTA DC point is seeded with
 `x0_guess={node: V}` → `.nodeset` (use the circuit's `dc_guesses[0]`).
+
+## Process selection
+
+The registered model types choose the renderer:
+
+| Model type | SPICE instance | Model setup | ngspice arguments |
+|------------|----------------|-------------|-------------------|
+| `freepdk45.nmos` / `.pmos` | flat `M` device | per-polarity `.include` cards | default |
+| `tsmc28hpcp.nmos` / `.pmos` | `X` wrapper using `nch_mac` / `pch_mac` | explicit five-section `.lib` closure | `-D ngbehavior=hsa` |
+
+A complete circuit must use one process adapter for every MOS. Mixed foundry setup
+semantics in one full-circuit ngspice deck are rejected instead of silently selecting
+the wrong cards.
+
+TSMC28HPC+ resolves its licensed model from `TSMC28_MODEL_DIR`,
+`TSMC28_PDK_ROOT`, the portable project-local
+`PDK/tsmc28hpcp/models/hspice/` entry, then `PDK_ROOT/tsmc28hpcp`. The adapter reads
+hierarchical `@m.x*.main[...]` operating-point vectors and passes `NF` to the foundry
+wrapper. See [TSMC28HPC+ Local Adapter](tsmc28hpcp.md).
 
 ## Mixed per-polarity corners: `sf` / `fs`
 

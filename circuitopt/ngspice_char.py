@@ -65,7 +65,8 @@ def ngspice_binary() -> "str | None":
     return _resolve_ngspice_binary()
 
 
-def _run_ngspice(cir: str, out_txt: str, timeout: float, what: str) -> None:
+def _run_ngspice(cir: str, out_txt: str, timeout: float, what: str,
+                 extra_args=()) -> None:
     """Run one ngspice batch deck, surfacing failures instead of swallowing them.
 
     ngspice's stderr carries harmless warnings even on a good run, so we key
@@ -75,7 +76,7 @@ def _run_ngspice(cir: str, out_txt: str, timeout: float, what: str) -> None:
     the return code, and the tail of stderr (falling back to stdout) so the
     caller sees what ngspice actually said instead of a downstream
     ``FileNotFoundError`` from :func:`numpy.loadtxt`."""
-    proc = subprocess.run([_ngspice(), "-b", cir], capture_output=True,
+    proc = subprocess.run([_ngspice(), *extra_args, "-b", cir], capture_output=True,
                           text=True, timeout=timeout)
     tail = (proc.stderr or "").strip() or (proc.stdout or "").strip()
     tail = tail[-800:]
@@ -116,15 +117,24 @@ def _default_grid(polarity: str, vdd: float) -> Tuple[np.ndarray, np.ndarray, np
     return vgs, vds, vsb
 
 
-def _grid_key(model_name, W, L, corner, vgs, vds, vsb, temp_c=27.0) -> str:
+def _grid_key(model_name, W, L, corner, vgs, vds, vsb, temp_c=27.0,
+              suffix="") -> str:
     axes = np.concatenate([vgs, vds, vsb]).tobytes()
     h = hashlib.sha1(axes).hexdigest()[:8]
     tag = "" if abs(temp_c - 27.0) < 1e-9 else f"_T{temp_c:g}"
-    return f"{model_name}_{corner}_W{W:g}_L{L:g}_{h}{tag}"
+    return f"{model_name}_{corner}_W{W:g}_L{L:g}_{h}{tag}{suffix}"
+
+
+def _adapter_cache_dir(adapter) -> str:
+    if adapter is None:
+        return _CACHE_DIR
+    root = os.path.dirname(os.path.dirname(__file__))
+    return os.path.join(root, "data", "pdk", adapter.cache_namespace)
 
 
 # ── ngspice batch characterisation ─────────────────────────────────────────────
-def _sweep_one_vsb(card_path, model_name, W, L, vb, vgs, vds, temp_c=27.0):
+def _sweep_one_vsb(card_path, model_name, W, L, vb, vgs, vds, temp_c=27.0,
+                   *, polarity="nmos", corner="nom", adapter=None, nf=1):
     """Run one 2-D ``dc`` sweep (Vgs inner, Vds outer) at a fixed bulk bias → op-vars.
 
     ``vgs``/``vds`` are the *signed* device-natural axes (NMOS 0→+hi, PMOS 0→−hi);
@@ -133,23 +143,37 @@ def _sweep_one_vsb(card_path, model_name, W, L, vb, vgs, vds, temp_c=27.0):
     temperature equations run at the PVT point. ngspice accepts a negative sweep step
     for the PMOS descent. wrdata flattens the sweep as Vds-blocks of Vgs-rows,
     reshaped to ``(n_vds, n_vgs)``."""
-    saves = " ".join(f"@mn[{v}]" for v in _OPVARS)
+    instance_name = "xchar" if adapter is not None else "mn"
+    op_vector = (adapter.op_vector if adapter is not None
+                 else lambda name, variable: f"@{name}[{variable}]")
+    saves = " ".join(op_vector(instance_name, v) for v in _OPVARS)
     g0, g1, gd = vgs[0], vgs[-1], (vgs[1] - vgs[0])
     d0, d1, dd = vds[0], vds[-1], (vds[1] - vds[0])
     with tempfile.TemporaryDirectory() as td:
         out_txt = os.path.join(td, "out.txt")
         cir = os.path.join(td, "deck.cir")
-        deck = (f"* freepdk45 char {model_name} W={W:g} L={L:g} vb={vb:g} T={temp_c:g}\n"
-                f'.include "{card_path}"\n'
+        if adapter is None:
+            title = f"* freepdk45 char {model_name} W={W:g} L={L:g} vb={vb:g} T={temp_c:g}"
+            preamble = [f'.include "{card_path}"']
+            instance = f"mn d g s b {model_name} w={W:g}u l={L:g}u"
+            command_args = ()
+        else:
+            title = f"* {adapter.name} char {model_name} W={W:g} L={L:g} nf={nf}"
+            preamble = adapter.characterization_preamble(corner, polarity, card_path)
+            instance = adapter.characterization_instance(
+                name=instance_name, polarity=polarity, width_um=W, length_um=L, nf=nf)
+            command_args = adapter.command_args
+        deck = (title + "\n" + "\n".join(preamble) + "\n"
                 f".options temp={temp_c:g}\n"
-                f"mn d g s b {model_name} w={W:g}u l={L:g}u\n"
+                f"{instance}\n"
                 f"vd d 0 {d0:g}\nvg g 0 {g0:g}\nvs s 0 0\nvb b 0 {vb:g}\n"
                 f".control\nset filetype=ascii\nsave {saves}\n"
                 f"dc vg {g0:g} {g1:g} {gd:g} vd {d0:g} {d1:g} {dd:g}\n"
                 f"wrdata {out_txt} {saves}\n.endc\n.end\n")
         with open(cir, "w") as fh:
             fh.write(deck)
-        _run_ngspice(cir, out_txt, timeout=120, what="dc-sweep")
+        _run_ngspice(cir, out_txt, timeout=120, what="dc-sweep",
+                     extra_args=command_args)
         raw = np.loadtxt(out_txt)
     # wrdata writes (scale, value) column-pairs; values are the even columns.
     vals = raw[:, 1::2]                        # (n_rows, n_opvars)
@@ -160,12 +184,14 @@ def _sweep_one_vsb(card_path, model_name, W, L, vb, vgs, vds, temp_c=27.0):
             f"expected {n_vgs * n_vds} ({n_vds} Vds × {n_vgs} Vgs)")
     out = {}
     for j, name in enumerate(_OPVARS):
-        out[name] = vals[:, j].reshape(n_vds, n_vgs)   # (Vds, Vgs)
+        values = vals[:, j].reshape(n_vds, n_vgs)   # (Vds, Vgs)
+        out[name] = (adapter.normalize_op_data(name, values)
+                     if adapter is not None else values)
     return out
 
 
 def characterize(card_path, model_name, polarity, W, L, corner, vdd=1.0,
-                 temp_c=27.0) -> CharGrid:
+                 temp_c=27.0, *, adapter=None, nf=1) -> CharGrid:
     """Characterise one FreePDK45 FET into a cached :class:`CharGrid`.
 
     One ngspice ``dc`` sweep per Vsb slice; the slices stack into
@@ -173,9 +199,12 @@ def characterize(card_path, model_name, polarity, W, L, corner, vdd=1.0,
     (so reuse needs no ngspice) and returned. ``vdd`` sets the sweep ceiling;
     ``temp_c`` the device temperature (°C, keyed into the cache for PVT)."""
     vgs, vds, vsb = _default_grid(polarity, vdd)
-    os.makedirs(_CACHE_DIR, exist_ok=True)
-    cache = os.path.join(_CACHE_DIR,
-                         _grid_key(model_name, W, L, corner, vgs, vds, vsb, temp_c) + ".npz")
+    cache_dir = _adapter_cache_dir(adapter)
+    os.makedirs(cache_dir, exist_ok=True)
+    suffix = f"_NF{int(nf)}" if adapter is not None else ""
+    cache = os.path.join(cache_dir,
+                         _grid_key(model_name, W, L, corner, vgs, vds, vsb,
+                                   temp_c, suffix=suffix) + ".npz")
     if os.path.exists(cache):
         d = np.load(cache)
         data = {n: d[f"op_{n}"] for n in _OPVARS}
@@ -188,7 +217,9 @@ def characterize(card_path, model_name, polarity, W, L, corner, vdd=1.0,
     stack = {n: [] for n in _OPVARS}
     for sb in np.abs(vsb):
         vb = sb if polarity == "pmos" else -sb
-        slc = _sweep_one_vsb(card_path, model_name, W, L, vb, vgs, vds, temp_c)
+        slc = _sweep_one_vsb(
+            card_path, model_name, W, L, vb, vgs, vds, temp_c,
+            polarity=polarity, corner=corner, adapter=adapter, nf=nf)
         for n in _OPVARS:
             stack[n].append(slc[n])
     data = {n: np.stack(stack[n], axis=0) for n in _OPVARS}   # (Vsb, Vds, Vgs)
@@ -213,7 +244,8 @@ def _noise_grid(polarity: str, vdd: float):
     return vgs, vds, vsb
 
 
-def _noise_one(card_path, model_name, W, L, vgs, vds, vb, temp_c=27.0):
+def _noise_one(card_path, model_name, W, L, vgs, vds, vb, temp_c=27.0, *,
+               polarity="nmos", corner="nom", adapter=None, nf=1):
     """One ngspice ``.noise`` at a bias → (S_thermal, S_flicker@1Hz) [A²/Hz].
 
     An ideal drain source holds Vds so the device's drain-noise current flows
@@ -225,17 +257,28 @@ def _noise_one(card_path, model_name, W, L, vgs, vds, vb, temp_c=27.0):
     with tempfile.TemporaryDirectory() as td:
         out_txt = os.path.join(td, "out.txt")
         cir = os.path.join(td, "deck.cir")
-        deck = (f"* fp45 noise {model_name}\n"
-                f'.include "{card_path}"\n'
+        if adapter is None:
+            title = f"* fp45 noise {model_name}"
+            preamble = [f'.include "{card_path}"']
+            instance = f"mn d g s b {model_name} w={W:g}u l={L:g}u"
+            command_args = ()
+        else:
+            title = f"* {adapter.name} noise {model_name}"
+            preamble = adapter.characterization_preamble(corner, polarity, card_path)
+            instance = adapter.characterization_instance(
+                name="xchar", polarity=polarity, width_um=W, length_um=L, nf=nf)
+            command_args = adapter.command_args
+        deck = (title + "\n" + "\n".join(preamble) + "\n"
                 f".options temp={temp_c:g}\n"
-                f"mn d g s b {model_name} w={W:g}u l={L:g}u\n"
+                f"{instance}\n"
                 f"vd d 0 {vds:g}\nvg g 0 {vgs:g} ac 1\nvs s 0 0\nvb b 0 {vb:g}\n"
                 f"hn out 0 vd 1\nrout out 0 1e12\n"
                 f".control\nset filetype=ascii\nnoise v(out) vg dec 4 1 1e11\n"
                 f"setplot noise1\nwrdata {out_txt} onoise_spectrum\n.endc\n.end\n")
         with open(cir, "w") as fh:
             fh.write(deck)
-        _run_ngspice(cir, out_txt, timeout=60, what="noise")
+        _run_ngspice(cir, out_txt, timeout=60, what="noise",
+                     extra_args=command_args)
         raw = np.loadtxt(out_txt)
     f, asd = raw[:, 0], raw[:, 1]            # onoise_spectrum is ASD [V/√Hz] = √S_id
     s_id = asd ** 2
@@ -255,17 +298,20 @@ class NoiseGrid:
 
 
 def characterize_noise(card_path, model_name, polarity, W, L, corner, vdd=1.0,
-                       temp_c=27.0) -> NoiseGrid:
+                       temp_c=27.0, *, adapter=None, nf=1) -> NoiseGrid:
     """Characterise drain-noise (S_thermal, S_flicker@1Hz) over a coarse grid, cached.
 
     Exact ngspice-C BSIM4 noise per bias (:func:`_noise_one`); the grid is coarser
     than the DC sweep because noise is smooth, and cached to ``*_noise.npz`` so IRN
     reuse needs no ngspice. ``temp_c`` sets the device temperature (°C, keyed)."""
     vgs, vds, vsb = _noise_grid(polarity, vdd)
-    os.makedirs(_CACHE_DIR, exist_ok=True)
+    cache_dir = _adapter_cache_dir(adapter)
+    os.makedirs(cache_dir, exist_ok=True)
+    suffix = f"_NF{int(nf)}" if adapter is not None else ""
     cache = os.path.join(
-        _CACHE_DIR,
-        _grid_key(model_name, W, L, corner, vgs, vds, vsb, temp_c) + "_noise.npz")
+        cache_dir,
+        _grid_key(model_name, W, L, corner, vgs, vds, vsb, temp_c,
+                  suffix=suffix) + "_noise.npz")
     if os.path.exists(cache):
         d = np.load(cache)
         return NoiseGrid(d["vgs"], d["vds"], d["vsb"], d["s_thermal"], d["s_flicker_1hz"])
@@ -279,6 +325,7 @@ def characterize_noise(card_path, model_name, polarity, W, L, corner, vdd=1.0,
         for j, vd in enumerate(vds):
             for k, vg in enumerate(vgs):
                 s_th[i, j, k], s_fl[i, j, k] = _noise_one(
-                    card_path, model_name, W, L, vg, vd, vb, temp_c)
+                    card_path, model_name, W, L, vg, vd, vb, temp_c,
+                    polarity=polarity, corner=corner, adapter=adapter, nf=nf)
     np.savez(cache, vgs=vgs, vds=vds, vsb=vsb, s_thermal=s_th, s_flicker_1hz=s_fl)
     return NoiseGrid(vgs, vds, vsb, s_th, s_fl)

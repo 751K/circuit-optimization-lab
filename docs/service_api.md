@@ -28,7 +28,7 @@ Swagger/OpenAPI docs are served automatically at `http://127.0.0.1:8341/docs`
 
 ```bash
 curl http://127.0.0.1:8341/api/v1/health
-# {"status":"ok","version":"0.1.0","api":"v1"}
+# {"status":"ok","version":"1.1.0","api":"v1"}
 ```
 
 ### Server flags
@@ -79,7 +79,7 @@ curl http://127.0.0.1:8341/api/v1/health
 ```
 
 ```json
-{"status": "ok", "version": "0.1.0", "api": "v1"}
+{"status": "ok", "version": "1.1.0", "api": "v1"}
 ```
 
 ### `GET /api/v1/capabilities`
@@ -93,7 +93,7 @@ curl http://127.0.0.1:8341/api/v1/capabilities
 
 ```json
 {
-  "version": "0.1.0",
+  "version": "1.1.0",
   "api": "v1",
   "models": {"pmos_tft": "circuitopt.pmos_tft_model.PMOS_TFT", "sky130.nmos": "...", "...": "..."},
   "analyses": {

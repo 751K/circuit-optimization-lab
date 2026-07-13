@@ -171,7 +171,7 @@ examples/periodic_rc.json
 ```
 
 - `type` ——模型注册键，格式 `"<pdk>.<极性>"`（如 `"sky130.nmos"`、`"sky130.pmos"`、
-  `"freepdk45.nmos"`、`"at4000tg.pmos"`）。见 `circuitopt.device_model.register_pdk`。
+  `"freepdk45.nmos"`、`"tsmc28hpcp.nmos"`、`"at4000tg.pmos"`）。见 `circuitopt.device_model.register_pdk`。
 - 其余键透传给器件构造函数。对 SKY130 器件：`vb`（衬底偏置，伏特；默认 0）、
   `corner`（SKY130 工艺角——`tt`/`ss`/`ff`/`sf`/`fs`；默认 `tt`）、`extract_w`
   （µm——在这个参考宽度处解析一次 SKY130 参数卡，让紧凑模型缩放实际 `W`，避免设计
@@ -183,7 +183,7 @@ examples/periodic_rc.json
   缓存的 Id/gm/gds/Cgs/Cgd 网格（`circuitopt.ngspice_char` / `circuitopt.ngspice_device`）再插值——每个值都是
   节点处 exact ngspice-C。噪声同样精确 ngspice-C（逐偏置 `.noise` → S_thermal + S_flicker@1Hz,
   log 空间插值,5T OTA 上验证在 ngspice `.noise` 的 ~5% 内）。器件键:`vb`（NMOS=0,PMOS=VDD=1.0）、
-  `corner`（`nom`/`ss`/`ff`,独立卡文件;默认 `nom`）、`extract_w`（µm——参考宽度表征一次、线性缩放
+  `corner`（`nom`/`tt`/`ss`/`ff`/`sf`/`fs`；默认 `nom`）、`extract_w`（µm——参考宽度表征一次、线性缩放
   实际 `W`,<0.7% vs 逐 W 真卡,使 dataset/优化器的 W 扫描保持纯插值）、`temperature`（开尔文,按该
   温度重表征卡做 PVT）、`NF`。快速网格负责 DC + AC + 噪声；统一 `transient()` 检测到 FreePDK45
   后会自动生成完整四端网表并调用 `circuitopt.ngspice_transient`，由 ngspice 原生 BSIM4 处理
@@ -191,9 +191,17 @@ examples/periodic_rc.json
   （Cdb/Csb）,故整机 `ac_solve` 的 UGBW 比 ngspice 自己的 `.ac` 偏高 ~8%——头条数字取 ngspice 值。
   卡在 `PDK_ROOT/freepdk45/` 下;见 `examples/freepdk45_5t_ota.json`（简单）与
   `examples/freepdk45_fd_ota.json`（全差分 OTA 设计案例,[docs/freepdk45_fd_ota_design.md](freepdk45_fd_ota_design.md)）。
+- **TSMC28HPC+**（`"tsmc28hpcp.nmos"` / `"tsmc28hpcp.pmos"`）绑定 licensed 1d8
+  HSPICE deck 中的 0.9V `nch_mac` / `pch_mac` core wrapper。PMOS bulk 接 core 电源时使用
+  `vb=0.9`。支持 `tt`/`ss`/`ff`/`sf`/`fs`（`nom` 是 `tt` 别名）、开尔文 `temperature`
+  和原生传给 foundry macro 的 `NF`。默认可迁移入口是
+  `PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l`，可依次用
+  `TSMC28_MODEL_DIR`、`TSMC28_PDK_ROOT` 覆盖。完整 `.tran`、`.ac`、`.noise`、`.op`
+  通过工艺适配器直接使用原模型 deck；本地 DC/AC/noise 优化循环可使用缓存表征网格。
+  全电路 ngspice deck 必须把所有 MOS 绑定到同一工艺。详见 [TSMC28HPC+ 适配说明](tsmc28hpcp.md)。
 - 一个电路里部分器件是 OTFT、部分是硅是合法的——例如互补硅 OTA 独立绑定 NMOS/PMOS
   器件。见 `examples/sky130_5t_ota.json`。
-- SKY130 / FreePDK45 PDK 需要外部工具链（OpenVAF + ngspice + PDK 文件）；未安装时求解器
+- SKY130 / FreePDK45 / TSMC28HPC+ 需要外部工具链（OpenVAF 和/或 ngspice + PDK 文件）；未安装时求解器
   调用会给出清晰报错。详见 [核心求解器概览](module_overview_zh.md) 的"硅 PDK / OSDI 层"一节。
 
 ### `bias`

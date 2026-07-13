@@ -19,10 +19,10 @@
 - 工艺角与逐器件 mismatch 扰动。
 - 面向 Cadence/Spectre 的验证，涵盖工作点、AC、噪声、瞬态、PSS、PAC 和 PNoise 行为。
 
-实现刻意保持小而自包含。目前 `circuitopt/` 下直接有 39 个 Python 文件（含 `service/` 子包共
-45 个），含 `__init__.py`、CLI 入口 `__main__.py`、校准/PSF/Cadence 网表辅助模块、共享诊断/profiling
+实现刻意保持小而自包含，包含 `__init__.py`、CLI 入口 `__main__.py`、校准/PSF/Cadence 网表辅助模块、共享诊断/profiling
 模块、主求解器栈、一套 ML surrogate 层（数据集构建、surrogate 训练、筛选-校验优化器）、接入同一套
-`TransistorModel` 接口的两个硅 PDK——SKY130（经 OpenVAF/OSDI 桥接）与 FreePDK45（经 ngspice-C 求值器）——
+`TransistorModel` 接口的三个硅 PDK——SKY130（OpenVAF/OSDI）、FreePDK45（ngspice-C）与
+TSMC28HPC+（可迁移 ngspice 工艺适配器）——
 以及架在整个栈之上的可选本地 HTTP 服务层（`circuitopt/service/`）。
 
 ## 文件结构
@@ -34,7 +34,7 @@ circuitopt/
   circuit_loader.py    JSON 电路描述加载器。
   device_model.py      TransistorModel ABC + NumbaParams + 模型工厂/注册表 + PDK/极性分层。
   device_factory.py    器件构建/解析层（build_devices、get_ss_params）+ corner 路由（OTFT CORNERS、
-                        SKY130/FreePDK45 apply_silicon_corner）。leaf 模块：只依赖 device_model。
+                        硅工艺 apply_silicon_corner）。leaf 模块：只依赖 device_model。
   pmos_tft_model.py    AT4000TG PMOS-OTFT 紧凑模型实现。
   numba_kernels.py     可选 Numba 加速标量内核。
   ac_mna.py            MNA stamp 原语。
@@ -64,9 +64,11 @@ circuitopt/
   osdi_device.py       OSDI 宿主紧凑模型的 TransistorModel 适配器（把任意 OSDI PDK 桥接进求解器栈）。
   osdi_transient.py    OSDI 器件的后向欧拉瞬态（在 numba 循环之外）。
   sky130_model.py      SKY130 nfet/pfet PDK：BSIM4 参数卡提取（经 ngspice）+ PDK 注册。
-  ngspice_char.py      FreePDK45 求值器：批量 ngspice .dc/.noise 表征 → 缓存 (Vsb,Vds,Vgs) 网格。
+  ngspice_char.py      model-card 求值器：批量 ngspice .dc/.noise 表征 → 缓存 (Vsb,Vds,Vgs) 网格。
   ngspice_device.py    基于缓存 ngspice 网格的 TransistorModel（插值 Id/gm/gds/caps/noise；extract_w + 温度）。
+  ngspice_process.py   工艺适配协议：deck 前导、器件语法、op 向量、仿真器参数。
   freepdk45_model.py   FreePDK45 nmos/pmos PDK：角卡绑定 + PDK 注册（ngspice-C 求值器）。
+  tsmc28_model.py      TSMC28HPC+ core nmos/pmos：nch_mac/pch_mac + HSPICE library 闭包。
   service/             可选的本地 FastAPI HTTP 服务层（`serve` extra）——见下文。
     __init__.py        只重导出 CLI 胶水代码；从不 import fastapi（import circuitopt 保持无 fastapi 依赖）。
     app.py             create_app() —— /api/v1 路由（health/capabilities/validate/solve/jobs/*）；薄适配，无数值逻辑。
@@ -114,7 +116,9 @@ osdi_transient.py    <- diagnostics, numba_kernels, osdi_host, compiled_topology
 sky130_model.py      <- device_model, osdi_device
 ngspice_char.py      <- 无内部依赖；ngspice 子进程 + numpy
 ngspice_device.py    <- device_model, ngspice_char；运行期可选 scipy
+ngspice_process.py   <- device_model
 freepdk45_model.py   <- device_model, ngspice_device
+tsmc28_model.py      <- device_model, ngspice_device, ngspice_process, toolchain
 service/app.py       <- analysis_dispatch, analysis_options, circuit_loader, device_factory, device_model,
                         freepdk45_model, service/jobs, service/serialize；import 时可选 fastapi/pydantic
 service/jobs.py      <- explore, corners, service/serialize；不依赖 fastapi（纯 threading/queue）
@@ -693,7 +697,8 @@ exact ngspice-C）。已验证 model==oracle:单器件 op 逐位对 ngspice `.op
 
 - **`ngspice_char.py`** ——批量表征器。`characterize()` 按 Vsb 切片扫 `.dc vg vd`（op-vars
   `@m[id/gm/gds/cgs/cgd]`）;`characterize_noise()` 逐偏置跑一次 `.noise`。两者都接受 `temp_c`
-  （`.options temp`,进缓存键——27°C 保持无标签故标称缓存不失效）,缓存到 `data/pdk/freepdk45/*.npz`。
+  （`.options temp`,进缓存键——27°C 保持无标签故标称缓存不失效）,按工艺缓存到
+  `data/pdk/freepdk45/` 或 `data/pdk/tsmc28hpcp/`。
   两者都经由共享的 `_run_ngspice()` 帮手让失败显式化：ngspice 非零 returncode，或 returncode
   为 0 但输出文件缺失（静默失败），都会抛出携带 ngspice stderr 尾部的 `RuntimeError`——而不是让
   临时 deck/输出文件（现在建在 `tempfile.TemporaryDirectory()` 里，不再是裸 `mktemp`）悄悄丢失，
@@ -705,12 +710,30 @@ exact ngspice-C）。已验证 model==oracle:单器件 op 逐位对 ngspice `.op
 - **`ngspice_transient.py`** ——完整电路 `.tran` 后端：MOS/R/C/独立源/受控源/PWL、corner/温度、
   节点与电源电流回读；统一 `transient()` 自动路由，网格对象本身无需伪造电荷 companion。
 - **`freepdk45_model.py`** ——`Fp45Nfet`/`Fp45Pfet(NgspiceDevice)` + `register_pdk("freepdk45", ...)`。
-  `corner`（nom/ss/ff）选卡目录 `PDK_ROOT/freepdk45/models_<corner>/`。`FREEPDK45_CORNERS =
-  ("nom", "ss", "ff")` 是合法 corner 名的公开元组；服务层 `GET /api/v1/capabilities` 直接读取它
+  `corner` 支持 nom/tt/ss/ff/sf/fs，并按极性选择卡目录。`FREEPDK45_CORNERS`
+  是合法 corner 名的公开元组；服务层 `GET /api/v1/capabilities` 直接读取它
   （连同 `device_factory.SKY130_CORNERS`、`device_factory.CORNERS`），而不是硬编码三个工艺角家族。
 
+### TSMC28HPC+ 工艺适配器（`ngspice_process.py` / `tsmc28_model.py`）
+
+`NgspiceProcessAdapter` 把 foundry 特有网表语义与 circuitopt 拓扑/求解器隔离。适配器负责 model-card
+前导、MOS 实例语法、层级工作点向量、corner 校验、缓存命名空间和额外 ngspice 启动参数。
+FreePDK45 保留原有扁平卡路径；TSMC28HPC+ 走适配器路径，源码中不嵌入任何模型参数。
+
+`Tsmc28HpcpAdapter` 面向 licensed 1d8 HSPICE deck 里的 0.9V `nch_mac` / `pch_mac` core wrapper。
+它显式展开 `setup`、工艺角、`global`、`total`、`stat` 五个 `.lib` section，并使用
+`-D ngbehavior=hsa` 启动 ngspice。`NF` 在 foundry wrapper 内原生表征；层级
+`@m.x*.main[...]` 向量提供 Id/gm/gds/电容及完整电路 `.op` 数据。完整 `.tran`、`.ac`、
+`.noise`、`.op` 共用同一适配器和模型 deck。
+
+默认可迁移模型入口为
+`PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l`，且被 Git 忽略。
+解析优先级为 `TSMC28_MODEL_DIR`、`TSMC28_PDK_ROOT`、项目内入口、
+`PDK_ROOT/tsmc28hpcp`。详见 [TSMC28HPC+ 适配说明](tsmc28hpcp.md)。
+
 `circuitopt/circuit_loader.py` 的可选 `models` 块（`{"M1": {"type": "sky130.nmos", ...}}` 或
-`"freepdk45.nmos"`）把 JSON 电路里的特定器件绑到非默认 PDK,所以一个混合 OTFT+硅（或全硅）电路只是配置
+`"freepdk45.nmos"` / `"tsmc28hpcp.nmos"`）把 JSON 电路里的特定器件绑到非默认 PDK，
+所以一个混合 OTFT+硅（或全硅）电路只是配置
 问题——见 [JSON 电路格式](json_circuit_format_zh.md)。两个完整的全差分 OTA 设计流程案例:
 [SKY130 FD-OTA](sky130_fd_ota_design.md)、[FreePDK45 FD-OTA](freepdk45_fd_ota_design.md)。
 

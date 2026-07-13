@@ -1,6 +1,7 @@
 """``TransistorModel`` backed by ngspice-C via a cached characterisation grid.
 
-For FreePDK45 the oracle is ngspice's built-in C-BSIM4 (its ``version = 4.0`` cards
+For model-card-backed processes the oracle is ngspice's built-in C-BSIM4. FreePDK45's
+``version = 4.0`` cards
 diverge ~30 % from our BSIM4.8 OSDI VA — see :mod:`circuitopt.ngspice_char`). This adapter
 makes ngspice the evaluator: a device characterises its ``(model, W, L, corner)`` once
 into a (Vsb, Vds, Vgs) grid of Id / gm / gds / Cgs / Cgd (:func:`circuitopt.ngspice_char.characterize`,
@@ -64,6 +65,9 @@ class NgspiceDevice(TransistorModel):
     POLARITY: str = "nmos"
     VDD: float = 1.0
     EXTRACT_W: float = None      # if set (µm), characterise the grid at this fixed W and
+    TRANSIENT_BACKEND = "ngspice"
+    NGSPICE_ADAPTER = None
+    NF_SCALES_OP = True
     #                              linearly scale the actual W — fast + smooth for W sweeps
     #                              (dataset/optimization); default characterises per W.
 
@@ -87,7 +91,8 @@ class NgspiceDevice(TransistorModel):
         self._w_char = float(ref) if ref is not None else self.W
         self._w_scale = self.W / self._w_char
         grid = characterize(self.CARD_PATH, self.MODEL_NAME, self.POLARITY,
-                            self._w_char, self.L, corner, vdd=self.VDD, temp_c=self.temp_c)
+                            self._w_char, self.L, corner, vdd=self.VDD, temp_c=self.temp_c,
+                            adapter=self.NGSPICE_ADAPTER, nf=self.NF)
         self._interp, self._bounds = _interpolator(grid)
         self._op_cache: Dict[Tuple[float, float, float], Dict[str, float]] = {}
         self._noise = None          # (interps, bounds) built lazily on first noise call
@@ -110,7 +115,7 @@ class NgspiceDevice(TransistorModel):
                         _clamp(vgs, self._bounds[2])]])   # axis order (Vsb, Vds, Vgs)
         # NF fingers in parallel and the W/W_ref reference-W scale both multiply every
         # extensive op-var linearly (=1.0 when characterised at the instance W).
-        nf = float(self.NF) * self._w_scale
+        nf = (float(self.NF) if self.NF_SCALES_OP else 1.0) * self._w_scale
         op = {name: float(self._interp[name](pt)[0]) * nf
               for name in ("id", "gm", "gds", "cgs", "cgd")}
         self._op_cache[key] = op
@@ -148,7 +153,8 @@ class NgspiceDevice(TransistorModel):
         from scipy.interpolate import RegularGridInterpolator
         ng = characterize_noise(self.CARD_PATH, self.MODEL_NAME, self.POLARITY,
                                 self._w_char, self.L, self.corner, vdd=self.VDD,
-                                temp_c=self.temp_c)
+                                temp_c=self.temp_c, adapter=self.NGSPICE_ADAPTER,
+                                nf=self.NF)
         ax = (np.abs(ng.vsb), np.abs(ng.vds), np.abs(ng.vgs))
         # Interpolate in LOG space: S_thermal ∝ gm and S_flicker span decades across
         # bias, so linear interpolation of a convex positive quantity over-estimates
@@ -175,11 +181,11 @@ class NgspiceDevice(TransistorModel):
         vsb = abs(Vs - self.vb)
         pt = np.array([[_clamp(vsb, bounds[0]), _clamp(vds, bounds[1]),
                         _clamp(vgs, bounds[2])]])          # axis order (Vsb, Vds, Vgs)
-        nf = float(self.NF) * self._w_scale                # interps are log10(PSD)
+        nf = (float(self.NF) if self.NF_SCALES_OP else 1.0) * self._w_scale
         return 10.0 ** float(it["th"](pt)[0]) * nf, 10.0 ** float(it["fl"](pt)[0]) * nf
 
     # ── transient-only hooks: not supported on the grid path ─────────────
-    _NO_TRAN = "FreePDK45/ngspice-grid path is DC+AC+noise (no transient charge companion)"
+    _NO_TRAN = "ngspice-grid path is DC+AC+noise (no transient charge companion)"
 
     def get_capacitance_charges_from_op(self, *a):
         raise NotImplementedError(self._NO_TRAN)

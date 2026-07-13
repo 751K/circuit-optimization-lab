@@ -1,5 +1,5 @@
 site_name: Circuit Optimization Lab
-site_description: A local, license-free, Cadence-calibrated framework for analog circuit simulation and ML-driven design optimization.
+site_description: A local, Cadence-calibrated, multi-PDK framework for analog circuit simulation and ML-driven design optimization.
 site_url: https://751k.github.io/circuit-optimization-lab/
 repo_url: https://github.com/751K/circuit-optimization-lab
 repo_name: 751K/circuit-optimization-lab
@@ -43,6 +43,7 @@ nav:
       - SKY130 FD-OTA: sky130_fd_ota_design.md
       - FreePDK45 FD-OTA: freepdk45_fd_ota_design.md
       - FreePDK45 SAR ADC: freepdk45_sar_design.md
+      - TSMC28HPC+ Local Adapter: tsmc28hpcp.md
       - AFE Design Equations: afe_design_equations.md
   - Performance:
       - Environment & Benchmarks: environment_performance.md
@@ -50,6 +51,7 @@ nav:
       - Future Plan: futureplan.md
   - 中文文档:
       - 项目说明: README_zh.md
+      - TSMC28HPC+ 本地适配: tsmc28hpcp_zh.md
       - 核心求解器概览: module_overview_zh.md
       - JSON 电路描述格式: json_circuit_format_zh.md
       - 本地服务 API: service_api_zh.md

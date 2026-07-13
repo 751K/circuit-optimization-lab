@@ -2,13 +2,13 @@
 
 [English](README.md) | [中文说明](README_zh.md)
 
-**Current release: v0.1.0** (2026-07-05) — see the
+**Current release: v1.1.0** (2026-07-13) — see the
 [CHANGELOG](https://github.com/751K/circuit-optimization-lab/blob/main/CHANGELOG.md).
 
 ## Overview
 
-A **local, license-free, Cadence-calibrated framework for analog circuit simulation
-and ML-driven design optimization** — built to be foundational infrastructure for two
+A **local, Cadence-calibrated framework for analog circuit simulation and ML-driven
+design optimization** — built to be foundational infrastructure for two
 shifts in how chips get designed:
 
 **1. Open infrastructure for ML-accelerated simulation.** Using ML to accelerate
@@ -28,23 +28,24 @@ loops through a simulator, but calling a commercial tool (licensed, remote, slow
 many dialogue turns is expensive and cannot run autonomously on-device. This project is
 a self-contained toolchain an LLM agent can call to **obtain simulation results, analyze
 and summarize them, and optimize a design** — the entire DC/AC/Noise/PSS/… loop, on the
-local machine, no external round-trip, no license. The JSON circuit format, the
+local machine with no commercial simulator round-trip. The JSON circuit format, the
 `python -m circuitopt` CLI, and the structured result dictionaries are deliberately shaped to
 be machine-callable and machine-readable, so an agent drives the whole design loop from
 the local shell.
 
 The solver stack is **calibrated to Cadence Spectre 24.1** — anchored on an AT4000TG
 PMOS-OTFT ECG AFE (typically <1% on gain/BW/IRN) — and generalizes across processes
-through the same engine: the AT4000TG OTFT plus two industry-standard silicon CMOS
+through the same engine: the AT4000TG OTFT plus three silicon CMOS
 nodes, **SKY130** (130 nm, OpenVAF-compiled BSIM4 via an OSDI host) and **FreePDK45**
-(45 nm, ngspice-C as the exact device evaluator). 
+(45 nm, ngspice-C as the exact device evaluator), plus an optional local
+**TSMC28HPC+** adapter (28 nm, licensed model deck through ngspice).
 
 **Concretely, it does:**
 - **DC/AC/Noise/Transient** — standard analysis without a simulator license.
 - **PSS / PAC / PNoise** — periodic steady-state / AC / noise for chopper amplifiers, matched to Spectre RF.
 - **Design exploration & ML-surrogate optimization** — sweep sizes/bias, build a labeled dataset, train a fast surrogate, screen a large candidate pool, and verify the shortlist on the calibrated solver (thousands of times faster than a brute-force sweep).
 - **Corners & mismatch** — process corners, per-device mismatch Monte Carlo, latch screening.
-- **Multi-process** — OTFT (AT4000TG) + silicon SKY130 + FreePDK45 through one pipeline; two worked, end-to-end fully-differential OTA design cases ship as reports ([SKY130](sky130_fd_ota_design.md), [FreePDK45](freepdk45_fd_ota_design.md)).
+- **Multi-process** — OTFT (AT4000TG), SKY130, FreePDK45, and TSMC28HPC+ through one pipeline. TSMC model payloads stay local and Git-ignored; see the [TSMC28HPC+ adapter guide](tsmc28hpcp.md).
 
 For solver internals, see [Core Solver Overview](module_overview.md).
 
@@ -78,21 +79,25 @@ scipy; Numba is optional but recommended — the solver hot paths are JIT kernel
 service layer (`circuit-opt serve`, see below). Everything so far runs with no
 external simulator and no license.
 
-**External open-source tools (only for the silicon PDKs — not pip-installable).**
+**External tools and model files (only for the silicon PDKs — not pip-installable).**
 The AT4000TG OTFT process and all analyses work fully without these; only
-`sky130.*` / `freepdk45.*` model types need them, and they raise a clear error at
+`sky130.*` / `freepdk45.*` / `tsmc28hpcp.*` model types need them, and they raise a clear error at
 first use if absent.
 
 | Tool | Role in this project | Point at it with |
 |------|----------------------|------------------|
 | **[OpenVAF-Reloaded](https://github.com/751K/OpenVAF-Reloaded)** — a maintained fork of [OpenVAF](https://github.com/pascalkuthe/OpenVAF) | Compiles standard Verilog-A compact models (BSIM4, …) to a native `.osdi` shared library; the **SKY130** device path loads it through the OSDI host (`circuitopt/osdi_host.py`), driven by the in-repo `tools/vacompile.sh` wrapper | `OPENVAF_BIN` / `OPENVAF_ROOT` |
-| **[ngspice](https://ngspice.sourceforge.io/)** | Its built-in C-BSIM4 is the exact device evaluator / oracle for **FreePDK45** (`circuitopt/ngspice_char.py`), and resolves SKY130's binned parameter cards; invoked via the in-repo `tools/run-ngspice.sh` wrapper | `NGSPICE_BIN` |
-| PDK card files (SKY130 via `volare`/`ciel`; FreePDK45 cards) | The process parameters themselves | `PDK_ROOT` |
+| **[ngspice](https://ngspice.sourceforge.io/)** | Exact C-BSIM4 evaluator for **FreePDK45**, full-circuit simulator for **TSMC28HPC+**, and SKY130 card resolver; invoked via `tools/run-ngspice.sh` | `NGSPICE_BIN` |
+| PDK model files | SKY130/FreePDK45 under `PDK_ROOT`; licensed TSMC model at the project-local ignored entry below or an external installation | `PDK_ROOT`, `TSMC28_MODEL_DIR`, `TSMC28_PDK_ROOT` |
 
 Resolution contains no machine-specific absolute paths: explicit environment variables
 win, followed by the active `VIRTUAL_ENV`, project `.venv`, and finally `PATH` for
 executables. Project-local conventions are `.venv/ngspice/bin/ngspice`, `.venv/pdk/`,
-and `.venv/bin/openvaf-r`; `BSIM4_VA` can independently point at the model source.
+`.venv/bin/openvaf-r`, and
+`PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l`. `BSIM4_VA` can
+independently point at the model source. The TSMC model is covered by the user's
+foundry license/NDA even though circuitopt and ngspice do not require a commercial
+simulator license.
 
 ### CLI Reference
 
@@ -417,7 +422,7 @@ collapsed designs that would otherwise dominate the fit). See
 option reference, and `docs/module_overview.md` for the surrogate architecture and honest
 accuracy numbers.
 
-### 7. Silicon PDKs (SKY130 + FreePDK45)
+### 7. Silicon PDKs (SKY130 + FreePDK45 + TSMC28HPC+)
 
 A circuit's `models` field binds specific devices to a non-default PDK — e.g. real
 silicon SKY130 transistors (NMOS + PMOS, via an OpenVAF-compiled BSIM4 running
@@ -472,6 +477,15 @@ and Python SAR controller in a closed loop. Its current 65-point ramp measures
 **clocked StrongARM dynamic latched comparator** (strobe generated by the optional
 `adc.clock` block) — all 64 code centers convert correctly at nom/ss/ff; see the
 [FreePDK45 SAR ADC design case](freepdk45_sar_design.md).
+
+**TSMC28HPC+ (28 nm, 0.9 V core)** uses `"tsmc28hpcp.nmos"` and
+`"tsmc28hpcp.pmos"`. Its adapter references the foundry `nch_mac`/`pch_mac`
+subcircuits, expands the required HSPICE `.lib` section closure, runs ngspice in
+HSPICE compatibility mode, and reads hierarchical operating-point vectors. Full
+`.tran`, `.ac`, `.noise`, and `.op` use the original deck; cached device grids remain
+available for optimization loops. Install the single required model file at the
+portable project-relative entry documented in the
+[TSMC28HPC+ adapter guide](tsmc28hpcp.md). Do not commit the licensed payload.
 
 ---
 
@@ -682,12 +696,13 @@ reuse or batched linear solves.
 
 **A `models`/silicon device raises a toolchain error.**
 The silicon PDKs need an external toolchain that isn't a pip dependency: SKY130 wants
-OpenVAF + ngspice + the SKY130 PDK; FreePDK45 wants ngspice + the FreePDK45 cards. The
+OpenVAF + ngspice + SKY130; FreePDK45 wants ngspice + its cards; TSMC28HPC+ wants
+ngspice + the licensed 1d8 HSPICE model. The
 compile / ngspice wrappers are vendored in-repo under `tools/`; only the binaries live
 outside. Install them and point `PDK_ROOT` plus the binaries — `OPENVAF_BIN` (or
 `OPENVAF_ROOT`, which resolves `$OPENVAF_ROOT/target/release/openvaf-r`) and
 `NGSPICE_BIN` — at them (see `docs/module_overview.md`). Without it, any circuit using a
-`sky130.*` / `freepdk45.*` model type raises a clear error at first use; every other
+`sky130.*` / `freepdk45.*` / `tsmc28hpcp.*` model type raises a clear error at first use; every other
 PDK (the default AT4000TG OTFT) is unaffected. Tests gated on the toolchain
 (`tests/test_sky130*.py`, `tests/test_freepdk45.py`, `tests/test_osdi_host.py`) skip
 cleanly when it's absent.
@@ -705,6 +720,7 @@ cleanly when it's absent.
 | [SKY130 FD-OTA design case](sky130_fd_ota_design.md) | End-to-end 130 nm fully-differential OTA: architecture → surrogate → optimize → PVT |
 | [FreePDK45 FD-OTA design case](freepdk45_fd_ota_design.md) | End-to-end 45 nm/1.0 V FD-OTA, incl. the whole-OTA ngspice `.ac` cross-check |
 | [FreePDK45 SAR ADC design case](freepdk45_sar_design.md) | End-to-end 45 nm/1.0 V 6-bit differential SAR with a clocked StrongARM comparator: architecture → nom/ss/ff → dynamic → mismatch MC |
+| [TSMC28HPC+ local adapter](tsmc28hpcp.md) | Portable local model entry, process binding, supported analyses, corners, and verification |
 | [Future Plan](futureplan.md) | Strategic direction: desktop client, MCP server, ML scaling |
 | `tests/` directory | Working examples of every API call with expected outputs |
 | `benchmarks/` directory | Performance baselines and how the hardware-accelerated paths compare |

@@ -48,6 +48,12 @@ temp/
 # Figures can be regenerated; remove this rule if final figures should be tracked.
 figures/generated/
 
+# Characterization grids generated from externally installed foundry models.
+data/pdk/tsmc28hpcp/
+
+# Licensed foundry model payloads live at a stable project-relative entry point.
+PDK/tsmc28hpcp/models/
+
 # Cadence/Spectre simulation outputs
 psf/
 psfbin/

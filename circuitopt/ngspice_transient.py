@@ -1,4 +1,4 @@
-"""Full-circuit FreePDK45 transient simulation through ngspice.
+"""Full-circuit model-card transient simulation through ngspice.
 
 The fast :mod:`circuitopt.ngspice_device` adapter stores DC and small-signal
 characterisation grids, not the four-terminal BSIM4 charge state required by a
@@ -17,12 +17,11 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from .device_factory import apply_silicon_corner
-from .freepdk45_model import FREEPDK45_CORNERS
 from .ngspice_char import _run_ngspice
 from .ngspice_render import (
-    _current_input, _element, _ident, _pwl_lines, build_node_map, include_lines,
+    _current_input, _element, _ident, _pwl_lines, build_node_map,
     nodeset_line, render_controlled, render_devices, render_passives,
-    render_rail_sources, resolve_common_temperature, resolve_freepdk45_cards)
+    render_rail_sources, resolve_common_temperature, resolve_ngspice_preamble)
 
 
 @dataclass(frozen=True)
@@ -30,9 +29,11 @@ class RenderedTransient:
     netlist: str
     node_names: tuple[str, ...]
     branch_names: tuple[str, ...]
+    command_args: tuple[str, ...] = ()
+    process: str = "freepdk45"
 
 
-def render_freepdk45_transient_netlist(
+def render_ngspice_transient_netlist(
     sizes: Mapping[str, tuple[float, float]],
     bias: Mapping[str, float],
     tgrid: Sequence[float],
@@ -52,7 +53,7 @@ def render_freepdk45_transient_netlist(
     mismatch: Mapping[str, float] | None = None,
     extra_options: Mapping[str, Any] | None = None,
 ) -> RenderedTransient:
-    """Render a complete FreePDK45 ``.tran`` deck and its output-column map.
+    """Render a complete model-card-backed ``.tran`` deck and its column map.
 
     ``mismatch`` maps a device name to a threshold-voltage offset in volts, emitted
     as the BSIM4 instance parameter ``delvto`` on that transistor's M-line. This is
@@ -74,8 +75,7 @@ def render_freepdk45_transient_netlist(
         model_types, device_kwargs, corner)
     if solver_corner not in (None, {}):
         raise ValueError(
-            f"FreePDK45 transient requires a silicon corner from "
-            f"{sorted(FREEPDK45_CORNERS)}, got {corner!r}")
+            f"ngspice transient requires a supported silicon corner, got {corner!r}")
     device_kwargs = {k: dict(v) for k, v in (device_kwargs or {}).items()}
     mismatch = {str(k): float(v) for k, v in (mismatch or {}).items()}
 
@@ -87,13 +87,15 @@ def render_freepdk45_transient_netlist(
 
     # Per-polarity corner card resolution (nom/tt/ss/ff + mixed sf/fs) and the single
     # common circuit temperature — shared with the .ac/.noise/.op oracles.
-    _corner, cards, _pol = resolve_freepdk45_cards(model_types, device_kwargs, device_names)
+    adapter, _corner, preamble = resolve_ngspice_preamble(
+        model_types, device_kwargs, device_names)
     temp_c = resolve_common_temperature(device_kwargs, device_names)
 
     node_map, node = build_node_map(topo, bias, node_inputs)
 
-    lines = ["* circuitopt FreePDK45 full-charge transient"]
-    lines.extend(include_lines(cards))
+    process = adapter.name if adapter is not None else "FreePDK45"
+    lines = [f"* circuitopt {process} full-charge transient"]
+    lines.extend(preamble)
     method = str(integration_method).lower()
     if method not in {"be", "gear2"}:
         raise ValueError(f"integration_method must be 'be' or 'gear2', got {method!r}")
@@ -136,7 +138,8 @@ def render_freepdk45_transient_netlist(
 
     dev_lines, dev_branches = render_devices(
         topo, sizes, bias, node_inputs, node, nf=nf, model_types=model_types,
-        device_kwargs=device_kwargs, mismatch=mismatch, gate_nodes=gate_nodes)
+        device_kwargs=device_kwargs, mismatch=mismatch, gate_nodes=gate_nodes,
+        adapter=adapter)
     lines.extend(dev_lines)
     branch_vectors.extend(dev_branches)
 
@@ -175,7 +178,14 @@ def render_freepdk45_transient_netlist(
         netlist="\n".join(lines) + "\n",
         node_names=tuple(topo.solved),
         branch_names=tuple(name for name, _ in branch_vectors),
+        command_args=adapter.command_args if adapter is not None else (),
+        process=process,
     )
+
+
+def render_freepdk45_transient_netlist(*args, **kwargs) -> RenderedTransient:
+    """Compatibility name for the generic ngspice transient renderer."""
+    return render_ngspice_transient_netlist(*args, **kwargs)
 
 
 def transient_ngspice(
@@ -193,7 +203,7 @@ def transient_ngspice(
     with tempfile.TemporaryDirectory(prefix="circuitopt-fp45-tran-") as td:
         output_path = os.path.join(td, "waveforms.dat")
         deck_path = os.path.join(td, "deck.cir")
-        rendered = render_freepdk45_transient_netlist(
+        rendered = render_ngspice_transient_netlist(
             sizes, bias, requested_t, topo=topo, output_path=output_path,
             nf=nf, V0=V0, inputs=inputs, node_inputs=node_inputs,
             current_inputs=current_inputs, corner=corner, model_types=model_types,
@@ -203,7 +213,8 @@ def transient_ngspice(
         with open(deck_path, "w", encoding="ascii") as fh:
             fh.write(rendered.netlist)
         _run_ngspice(deck_path, output_path, timeout=timeout,
-                     what="FreePDK45 full-circuit transient")
+                     what=f"{rendered.process} full-circuit transient",
+                     extra_args=rendered.command_args)
         raw = np.loadtxt(output_path, skiprows=1, ndmin=2)
 
     expected_cols = 1 + len(rendered.node_names) + len(rendered.branch_names)
@@ -243,6 +254,7 @@ def transient_ngspice(
         "nfail": 0,
         "backend": "ngspice",
         "ngspice_transient": True,
+        "process": rendered.process,
     }
     for alias, node_name in topo.aliases.items():
         if node_name in nodes:

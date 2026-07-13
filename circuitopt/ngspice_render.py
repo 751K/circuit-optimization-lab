@@ -1,4 +1,4 @@
-"""Shared FreePDK45 ngspice deck-rendering primitives.
+"""Shared model-card ngspice deck-rendering primitives.
 
 The full-circuit ngspice oracles — ``.tran`` (:mod:`circuitopt.ngspice_transient`)
 and ``.ac`` / ``.noise`` / ``.op`` (:mod:`circuitopt.ngspice_ac`) — all render the
@@ -24,6 +24,7 @@ import numpy as np
 
 from .device_factory import dev_nf
 from .freepdk45_model import FREEPDK45_CORNERS, corner_card_dir, normalize_corner
+from .ngspice_process import adapter_for_model_types
 from .toolchain import pdk_root
 
 _IDENT = re.compile(r"[^A-Za-z0-9_.$]")
@@ -153,6 +154,22 @@ def include_lines(cards: Mapping[str, str]) -> list[str]:
     return [f'.include "{cards[polarity]}"' for polarity in sorted(cards)]
 
 
+def resolve_ngspice_preamble(model_types, device_kwargs, device_names):
+    """Resolve the process adapter and model-card lines for a complete deck.
+
+    FreePDK45 retains its historical flat-card renderer. Adapter-backed processes
+    provide their own library-section preamble and simulator command arguments.
+    Returns ``(adapter, corner, lines)``.
+    """
+    adapter = adapter_for_model_types(model_types, device_names)
+    if adapter is not None:
+        corner, lines = adapter.deck_preamble(model_types, device_kwargs, device_names)
+        return adapter, corner, list(lines)
+    corner, cards, _polarities = resolve_freepdk45_cards(
+        model_types, device_kwargs, device_names)
+    return None, corner, include_lines(cards)
+
+
 # ── node mapping ───────────────────────────────────────────────────────────────
 def build_node_map(topo, bias, node_inputs):
     """``({name: ngspice_node}, node_fn)`` for a topology.
@@ -206,8 +223,8 @@ def render_rail_sources(topo, bias, node_inputs, node, *, ac=None):
 
 # ── transistors ────────────────────────────────────────────────────────────────
 def render_devices(topo, sizes, bias, node_inputs, node, *, nf=None, model_types,
-                   device_kwargs=None, mismatch=None, gate_nodes=None):
-    """Transistor M-lines plus any per-device bulk sources.
+                   device_kwargs=None, mismatch=None, gate_nodes=None, adapter=None):
+    """Transistor M/X lines plus any per-device bulk sources.
 
     ``gate_nodes`` maps a device to a driven gate node (transient PWL gate); absent,
     the gate uses ``node(g)``. ``mismatch`` maps a device to a ``delvto`` Vth offset
@@ -241,11 +258,17 @@ def render_devices(topo, sizes, bias, node_inputs, node, *, nf=None, model_types
                 branch_vectors.append((f"bulk:{name}", source))
         W, L = sizes[name]
         gate = gate_nodes.get(name, node(g))
-        line = (f"{_element('M', name)} {node(d)} {gate} {node(s)} {bulk} {model} "
-                f"w={float(W):.17g}u l={float(L):.17g}u nf={dev_nf(nf, name)}")
         dvt = mismatch.get(name, 0.0)
-        if dvt != 0.0:
-            line += f" delvto={dvt:.17g}"
+        if adapter is None:
+            line = (f"{_element('M', name)} {node(d)} {gate} {node(s)} {bulk} {model} "
+                    f"w={float(W):.17g}u l={float(L):.17g}u nf={dev_nf(nf, name)}")
+            if dvt != 0.0:
+                line += f" delvto={dvt:.17g}"
+        else:
+            line = adapter.render_instance(
+                name=_element("X", name), d=node(d), g=gate, s=node(s), b=bulk,
+                model_type=model_type, width_um=float(W), length_um=float(L),
+                nf=dev_nf(nf, name), mismatch=dvt)
         lines.append(line)
     return lines, branch_vectors
 
