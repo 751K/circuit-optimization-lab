@@ -69,6 +69,22 @@ def dev_nf(nf: int | Mapping[str, int] | None, name: str) -> int:
     return int(nf)
 
 
+def dev_mult(mult: int | Mapping[str, int] | None, name: str) -> int:
+    """Resolve device multiplicity M (parallel-instance count) for one device.
+    mult may be None (->1), an int (global), or a per-device map {'M0':3,...}
+    (missing -> 1).  ngspice's ``m=`` multiplier scales every per-instance
+    quantity — Idc/gm, gate and junction caps, noise power — by M, so N identical
+    parallel instances render as ONE instance with ``m=N`` at the same operating
+    point (verified: i(vd) identical to N discrete clones).  Distinct from
+    :func:`dev_nf`, which splits ONE device's width into fingers without changing
+    total current."""
+    if not mult:
+        return 1
+    if isinstance(mult, dict):
+        return int(mult.get(name, 1))
+    return int(mult)
+
+
 def build_devices(sizes: Mapping[str, tuple[float, float]], *,
                   nf: int | Mapping[str, int] | None = None,
                   corner: str | Mapping[str, Any] | None = None, topo: Any,

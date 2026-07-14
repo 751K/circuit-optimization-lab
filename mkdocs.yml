@@ -43,6 +43,7 @@ nav:
       - SKY130 FD-OTA: sky130_fd_ota_design.md
       - FreePDK45 FD-OTA: freepdk45_fd_ota_design.md
       - FreePDK45 SAR ADC: freepdk45_sar_design.md
+      - TSMC28HPC+ MDAC OTA: tsmc28_mdac_ota_design.md
       - TSMC28HPC+ Local Adapter: tsmc28hpcp.md
       - AFE Design Equations: afe_design_equations.md
   - Performance:
@@ -51,6 +52,7 @@ nav:
       - Future Plan: futureplan.md
   - 中文文档:
       - 项目说明: README_zh.md
+      - TSMC28HPC+ MDAC OTA: tsmc28_mdac_ota_design.md
       - TSMC28HPC+ 本地适配: tsmc28hpcp_zh.md
       - 核心求解器概览: module_overview_zh.md
       - JSON 电路描述格式: json_circuit_format_zh.md

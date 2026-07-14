@@ -13,6 +13,7 @@ Historical benchmark plots and exploration outputs. Not tracked in git (`.gitign
 | `afe_testbench_explore.png` | " | " |
 | `pmos_gmid_gmro_multi_wl.csv` | one-off device characterization | PMOS_TFT gm/Id sweep over multiple W/L combos |
 | `pmos_gmid_gmro_multi_wl.png` | " | " |
+| `tsmc28_mdac_ota_pvt45.csv` | TSMC28HPC+ 14-bit pipeline MDAC OTA signoff | `.venv/bin/python experiments/tsmc28_mdac_pvt_campaign.py --workers 4` |
 
 ## Cleanup
 

@@ -65,6 +65,24 @@ def ngspice_binary() -> "str | None":
     return _resolve_ngspice_binary()
 
 
+def ngspice_chain_enabled(override=None) -> bool:
+    """Whether same-topology ngspice analyses may be CHAINED into one process.
+
+    The S4 speed lever: foundry macro expansion dominates every ngspice launch
+    (~2.9 s per TSMC28 ``nch_mac``/``pch_mac`` instance at parse time), so the
+    oracles chain follow-up analyses into the already-parsed process via
+    ``alter`` (which never re-expands) instead of paying the parse again.
+
+    Resolution order: an explicit ``override`` (the oracle-level ``chain``
+    kwarg) wins when not ``None``; otherwise the environment variable
+    ``CIRCUITOPT_NGSPICE_CHAIN`` is read AT CALL TIME (never cached at import)
+    — unset or ``"1"`` enables chaining, ``"0"`` disables every lever and
+    restores the one-process-per-analysis behaviour byte for byte."""
+    if override is not None:
+        return bool(override)
+    return os.environ.get("CIRCUITOPT_NGSPICE_CHAIN", "1") != "0"
+
+
 def _run_ngspice(cir: str, out_txt: str, timeout: float, what: str,
                  extra_args=()) -> None:
     """Run one ngspice batch deck, surfacing failures instead of swallowing them.

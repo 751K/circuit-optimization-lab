@@ -57,6 +57,7 @@ def _load_devices(raw_devices):
     devices = []
     sizes = {}
     nf = {}
+    mult = {}
     if not isinstance(raw_devices, list):
         raise ValueError("devices must be a list")
 
@@ -75,12 +76,17 @@ def _load_devices(raw_devices):
                                _as_number(item["L"], f"{where}.L"))
             if "NF" in item:
                 nf[name] = int(item["NF"])
+            if "M" in item:
+                m = int(item["M"])
+                if m < 1:
+                    raise ValueError(f"{where}.M must be >= 1, got {m}")
+                mult[name] = m
         elif isinstance(item, (list, tuple)) and len(item) == 4:
             name, drain, gate, source = item
         else:
             raise ValueError(f"{where} must be a device object or [name, drain, gate, source]")
         devices.append((str(name), str(drain), str(gate), str(source)))
-    return devices, sizes, nf
+    return devices, sizes, nf, mult
 
 
 # Per-device constructor kwargs accepted in a ``models`` entry (besides ``type``).
@@ -132,7 +138,7 @@ def models_from_config(
     mapping without re-running the full :func:`circuit_from_dict` parse."""
     if not isinstance(data, dict) or "devices" not in data:
         raise ValueError("circuit dict must carry a 'devices' list")
-    devices, _, _ = _load_devices(data["devices"])
+    devices, _, _, _ = _load_devices(data["devices"])
     return _load_models(data.get("models"), devices)
 
 
@@ -422,7 +428,7 @@ def circuit_from_dict(data):
     if not isinstance(rails, dict):
         raise ValueError("rails must be an object")
 
-    devices, embedded_sizes, embedded_nf = _load_devices(raw_devices)
+    devices, embedded_sizes, embedded_nf, embedded_mult = _load_devices(raw_devices)
     sizes = _load_sizes(data.get("sizes"), embedded_sizes)
     missing_sizes = [dev for dev, *_ in devices if dev not in sizes]
     if missing_sizes:
@@ -461,6 +467,7 @@ def circuit_from_dict(data):
         vcvs=_load_vcvs(data.get("vcvs")),
         cccs=_load_cccs(data.get("cccs")),
         ccvs=_load_ccvs(data.get("ccvs")),
+        device_mult=embedded_mult,
     )
     _validate_nodes(topo)
     bias = {str(k): float(v) for k, v in data.get("bias", {}).items()}

@@ -71,7 +71,7 @@ def test_adapter_renders_library_closure_and_macro_instances(tmp_path, monkeypat
         output_path=str(tmp_path / "wave.dat"), nf={"MN": 2, "MP": 4},
         inputs={"vin": np.array([0.0, 0.9])}, corner="SF",
         model_types=spec.model_types, device_kwargs=spec.device_kwargs,
-        mismatch={"MN": 0.01},
+        mismatch={"MN": 0.01}, op_devices=("MN", "MP"),
     )
     deck = rendered.netlist
     assert [line.rsplit(" ", 1)[-1] for line in deck.splitlines() if line.startswith(".lib")] == [
@@ -80,6 +80,83 @@ def test_adapter_renders_library_closure_and_macro_instances(tmp_path, monkeypat
     assert "XMP n_OUT n_gate_MP n_VDD n_VDD pch_mac" in deck
     assert rendered.command_args == ("-D", "ngbehavior=hsa")
     assert rendered.process == "TSMC28HPC+"
+    assert rendered.op_vectors == tuple(
+        (name, variable)
+        for name in ("MN", "MP")
+        for variable in ("vds", "vgs", "vdsat", "id", "gm", "gds")
+    )
+    assert "@m.xmn.main[vds]" in deck
+    assert "@m.xmp.main[gds]" in deck
+
+
+def test_device_multiplicity_renders_m_parameter(tmp_path, monkeypatch):
+    """A device dict "M" field must reach the deck as ``m=<int>`` (via
+    Topology.device_mult -> render_devices), and M=1/absent must stay
+    byte-identical to a deck that never heard of multiplicity."""
+    _fake_model_dir(tmp_path, monkeypatch)
+    from circuitopt.circuit_loader import circuit_from_dict
+    from circuitopt.ngspice_transient import render_ngspice_transient_netlist
+
+    def render(with_m):
+        raw = {
+            "name": "tsmc28_mult", "solved": ["OUT"],
+            "rails": {"VDD": "VDD", "GND": 0.0, "IN": 0.0},
+            "devices": [
+                {"name": "MN", "drain": "OUT", "gate": "IN", "source": "GND",
+                 "W": 1.0, "L": 0.03, **({"M": 3} if with_m else {})},
+                {"name": "MP", "drain": "OUT", "gate": "IN", "source": "VDD",
+                 "W": 2.0, "L": 0.03, **({"M": 1} if with_m else {})},
+            ],
+            "models": {"MN": {"type": "tsmc28hpcp.nmos"},
+                       "MP": {"type": "tsmc28hpcp.pmos", "vb": 0.9}},
+            "bias": {"VDD": 0.9}, "outputs": ["OUT"],
+            "load_caps": [["OUT", "GND", 2e-15]],
+            "transient_inputs": {"MN": "vin", "MP": "vin"},
+            "dc_guesses": [{"OUT": 0.9}],
+        }
+        spec = circuit_from_dict(raw)
+        return render_ngspice_transient_netlist(
+            spec.sizes, spec.bias, np.array([0.0, 1e-9]), topo=spec.topology,
+            output_path=str(tmp_path / "wave.dat"),
+            inputs={"vin": np.array([0.0, 0.9])},
+            model_types=spec.model_types, device_kwargs=spec.device_kwargs,
+        ).netlist
+
+    with_m, without_m = render(True), render(False)
+    assert "XMN n_OUT n_gate_MN 0 0 nch_mac w=1u l=0.029999999999999999u nf=1 m=3" in with_m
+    mp_lines = [ln for ln in with_m.splitlines() if ln.startswith("XMP")]
+    assert mp_lines and " m=" not in mp_lines[0]          # M=1 renders bare
+    assert without_m == with_m.replace(" m=3", "")        # only delta is the m=
+
+
+def test_transient_rejects_unknown_operating_point_device(tmp_path, monkeypatch):
+    _fake_model_dir(tmp_path, monkeypatch)
+    from circuitopt.ngspice_transient import render_ngspice_transient_netlist
+
+    spec = _inverter_spec()
+    with pytest.raises(ValueError, match="op_devices references unknown devices: MISSING"):
+        render_ngspice_transient_netlist(
+            spec.sizes, spec.bias, np.array([0.0, 1e-9]), topo=spec.topology,
+            output_path=str(tmp_path / "wave.dat"),
+            inputs={"vin": np.array([0.0, 0.9])}, model_types=spec.model_types,
+            device_kwargs=spec.device_kwargs, op_devices=("MISSING",),
+        )
+
+
+def test_transient_uic_renders_initial_conditions(tmp_path, monkeypatch):
+    _fake_model_dir(tmp_path, monkeypatch)
+    from circuitopt.ngspice_transient import render_ngspice_transient_netlist
+
+    spec = _inverter_spec()
+    rendered = render_ngspice_transient_netlist(
+        spec.sizes, spec.bias, np.array([0.0, 1e-9]), topo=spec.topology,
+        output_path=str(tmp_path / "wave.dat"),
+        inputs={"vin": np.array([0.0, 0.9])}, model_types=spec.model_types,
+        device_kwargs=spec.device_kwargs, V0=np.array([0.3]), uic=True,
+    )
+    assert ".ic v(n_OUT)=0.29999999999999999" in rendered.netlist
+    assert " uic\n" in rendered.netlist
+    assert ".nodeset " not in rendered.netlist
 
 
 def test_adapter_rejects_mixed_process_deck(tmp_path, monkeypatch):

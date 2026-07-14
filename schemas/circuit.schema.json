@@ -34,7 +34,7 @@
     },
     "devices": {
       "type": "array",
-      "description": "PMOS_TFT devices. Object form may carry W/L/NF; array form is [name, drain, gate, source].",
+      "description": "PMOS_TFT devices. Object form may carry W/L/NF/M (M = parallel-instance multiplicity, default 1); array form is [name, drain, gate, source].",
       "items": {
         "oneOf": [
           {"$ref": "#/$defs/deviceObject"},
@@ -660,7 +660,8 @@
         "source": {"$ref": "#/$defs/name"},
         "W": {"$ref": "#/$defs/positiveNumber"},
         "L": {"$ref": "#/$defs/positiveNumber"},
-        "NF": {"type": "integer", "minimum": 1}
+        "NF": {"type": "integer", "minimum": 1},
+        "M": {"type": "integer", "minimum": 1}
       },
       "dependentRequired": {
         "W": ["L"],

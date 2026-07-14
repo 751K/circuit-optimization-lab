@@ -13,6 +13,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TSMC28HPC+ pipeline-MDAC OTA** — Added a fully transistorized, fully
+  differential OTA powered from one 20 µA reference, generated open-loop,
+  differential-loop, two CMFB-loop, closed-loop noise, five-level residue, and
+  split-CDAC 0111→1000 testbenches, plus a resumable 45-point foundry-model PVT
+  campaign and complete ADC-to-OTA design documentation.
+
+### Changed
+
+- **Chained same-process ngspice analyses** — foundry-macro expansion dominates
+  every ngspice launch (~2.9 s per TSMC28 macro instance at parse time), so the
+  oracles now chain same-topology analyses into one process via `alter`:
+  `loop_gain_tian_ngspice` folds its v-/i-injection sweeps into a single deck,
+  `transient_ngspice_chain` runs a whole set of input-only variants (e.g. the
+  five MDAC residue levels) after one parse, and the PVT campaign merges the
+  open-loop `.ac` with the power/static-saturation `.op`. One TSMC28 MDAC PVT
+  point drops from 15 to 7 ngspice processes (28.8 → 13.3 min measured), with
+  chained results bit-identical to the per-process path.
+  `CIRCUITOPT_NGSPICE_CHAIN=0` restores the historical behaviour.
+- **Transient operating-point vectors** — `transient_ngspice` can optionally
+  return per-device `vds`, `vgs`, `vdsat`, `id`, `gm`, and `gds` waveforms and
+  final values, enabling saturation checks at the actual end of charge-transfer
+  transients instead of a replacement DC solve.
+
 ## [1.1.0] - 2026-07-13
 
 ### Added

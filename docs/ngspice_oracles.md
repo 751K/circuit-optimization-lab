@@ -110,6 +110,12 @@ op["M1"]  # {"vds","vgs","vdsat","id","gm","gds","region_ok"}
 `region_ok = |vds| >= |vdsat| + margin` (absolute values handle NMOS/PMOS uniformly) —
 the saturation-region test for a bias-point audit across the PVT grid.
 
+For a charge-transfer circuit, replacing the final transient state with a new DC
+solve can discard sampled charge. Pass `op_devices=["M1", ...]` to
+`transient_ngspice` instead: `device_op` then contains the same six quantities as
+waveforms and `device_op_final` contains their final-sample values. This is the
+MDAC campaign's saturation oracle after maximum residue and major-carry settling.
+
 ## `loop_gain_ngspice` — loop gain & phase margin
 
 Chosen method: **Middlebrook single voltage injection**. It needs only one
@@ -139,3 +145,27 @@ degrees). To apply it to the FD-OTA:
 Because PM/UGBW/GM are magnitude/relative-phase quantities, the loop-gain sign
 convention (which depends on ngspice's controlled-source current sense) does not affect
 them.
+
+### `loop_gain_tian_ngspice` — exact loop gain at a capacitive break
+
+Single voltage injection is exact **only while the `p` side stays high-impedance
+relative to the `q` side across the whole sweep**. At a MOS gate this fails at RF:
+a large input pair's Cgg (pF-class) falls to hundreds of ohms right around loop
+crossover, and the reported PM becomes a probe artifact — we measured a two-stage
+MDAC OTA loop reporting PM ≈ 98° while its closed-loop transient rang at ~500 MHz
+(true margin ≈ 25°); `gm_db = nan` in the sweep was the tell.
+
+`loop_gain_tian_ngspice` (same signature/return shape) removes the impedance
+condition with Tian's double injection (IEEE Circuits & Devices 17(1), 2001): a
+second AC run drives a testbench current source into the break's `p` node with the
+0 V vsource left in place, and the two runs' `v(p)`/`i(Vinj)` combine as
+`T = -1/(1 - 1/(2*(i1*v2 - v1*i2) + v1 + i2))` — exact for arbitrary impedances on
+both sides, orientation-symmetric, validated to machine precision against a
+two-pole analytic loop (`tests/test_pvt_machinery.py`). **PM sign-off for any loop
+broken at a capacitive gate must use this variant.** By default the v- and
+i-injection sweeps are CHAINED into one ngspice process (the current sources sit
+in the deck at `ac 0`, an `alter @src[acmag]` swaps the drive between sweeps), so
+the deck's fixed model-expansion cost is paid once — measured bit-identical to
+the two-process path on both analytic and foundry decks. Set
+`CIRCUITOPT_NGSPICE_CHAIN=0` (or `chain=False`) to force the historical
+one-process-per-sweep behaviour.

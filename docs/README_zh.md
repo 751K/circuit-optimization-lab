@@ -651,6 +651,7 @@ FreePDK45 需 ngspice + FreePDK45 卡，TSMC28HPC+ 需 ngspice + licensed 1d8 HS
 | [本地服务 API](service_api_zh.md)             | 本地 FastAPI HTTP 层：端点、job 状态机、与 CLI 的语义对应关系 |
 | [SKY130 FD-OTA 设计案例](sky130_fd_ota_design.md) | 130nm 全差分 OTA 全流程：架构 → 代理 → 优化 → PVT |
 | [FreePDK45 FD-OTA 设计案例](freepdk45_fd_ota_design.md) | 45nm/1.0V 全差分 OTA 全流程，含整机对 ngspice `.ac` 的交叉核对 |
+| [TSMC28HPC+ MDAC OTA 设计](tsmc28_mdac_ota_design.md) | 14-bit pipeline 第一级 4-bit/增益 8 MDAC OTA：指标推导、晶体管尺寸、三环稳定性、residue/码型瞬态、噪声与 45 点 PVT |
 | [TSMC28HPC+ 本地适配](tsmc28hpcp.md) | 可迁移模型入口、工艺绑定、corner、支持分析与真实模型验证 |
 | [后续开发计划](futureplan.md)                  | 未来战略方向：桌面客户端、MCP server、ML 规模化 |
 | `tests/` 目录                              | 每个 API 调用的可运行示例，带预期输出  |

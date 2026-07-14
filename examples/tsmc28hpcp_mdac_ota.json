@@ -1,0 +1,832 @@
+{
+  "name": "tsmc28hpcp_mdac_ota",
+  "description": "Closed-loop hold-phase residue transient. The initial OP sees the 2 Mohm DC helpers through closed transmission gates; the hold edge opens their far ends so they cannot leak sampled CDAC charge.",
+  "solved": [
+    "IB",
+    "NBC",
+    "VBNC",
+    "PB",
+    "PX",
+    "VBPC",
+    "VCM",
+    "VREF1",
+    "VCMIN",
+    "CMR",
+    "TAIL",
+    "A1",
+    "A2",
+    "O1",
+    "O2",
+    "B1",
+    "B2",
+    "OUTP",
+    "OUTN",
+    "MZ1",
+    "MZ2",
+    "CTRL1",
+    "CMT1",
+    "NSNS1",
+    "CTRL2",
+    "CMB",
+    "CMS",
+    "NSNS2",
+    "INP",
+    "INN",
+    "BP1",
+    "BP2",
+    "CMS1",
+    "CMPC1",
+    "CMPC2",
+    "CMRA",
+    "CMRB",
+    "RDCP",
+    "RDCN",
+    "DCH",
+    "DCHB"
+  ],
+  "rails": {
+    "VDD": "VDD",
+    "GND": 0.0
+  },
+  "bias": {
+    "VDD": 0.9
+  },
+  "devices": [
+    {
+      "name": "MBN",
+      "drain": "IB",
+      "gate": "IB",
+      "source": "GND",
+      "W": 6.0,
+      "L": 0.2,
+      "NF": 6
+    },
+    {
+      "name": "MPRN",
+      "drain": "PB",
+      "gate": "IB",
+      "source": "GND",
+      "W": 6.0,
+      "L": 0.2,
+      "NF": 6
+    },
+    {
+      "name": "MPR",
+      "drain": "PB",
+      "gate": "PB",
+      "source": "VDD",
+      "W": 1.5,
+      "L": 0.2,
+      "NF": 2
+    },
+    {
+      "name": "MPC",
+      "drain": "VBNC",
+      "gate": "PB",
+      "source": "VDD",
+      "W": 1.5,
+      "L": 0.2,
+      "NF": 2
+    },
+    {
+      "name": "MCND",
+      "drain": "VBNC",
+      "gate": "VBNC",
+      "source": "NBC",
+      "W": 3.15,
+      "L": 0.3,
+      "NF": 3
+    },
+    {
+      "name": "MCPD",
+      "drain": "VBPC",
+      "gate": "VBPC",
+      "source": "PX",
+      "W": 4.35,
+      "L": 0.3,
+      "NF": 4
+    },
+    {
+      "name": "MNC",
+      "drain": "VBPC",
+      "gate": "IB",
+      "source": "GND",
+      "W": 6.0,
+      "L": 0.2,
+      "NF": 6
+    },
+    {
+      "name": "MREPP",
+      "drain": "VREF1",
+      "gate": "PB",
+      "source": "VDD",
+      "W": 6.0,
+      "L": 0.2,
+      "NF": 6
+    },
+    {
+      "name": "MREP",
+      "drain": "VREF1",
+      "gate": "VREF1",
+      "source": "GND",
+      "W": 9.6,
+      "L": 0.3,
+      "NF": 10
+    },
+    {
+      "name": "MCMP",
+      "drain": "VCMIN",
+      "gate": "PB",
+      "source": "VDD",
+      "W": 3.0,
+      "L": 0.2,
+      "NF": 3
+    },
+    {
+      "name": "MCMD",
+      "drain": "VCMIN",
+      "gate": "VCMIN",
+      "source": "CMR",
+      "W": 5.0,
+      "L": 0.2,
+      "NF": 5
+    },
+    {
+      "name": "M0",
+      "drain": "TAIL",
+      "gate": "IB",
+      "source": "GND",
+      "W": 300.0,
+      "L": 0.2,
+      "NF": 200,
+      "M": 3
+    },
+    {
+      "name": "M1",
+      "drain": "A1",
+      "gate": "INP",
+      "source": "TAIL",
+      "W": 315.0,
+      "L": 0.35,
+      "NF": 200
+    },
+    {
+      "name": "M2",
+      "drain": "A2",
+      "gate": "INN",
+      "source": "TAIL",
+      "W": 315.0,
+      "L": 0.35,
+      "NF": 200
+    },
+    {
+      "name": "M3",
+      "drain": "O1",
+      "gate": "VBNC",
+      "source": "A1",
+      "W": 290.0,
+      "L": 0.4,
+      "NF": 200
+    },
+    {
+      "name": "M4",
+      "drain": "O2",
+      "gate": "VBNC",
+      "source": "A2",
+      "W": 290.0,
+      "L": 0.4,
+      "NF": 200
+    },
+    {
+      "name": "M5",
+      "drain": "O1",
+      "gate": "VBPC",
+      "source": "B1",
+      "W": 300.0,
+      "L": 0.3,
+      "NF": 200
+    },
+    {
+      "name": "M6",
+      "drain": "O2",
+      "gate": "VBPC",
+      "source": "B2",
+      "W": 300.0,
+      "L": 0.3,
+      "NF": 200
+    },
+    {
+      "name": "M7",
+      "drain": "B1",
+      "gate": "CTRL1",
+      "source": "VDD",
+      "W": 225.0,
+      "L": 0.3,
+      "NF": 200
+    },
+    {
+      "name": "M8",
+      "drain": "B2",
+      "gate": "CTRL1",
+      "source": "VDD",
+      "W": 225.0,
+      "L": 0.3,
+      "NF": 200
+    },
+    {
+      "name": "M9",
+      "drain": "OUTN",
+      "gate": "O1",
+      "source": "GND",
+      "W": 300.0,
+      "L": 0.4,
+      "NF": 200,
+      "M": 2
+    },
+    {
+      "name": "M10",
+      "drain": "OUTP",
+      "gate": "O2",
+      "source": "GND",
+      "W": 300.0,
+      "L": 0.4,
+      "NF": 200,
+      "M": 2
+    },
+    {
+      "name": "M11",
+      "drain": "OUTN",
+      "gate": "CTRL2",
+      "source": "VDD",
+      "W": 371.428571,
+      "L": 0.4,
+      "NF": 200,
+      "M": 3
+    },
+    {
+      "name": "M12",
+      "drain": "OUTP",
+      "gate": "CTRL2",
+      "source": "VDD",
+      "W": 371.428571,
+      "L": 0.4,
+      "NF": 200,
+      "M": 3
+    },
+    {
+      "name": "MS1",
+      "drain": "NSNS1",
+      "gate": "CMS1",
+      "source": "CMT1",
+      "W": 10.0,
+      "L": 0.2,
+      "NF": 10
+    },
+    {
+      "name": "MS2",
+      "drain": "CTRL1",
+      "gate": "VREF1",
+      "source": "CMT1",
+      "W": 10.0,
+      "L": 0.2,
+      "NF": 10
+    },
+    {
+      "name": "MT1",
+      "drain": "CMT1",
+      "gate": "IB",
+      "source": "GND",
+      "W": 9.3,
+      "L": 0.2,
+      "NF": 9
+    },
+    {
+      "name": "MDL1",
+      "drain": "CTRL1",
+      "gate": "CTRL1",
+      "source": "VDD",
+      "W": 2.25,
+      "L": 0.3,
+      "NF": 2
+    },
+    {
+      "name": "MDS1",
+      "drain": "NSNS1",
+      "gate": "NSNS1",
+      "source": "VDD",
+      "W": 2.25,
+      "L": 0.3,
+      "NF": 2
+    },
+    {
+      "name": "MRA",
+      "drain": "NSNS2",
+      "gate": "CMS",
+      "source": "CMRA",
+      "W": 40.0,
+      "L": 0.2,
+      "NF": 40
+    },
+    {
+      "name": "MRB",
+      "drain": "CTRL2",
+      "gate": "VCM",
+      "source": "CMRB",
+      "W": 40.0,
+      "L": 0.2,
+      "NF": 40
+    },
+    {
+      "name": "MTB",
+      "drain": "CMB",
+      "gate": "IB",
+      "source": "GND",
+      "W": 2.325,
+      "L": 0.2,
+      "NF": 2
+    },
+    {
+      "name": "MDL2",
+      "drain": "CTRL2",
+      "gate": "CTRL2",
+      "source": "VDD",
+      "W": 0.4875,
+      "L": 0.3,
+      "NF": 1
+    },
+    {
+      "name": "MDS2",
+      "drain": "NSNS2",
+      "gate": "NSNS2",
+      "source": "VDD",
+      "W": 0.4875,
+      "L": 0.3,
+      "NF": 1
+    },
+    {
+      "name": "MSWPN",
+      "drain": "RDCP",
+      "gate": "DCH",
+      "source": "VCMIN",
+      "W": 0.1,
+      "L": 0.05,
+      "NF": 1
+    },
+    {
+      "name": "MSWPP",
+      "drain": "RDCP",
+      "gate": "DCHB",
+      "source": "VCMIN",
+      "W": 0.2,
+      "L": 0.05,
+      "NF": 1
+    },
+    {
+      "name": "MSWNN",
+      "drain": "RDCN",
+      "gate": "DCH",
+      "source": "VCMIN",
+      "W": 0.1,
+      "L": 0.05,
+      "NF": 1
+    },
+    {
+      "name": "MSWNP",
+      "drain": "RDCN",
+      "gate": "DCHB",
+      "source": "VCMIN",
+      "W": 0.2,
+      "L": 0.05,
+      "NF": 1
+    }
+  ],
+  "models": {
+    "MBN": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MPRN": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MPR": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MPC": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MCND": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MCPD": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MNC": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MREPP": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MREP": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MCMP": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MCMD": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "M0": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "M1": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "M2": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "M3": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "M4": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "M5": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "M6": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "M7": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "M8": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "M9": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "M10": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "M11": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "M12": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MS1": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MS2": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MT1": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MDL1": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MDS1": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MRA": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MRB": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MTB": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MDL2": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MDS2": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MSWPN": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MSWPP": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    },
+    "MSWNN": {
+      "type": "tsmc28hpcp.nmos"
+    },
+    "MSWNP": {
+      "type": "tsmc28hpcp.pmos",
+      "vb": 0.9
+    }
+  },
+  "current_sources": [
+    [
+      "Iref",
+      "VDD",
+      "IB",
+      2e-05
+    ]
+  ],
+  "capacitors": [
+    {
+      "name": "CC1",
+      "a": "OUTN",
+      "b": "MZ1",
+      "C": 4e-13
+    },
+    {
+      "name": "CC2",
+      "a": "OUTP",
+      "b": "MZ2",
+      "C": 4e-13
+    },
+    {
+      "name": "CFS1",
+      "a": "OUTP",
+      "b": "CMS",
+      "C": 1e-13
+    },
+    {
+      "name": "CFS2",
+      "a": "OUTN",
+      "b": "CMS",
+      "C": 1e-13
+    },
+    {
+      "name": "CL1",
+      "a": "OUTP",
+      "b": "GND",
+      "C": 5e-13
+    },
+    {
+      "name": "CL2",
+      "a": "OUTN",
+      "b": "GND",
+      "C": 5e-13
+    },
+    {
+      "name": "CF1",
+      "a": "OUTP",
+      "b": "INP",
+      "C": 3.25e-13
+    },
+    {
+      "name": "CS1",
+      "a": "INP",
+      "b": "BP1",
+      "C": 2.6e-12
+    },
+    {
+      "name": "CF2",
+      "a": "OUTN",
+      "b": "INN",
+      "C": 3.25e-13
+    },
+    {
+      "name": "CS2",
+      "a": "INN",
+      "b": "BP2",
+      "C": 2.6e-12
+    },
+    {
+      "name": "CFCM1P",
+      "a": "O1",
+      "b": "CMS1",
+      "C": 5e-14
+    },
+    {
+      "name": "CFCM1N",
+      "a": "O2",
+      "b": "CMS1",
+      "C": 5e-14
+    },
+    {
+      "name": "CCMFB1",
+      "a": "CTRL1",
+      "b": "CMPC1",
+      "C": 4e-11
+    },
+    {
+      "name": "CMILL1",
+      "a": "CTRL1",
+      "b": "CMS1",
+      "C": 1.1e-12
+    },
+    {
+      "name": "CCMFB2",
+      "a": "CTRL2",
+      "b": "CMPC2",
+      "C": 4e-11
+    }
+  ],
+  "resistors": [
+    {
+      "name": "RVCM1",
+      "a": "VDD",
+      "b": "VCM",
+      "R": 67200.0
+    },
+    {
+      "name": "RVCM2",
+      "a": "VCM",
+      "b": "GND",
+      "R": 60000.0
+    },
+    {
+      "name": "RS1",
+      "a": "OUTP",
+      "b": "CMS",
+      "R": 100000.0
+    },
+    {
+      "name": "RS2",
+      "a": "OUTN",
+      "b": "CMS",
+      "R": 100000.0
+    },
+    {
+      "name": "RNC",
+      "a": "NBC",
+      "b": "GND",
+      "R": 34000.0
+    },
+    {
+      "name": "RCP",
+      "a": "VDD",
+      "b": "PX",
+      "R": 10000.0
+    },
+    {
+      "name": "RCM",
+      "a": "CMR",
+      "b": "GND",
+      "R": 4000.0
+    },
+    {
+      "name": "RDC1",
+      "a": "INP",
+      "b": "RDCP",
+      "R": 2000000.0
+    },
+    {
+      "name": "RDC2",
+      "a": "INN",
+      "b": "RDCN",
+      "R": 2000000.0
+    },
+    {
+      "name": "RSCM1P",
+      "a": "O1",
+      "b": "CMS1",
+      "R": 100000.0
+    },
+    {
+      "name": "RSCM1N",
+      "a": "O2",
+      "b": "CMS1",
+      "R": 100000.0
+    },
+    {
+      "name": "RCMFB1",
+      "a": "CMPC1",
+      "b": "VDD",
+      "R": 5000.0
+    },
+    {
+      "name": "RDEG2A",
+      "a": "CMRA",
+      "b": "CMB",
+      "R": 100.0
+    },
+    {
+      "name": "RDEG2B",
+      "a": "CMRB",
+      "b": "CMB",
+      "R": 100.0
+    },
+    {
+      "name": "RCMFB2",
+      "a": "CMPC2",
+      "b": "VDD",
+      "R": 200.0
+    },
+    {
+      "name": "RZ1",
+      "a": "MZ1",
+      "b": "O1",
+      "R": 100.0
+    },
+    {
+      "name": "RZ2",
+      "a": "MZ2",
+      "b": "O2",
+      "R": 100.0
+    },
+    {
+      "name": "RFLOATP",
+      "a": "RDCP",
+      "b": "VCMIN",
+      "R": 1000000000000.0
+    },
+    {
+      "name": "RFLOATN",
+      "a": "RDCN",
+      "b": "VCMIN",
+      "R": 1000000000000.0
+    }
+  ],
+  "vsources": [
+    [
+      "VBP1",
+      "BP1",
+      "GND",
+      "bp1"
+    ],
+    [
+      "VBP2",
+      "BP2",
+      "GND",
+      "bp2"
+    ],
+    [
+      "VDCH",
+      "DCH",
+      "GND",
+      "DCH"
+    ],
+    [
+      "VDCHB",
+      "DCHB",
+      "GND",
+      "DCHB"
+    ]
+  ],
+  "outputs": [
+    "OUTP",
+    "OUTN"
+  ],
+  "aliases": {
+    "vop": "OUTP",
+    "von": "OUTN"
+  },
+  "dc_guesses": [
+    {
+      "IB": 0.55,
+      "NBC": 0.3,
+      "VBNC": 0.77,
+      "PB": 0.33000000000000007,
+      "PX": 0.7,
+      "VBPC": 0.20000000000000007,
+      "VCM": 0.42452830188679247,
+      "VREF1": 0.55,
+      "VCMIN": 0.6,
+      "CMR": 0.16,
+      "TAIL": 0.15,
+      "A1": 0.27,
+      "A2": 0.27,
+      "O1": 0.55,
+      "O2": 0.55,
+      "B1": 0.72,
+      "B2": 0.72,
+      "OUTP": 0.45,
+      "OUTN": 0.45,
+      "MZ1": 0.55,
+      "MZ2": 0.55,
+      "CTRL1": 0.33000000000000007,
+      "CMT1": 0.08,
+      "CMT2": 0.08,
+      "NSNS1": 0.35,
+      "CTRL2": 0.35,
+      "CMB": 0.06,
+      "CMS": 0.45,
+      "NSNS2": 0.35,
+      "INP": 0.6,
+      "INN": 0.6,
+      "BP1": 0.45,
+      "BP2": 0.45,
+      "CMS1": 0.51,
+      "CMPC1": 0.9,
+      "CMPC2": 0.9,
+      "CMRA": 0.07,
+      "CMRB": 0.07,
+      "RDCP": 0.6,
+      "RDCN": 0.6,
+      "DCH": 0.9,
+      "DCHB": 0.0
+    }
+  ]
+}

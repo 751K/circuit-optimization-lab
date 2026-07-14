@@ -77,8 +77,12 @@ class NgspiceProcessAdapter(ABC):
     @abstractmethod
     def render_instance(self, *, name: str, d: str, g: str, s: str, b: str,
                         model_type: str, width_um: float, length_um: float,
-                        nf: int, mismatch: float = 0.0) -> str:
-        """Render one four-terminal transistor instance."""
+                        nf: int, mismatch: float = 0.0, mult: int = 1) -> str:
+        """Render one four-terminal transistor instance.
+
+        ``mult`` is the parallel-instance multiplicity (default 1 -> omitted, so an
+        existing deck stays byte-identical); ``mult > 1`` appends ``m=<int>`` to fold
+        that many identical parallel instances into one line."""
 
     @abstractmethod
     def characterization_preamble(self, corner: str, polarity: str,

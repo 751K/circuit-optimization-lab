@@ -70,11 +70,13 @@ class Tsmc28HpcpAdapter(NgspiceProcessAdapter):
         return polarity
 
     def render_instance(self, *, name, d, g, s, b, model_type, width_um,
-                        length_um, nf, mismatch=0.0):
+                        length_um, nf, mismatch=0.0, mult=1):
         polarity = self._polarity(model_type)
         model = "nch_mac" if polarity == "nmos" else "pch_mac"
         line = (f"{name} {d} {g} {s} {b} {model} "
                 f"w={float(width_um):.17g}u l={float(length_um):.17g}u nf={int(nf)}")
+        if int(mult) > 1:
+            line += f" m={int(mult)}"
         if float(mismatch) != 0.0:
             line += f" _delvto={float(mismatch):.17g}"
         return line

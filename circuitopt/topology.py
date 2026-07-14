@@ -21,8 +21,15 @@ class Topology:
                  load_caps=None, dc_guesses=None, aliases=None, transient_inputs=None,
                  resistors=None, capacitors=None, isources=None, vccs=None,
                  vsources=None, vcvs=None, cccs=None, ccvs=None, ac_drives=None,
-                 dc_tol=None, require_dc_in_box=False):
+                 dc_tol=None, require_dc_in_box=False, device_mult=None):
         self.solved = list(solved)                 # MNA node order (index = position)
+        # Optional per-device parallel multiplicity (SPICE ``m=``). Structural, like
+        # the device list itself: m parallel copies of one drawn instance. Renderers
+        # read it via ``getattr`` so older pickled/derived topologies keep working.
+        self.device_mult = {str(k): int(v) for k, v in (device_mult or {}).items()}
+        for name, m in self.device_mult.items():
+            if m < 1:
+                raise ValueError(f"device_mult[{name!r}] must be >= 1, got {m}")
         self.idx = {n: i for i, n in enumerate(self.solved)}
         self.n = len(self.solved)
         self.devices = list(devices)               # (name, drain, gate, source) by node name

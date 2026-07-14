@@ -720,6 +720,7 @@ cleanly when it's absent.
 | [SKY130 FD-OTA design case](sky130_fd_ota_design.md) | End-to-end 130 nm fully-differential OTA: architecture → surrogate → optimize → PVT |
 | [FreePDK45 FD-OTA design case](freepdk45_fd_ota_design.md) | End-to-end 45 nm/1.0 V FD-OTA, incl. the whole-OTA ngspice `.ac` cross-check |
 | [FreePDK45 SAR ADC design case](freepdk45_sar_design.md) | End-to-end 45 nm/1.0 V 6-bit differential SAR with a clocked StrongARM comparator: architecture → nom/ss/ff → dynamic → mismatch MC |
+| [TSMC28HPC+ MDAC OTA design](tsmc28_mdac_ota_design.md) | 14-bit pipeline first-stage 4-bit/gain-8 MDAC OTA: specification derivation, transistor sizing, three-loop stability, residue/code-transition transient, noise, and 45-point PVT |
 | [TSMC28HPC+ local adapter](tsmc28hpcp.md) | Portable local model entry, process binding, supported analyses, corners, and verification |
 | [Future Plan](futureplan.md) | Strategic direction: desktop client, MCP server, ML scaling |
 | `tests/` directory | Working examples of every API call with expected outputs |

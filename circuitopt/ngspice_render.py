@@ -22,7 +22,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .device_factory import dev_nf
+from .device_factory import dev_mult, dev_nf
 from .freepdk45_model import FREEPDK45_CORNERS, corner_card_dir, normalize_corner
 from .ngspice_process import adapter_for_model_types
 from .toolchain import pdk_root
@@ -223,18 +223,25 @@ def render_rail_sources(topo, bias, node_inputs, node, *, ac=None):
 
 # ── transistors ────────────────────────────────────────────────────────────────
 def render_devices(topo, sizes, bias, node_inputs, node, *, nf=None, model_types,
-                   device_kwargs=None, mismatch=None, gate_nodes=None, adapter=None):
+                   device_kwargs=None, mismatch=None, gate_nodes=None, adapter=None,
+                   mult=None):
     """Transistor M/X lines plus any per-device bulk sources.
 
     ``gate_nodes`` maps a device to a driven gate node (transient PWL gate); absent,
     the gate uses ``node(g)``. ``mismatch`` maps a device to a ``delvto`` Vth offset
-    (skipped when 0, so a zero-sigma deck is byte-identical). Returns
-    ``(lines, branch_vectors)`` with each bulk source recorded as ``("bulk:<name>", src)``.
-    Byte-identical to the transient renderer's device block."""
+    (skipped when 0, so a zero-sigma deck is byte-identical). ``mult`` maps a device
+    to an integer ``m=`` multiplicity (None/1 -> omitted, so a single-instance deck is
+    byte-identical); ``m=N`` folds N identical parallel instances into one line.
+    Returns ``(lines, branch_vectors)`` with each bulk source recorded as
+    ``("bulk:<name>", src)``. Byte-identical to the transient renderer's device block."""
     node_inputs = dict(node_inputs or {})
     device_kwargs = device_kwargs or {}
     mismatch = {str(k): float(v) for k, v in (mismatch or {}).items()}
     gate_nodes = dict(gate_nodes or {})
+    if mult is None:
+        # Structural multiplicity travels on the topology (loader: device "M" field)
+        # so no oracle signature needs to thread it; the kwarg stays as an override.
+        mult = getattr(topo, "device_mult", None) or None
     lines: list[str] = []
     branch_vectors: list[tuple[str, str]] = []
     for name, d, g, s in topo.devices:
@@ -259,16 +266,19 @@ def render_devices(topo, sizes, bias, node_inputs, node, *, nf=None, model_types
         W, L = sizes[name]
         gate = gate_nodes.get(name, node(g))
         dvt = mismatch.get(name, 0.0)
+        m = dev_mult(mult, name)
         if adapter is None:
             line = (f"{_element('M', name)} {node(d)} {gate} {node(s)} {bulk} {model} "
                     f"w={float(W):.17g}u l={float(L):.17g}u nf={dev_nf(nf, name)}")
+            if m > 1:
+                line += f" m={m}"
             if dvt != 0.0:
                 line += f" delvto={dvt:.17g}"
         else:
             line = adapter.render_instance(
                 name=_element("X", name), d=node(d), g=gate, s=node(s), b=bulk,
                 model_type=model_type, width_um=float(W), length_um=float(L),
-                nf=dev_nf(nf, name), mismatch=dvt)
+                nf=dev_nf(nf, name), mismatch=dvt, mult=m)
         lines.append(line)
     return lines, branch_vectors
 
