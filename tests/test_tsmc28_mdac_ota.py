@@ -66,13 +66,16 @@ def test_parallel_multiplicity_replaces_clone_instances():
     }
     clone_names = {"M0B", "M0C", "M9B", "M10B", "M11B", "M11C", "M12B", "M12C"}
     assert not (set(mult) & clone_names)
-    # Effective widths match the pre-collapse deck exactly.
-    eff = {name: dev["W"] * int(dev.get("M", 1))
-           for dev in deck["devices"] for name in [dev["name"]]}
-    assert eff["M0"] == pytest.approx(900.0)
-    assert eff["M9"] == eff["M10"] == pytest.approx(600.0)
-    assert eff["M11"] == eff["M12"] == pytest.approx(3 * 371.428571)
+    # Multiplied devices carry the generator's per-unit W (the JSON "W" is one
+    # unit, never the M-folded total) and the generator's MULT map is the single
+    # source of truth for every M value.  Design W/L values themselves are NOT
+    # frozen here — sizing iterates (C1 resized M9/M10); the invariant is the
+    # multiplicity MECHANISM, not the numbers.
     gen = _generator()
+    per_unit = {dev["name"]: dev["W"] for dev in deck["devices"]}
+    for name, m in gen.MULT.items():
+        assert mult[name] == m
+        assert per_unit[name] == pytest.approx(gen.SZ[name][0])
     assert list(gen.CORE_SAT_DEVICES) == ["M0", *[f"M{i}" for i in range(1, 13)]]
 
 

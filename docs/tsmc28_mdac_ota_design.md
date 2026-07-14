@@ -95,14 +95,14 @@ flowchart LR
 | MCND | NMOS cascode 复制管 | 3.15 / 0.30 / 3 |
 | MCPD | PMOS cascode 复制管 | 4.35 / 0.30 / 4 |
 | MNC | PMOS cascode 偏置下拉 | 6 / 0.20 / 6 |
-| MREPP / MREP | CMFB1 参考复制 | 6 / 0.20 / 6；9.6 / 0.30 / 10 |
+| MREPP / MREP | CMFB1 参考复制 | 6 / 0.20 / 6；11.43 / 0.20 / 11（80 µA ÷ M9 的 7 µA/µm 密度、同 L，VREF1 跨角点跟踪二级电流） |
 | MCMP / MCMD | 输入共模复制 | 3 / 0.20 / 3；5 / 0.20 / 5 |
 | M0 | 输入级尾电流源，`m=3` 并联倍乘 | 300 / 0.20 / 200 ×3 |
 | M1 / M2 | NMOS 差分输入对 | 315 / 0.35 / 200 |
 | M3 / M4 | NMOS telescopic cascode | 290 / 0.40 / 200 |
 | M5 / M6 | PMOS telescopic cascode | 300 / 0.30 / 200 |
 | M7 / M8 | CMFB1 PMOS 负载 | 225 / 0.30 / 200 |
-| M9；M10 | 第二级 NMOS 共源管，`m=2` 倍乘 | 300 / 0.40 / 200 ×2；每侧总 W 600 |
+| M9；M10 | 第二级 NMOS 共源管，`m=2` 倍乘（C1 短沟化：L 0.40→0.20 把 C1≈4 pF 压到 ~1.3 pF，p2 抬到 ~2×UGF，消除 500 MHz 大信号振铃） | 200 / 0.20 / 200 ×2；每侧总 W 400 |
 | M11；M12 | CMFB2 PMOS 输出负载，`m=3` 倍乘 | 371.43 / 0.40 / 200 ×3；每侧总 W 1114.29 |
 | MS1 / MS2 | CMFB1 差分对 | 10 / 0.20 / 10 |
 | MT1 | CMFB1 尾电流源 | 9.3 / 0.20 / 9 |
@@ -121,7 +121,7 @@ flowchart LR
 | Cs / Cf | 2.6 pF / 325 fF 每侧 | CDAC 与增益 8 反馈 |
 | CL | 500 fF 每侧 | 规格要求的外部负载 |
 | Cc | 400 fF 每侧 | 差模 Miller 补偿；没有额外理想 `COUT` |
-| Rz | 100 Ω 每侧 | 对称 poly nulling 电阻，消除 RHP 零点并避免三极区 MOS 的寄生/角落漂移 |
+| Rz | 420 Ω 每侧 | 对称 poly nulling 电阻；Rz > 1/gm9 把 Miller 零点搬到左半平面 ~1 GHz，为大信号建立轨迹补相位（C1 与二级短沟化配套整定） |
 | CMFB1 感测 | 2 × 100 kΩ，2 × 50 fF | 一级共模平均与前馈 |
 | CMFB2 感测 | 2 × 100 kΩ，2 × 100 fF | 输出共模平均与前馈 |
 | CMFB1 补偿 | 40 pF 串 5 kΩ；1.1 pF Miller | `CTRL1-CMPC1-VDD` 与 `CTRL1-CMS1` |
