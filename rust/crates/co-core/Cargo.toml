@@ -1,0 +1,8 @@
+[package]
+name = "co-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CircuitOpt numerical solver core (R1 scaffold)."
+
+[dependencies]

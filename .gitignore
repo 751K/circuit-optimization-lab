@@ -94,3 +94,6 @@ html/
 csv/
 img/
 tex/
+
+# Rust core build artifacts (rust/crates/*/target share the workspace target dir)
+rust/target/
