@@ -1,0 +1,102 @@
+{
+  "name": "tsmc28hpcp_5t_ota",
+  "description": "TSMC28HPC+ 0.9 V five-transistor OTA benchmark for native BSIM4 versus the explicit ngspice oracle. NMOS differential pair M1/M2 drives a PMOS diode/mirror load M3/M4 and NMOS tail M5. The benchmark covers DC, differential AC, output noise, and differential input-step transient without any ADC/CDAC circuitry.",
+  "solved": ["tail", "n1", "vout"],
+  "rails": {
+    "VDD": "VDD",
+    "GND": 0.0,
+    "vinp": "VCM",
+    "vinn": "VCM",
+    "vbias": "VB"
+  },
+  "devices": [
+    {
+      "name": "M1",
+      "drain": "n1",
+      "gate": "vinp",
+      "source": "tail",
+      "W": 4.0,
+      "L": 0.2,
+      "NF": 4
+    },
+    {
+      "name": "M2",
+      "drain": "vout",
+      "gate": "vinn",
+      "source": "tail",
+      "W": 4.0,
+      "L": 0.2,
+      "NF": 4
+    },
+    {
+      "name": "M3",
+      "drain": "n1",
+      "gate": "n1",
+      "source": "VDD",
+      "W": 2.0,
+      "L": 0.2,
+      "NF": 2
+    },
+    {
+      "name": "M4",
+      "drain": "vout",
+      "gate": "n1",
+      "source": "VDD",
+      "W": 2.0,
+      "L": 0.2,
+      "NF": 2
+    },
+    {
+      "name": "M5",
+      "drain": "tail",
+      "gate": "vbias",
+      "source": "GND",
+      "W": 8.0,
+      "L": 0.2,
+      "NF": 8
+    }
+  ],
+  "models": {
+    "M1": {"type": "tsmc28hpcp.nmos"},
+    "M2": {"type": "tsmc28hpcp.nmos"},
+    "M3": {"type": "tsmc28hpcp.pmos", "vb": 0.9},
+    "M4": {"type": "tsmc28hpcp.pmos", "vb": 0.9},
+    "M5": {"type": "tsmc28hpcp.nmos"}
+  },
+  "bias": {
+    "VDD": 0.9,
+    "VCM": 0.45,
+    "VB": 0.4
+  },
+  "outputs": ["vout"],
+  "input_drives": {
+    "M1": 0.5,
+    "M2": -0.5
+  },
+  "load_caps": [
+    ["vout", "GND", 2e-13]
+  ],
+  "dc_guesses": [
+    {"tail": 0.055, "n1": 0.456, "vout": 0.456},
+    {"tail": 0.08, "n1": 0.5, "vout": 0.5}
+  ],
+  "analyses": {
+    "ac": {
+      "freqs": {
+        "start": 1000.0,
+        "stop": 100000000000.0,
+        "num": 121,
+        "scale": "log"
+      }
+    },
+    "noise": {
+      "freqs": {
+        "start": 1000.0,
+        "stop": 10000000000.0,
+        "num": 81,
+        "scale": "log"
+      },
+      "band": [1000.0, 10000000000.0]
+    }
+  }
+}

@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 from .device_factory import (dev_corner, dev_nf, is_per_device_corner,
-                             build_devices, get_ss_params, resolve_binding)
+                             apply_silicon_corner, build_devices, get_ss_params,
+                             resolve_binding)
 from .dc_solver import (DC_FALLBACK_TOL, bounded_least_squares_dc,
                         dc_residual_ok, is_afe_topology,
                         is_pairwise_symmetric_afe, symmetric_continuation,
@@ -77,6 +78,8 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     topo, nf, corner, model_types, device_kwargs, x0_guess = resolve_binding(
         binding, topo=topo, nf=nf, corner=corner, model_types=model_types,
         device_kwargs=device_kwargs, x0_guess=x0_guess)
+    device_kwargs, corner = apply_silicon_corner(
+        model_types, device_kwargs, corner)
     if topo is None:
         topo = AFE_TOPO
     from scipy.optimize import fsolve
@@ -103,8 +106,21 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                 detail=f"{name} drain current -> 1e-18 (device eval failed)")
             return 1e-18
 
+    def terminal_currents(name, Vs, Vd, Vg):
+        dev = _dev_inst[name]
+        if not getattr(dev, "HAS_TERMINAL_LINEARIZATION", False):
+            return None
+        try:
+            return dev.get_terminal_currents(Vs, Vd, Vg)
+        except Exception as exc:
+            diagnostics.note_critical(
+                "model.terminal_currents_fallback", exc,
+                detail=f"{name} four-terminal DC currents unavailable; using Ids")
+            return None
+
     # ── 1. DC solve (residuals built from the topology) ──
-    residuals = lambda x: plan.dc_residuals(x, Id, gmin)
+    residuals = lambda x: plan.dc_residuals(
+        x, Id, gmin, terminal_current_fun=terminal_currents)
     per_dev = is_per_device_corner(corner)
     symmetric_fast = (x0_guess is None and not per_dev
                       and is_pairwise_symmetric_afe(sizes, nf, topo))
@@ -134,6 +150,21 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                 guesses.append(cvec)
         guesses.extend(topo.dc_guess_vectors(bias))
 
+    native_terminal_dc = any(
+        getattr(dev, "HAS_TERMINAL_LINEARIZATION", False)
+        for dev in _dev_inst.values()
+    )
+    if native_terminal_dc:
+        if not guesses:
+            guesses.extend(topo.dc_guess_vectors(bias))
+        sol = bounded_least_squares_dc(
+            residuals, guesses, topo, bias, tol=dc_tol)
+        if sol is not None:
+            nv = topo.node_vals(sol)
+            if topo.n_branches:
+                for name, index in topo.vsource_index.items():
+                    branch_currents[name] = float(sol[index])
+
     if nv is None:
         if not guesses:
             guesses.extend(topo.dc_guess_vectors(bias))
@@ -153,7 +184,8 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
             def _solve(bias_d, gm, x0):
                 try:
                     step_plan = plan if bias_d is bias else CompiledTopology(topo, bias_d)
-                    rfun = lambda z: step_plan.dc_residuals(z, Id, gm)
+                    rfun = lambda z: step_plan.dc_residuals(
+                        z, Id, gm, terminal_current_fun=terminal_currents)
                     s, _, ier, _ = fsolve(rfun, x0, full_output=True, xtol=1e-12,
                                           maxfev=4000)
                     return s if (dc_residual_ok(rfun, s, tol=dc_tol) or
@@ -272,8 +304,8 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
           for name, *_ in topo.devices}
 
     # ── 3. Build & solve the small-signal MNA (terminals from the topology) ──
-    from .ac_mna import (stamp_adm, stamp_mos_lti, stamp_vccs, stamp_vsource,
-                         stamp_vcvs, stamp_cccs, stamp_ccvs)
+    from .ac_mna import (stamp_adm, stamp_dense_lti, stamp_mos_lti, stamp_vccs,
+                         stamp_vsource, stamp_vcvs, stamp_cccs, stamp_ccvs)
     NN = plan.n_aug
     drive = topo.input_drives
     # Normalize the gain by the differential input magnitude. The stimulus is either
@@ -297,9 +329,18 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     RHS_G = np.zeros(NN, dtype=complex)
     RHS_C = np.zeros(NN, dtype=complex)
     for name, d, g, s in devs:
-        p = ss[name]
-        stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
-                       p["gm"], p["gds"], p["Cgs"], p["Cgd"])
+        dev = _dev_inst[name]
+        if getattr(dev, "HAS_TERMINAL_LINEARIZATION", False):
+            G4, C4 = dev.get_terminal_linearization(*bpts[name])
+            stamp_dense_lti(
+                G, C, RHS_G, RHS_C,
+                (d, g, s, ("v", 0.0)),
+                G4, C4,
+            )
+        else:
+            p = ss[name]
+            stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
+                           p["gm"], p["gds"], p["Cgs"], p["Cgd"])
     for a, b, cap in ac_caps:
         stamp_adm(C, RHS_C, a, b, cap)
     for _, a, b, _, gval in ac_res:

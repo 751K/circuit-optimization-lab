@@ -1,0 +1,18 @@
+#ifndef CIRCUITOPT_BSIM4_CONFIG_H
+#define CIRCUITOPT_BSIM4_CONFIG_H
+
+#define HAVE_UNISTD_H 1
+#define HAVE_STDINT_H 1
+#define HAVE_STDBOOL_H 1
+#define HAVE_STRINGS_H 1
+#define HAVE_SYS_TYPES_H 1
+#define HAVE_SYS_TIME_H 1
+#define HAVE_SYS_STAT_H 1
+#define HAVE_DIRENT_H 1
+#define HAVE_MATH_H 1
+#define HAVE_ISNAN 1
+#define HAVE_ISFINITE 1
+#define HAVE_BCOPY 1
+#define HAVE_BZERO 1
+
+#endif

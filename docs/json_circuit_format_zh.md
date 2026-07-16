@@ -196,13 +196,17 @@ examples/periodic_rc.json
   `vb=0.9`。支持 `tt`/`ss`/`ff`/`sf`/`fs`（`nom` 是 `tt` 别名）、开尔文 `temperature`
   和原生传给 foundry macro 的 `NF`。默认可迁移入口是
   `PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l`，可依次用
-  `TSMC28_MODEL_DIR`、`TSMC28_PDK_ROOT` 覆盖。完整 `.tran`、`.ac`、`.noise`、`.op`
-  通过工艺适配器直接使用原模型 deck；本地 DC/AC/noise 优化循环可使用缓存表征网格。
-  全电路 ngspice deck 必须把所有 MOS 绑定到同一工艺。详见 [TSMC28HPC+ 适配说明](tsmc28hpcp.md)。
+  `TSMC28_MODEL_DIR`、`TSMC28_PDK_ROOT` 覆盖。默认模型类型由内部 HSPICE 解析器和
+  原生 Berkeley BSIM4.5 后端完成 DC、AC、noise、transient、PSS、PAC、PNoise，
+  不启动 ngspice。需要回归交叉核对时，显式使用
+  `tsmc28hpcp_ngspice.nmos` / `.pmos` oracle 别名。详见
+  [TSMC28HPC+ 适配说明](tsmc28hpcp.md)。
 - 一个电路里部分器件是 OTFT、部分是硅是合法的——例如互补硅 OTA 独立绑定 NMOS/PMOS
   器件。见 `examples/sky130_5t_ota.json`。
-- SKY130 / FreePDK45 / TSMC28HPC+ 需要外部工具链（OpenVAF 和/或 ngspice + PDK 文件）；未安装时求解器
-  调用会给出清晰报错。详见 [核心求解器概览](module_overview_zh.md) 的"硅 PDK / OSDI 层"一节。
+- SKY130 和 FreePDK45 仍需要各自文档中的外部仿真工具链。TSMC28HPC+ 原生路径只需要
+  licensed 模型文件，以及首次编译 BSIM4 后端时可用的 C 编译器；ngspice 仅为可选 oracle。
+  缺少前置条件时求解器会清晰报错。详见
+  [核心求解器概览](module_overview_zh.md) 的"硅 PDK / OSDI 层"一节。
 
 ### `bias`
 
@@ -728,7 +732,8 @@ pnoise_irn = results["pnoise"]["irn_uV_band"]
   （nmos + pmos，经 OpenVAF 编译的 BSIM4，通过 OSDI 宿主接入）。
 - 通过 `models` 字段做逐器件模型绑定——混合 OTFT/硅电路（不覆盖时默认 PDK 仍是
   ``"at4000tg.pmos"``）。
-- 硅 DC/AC/noise；SKY130 走 OSDI 瞬态，FreePDK45 走原生 ngspice 全电荷瞬态。
+- 硅 DC/AC/noise；SKY130 走 OSDI 瞬态，FreePDK45 走 ngspice 全电荷瞬态，
+  TSMC28HPC+ 走项目内部原生 BSIM4 后端。
 
 尚未支持：
 

@@ -5,7 +5,11 @@ from circuitopt.numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_nu
 from circuitopt.adaptive_config import AdaptiveConfig, adaptive_lte_wrms, adaptive_next_h
 import circuitopt.numba_kernels as nk
 from circuitopt.pac_solver import pac_solve
-from circuitopt.pnoise_solver import pnoise_solve
+from circuitopt.pnoise_solver import (
+    _fold_terminal_noise_source,
+    _psd_matrix_sqrt,
+    pnoise_solve,
+)
 from circuitopt.pss_solver import pss_solve
 from circuitopt.transient_solver import transient
 from circuitopt.topology import Topology
@@ -167,6 +171,43 @@ def test_generic_pnoise_includes_resistor_thermal_noise():
     np.testing.assert_allclose(pnoise["out_psd"], expected, rtol=1e-5)
     assert pnoise["method"] == "lti_noise_fast_path"
     assert pnoise["pnoise_hb_solve_count"] == 0
+
+
+def test_correlated_terminal_noise_fold_matches_stationary_quadratic_form():
+    white = np.array([
+        [4.0, 1.0 - 0.5j, -2.0, 0.0],
+        [1.0 + 0.5j, 3.0, -0.5, 0.0],
+        [-2.0, -0.5, 4.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+    ]) * 1e-24
+    flicker = np.array([
+        [2.0, 0.4, -1.0, 0.0],
+        [0.4, 1.5, -0.2, 0.0],
+        [-1.0, -0.2, 2.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+    ]) * 1e-20
+    frequency = 1e3
+    z = np.array([2.0 + 0.5j, -1.0j, 0.25 - 0.5j, 0.0])
+    adj = z[:3].copy()
+    terminal_indices = (
+        np.array([0]),
+        np.array([1]),
+        np.array([2]),
+        None,
+    )
+    actual = _fold_terminal_noise_source(
+        adj,
+        terminal_indices,
+        white[None, None, :, :],
+        _psd_matrix_sqrt(flicker)[None, :, :],
+        frequency,
+        np.array([0]),
+        fundamental=1e6,
+        max_sideband=0,
+    )
+    expected = float(np.real(
+        z @ (white + flicker / frequency) @ z.conj()))
+    assert actual == pytest.approx(expected, rel=1e-12)
 
 
 def test_generic_pnoise_reuses_hb_and_adjoint_cache():

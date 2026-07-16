@@ -15,7 +15,7 @@ import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 
-from .device_model import create_device, get_default_model_type
+from .device_model import create_device, get_default_model_type, get_model_class
 
 if TYPE_CHECKING:
     from .device_model import TransistorModel
@@ -105,15 +105,28 @@ def build_devices(sizes: Mapping[str, tuple[float, float]], *,
     """
     model_types = model_types or {}
     device_kwargs = device_kwargs or {}
-    return {
-        name: create_device(
-            model_types.get(name, get_default_model_type()),
-            W=sizes[name][0], L=sizes[name][1],
-            NF=dev_nf(nf, name), **dev_corner(corner, name),
+    devices = {}
+    multiplicity = getattr(topo, "device_mult", {})
+    for name, *_ in topo.devices:
+        model_type = model_types.get(name, get_default_model_type())
+        kwargs = {
+            **dev_corner(corner, name),
             **device_kwargs.get(name, {}),
+        }
+        model_class = get_model_class(model_type)
+        if (
+            model_class is not None
+            and getattr(model_class, "SUPPORTS_MULTIPLICITY", False)
+        ):
+            kwargs.setdefault("mult", int(multiplicity.get(name, 1)))
+        devices[name] = create_device(
+            model_type,
+            W=sizes[name][0],
+            L=sizes[name][1],
+            NF=dev_nf(nf, name),
+            **kwargs,
         )
-        for name, *_ in topo.devices
-    }
+    return devices
 
 
 def get_ss_params(W: float, L: float, Vs: float, Vd: float, Vg: float,

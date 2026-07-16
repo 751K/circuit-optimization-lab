@@ -1,9 +1,9 @@
 # Full-circuit ngspice oracles (FreePDK45 and TSMC28HPC+)
 
-The local grid solvers (`ac_solve`, `noise_analysis`) evaluate model-card processes
-through cached device characterization. For sign-off-style numbers, four oracles
-render the **complete** circuit and let ngspice run the original compact-model deck
-with full charge. They live in
+FreePDK45 uses cached ngspice-C characterization in its local solvers. TSMC28HPC+
+normally uses circuitopt's native BSIM4.5 backend; ngspice is retained as an
+independent regression oracle. The oracle helpers render the **complete** circuit
+and let ngspice run the original compact-model deck with full charge. They live in
 `circuitopt/ngspice_ac.py` and share the deck renderer in `circuitopt/ngspice_render.py`
 with the `.tran` backend, so device M/X lines, R/C, E/G/F/H controlled sources,
 rails, per-polarity corner routing, temperature and supply bias render identically.
@@ -25,7 +25,7 @@ The registered model types choose the renderer:
 | Model type | SPICE instance | Model setup | ngspice arguments |
 |------------|----------------|-------------|-------------------|
 | `freepdk45.nmos` / `.pmos` | flat `M` device | per-polarity `.include` cards | default |
-| `tsmc28hpcp.nmos` / `.pmos` | `X` wrapper using `nch_mac` / `pch_mac` | explicit five-section `.lib` closure | `-D ngbehavior=hsa` |
+| `tsmc28hpcp_ngspice.nmos` / `.pmos` | `X` wrapper using `nch_mac` / `pch_mac` | explicit five-section `.lib` closure | `-D ngbehavior=hsa` |
 
 A complete circuit must use one process adapter for every MOS. Mixed foundry setup
 semantics in one full-circuit ngspice deck are rejected instead of silently selecting

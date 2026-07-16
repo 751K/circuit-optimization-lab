@@ -17,9 +17,15 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
 
-from .ac_mna import stamp_adm, stamp_mos_lti, branch_incidence
+from .ac_mna import branch_incidence, stamp_adm, stamp_dense_lti, stamp_mos_lti
 from .ac_solver import ac_solve
-from .device_factory import dev_nf, build_devices, get_ss_params, resolve_binding
+from .device_factory import (
+    apply_silicon_corner,
+    build_devices,
+    dev_nf,
+    get_ss_params,
+    resolve_binding,
+)
 from .adaptive_config import resolve_adaptive_config
 from .topology import AFE_TOPO
 from .transient_solver import transient
@@ -92,10 +98,19 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
         G = G0.copy(); C = C0.copy()
         for name, d, g, s in topo.devices:
             Vs = term_value(s, m); Vd = term_value(d, m); Vg = term_value(g, m)
-            p = get_ss_params(sizes[name][0], sizes[name][1], Vs, Vd, Vg,
-                              nf=dev_nf(nf, name), dev_inst=dev_inst[name])
-            stamp_mos_lti(G, C, rg, rc, term(d), term(g), term(s),
-                           p["gm"], p["gds"], p["Cgs"], p["Cgd"])
+            dev = dev_inst[name]
+            if getattr(dev, "HAS_TERMINAL_LINEARIZATION", False):
+                G4, C4 = dev.get_terminal_linearization(Vs, Vd, Vg)
+                stamp_dense_lti(
+                    G, C, rg, rc,
+                    (term(d), term(g), term(s), ("v", 0.0)),
+                    G4, C4,
+                )
+            else:
+                p = get_ss_params(sizes[name][0], sizes[name][1], Vs, Vd, Vg,
+                                  nf=dev_nf(nf, name), dev_inst=dev)
+                stamp_mos_lti(G, C, rg, rc, term(d), term(g), term(s),
+                               p["gm"], p["gds"], p["Cgs"], p["Cgd"])
         return G, C
 
     def _solve(J, B):
@@ -617,9 +632,20 @@ class _PSSShootingStepper:
                 not self.adaptive or self.runner.adaptive_grid_frozen):
             try:
                 if self.mono_dev_inst is None:
+                    transient_kwargs = self.runner.transient_kwargs
+                    device_kwargs, corner = apply_silicon_corner(
+                        transient_kwargs.get("model_types"),
+                        transient_kwargs.get("device_kwargs"),
+                        transient_kwargs.get("corner"),
+                    )
                     self.mono_dev_inst = build_devices(
-                        self.sizes, nf=self.nf, corner=self.runner.transient_kwargs.get("corner"),
-                        topo=self.topo)
+                        self.sizes,
+                        nf=self.nf,
+                        corner=corner,
+                        topo=self.topo,
+                        model_types=transient_kwargs.get("model_types"),
+                        device_kwargs=device_kwargs,
+                    )
                 phi = _shooting_monodromy(
                     tr, self.topo, self.sizes, self.nf, self.bias, self.inputs,
                     self.node_inputs, self.mono_dev_inst,

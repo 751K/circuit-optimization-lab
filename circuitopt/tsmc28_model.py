@@ -28,7 +28,7 @@ _MODEL_FILE = "cln28hpcp_1d8_elk_v1d0_2p2.l"
 
 class Tsmc28HpcpAdapter(NgspiceProcessAdapter):
     name = "TSMC28HPC+"
-    model_prefix = "tsmc28hpcp"
+    model_prefix = "tsmc28hpcp_ngspice"
     corners = ("tt", "ss", "ff", "sf", "fs")
     default_corner = "tt"
     vdd = 0.9
@@ -132,4 +132,8 @@ class Tsmc28Pfet(_Tsmc28CoreFet):
     MODEL_NAME = "pch_mac"
 
 
-register_pdk("tsmc28hpcp", {"nmos": Tsmc28Nfet, "pmos": Tsmc28Pfet}, default=False)
+register_pdk(
+    "tsmc28hpcp_ngspice",
+    {"nmos": Tsmc28Nfet, "pmos": Tsmc28Pfet},
+    default=False,
+)

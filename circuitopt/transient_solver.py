@@ -1152,6 +1152,21 @@ def ngspice_model_names(model_types):
     return tuple(names)
 
 
+def native_bsim4_model_names(model_types):
+    """Names bound to the in-process native BSIM4 charge transient."""
+    if not model_types:
+        return ()
+    from .device_model import get_model_class
+    return tuple(
+        name
+        for name, model_type in model_types.items()
+        if (
+            (model_class := get_model_class(model_type)) is not None
+            and getattr(model_class, "TRANSIENT_BACKEND", None) == "bsim4_native"
+        )
+    )
+
+
 def freepdk45_model_names(model_types):
     """Compatibility alias for callers that previously queried ngspice routing."""
     return tuple(name for name in ngspice_model_names(model_types)
@@ -1250,6 +1265,44 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         device_kwargs=device_kwargs)
     if topo is None:
         topo = AFE_TOPO
+    if native_bsim4_model_names(model_types):
+        from .compact_models.bsim4.transient import transient_native_bsim4
+        from .device_factory import apply_silicon_corner
+
+        native_kwargs = {
+            name: dict(values)
+            for name, values in (device_kwargs or {}).items()
+        }
+        native_kwargs, native_corner = apply_silicon_corner(
+            model_types, native_kwargs, corner)
+        for name, offset in (mismatch or {}).items():
+            native_kwargs.setdefault(name, {})["_delvto"] = float(offset)
+        _inputs = inputs
+        if _inputs is None:
+            _inputs = {}
+            if vip is not None:
+                _inputs["vip"] = vip
+            if vin is not None:
+                _inputs["vin"] = vin
+        return transient_native_bsim4(
+            sizes,
+            bias,
+            tgrid,
+            topo=topo,
+            nf=nf,
+            V0=V0,
+            inputs=_inputs,
+            node_inputs=node_inputs,
+            current_inputs=current_inputs,
+            corner=native_corner,
+            model_types=model_types,
+            device_kwargs=native_kwargs,
+            integration_method=integration_method,
+            newton_maxit=max(int(newton_maxit), 40),
+            newton_vtol=newton_vtol,
+            newton_step_limit=min(float(newton_step_limit), 0.25),
+            max_step=max_step,
+        )
     if ngspice_model_names(model_types):
         from .ngspice_transient import transient_ngspice
         _inputs = inputs

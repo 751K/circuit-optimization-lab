@@ -413,18 +413,34 @@ class CompiledTopology:
                 ctrl_bi=ctrl_bi, bi=self.n + offset + k, gamma=float(gamma)))
         return tuple(out)
 
-    def dc_residuals(self, x, Idfun, gmin):
+    def dc_residuals(self, x, Idfun, gmin, terminal_current_fun=None):
         """KCL residual using compiled terminal tokens (length n_aug; gmin on node rows)."""
         res = np.zeros(self.n_aug)
         for dev in self.devices:
-            i = Idfun(dev.name,
-                      self.term_value(dev.s, x),
-                      self.term_value(dev.d, x),
-                      self.term_value(dev.g, x))
-            if dev.di is not None:
-                res[dev.di] += i
-            if dev.si is not None:
-                res[dev.si] -= i
+            vs = self.term_value(dev.s, x)
+            vd = self.term_value(dev.d, x)
+            vg = self.term_value(dev.g, x)
+            currents = (
+                terminal_current_fun(dev.name, vs, vd, vg)
+                if terminal_current_fun is not None
+                else None
+            )
+            if currents is None:
+                i = Idfun(dev.name, vs, vd, vg)
+                if dev.di is not None:
+                    res[dev.di] += i
+                if dev.si is not None:
+                    res[dev.si] -= i
+            else:
+                # Compact-model terminal order is (d, g, s, b), with current
+                # positive leaving the terminal. The DC residual uses positive
+                # current injection, hence the minus sign.
+                for row, current in zip(
+                    (dev.di, dev.gi, dev.si, None),
+                    currents,
+                ):
+                    if row is not None:
+                        res[row] -= float(current)
         for item in self.resistors:
             i_ab = (self.term_value(item.a, x) - self.term_value(item.b, x)) * item.g
             if item.ai is not None:

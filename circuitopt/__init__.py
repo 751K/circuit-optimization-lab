@@ -49,7 +49,8 @@ from .pac_solver import pac_solve
 from . import pmos_tft_model  # noqa: F401 — triggers register_pdk("at4000tg", …)
 from . import sky130_model    # noqa: F401 — triggers register_pdk("sky130", …)
 from . import freepdk45_model  # noqa: F401 — triggers register_pdk("freepdk45", …)
-from . import tsmc28_model  # noqa: F401 — triggers register_pdk("tsmc28hpcp", …)
+from . import tsmc28_model  # noqa: F401 — registers explicit ngspice oracle PDK
+from .pdk.tsmc28 import device as _tsmc28_native_device  # noqa: F401
 from .pnoise_solver import pnoise_solve
 from .pss_solver import pss_solve
 from .topology import Topology

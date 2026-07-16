@@ -17,8 +17,14 @@ from scipy.sparse import linalg as _spla
 from .ac_mna import stamp_adm, stamp_dense_lti, stamp_mos_lti, branch_incidence
 from .ac_solver import bw_from_gain, ac_solve
 from .compiled_topology import term_arrays
-from .device_factory import (dev_corner, dev_nf, build_devices, get_ss_params,
-                             resolve_binding)
+from .device_factory import (
+    apply_silicon_corner,
+    build_devices,
+    dev_corner,
+    dev_nf,
+    get_ss_params,
+    resolve_binding,
+)
 from .numba_kernels import (_pnoise_hb_blocks_impl, pac_hb_blocks_numba,
                             pac_linearize_orbit_numba,
                             pac_linearize_orbit_gate1_numba, py_impl)
@@ -1536,6 +1542,8 @@ def pac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
     # per-device model binding (silicon) travels with the PSS result
     model_types = pss_result.get("model_types")
     device_kwargs = pss_result.get("device_kwargs")
+    device_kwargs, corner = apply_silicon_corner(
+        model_types, device_kwargs, corner)
     compute_condition = _resolve_compute_condition(
         compute_condition, profile=profile, debug=debug)
 

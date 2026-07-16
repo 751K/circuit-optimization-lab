@@ -22,7 +22,7 @@
 实现刻意保持小而自包含，包含 `__init__.py`、CLI 入口 `__main__.py`、校准/PSF/Cadence 网表辅助模块、共享诊断/profiling
 模块、主求解器栈、一套 ML surrogate 层（数据集构建、surrogate 训练、筛选-校验优化器）、接入同一套
 `TransistorModel` 接口的三个硅 PDK——SKY130（OpenVAF/OSDI）、FreePDK45（ngspice-C）与
-TSMC28HPC+（可迁移 ngspice 工艺适配器）——
+TSMC28HPC+（内部 HSPICE 解析器与原生 Berkeley BSIM4.5）——
 以及架在整个栈之上的可选本地 HTTP 服务层（`circuitopt/service/`）。
 
 ## 文件结构
@@ -714,17 +714,15 @@ exact ngspice-C）。已验证 model==oracle:单器件 op 逐位对 ngspice `.op
   是合法 corner 名的公开元组；服务层 `GET /api/v1/capabilities` 直接读取它
   （连同 `device_factory.SKY130_CORNERS`、`device_factory.CORNERS`），而不是硬编码三个工艺角家族。
 
-### TSMC28HPC+ 工艺适配器（`ngspice_process.py` / `tsmc28_model.py`）
+### TSMC28HPC+ 原生适配（`spice/` / `compact_models/bsim4/` / `pdk/tsmc28/`）
 
-`NgspiceProcessAdapter` 把 foundry 特有网表语义与 circuitopt 拓扑/求解器隔离。适配器负责 model-card
-前导、MOS 实例语法、层级工作点向量、corner 校验、缓存命名空间和额外 ngspice 启动参数。
-FreePDK45 保留原有扁平卡路径；TSMC28HPC+ 走适配器路径，源码中不嵌入任何模型参数。
+内部 HSPICE 前端负责 `.lib`/`.include` 闭包、参数表达式、子电路、foundry MOS macro
+和尺寸 bin。TSMC28 library 层为每个实例选择 0.9V `nch_mac` / `pch_mac` core 模型，
+再把展开后的模型参数和实例参数交给原生 Berkeley BSIM4.5 后端。
 
-`Tsmc28HpcpAdapter` 面向 licensed 1d8 HSPICE deck 里的 0.9V `nch_mac` / `pch_mac` core wrapper。
-它显式展开 `setup`、工艺角、`global`、`total`、`stat` 五个 `.lib` section，并使用
-`-D ngbehavior=hsa` 启动 ngspice。`NF` 在 foundry wrapper 内原生表征；层级
-`@m.x*.main[...]` 向量提供 Id/gm/gds/电容及完整电路 `.op` 数据。完整 `.tran`、`.ac`、
-`.noise`、`.op` 共用同一适配器和模型 deck。
+原生器件提供四端电流、电荷、电导、电容和相关噪声，因此 DC、AC、noise、transient、
+PSS、PAC、PNoise 都不需要 ngspice 子进程。旧工艺适配器仅以显式
+`tsmc28hpcp_ngspice.*` 名称保留，作为独立回归 oracle。
 
 默认可迁移模型入口为
 `PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l`，且被 Git 忽略。

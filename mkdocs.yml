@@ -39,6 +39,7 @@ nav:
       - Service API: service_api.md
   - Architecture:
       - Module Overview: module_overview.md
+      - Native TSMC28 BSIM4 Backend: development/native_bsim4_plan.md
   - Design Cases:
       - SKY130 FD-OTA: sky130_fd_ota_design.md
       - FreePDK45 FD-OTA: freepdk45_fd_ota_design.md

@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Native TSMC28 BSIM4 simulation** — Added an internal HSPICE frontend for
+  `.lib`/`.include` closure, parameter expressions, foundry MOS macros, model
+  bins, and a bundled Berkeley BSIM4.5 native backend. The default
+  `tsmc28hpcp.nmos` / `.pmos` models now expose four-terminal currents, charges,
+  conductance, capacitance, and correlated noise without launching ngspice.
+- **TSMC28 5T OTA cross-check** — Added
+  `examples/tsmc28hpcp_5t_ota.json`,
+  `experiments/tsmc28_5t_ota_compare.py`, and regression tests covering device
+  `Id/gm/gds`, differential AC, 1 kHz--10 GHz integrated output noise, and a
+  2 mV differential-step transient against the explicit ngspice oracle.
 - **TSMC28HPC+ pipeline-MDAC OTA** — Added a fully transistorized, fully
   differential OTA powered from one 20 µA reference, generated open-loop,
   differential-loop, two CMFB-loop, closed-loop noise, five-level residue, and
@@ -23,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **TSMC28 default backend** — `tsmc28hpcp.*` now selects the native BSIM4
+  implementation. The former subprocess-backed implementation remains
+  available as `tsmc28hpcp_ngspice.*` for independent oracle comparisons.
+- **Full-terminal periodic analysis** — PSS/PAC use the native four-terminal
+  conductance/charge linearization. PNoise now folds the full Hermitian terminal
+  noise covariance, preserves cross-terminal correlation, and extracts the
+  foundry model's flicker exponent instead of assuming exact `1/f`.
 - **Chained same-process ngspice analyses** — foundry-macro expansion dominates
   every ngspice launch (~2.9 s per TSMC28 macro instance at parse time), so the
   oracles now chain same-topology analyses into one process via `alter`:

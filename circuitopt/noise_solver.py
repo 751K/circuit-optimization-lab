@@ -28,10 +28,11 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 from .device_model import create_device, get_default_model_type
-from .ac_mna import (stamp_adm, stamp_mos_lti, stamp_vccs, stamp_vsource,
-                     stamp_vcvs, stamp_cccs, stamp_ccvs)
+from .ac_mna import (stamp_adm, stamp_dense_lti, stamp_mos_lti, stamp_vccs,
+                     stamp_vsource, stamp_vcvs, stamp_cccs, stamp_ccvs)
 from .ac_solver import ac_solve
-from .device_factory import dev_corner, dev_nf, resolve_binding
+from .device_factory import (apply_silicon_corner, build_devices, dev_corner,
+                             dev_nf, resolve_binding)
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
 from . import diagnostics
@@ -74,6 +75,8 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
     topo, nf, corner, model_types, device_kwargs, x0_guess = resolve_binding(
         binding, topo=topo, nf=nf, corner=corner, model_types=model_types,
         device_kwargs=device_kwargs, x0_guess=x0_guess)
+    device_kwargs, corner = apply_silicon_corner(
+        model_types, device_kwargs, corner)
     if topo is None:
         topo = AFE_TOPO
     # ── 1. DC + small-signal params + gain (reuse the validated AC solver) ──
@@ -95,6 +98,10 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
     node_vals = {nm: dc[nm] for nm in plan.solved}
     bpts = plan.bias_points(node_vals)
     devs = plan.ac_devices(drive={})
+    dev_inst = build_devices(
+        sizes, nf=nf, corner=corner, topo=topo,
+        model_types=model_types, device_kwargs=device_kwargs,
+    )
     ac_caps = plan.ac_capacitors()
     ac_res = plan.ac_resistors()
     ac_vccs = plan.ac_vccs()
@@ -105,6 +112,10 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
     psd = {}
     psd_split = {}
     for name in bpts:
+        if getattr(dev_inst[name], "HAS_TERMINAL_NOISE", False):
+            psd[name] = None
+            psd_split[name] = None
+            continue
         W, L = sizes[name]
         Vs, Vd, Vg = bpts[name]
         S, S_th, S_fl1 = device_psd(
@@ -128,9 +139,18 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
     RHS_G = np.zeros(NN, dtype=complex)
     RHS_C = np.zeros(NN, dtype=complex)
     for name, d, g, s in devs:
-        p = ss[name]
-        stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
-                       p["gm"], p["gds"], p["Cgs"], p["Cgd"])
+        dev = dev_inst[name]
+        if getattr(dev, "HAS_TERMINAL_LINEARIZATION", False):
+            G4, C4 = dev.get_terminal_linearization(*bpts[name])
+            stamp_dense_lti(
+                G, C, RHS_G, RHS_C,
+                (d, g, s, ("v", 0.0)),
+                G4, C4,
+            )
+        else:
+            p = ss[name]
+            stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
+                           p["gm"], p["gds"], p["Cgs"], p["Cgd"])
     for a, b, cap in ac_caps:
         stamp_adm(C, RHS_C, a, b, cap)
     for _, a, b, _, gval in ac_res:
@@ -165,7 +185,44 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
 
     for name in bpts:
         d, s = inj[name]
-        contrib = (np.abs(transimpedance(d, s)) ** 2) * psd[name]
+        dev = dev_inst[name]
+        if getattr(dev, "HAS_TERMINAL_NOISE", False):
+            terms = next(
+                (d0, g0, s0, ("v", 0.0))
+                for dev_name, d0, g0, s0 in devs
+                if dev_name == name
+            )
+            z = np.zeros((len(freqs), 4), dtype=complex)
+            for terminal_index, term in enumerate(terms):
+                if term[0] == "n":
+                    z[:, terminal_index] = tvec[:, term[1]]
+            contrib = np.zeros(len(freqs))
+            white = np.zeros(len(freqs))
+            flicker = np.zeros(len(freqs))
+            Vs, Vd, Vg = bpts[name]
+            for fi, frequency in enumerate(freqs):
+                noise = dev.get_terminal_noise(Vs, Vd, Vg, float(frequency))
+                zi = z[fi]
+                contrib[fi] = max(
+                    float(np.real(zi @ noise.spectral_density @ zi.conj())),
+                    0.0,
+                )
+                for component_name, target in (
+                    ("white", white),
+                    ("flicker", flicker),
+                ):
+                    matrix = noise.components.get(component_name)
+                    if matrix is not None:
+                        target[fi] = max(
+                            float(np.real(zi @ matrix @ zi.conj())),
+                            0.0,
+                        )
+            psd_split[name] = {
+                "white_out_psd": white,
+                "flicker_out_psd": flicker,
+            }
+        else:
+            contrib = (np.abs(transimpedance(d, s)) ** 2) * psd[name]
         dev_psd[name] = contrib
         out_psd += contrib
     for rname, ta, tb, S_th in res_inj:                  # resistor thermal noise 4kT/R

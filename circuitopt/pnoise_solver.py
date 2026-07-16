@@ -24,8 +24,14 @@ except Exception:  # pragma: no cover - scipy is a project dependency
     _spla = None
 
 from .ac_mna import branch_incidence
-from .device_factory import (dev_corner, dev_nf, build_devices, get_ss_params,
-                             resolve_binding)
+from .device_factory import (
+    apply_silicon_corner,
+    build_devices,
+    dev_corner,
+    dev_nf,
+    get_ss_params,
+    resolve_binding,
+)
 from .noise_solver import band_rms, noise_analysis
 from .numba_kernels import (_pnoise_hb_blocks_impl, pnoise_fold_psd_numba,
                             pnoise_hb_blocks_numba, py_impl)
@@ -47,6 +53,50 @@ if TYPE_CHECKING:
 _KB = 1.380649e-23
 _TEMP = 300.15
 _HB_SOLVERS = {"auto", "dense", "sparse", "iterative"}
+
+
+def _psd_matrix_sqrt(matrix):
+    """Hermitian PSD square root used to modulate correlated 1/f noise."""
+    matrix = np.asarray(matrix, dtype=complex)
+    hermitian = 0.5 * (matrix + matrix.conj().T)
+    values, vectors = np.linalg.eigh(hermitian)
+    values = np.maximum(values.real, 0.0)
+    return (vectors * np.sqrt(values)[None, :]) @ vectors.conj().T
+
+
+def _fold_terminal_noise_source(
+        adj, terminal_indices, white_grid, flicker_vector,
+        frequency, ks, fundamental, max_sideband, flicker_exponent=1.0):
+    """Fold one correlated multi-terminal cyclostationary noise source."""
+    nb = len(ks)
+    zterm = np.zeros((nb, len(terminal_indices)), dtype=complex)
+    for terminal, indices in enumerate(terminal_indices):
+        if indices is not None:
+            zterm[:, terminal] = adj[indices]
+
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        contribution = float(np.real(np.einsum(
+            "ra,rlab,lb->",
+            zterm,
+            white_grid,
+            np.conj(zterm),
+            optimize=True,
+        )))
+        nu = np.abs(float(frequency) + ks * float(fundamental))
+        nu[nu < 1e-9] = 1e-9
+        two_k = 2 * int(max_sideband)
+        modulated = np.empty((nb, flicker_vector.shape[-1]), dtype=complex)
+        for sideband in range(nb):
+            factors = flicker_vector[
+                two_k - sideband:two_k - sideband + nb
+            ]
+            modulated[sideband] = np.einsum(
+                "rt,rtq->q", zterm, factors, optimize=True)
+        contribution += float(np.sum(
+            (modulated.real ** 2 + modulated.imag ** 2)
+            / (nu ** float(flicker_exponent))[:, None]
+        ))
+    return max(contribution, 0.0)
 
 
 def _merge_sizes_and_nf(sizes, nf, pss_result):
@@ -605,6 +655,8 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
     # per-device model binding (silicon) travels with the PSS result
     model_types = pss_result.get("model_types")
     device_kwargs = pss_result.get("device_kwargs")
+    device_kwargs, corner = apply_silicon_corner(
+        model_types, device_kwargs, corner)
     if lti_fast_path:
         fast = _try_lti_noise_fast_path(
             all_sizes, tbias, freqs, pss_result=pss_result, nf=all_nf,
@@ -651,7 +703,7 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         return rails[node]
 
     lin_key = (
-        "pnoise_lin_gate1_v1",
+        "pnoise_lin_gate1_terminal_noise_v2",
         tuple(topo.solved),
         tuple(topo.devices),
         tuple(topo.resistors),
@@ -693,6 +745,15 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         n_state = Gt.shape[1]
         Sth = np.zeros((len(devices), N))
         Sfl = np.zeros((len(devices), N))
+        terminal_white = {}
+        terminal_flicker_factor = {}
+        terminal_flicker_exponents = {}
+        for j, (name, _d, _g, _s) in enumerate(devices):
+            if getattr(dev_inst[name], "HAS_TERMINAL_NOISE", False):
+                terminal_white[j] = np.zeros((N, 4, 4), dtype=complex)
+                terminal_flicker_factor[j] = np.zeros(
+                    (N, 4, 4), dtype=complex)
+                terminal_flicker_exponents[j] = []
         noise_failure_count = 0
         noise_failure_devices = set()
         noise_failure_reason = ""
@@ -709,6 +770,47 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
                 if name in gated_noise:
                     S_th = 4.0 * _KB * _TEMP * abs(p["gds"])
                     S_fl1 = 0.0
+                    if j in terminal_white:
+                        terminal_white[j][m, 0, 0] = S_th
+                        terminal_white[j][m, 2, 2] = S_th
+                        terminal_white[j][m, 0, 2] = -S_th
+                        terminal_white[j][m, 2, 0] = -S_th
+                        continue
+                elif j in terminal_white:
+                    try:
+                        noise = dev_inst[name].get_terminal_noise(
+                            Vs, Vd, Vg, frequency=1.0)
+                        white = noise.components.get("white")
+                        flicker = noise.components.get("flicker")
+                        if white is not None:
+                            terminal_white[j][m] = 0.5 * (
+                                white + white.conj().T)
+                        if flicker is not None:
+                            terminal_flicker_factor[j][m] = (
+                                _psd_matrix_sqrt(flicker))
+                            probe = dev_inst[name].get_terminal_noise(
+                                Vs, Vd, Vg, frequency=10.0
+                            ).components.get("flicker")
+                            ref_power = max(
+                                float(np.real(np.trace(flicker))), 0.0)
+                            probe_power = (
+                                max(float(np.real(np.trace(probe))), 0.0)
+                                if probe is not None else 0.0
+                            )
+                            if ref_power > 0.0 and probe_power > 0.0:
+                                exponent = -np.log(
+                                    probe_power / ref_power) / np.log(10.0)
+                                if np.isfinite(exponent):
+                                    terminal_flicker_exponents[j].append(
+                                        float(exponent))
+                        continue
+                    except Exception as exc:
+                        diagnostics.note("pnoise.device_noise_zeroed", exc)
+                        noise_failure_count += 1
+                        noise_failure_devices.add(name)
+                        if not noise_failure_reason:
+                            noise_failure_reason = type(exc).__name__
+                        continue
                 else:
                     try:
                         S_th, S_fl1 = dev_inst[name].get_noise_psd(
@@ -738,8 +840,22 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         Mflf = np.fft.fft(np.sqrt(Sfl), axis=1) / N
 
         all_noise_sources = []
-        for j, (name, d, _g, s) in enumerate(devices):
-            all_noise_sources.append((name, idx.get(d), idx.get(s), Sthf[j], Mflf[j]))
+        for j, (name, d, g, s) in enumerate(devices):
+            if j in terminal_white:
+                exponents = terminal_flicker_exponents[j]
+                flicker_exponent = (
+                    float(np.median(exponents)) if exponents else 1.0)
+                all_noise_sources.append((
+                    name,
+                    (idx.get(d), idx.get(g), idx.get(s), None),
+                    flicker_exponent,
+                    np.fft.fft(terminal_white[j], axis=0) / N,
+                    np.fft.fft(
+                        terminal_flicker_factor[j], axis=0) / N,
+                ))
+            else:
+                all_noise_sources.append((
+                    name, idx.get(d), idx.get(s), Sthf[j], Mflf[j]))
         for name, a, b, R in topo.resistors:
             sth = np.zeros(N, dtype=complex)
             sfl = np.zeros(N, dtype=complex)
@@ -877,16 +993,33 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
     # flicker: the sqrt(PWR) modulation harmonics M_{-2K..2K}; the fold builds the
     # cyclostationary matrix S_kl = sum_a M_{k-a} M*_{l-a} / nu_a from them.
     mvec_idx = np.arange(-2 * K, 2 * K + 1)
-    source_grids = [
-        (
-            name,
-            None if pi is None else harm_offsets + int(pi),
-            None if qi is None else harm_offsets + int(qi),
-            coeff(sth_coeff, m_grid),
-            coeff(sfl_coeff, mvec_idx),
-        )
-        for name, pi, qi, sth_coeff, sfl_coeff in noise_sources
-    ]
+    source_grids = []
+    for name, pi, qi, sth_coeff, sfl_coeff in noise_sources:
+        if isinstance(pi, tuple):
+            terminal_indices = tuple(
+                None if terminal is None
+                else harm_offsets + int(terminal)
+                for terminal in pi
+            )
+            source_grids.append((
+                name,
+                terminal_indices,
+                None,
+                coeff(sth_coeff, m_grid),
+                coeff(sfl_coeff, mvec_idx),
+                "terminal",
+                float(qi),
+            ))
+        else:
+            source_grids.append((
+                name,
+                None if pi is None else harm_offsets + int(pi),
+                None if qi is None else harm_offsets + int(qi),
+                coeff(sth_coeff, m_grid),
+                coeff(sfl_coeff, mvec_idx),
+                "scalar",
+                1.0,
+            ))
     e = np.zeros(nb * n_state, dtype=complex)
     base0 = K * n_state
     for node, weight in out_w.items():
@@ -1004,7 +1137,14 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
     fold_work = len(freqs) * max(1, len(source_grids)) * nb * nb
     # The numba fold accepts explicit source indices into the adjoint vector;
     # bordered (vsource) adjoints are wider, so fold those in Python.
-    use_numba_fold = pnoise_fold_psd_numba is not None and fold_work >= 1000 and nbr == 0
+    has_terminal_noise = any(
+        source[-2] == "terminal" for source in source_grids)
+    use_numba_fold = (
+        pnoise_fold_psd_numba is not None
+        and fold_work >= 1000
+        and nbr == 0
+        and not has_terminal_noise
+    )
     source_names = [name for name, *_ in source_grids]
     t_fold0 = time.perf_counter()
     if use_numba_fold:
@@ -1013,7 +1153,9 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         q_indices = np.full((ns, nb), -1, dtype=np.int64)
         sth_stack = np.empty((ns, nb, nb), dtype=np.complex128)
         mfl_stack = np.empty((ns, 4 * K + 1), dtype=np.complex128)
-        for si, (_name, p_idx, q_idx, sth_grid, mfl_vec) in enumerate(source_grids):
+        for si, (
+                _name, p_idx, q_idx, sth_grid, mfl_vec, _kind, _exponent
+        ) in enumerate(source_grids):
             if p_idx is not None:
                 p_indices[si] = np.asarray(p_idx, dtype=np.int64)
             if q_idx is not None:
@@ -1045,7 +1187,24 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
             nu[nu < 1e-9] = 1e-9
             inv_nu = 1.0 / nu
 
-            for name, p_idx, q_idx, sth_grid, mfl_vec in source_grids:
+            for (
+                    name, p_idx, q_idx, sth_grid, mfl_vec, kind, exponent
+            ) in source_grids:
+                if kind == "terminal":
+                    contrib = _fold_terminal_noise_source(
+                        adj,
+                        p_idx,
+                        sth_grid,
+                        mfl_vec,
+                        freq,
+                        ks,
+                        fundamental,
+                        K,
+                        exponent,
+                    )
+                    dev_psd[name][fi] += contrib
+                    out_psd[fi] += contrib
+                    continue
                 if p_idx is None:
                     Z = np.zeros(nb, dtype=complex)
                 else:
@@ -1102,6 +1261,8 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         "pnoise_internal_gate1_states": int(n_gate1),
         "pnoise_hb_solve_count": int(hb_solve_count),
         "pnoise_noise_source_count": int(len(noise_sources)),
+        "pnoise_terminal_noise_source_count": int(sum(
+            source[-2] == "terminal" for source in source_grids)),
         "pnoise_numba_hb_used": bool(hb_numba_used),
         "pnoise_numba_fold_used": bool(use_numba_fold),
         "pnoise_time_domain_used": bool(pnoise_time_domain_used),

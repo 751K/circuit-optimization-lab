@@ -203,15 +203,18 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
   `tt`/`ss`/`ff`/`sf`/`fs` (`nom` aliases `tt`); `temperature` is in kelvin and
   `NF` is passed natively to the foundry macro. The portable default model entry is
   `PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l`; overrides are
-  `TSMC28_MODEL_DIR`, then `TSMC28_PDK_ROOT`. Full `.tran`, `.ac`, `.noise`, and
-  `.op` use the original model deck through the process adapter; local DC/AC/noise
-  optimization loops may use cached characterization grids. A full-circuit ngspice
-  deck must bind every transistor to this same process. See
+  `TSMC28_MODEL_DIR`, then `TSMC28_PDK_ROOT`. The default model types use the
+  internal HSPICE parser plus native Berkeley BSIM4.5 backend for DC, AC, noise,
+  transient, PSS, PAC, and PNoise; they do not launch ngspice. Explicit
+  `tsmc28hpcp_ngspice.nmos` / `.pmos` aliases retain the complete-circuit ngspice
+  oracle for regression comparisons. See
   [TSMC28HPC+ Local Adapter](tsmc28hpcp.md).
 - A mixed circuit (some devices OTFT, some silicon) is valid — e.g. a complementary
   silicon OTA binds NMOS/PMOS devices independently. See `examples/sky130_5t_ota.json`.
-- The SKY130 / FreePDK45 / TSMC28HPC+ PDKs need an external toolchain (OpenVAF and/or ngspice plus the PDK
-  files); solver calls raise a clear error if it is not installed. See the
+- SKY130 and FreePDK45 need their documented external simulator toolchains.
+  TSMC28HPC+ native simulation needs the licensed model file and a C compiler
+  for the first BSIM4 backend build; ngspice is optional and used only by its
+  explicit oracle aliases. Missing prerequisites raise a clear error. See the
   "Silicon PDK / OSDI layer" section in [Core Solver Overview](module_overview.md).
 
 ### `bias`
@@ -781,12 +784,12 @@ Supported (model abstraction):
 - NMOS and PMOS across AT4000TG (PMOS-only), SKY130, FreePDK45, and TSMC28HPC+.
 - Per-device model binding via the ``models`` field — mixed OTFT/silicon circuits
   (default PDK stays ``"at4000tg.pmos"`` unless overridden).
-- Silicon DC/AC/noise; SKY130 uses OSDI transient, while FreePDK45 and TSMC28HPC+
-  use native ngspice full-charge transient.
+- Silicon DC/AC/noise; SKY130 uses OSDI transient, FreePDK45 uses ngspice
+  full-charge transient, and TSMC28HPC+ uses the internal native BSIM4 backend.
 
 Not yet supported:
 
-- FreePDK45/TSMC28HPC+ PSS/PAC/PNoise on the direct-ngspice backend.
+- FreePDK45 PSS/PAC/PNoise on its direct-ngspice backend.
 - ADC transient noise, per-device FreePDK45 mismatch, layout parasitic extraction, and transistor-level SAR digital control.
 - Multi-output simultaneous analysis.
 - Hierarchical subcircuits.

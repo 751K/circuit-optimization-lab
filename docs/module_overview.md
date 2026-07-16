@@ -27,7 +27,7 @@ calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
 modules, the main solver stack, an ML-surrogate layer (dataset builder, surrogate
 training, screen-and-verify optimizer), three silicon PDKs — SKY130 (via an
 OpenVAF/OSDI bridge), FreePDK45 (via an ngspice-C evaluator), and TSMC28HPC+
-(via a portable ngspice process adapter) — plugged into the
+(via the internal HSPICE parser and native Berkeley BSIM4.5 backend) — plugged into the
 same `TransistorModel` interface as the original AT4000TG OTFT model, and an
 optional local HTTP service layer (`circuitopt/service/`) over the whole stack.
 
@@ -825,20 +825,17 @@ match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see th
   layer's `GET /api/v1/capabilities` reads it directly (alongside `device_factory.SKY130_CORNERS`
   and `device_factory.CORNERS`) rather than hardcoding the three corner families.
 
-### TSMC28HPC+ process adapter (`ngspice_process.py` / `tsmc28_model.py`)
+### TSMC28HPC+ native adapter (`spice/` / `compact_models/bsim4/` / `pdk/tsmc28/`)
 
-`NgspiceProcessAdapter` isolates foundry-specific netlist semantics from circuitopt's
-topology and solvers. An adapter supplies model-card preamble lines, MOS instance
-syntax, hierarchical operating-point vectors, corner validation, cache namespace,
-and extra ngspice command arguments. FreePDK45 keeps its legacy flat-card path;
-TSMC28HPC+ uses the adapter path without embedding any model parameters in source.
+The internal HSPICE frontend resolves nested `.lib`/`.include` closures, parameters,
+expressions, subcircuits, foundry MOS macros, and geometry bins. The TSMC28 library
+layer selects the 0.9 V `nch_mac` / `pch_mac` core model for each instance and sends
+the expanded model and instance parameters to the native Berkeley BSIM4.5 backend.
 
-`Tsmc28HpcpAdapter` targets the 0.9 V `nch_mac` / `pch_mac` core wrappers in the
-licensed 1d8 HSPICE deck. It expands the required `setup`, process corner, `global`,
-`total`, and `stat` `.lib` sections and starts ngspice with
-`-D ngbehavior=hsa`. `NF` is characterized natively inside the foundry wrapper;
-hierarchical `@m.x*.main[...]` vectors provide Id/gm/gds/capacitance and full-circuit
-`.op` data. Full `.tran`, `.ac`, `.noise`, and `.op` share this same adapter and deck.
+The native device exposes four-terminal currents, charges, conductance, capacitance,
+and correlated noise. DC, AC, noise, transient, PSS, PAC, and PNoise therefore run
+without an ngspice subprocess. The old process adapter remains registered only under
+the explicit `tsmc28hpcp_ngspice.*` model names as an independent regression oracle.
 
 The default portable model entry is
 `PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l`, which is Git-ignored.

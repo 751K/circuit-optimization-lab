@@ -97,7 +97,24 @@ circuit-opt = "circuitopt.__main__:main"
 # blocker for public PyPI publishing (name collisions in shared environments).
 # ``circuitopt.service`` is listed explicitly: with an explicit ``packages`` list
 # setuptools does NOT auto-discover subpackages, so it must be named here.
-packages = ["circuitopt", "circuitopt.service"]
+packages = [
+    "circuitopt",
+    "circuitopt.service",
+    "circuitopt.spice",
+    "circuitopt.pdk",
+    "circuitopt.pdk.tsmc28",
+    "circuitopt.compact_models",
+    "circuitopt.compact_models.bsim4",
+]
+
+[tool.setuptools.package-data]
+"circuitopt.compact_models.bsim4" = [
+    "native_src/*.c",
+    "native_src/*.md",
+    "native_src/vendor/bsim4v5/*",
+    "native_src/vendor/include/ngspice/*",
+    "native_src/vendor/support/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

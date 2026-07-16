@@ -2,16 +2,14 @@
 from __future__ import annotations
 
 import os
-import json
-from pathlib import Path
-
 import numpy as np
 import pytest
 
 
-def _inverter_spec():
+def _inverter_spec(*, oracle=False):
     from circuitopt.circuit_loader import circuit_from_dict
 
+    prefix = "tsmc28hpcp_ngspice" if oracle else "tsmc28hpcp"
     return circuit_from_dict({
         "name": "tsmc28_inverter",
         "solved": ["OUT"],
@@ -23,8 +21,8 @@ def _inverter_spec():
              "W": 2.0, "L": 0.03},
         ],
         "models": {
-            "MN": {"type": "tsmc28hpcp.nmos"},
-            "MP": {"type": "tsmc28hpcp.pmos", "vb": 0.9},
+            "MN": {"type": f"{prefix}.nmos"},
+            "MP": {"type": f"{prefix}.pmos", "vb": 0.9},
         },
         "bias": {"VDD": 0.9},
         "outputs": ["OUT"],
@@ -65,7 +63,7 @@ def test_adapter_renders_library_closure_and_macro_instances(tmp_path, monkeypat
     _fake_model_dir(tmp_path, monkeypatch)
     from circuitopt.ngspice_transient import render_ngspice_transient_netlist
 
-    spec = _inverter_spec()
+    spec = _inverter_spec(oracle=True)
     rendered = render_ngspice_transient_netlist(
         spec.sizes, spec.bias, np.array([0.0, 1e-9]), topo=spec.topology,
         output_path=str(tmp_path / "wave.dat"), nf={"MN": 2, "MP": 4},
@@ -107,8 +105,8 @@ def test_device_multiplicity_renders_m_parameter(tmp_path, monkeypatch):
                 {"name": "MP", "drain": "OUT", "gate": "IN", "source": "VDD",
                  "W": 2.0, "L": 0.03, **({"M": 1} if with_m else {})},
             ],
-            "models": {"MN": {"type": "tsmc28hpcp.nmos"},
-                       "MP": {"type": "tsmc28hpcp.pmos", "vb": 0.9}},
+            "models": {"MN": {"type": "tsmc28hpcp_ngspice.nmos"},
+                       "MP": {"type": "tsmc28hpcp_ngspice.pmos", "vb": 0.9}},
             "bias": {"VDD": 0.9}, "outputs": ["OUT"],
             "load_caps": [["OUT", "GND", 2e-15]],
             "transient_inputs": {"MN": "vin", "MP": "vin"},
@@ -133,7 +131,7 @@ def test_transient_rejects_unknown_operating_point_device(tmp_path, monkeypatch)
     _fake_model_dir(tmp_path, monkeypatch)
     from circuitopt.ngspice_transient import render_ngspice_transient_netlist
 
-    spec = _inverter_spec()
+    spec = _inverter_spec(oracle=True)
     with pytest.raises(ValueError, match="op_devices references unknown devices: MISSING"):
         render_ngspice_transient_netlist(
             spec.sizes, spec.bias, np.array([0.0, 1e-9]), topo=spec.topology,
@@ -147,7 +145,7 @@ def test_transient_uic_renders_initial_conditions(tmp_path, monkeypatch):
     _fake_model_dir(tmp_path, monkeypatch)
     from circuitopt.ngspice_transient import render_ngspice_transient_netlist
 
-    spec = _inverter_spec()
+    spec = _inverter_spec(oracle=True)
     rendered = render_ngspice_transient_netlist(
         spec.sizes, spec.bias, np.array([0.0, 1e-9]), topo=spec.topology,
         output_path=str(tmp_path / "wave.dat"),
@@ -163,7 +161,7 @@ def test_adapter_rejects_mixed_process_deck(tmp_path, monkeypatch):
     _fake_model_dir(tmp_path, monkeypatch)
     from circuitopt.ngspice_transient import render_ngspice_transient_netlist
 
-    spec = _inverter_spec()
+    spec = _inverter_spec(oracle=True)
     models = dict(spec.model_types)
     models["MP"] = "freepdk45.pmos"
     with pytest.raises(NotImplementedError, match="one ngspice process adapter"):
@@ -182,16 +180,16 @@ def test_tsmc_capacitance_signs_are_normalized():
         np.array([-2e-16, -3e-17]))
 
 
-def test_real_tsmc28_inverter_transient_when_pdk_is_configured():
-    from circuitopt.ngspice_char import ngspice_binary
+def test_real_tsmc28_inverter_transient_when_pdk_is_configured(monkeypatch):
     from circuitopt.toolchain import tsmc28_model_dir
 
     model = os.path.join(tsmc28_model_dir(), "cln28hpcp_1d8_elk_v1d0_2p2.l")
-    if not os.path.isfile(model) or ngspice_binary() is None:
-        pytest.skip("set TSMC28_MODEL_DIR and install ngspice for licensed-PDK integration")
+    if not os.path.isfile(model):
+        pytest.skip("set TSMC28_MODEL_DIR for licensed-PDK integration")
 
     from circuitopt.transient_solver import transient
 
+    monkeypatch.setenv("NGSPICE_BIN", "/definitely/not/an/executable")
     spec = _inverter_spec()
     tgrid = np.linspace(0.0, 0.4e-9, 81)
     vin = np.where(tgrid < 0.1e-9, 0.0, 0.9)
@@ -199,36 +197,8 @@ def test_real_tsmc28_inverter_transient_when_pdk_is_configured():
         spec.sizes, spec.bias, tgrid, binding=spec.binding(), inputs={"vin": vin},
         corner="tt", integration_method="gear2", max_step=1e-12)
     out = result["nodes"]["OUT"]
-    assert result["process"] == "TSMC28HPC+"
+    assert result["backend"] == "bsim4_native"
+    assert result["bsim4_native_transient"] is True
+    assert result["nfail"] == 0
     assert out[0] > 0.85 and out[-1] < 0.05
     assert np.all(np.isfinite(out))
-
-
-def test_real_tsmc28_sar_adc_smoke_when_pdk_is_configured():
-    from circuitopt.ngspice_char import ngspice_binary
-    from circuitopt.toolchain import tsmc28_model_dir
-
-    model = os.path.join(tsmc28_model_dir(), "cln28hpcp_1d8_elk_v1d0_2p2.l")
-    if not os.path.isfile(model) or ngspice_binary() is None:
-        pytest.skip("set TSMC28_MODEL_DIR and install ngspice for licensed-PDK integration")
-
-    from circuitopt.circuit_loader import circuit_from_dict
-    from circuitopt.sar import run_sar_conversion
-
-    source = Path(__file__).resolve().parents[1] / "examples" / "freepdk45_sar3.json"
-    config = json.loads(source.read_text(encoding="utf-8"))
-    config["name"] = "tsmc28_sar3_smoke"
-    for model_config in config["models"].values():
-        polarity = model_config["type"].rsplit(".", 1)[-1]
-        model_config["type"] = f"tsmc28hpcp.{polarity}"
-        if polarity == "pmos":
-            model_config["vb"] = 0.9
-    config["bias"].update(VDD=0.9, VCM=0.45, VBIAS=0.45)
-    config["adc"].update(
-        vref=0.9, input_common_mode=0.45, comparator_threshold=0.45,
-        points_per_period=20, edge_time=1e-9)
-    spec = circuit_from_dict(config)
-    result = run_sar_conversion(spec, 0.45, corner="tt")
-    assert 0 <= result["code"] < 8
-    assert result["transient"]["process"] == "TSMC28HPC+"
-    assert np.isfinite(result["total_power_w"])

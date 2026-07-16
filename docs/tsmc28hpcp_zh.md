@@ -1,38 +1,40 @@
-# TSMC28HPC+ 本地工艺适配
+# TSMC28HPC+ 原生工艺适配
 
 [English](tsmc28hpcp.md) | [中文说明](tsmc28hpcp_zh.md)
 
-`tsmc28hpcp` PDK binding 用本地 ngspice 调用用户已有许可的 TSMC 28HPC+ 模型。
-当前适配目标是 1d8 HSPICE deck 中的 0.9V core `nch_mac` / `pch_mac`。模型文件
-只保存在本机，不提交到 Git；这避免泄漏，但不会改变 foundry license/NDA 的约束。
+`tsmc28hpcp` binding 在 circuitopt 内部直接求值用户本地已有许可的 TSMC
+28HPC+ 模型。默认的 `tsmc28hpcp.nmos` / `tsmc28hpcp.pmos` 不会启动
+ngspice：代码自行解析 HSPICE library 闭包、foundry MOS 宏和尺寸 bin，再由
+项目内置的 Berkeley BSIM4.5 原生后端完成器件求值。
 
-## 统一入口
+当前目标是 1d8 HSPICE deck 中的 0.9 V core `nch_mac` / `pch_mac`。foundry
+文件只保存在本机，不提交到 Git；这避免误上传，但不会改变 license/NDA 约束。
 
-项目内标准入口是：
+## 模型入口
+
+项目内标准可迁移入口是：
 
 ```text
 PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l
 ```
 
-代码从项目根目录解析该相对路径，不记录任何电脑的绝对路径。换电脑后把同一个文件放到
-相同位置即可。当前 core MOS 适配只需要这个约 7.3MB 的主模型文件，不需要把整个约 160GB
-的 iPDK delivery 搬进项目。`PDK/tsmc28hpcp/models/` 已加入 `.gitignore`。
+当前 core MOS 适配只需要这个主模型文件，不需要复制完整 iPDK delivery。
+`PDK/tsmc28hpcp/models/` 已被 Git 忽略。
 
-也可以使用外部安装，解析优先级如下：
-
-1. `TSMC28_MODEL_DIR`：直接指向包含主模型文件的 `models/hspice`。
-2. `TSMC28_PDK_ROOT`：指向 iPDK 或 delivery 根目录。
-3. 项目内标准入口 `PDK/tsmc28hpcp/`。
-4. 通用入口 `PDK_ROOT/tsmc28hpcp`。
-
-ngspice 默认从项目 uv 环境、当前虚拟环境和 `PATH` 查找，也可以显式设置：
+外部安装可以使用：
 
 ```bash
-export NGSPICE_BIN=/path/to/ngspice
+export TSMC28_MODEL_DIR=/path/to/models/hspice
+# 或
+export TSMC28_PDK_ROOT=/path/to/iPDK_delivery
 ```
 
-已验证 ngspice 46。适配器使用 `-D ngbehavior=hsa` 启动，并显式展开 foundry deck 的
-`setup`、工艺角、`global`、`total`、`stat` 五个 `.lib` section，原始模型文件不做修改。
+解析顺序为 `TSMC28_MODEL_DIR`、`TSMC28_PDK_ROOT`、项目内标准入口，最后是
+`PDK_ROOT/tsmc28hpcp`。JSON 和 Python 源码中不记录任何电脑的绝对路径。
+
+第一次使用原生 BSIM4 时，项目会从随代码提供的 Berkeley BSIM4.5 器件源码编译
+一个小型共享库，并缓存到源码树之外。因此首次运行需要本机 C 编译器；正常仿真不
+需要 ngspice。
 
 ## JSON 绑定
 
@@ -51,42 +53,44 @@ export NGSPICE_BIN=/path/to/ngspice
 ```
 
 - `W`、`L` 单位为 µm。
-- PMOS bulk 通常显式设为 core 电源 `vb=0.9`。
-- 支持 `tt`、`ss`、`ff`、`sf`、`fs`；`nom` 是 `tt` 的别名。
-- `temperature` 单位为 K，整个 ngspice 电路必须使用同一温度。
-- `NF` 原生传给 `nch_mac` / `pch_mac`，不会在 wrapper 外重复缩放。
-- 完整 ngspice deck 的所有 MOS 必须绑定同一个工艺适配器，不支持混合 foundry deck。
+- `NF` 原生传给 foundry macro，不在 wrapper 外重复缩放。
+- PMOS bulk 通常显式设置为 core 电源 `vb=0.9`。
+- 支持 `tt`、`ss`、`ff`、`sf`、`fs`；`nom` 是 `tt` 别名。
+- `temperature` 单位为 K。
+- 单管阈值失配通过 macro 的 `_delvto` 参数传入。
 
 ## 分析覆盖
 
-| 分析 | TSMC28HPC+ 路径 |
-|------|-----------------|
-| DC / 本地 AC / 本地 noise | ngspice 单管表征网格，可缓存用于优化循环 |
-| `.op` | 完整电路 ngspice，读取 `@m.x*.main[...]` 层级向量 |
-| `.ac` / `.noise` | 完整电路 ngspice，直接使用原模型 deck |
-| `transient()` | 自动路由到完整电荷 ngspice `.tran` |
-| mismatch | full transient 实例参数 `_delvto` |
-| PSS / PAC / PNoise | direct-ngspice model-card 后端尚未接入 |
+原生路径支持：
 
-本地表征网格适合大量候选的 DC/AC/noise 优化；最终带宽、结电容、开关电荷和 settling 应使用
-完整 `.ac` / `.noise` / `.tran` oracle。
+- 非线性 DC 和完整四端工作点电流；
+- AC/PAC 的四端电导与电荷线性化；
+- Noise/PNoise 的四端相关白噪声和 flicker 噪声矩阵；
+- 电荷守恒的 backward-Euler 与 Gear2 瞬态；
+- 带解析四端 monodromy 的 PSS shooting；
+- PAC 谐波转换与 PNoise 周期噪声折叠。
 
-## 已验证
+PNoise 会保留端口间相关性，并从模型中提取 flicker 指数，不再把所有器件都固定
+假设为严格 `1/f`。
 
-- `nch_mac` / `pch_mac` 单管 DC、gm、gds、Cgs、Cgd 表征。
-- CMOS 反相器完整电荷瞬态。
-- 层级 `.op` 与饱和区判断。
-- 单管白噪声和 1/f 噪声系数。
-- 3-bit SAR ADC：CDAC、采样开关、晶体管比较器、逐位重放和功耗回读。
+ngspice 只保留为独立 oracle。需要交叉核对时，显式使用
+`tsmc28hpcp_ngspice.nmos` / `tsmc28hpcp_ngspice.pmos`，或调用
+`circuitopt.ngspice_ac` 中的完整电路 helper。只有这条 oracle 路径需要
+`NGSPICE_BIN`。
+
+当前代码负责电路仿真和优化，不负责 Cadence library 导入、版图、DRC/LVS、PEX、
+可靠性检查或 tapeout sign-off；这些仍应使用官方 iPDK 与 foundry 认可的工具。
+
+## 5T OTA 验证
+
+验证电路严格只有五只 MOS，不含 ADC/CDAC：
 
 ```bash
-pytest -q tests/test_tsmc28.py
+python experiments/tsmc28_5t_ota_compare.py \
+  --output /tmp/tsmc28_5t_compare.json
+pytest -q tests/test_tsmc28_5t_ota.py
 ```
 
-真实 SAR 冒烟约需两分钟，因为每一位比较判决都会重放一次完整瞬态。没有 licensed 模型时，
-纯适配器测试仍会运行，依赖模型的测试自动 skip。
-
-## 边界
-
-当前代码负责本地电路仿真与优化，不负责 Cadence library 导入、版图、DRC/LVS、PEX 或 tapeout
-sign-off。后续进入 Cadence 时仍应使用原始 iPDK、官方 rule deck 和 foundry 规定的仿真器/版本。
+脚本用同一份 TSMC28 5T OTA 分别运行原生后端和显式 ngspice oracle，对比五只管子的
+`Id/gm/gds`、差分 AC、1 kHz 到 10 GHz 输出积分噪声，以及 2 mV 差分输入阶跃
+瞬态。报告内置固定验收阈值，并给出顶层 `passed` 标志。

@@ -38,7 +38,7 @@ PMOS-OTFT ECG AFE (typically <1% on gain/BW/IRN) — and generalizes across proc
 through the same engine: the AT4000TG OTFT plus three silicon CMOS
 nodes, **SKY130** (130 nm, OpenVAF-compiled BSIM4 via an OSDI host) and **FreePDK45**
 (45 nm, ngspice-C as the exact device evaluator), plus an optional local
-**TSMC28HPC+** adapter (28 nm, licensed model deck through ngspice).
+**TSMC28HPC+** adapter (28 nm, internal HSPICE parser and native Berkeley BSIM4.5).
 
 **Concretely, it does:**
 - **DC/AC/Noise/Transient** — standard analysis without a simulator license.
@@ -81,13 +81,14 @@ external simulator and no license.
 
 **External tools and model files (only for the silicon PDKs — not pip-installable).**
 The AT4000TG OTFT process and all analyses work fully without these; only
-`sky130.*` / `freepdk45.*` / `tsmc28hpcp.*` model types need them, and they raise a clear error at
-first use if absent.
+`sky130.*` / `freepdk45.*` / `tsmc28hpcp.*` model types need their PDK files and
+documented build/runtime prerequisites, and they raise a clear error at first use
+if absent.
 
 | Tool | Role in this project | Point at it with |
 |------|----------------------|------------------|
 | **[OpenVAF-Reloaded](https://github.com/751K/OpenVAF-Reloaded)** — a maintained fork of [OpenVAF](https://github.com/pascalkuthe/OpenVAF) | Compiles standard Verilog-A compact models (BSIM4, …) to a native `.osdi` shared library; the **SKY130** device path loads it through the OSDI host (`circuitopt/osdi_host.py`), driven by the in-repo `tools/vacompile.sh` wrapper | `OPENVAF_BIN` / `OPENVAF_ROOT` |
-| **[ngspice](https://ngspice.sourceforge.io/)** | Exact C-BSIM4 evaluator for **FreePDK45**, full-circuit simulator for **TSMC28HPC+**, and SKY130 card resolver; invoked via `tools/run-ngspice.sh` | `NGSPICE_BIN` |
+| **[ngspice](https://ngspice.sourceforge.io/)** | Exact C-BSIM4 evaluator for **FreePDK45** and SKY130 card resolver; optional independent oracle for **TSMC28HPC+** | `NGSPICE_BIN` |
 | PDK model files | SKY130/FreePDK45 under `PDK_ROOT`; licensed TSMC model at the project-local ignored entry below or an external installation | `PDK_ROOT`, `TSMC28_MODEL_DIR`, `TSMC28_PDK_ROOT` |
 
 Resolution contains no machine-specific absolute paths: explicit environment variables
