@@ -1,5 +1,9 @@
 # Full-circuit ngspice oracles (FreePDK45 and TSMC28HPC+)
 
+> **Status: maintained advanced reference.** These helpers are explicit
+> comparison paths. They are not the default TSMC28 native backend and do not
+> turn an ngspice result into foundry sign-off.
+
 FreePDK45 uses cached ngspice-C characterization in its local solvers. TSMC28HPC+
 normally uses circuitopt's native BSIM4.5 backend; ngspice is retained as an
 independent regression oracle. The oracle helpers render the **complete** circuit

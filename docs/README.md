@@ -1,734 +1,84 @@
-# Circuit Optimization Flow
+# Circuit Optimization Documentation
 
-[English](README.md) | [中文说明](README_zh.md)
+[English](README.md) | [中文](README_zh.md)
 
-**Current release: v1.1.0** (2026-07-13) — see the
+This site is the maintained documentation for Circuit Optimization. It is
+organized for three audiences:
+
+- **Users** who want to install the project, run an existing circuit, and create
+  circuit JSON files.
+- **PDK integrators** who need to understand model bindings, external toolchains,
+  process corners, and backend limitations.
+- **Developers** who need the solver architecture, extension points, tests, and
+  release checks.
+
+## Start Here
+
+1. [Getting Started](getting_started.md): install with `uv` or `venv`, run the
+   passive smoke test, and choose optional dependencies.
+2. [CLI Reference](cli_reference.md): analysis, exploration, corners, mismatch,
+   ADC, plotting, dataset, and service commands.
+3. [Circuit JSON Format](json_circuit_format.md): the maintained field-level
+   reference for circuit descriptions.
+4. [PDK Support Matrix](pdk_support.md): model keys, prerequisites, supported
+   analyses, corner names, and accuracy boundaries.
+
+## Learn the Internals
+
+- [Core Solver Overview](module_overview.md): data flow, model abstraction,
+  MNA/Newton solvers, transient integration, periodic analyses, optimization,
+  and service layers.
+- [Developer Handoff Guide](development.md): repository map, test strategy,
+  extension workflow, and documentation maintenance rules.
+- [Local Service API](service_api.md): FastAPI endpoints, background jobs,
+  serialization, and CLI equivalence.
+- [ngspice Oracle Helpers](ngspice_oracles.md): explicit external-reference
+  paths used by FreePDK45 and TSMC regression workflows.
+
+## PDK Guides
+
+- [TSMC28HPC+ Native Adapter](tsmc28hpcp.md)
+- [PDK Support Matrix](pdk_support.md)
+
+Foundry model payloads are local inputs. They are not part of the repository,
+must remain Git-ignored, and remain subject to their original license terms.
+
+## Design Records
+
+[Design Cases and Validation Status](design_cases.md) separates reproducible
+examples from incomplete campaigns and historical engineering notes. A design
+record documents one experiment; it is not automatically a release-wide
+accuracy guarantee.
+
+## Reference Documents
+
+| Document | Purpose | Maintenance status |
+|---|---|---|
+| [Getting Started](getting_started.md) | Installation and first run | Maintained |
+| [CLI Reference](cli_reference.md) | Current command-line interface | Maintained |
+| [Circuit JSON Format](json_circuit_format.md) | Circuit schema and examples | Maintained |
+| [PDK Support Matrix](pdk_support.md) | Backend and process capability boundaries | Maintained |
+| [Core Solver Overview](module_overview.md) | Implementation architecture | Maintained |
+| [Local Service API](service_api.md) | HTTP and job API | Maintained |
+| [TSMC28HPC+ Adapter](tsmc28hpcp.md) | Licensed local model integration | Maintained |
+| [Licenses and Third-Party Software](third_party_licenses.md) | MIT scope, BSIM4 attribution, and vendored-code terms | Maintained |
+| [Environment and Performance Notes](environment_performance.md) | Dated benchmark snapshots and tuning notes | Reference snapshot |
+| [Design Cases](design_cases.md) | Design-specific derivations and results | Per-case status |
+
+The release history is maintained in the repository
 [CHANGELOG](https://github.com/751K/circuit-optimization-lab/blob/main/CHANGELOG.md).
-
-## Overview
-
-A **local, Cadence-calibrated framework for analog circuit simulation and ML-driven
-design optimization** — built to be foundational infrastructure for two
-shifts in how chips get designed:
-
-**1. Open infrastructure for ML-accelerated simulation.** Using ML to accelerate
-chip-design simulation is a fast-growing direction, yet the field still lacks open,
-foundational building blocks: there is no standard, open way to *generate large-scale,
-physics-faithful simulation data*, no reusable *data-generator framework*, and no
-*ML-method framework* purpose-built for circuits. This project provides the whole chain
-as one open, reproducible pipeline — a Cadence-calibrated solver stack as the
-physics-faithful oracle → a provenance-tracked labeled-dataset generator
-([`circuitopt/dataset.py`](https://github.com/751K/circuit-optimization-lab/blob/main/circuitopt/dataset.py)) → an ML surrogate + screen-and-verify optimizer
-([`circuitopt/surrogate.py`](https://github.com/751K/circuit-optimization-lab/blob/main/circuitopt/surrogate.py), `surrogate_torch.py`, `optimize.py`).
-Circuit in, data out, surrogate trained, design optimized, with no commercial simulator
-in the loop.
-
-**2. A local toolchain an LLM/agent can drive.** LLM-driven circuit design increasingly
-loops through a simulator, but calling a commercial tool (licensed, remote, slow) across
-many dialogue turns is expensive and cannot run autonomously on-device. This project is
-a self-contained toolchain an LLM agent can call to **obtain simulation results, analyze
-and summarize them, and optimize a design** — the entire DC/AC/Noise/PSS/… loop, on the
-local machine with no commercial simulator round-trip. The JSON circuit format, the
-`python -m circuitopt` CLI, and the structured result dictionaries are deliberately shaped to
-be machine-callable and machine-readable, so an agent drives the whole design loop from
-the local shell.
-
-The solver stack is **calibrated to Cadence Spectre 24.1** — anchored on an AT4000TG
-PMOS-OTFT ECG AFE (typically <1% on gain/BW/IRN) — and generalizes across processes
-through the same engine: the AT4000TG OTFT plus three silicon CMOS
-nodes, **SKY130** (130 nm, OpenVAF-compiled BSIM4 via an OSDI host) and **FreePDK45**
-(45 nm, ngspice-C as the exact device evaluator), plus an optional local
-**TSMC28HPC+** adapter (28 nm, internal HSPICE parser and native Berkeley BSIM4.5).
-
-**Concretely, it does:**
-- **DC/AC/Noise/Transient** — standard analysis without a simulator license.
-- **PSS / PAC / PNoise** — periodic steady-state / AC / noise for chopper amplifiers, matched to Spectre RF.
-- **Design exploration & ML-surrogate optimization** — sweep sizes/bias, build a labeled dataset, train a fast surrogate, screen a large candidate pool, and verify the shortlist on the calibrated solver (thousands of times faster than a brute-force sweep).
-- **Corners & mismatch** — process corners, per-device mismatch Monte Carlo, latch screening.
-- **Multi-process** — OTFT (AT4000TG), SKY130, FreePDK45, and TSMC28HPC+ through one pipeline. TSMC model payloads stay local and Git-ignored; see the [TSMC28HPC+ adapter guide](tsmc28hpcp.md).
-
-For solver internals, see [Core Solver Overview](module_overview.md).
-
----
-
-## Quick Start
-
-```bash
-# 1. Install (includes Numba — the solver hot paths are JIT-compiled kernels)
-python3 -m pip install -r requirements.txt
-
-# 2. Run your first circuit — one command
-python3 -m circuitopt examples/periodic_rc.json
-
-# 4. Verify — run the AFE benchmark
-python3 -m benchmarks.bench_afe --warm-runs 1 --skip-noise
-```
-
-The first command above runs AC, noise, PSS, PAC, and PNoise on a passive RC
-lowpass and prints a summary. No Python scripting needed. If it prints numbers,
-everything works. From there, swap in any circuit JSON or use
-`-a ac,noise` to pick specific analyses.
-
-### Dependencies
-
-**Python (pip).** The OTFT / analysis core needs only `requirements.txt` (numpy,
-scipy; Numba is optional but recommended — the solver hot paths are JIT kernels).
-`requirements-ml.txt` adds scikit-learn / torch for the ML surrogate layer;
-`requirements-demo.txt` adds Flask for the web demo; the `serve` extra
-(`pip install -e ".[serve]"`) adds FastAPI + uvicorn for the local HTTP
-service layer (`circuit-opt serve`, see below). Everything so far runs with no
-external simulator and no license.
-
-**External tools and model files (only for the silicon PDKs — not pip-installable).**
-The AT4000TG OTFT process and all analyses work fully without these; only
-`sky130.*` / `freepdk45.*` / `tsmc28hpcp.*` model types need their PDK files and
-documented build/runtime prerequisites, and they raise a clear error at first use
-if absent.
-
-| Tool | Role in this project | Point at it with |
-|------|----------------------|------------------|
-| **[OpenVAF-Reloaded](https://github.com/751K/OpenVAF-Reloaded)** — a maintained fork of [OpenVAF](https://github.com/pascalkuthe/OpenVAF) | Compiles standard Verilog-A compact models (BSIM4, …) to a native `.osdi` shared library; the **SKY130** device path loads it through the OSDI host (`circuitopt/osdi_host.py`), driven by the in-repo `tools/vacompile.sh` wrapper | `OPENVAF_BIN` / `OPENVAF_ROOT` |
-| **[ngspice](https://ngspice.sourceforge.io/)** | Exact C-BSIM4 evaluator for **FreePDK45** and SKY130 card resolver; optional independent oracle for **TSMC28HPC+** | `NGSPICE_BIN` |
-| PDK model files | SKY130/FreePDK45 under `PDK_ROOT`; licensed TSMC model at the project-local ignored entry below or an external installation | `PDK_ROOT`, `TSMC28_MODEL_DIR`, `TSMC28_PDK_ROOT` |
-
-Resolution contains no machine-specific absolute paths: explicit environment variables
-win, followed by the active `VIRTUAL_ENV`, project `.venv`, and finally `PATH` for
-executables. Project-local conventions are `.venv/ngspice/bin/ngspice`, `.venv/pdk/`,
-`.venv/bin/openvaf-r`, and
-`PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l`. `BSIM4_VA` can
-independently point at the model source. The TSMC model is covered by the user's
-foundry license/NDA even though circuitopt and ngspice do not require a commercial
-simulator license.
-
-### CLI Reference
-
-`python -m circuitopt` uses subcommands (backward compatible — bare `circuit.json` defaults to `run`):
-
-```bash
-# ── Analysis dispatch (default: "run") ──
-python -m circuitopt examples/periodic_rc.json                          # all configured analyses
-python -m circuitopt examples/periodic_rc.json -a ac,noise,pss          # specific analyses
-python -m circuitopt run examples/periodic_rc.json -a ac,noise          # explicit subcommand
-
-# ── Design-space exploration ──
-python -m circuitopt examples/afe_explore.json --explore -n 500         # --explore flag (legacy)
-python -m circuitopt explore examples/afe_explore.json -n 500 --seed 1  # subcommand
-
-# ── Process corners sweep ──
-python -m circuitopt corners examples/afe_explore.json                  # typ/slow/fast
-python -m circuitopt corners examples/afe_explore.json --freqs-num 61
-
-# ── Mismatch Monte Carlo ──
-python -m circuitopt mc examples/afe_explore.json -n 200 --seed 1      # typical corner
-python -m circuitopt mc examples/afe_explore.json --corner slow -n 500
-
-# ── Chopper analysis ──
-python -m circuitopt chopper examples/afe_explore.json --level ideal    # square-wave LPTV
-python -m circuitopt chopper examples/afe_explore.json --level pmos     # static-phase PMOS
-python -m circuitopt chopper examples/afe_explore.json --level lptv     # PMOS sideband fold
-python -m circuitopt chopper examples/afe_explore.json --level pss      # shooting PSS
-python -m circuitopt chopper examples/afe_explore.json --level pnoise   # PSS→PAC→PNoise
-python -m circuitopt chopper examples/afe_explore.json --level transient
-
-# Common options for all subcommands:
-#   --noise-band LO HI  IRN integration band (default: 0.05 100.0)
-#   -o PATH             write results to file
-#   --no-numba          disable Numba acceleration
-#   --quiet             suppress progress output
-```
-
-### How the code is organized
-
-Before diving into the workflows, a one-minute map of the concepts:
-
-| Concept | What it is | Where it lives |
-|---------|-----------|----------------|
-| **Topology** | Circuit structure — which nodes exist, how devices connect, where inputs/outputs are | `circuitopt/topology.py`, or auto-generated from JSON |
-| **Sizes** | `{device: (W_µm, L_µm)}` — transistor dimensions | JSON `sizes` field |
-| **NF** | Number of fingers (parallel transistor multiplier; increases current) | JSON `nf` field, or per-device in `devices[].NF` |
-| **Bias** | `{node: voltage}` — DC operating voltages at rail nodes | JSON `bias` field |
-| **Solver** | A function that takes topology + sizes + bias → results (gain, noise, waveforms, …) | `circuitopt/ac_solver.py`, `circuitopt/transient_solver.py`, etc. |
-| **Device Model** | Abstract interface (`TransistorModel`) — solvers call the interface, not a concrete model; swap models via factory | `circuitopt/device_model.py`, `circuitopt/pmos_tft_model.py` |
-
-Any solver call follows the same pattern:
-
-```python
-result = solver(sizes, bias, ..., topo=topology, nf=nf)
-```
-
-The JSON file bundles all the inputs together; `load_circuit_json()` unpacks them
-into a `CircuitSpec` with `.topology`, `.sizes`, `.bias`, `.nf`, and optionally
-`.explore`.
-
----
-
-## Common Workflows
-
-All examples below are copy-paste ready. They use the locked AFE design from
-`examples/afe_explore.json`.
-
-### 1. Load a Circuit and Run DC / AC / Noise
-
-```python
-import numpy as np
-from circuitopt.circuit_loader import load_circuit_json
-from circuitopt.ac_solver import ac_solve
-from circuitopt.noise_solver import noise_analysis, band_rms
-
-# Load from JSON — no hard-coded node names in solver code
-spec = load_circuit_json("examples/afe_explore.json")
-freqs = np.logspace(-2, 4, 121)   # 0.01 Hz to 10 kHz
-
-# DC operating point + AC gain/bandwidth
-ac = ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
-print(f"Gain: {ac['Av_dc_dB']:.2f} dB,  BW: {ac['bw_Hz']:.1f} Hz")
-# → Gain: 22.89 dB,  BW: 549.3 Hz
-
-# Noise analysis (thermal + flicker)
-noise = noise_analysis(spec.sizes, spec.bias, freqs,
-                       topo=spec.topology, nf=spec.nf)
-irn_uv = band_rms(freqs, noise["irn_psd"], 0.05, 100.0) * 1e6
-print(f"IRN (0.05–100 Hz): {irn_uv:.2f} µVrms")
-# → IRN (0.05–100 Hz): 36.97 µVrms
-```
-
-### 2. Run a Transient Simulation
-
-```python
-from circuitopt.transient_solver import transient
-
-# 4 ms simulation, 0.5 mV step at t=0.5 ms
-t = np.linspace(0, 4e-3, 400)
-vip = np.where(t >= 0.5e-3, 30.65 + 0.5e-3, 30.65)
-vin = np.where(t >= 0.5e-3, 30.65 - 0.5e-3, 30.65)
-
-# Default: backward Euler (BE) — robust, well-validated
-tran = transient(spec.sizes, spec.bias, t, vip, vin,
-                 topo=spec.topology, nf=spec.nf)
-print(f"Transient steps: {len(t)},  nfail: {tran['nfail']}")
-# → Transient steps: 400,  nfail: 0
-
-# Optional: gear2/BDF2 — second-order, stiffly stable (chopper PSS/PAC/PNoise default)
-tran_gear2 = transient(spec.sizes, spec.bias, t, vip, vin,
-                       topo=spec.topology, nf=spec.nf,
-                       integration_method="gear2")
-```
-Gear2 (variable-step BDF2) reduces PAC baseband error from BE's ~−2.5% to <1%
-across all corners. On stiff circuits (e.g. chopper), `integration_method="gear2"`
-stays in the Numba gear2 grid when `max_step` / `max_retry_subdivisions` request
-subdivision/retry; the grid maintains rolling two-step history through accepted
-substeps. PSS/PAC/PNoise pipelines default to gear2 for accuracy; bare
-`transient()` defaults to BE. The global transient capacitance operator remains
-the charge-conservative Q stamp; the PMOS chopper PSS wrapper deliberately uses
-`cap_mode="average"` for its orbit, matching Cadence's commutation feedthrough
-on the high-impedance internal nodes while keeping `charge` as the safer default
-for generic stiff switched-capacitor circuits.
-
-### 3. Chopper Analysis (Three Levels)
-
-#### Level 1 — Ideal LPTV (fast, square-wave model)
-
-```python
-from circuitopt.chopper import chopper_analysis
-
-chop_ideal = chopper_analysis(
-    spec.sizes, spec.bias, freqs, f_chop=225.0,
-    topo=spec.topology, nf=spec.nf, max_harmonic=31,
-    band=(0.05, 100.0))
-print(f"Ideal chop: {chop_ideal['peak_dB']:.2f} dB,  "
-      f"IRN: {chop_ideal['irn_uV_band']:.2f} µVrms")
-```
-
-#### Level 2 — PMOS Switch (static phases, no PSS needed)
-
-```python
-from circuitopt.chopper import pmos_chopper_analysis
-
-pmos = pmos_chopper_analysis(
-    spec.sizes, spec.bias, freqs,
-    switch_size=(20000, 80), band=(0.05, 100.0))
-print(f"PMOS static chop: {pmos['peak_dB']:.2f} dB,  "
-      f"IRN: {pmos['irn_uV_band']:.2f} µVrms")
-```
-
-#### Level 3 — Full PSS / PAC / PNoise (first-principles, matches Spectre)
-
-```python
-from circuitopt.chopper import (pmos_chopper_pss, pmos_chopper_pac,
-                           pmos_chopper_pnoise)
-
-# Step 1: PSS — find the periodic steady-state orbit
-pss = pmos_chopper_pss(
-    spec.sizes, spec.bias, f_chop=225.0,
-    switch_size=(5000, 30), edge_time=20e-6,
-    tstab_periods=2, n_points=121)
-print(f"PSS converged: {pss['converged']},  "
-      f"residual: {pss['residual_norm']:.2e}")
-
-# Step 2: PAC — periodic AC gain on the PSS orbit
-pac = pmos_chopper_pac(
-    spec.sizes, spec.bias, freqs, f_chop=225.0,
-    pss_result=pss)
-print(f"PAC gain: {pac['Av_dc_dB']:.2f} dB,  BW: {pac['bw_Hz']:.1f} Hz")
-
-# Step 3: PNoise — periodic noise (harmonic balance, no calibration constants)
-pnoise = pmos_chopper_pnoise(
-    spec.sizes, spec.bias, freqs, f_chop=225.0,
-    pss_result=pss, pac_result=pac, max_sideband=10,
-    band=(0.05, 100.0))
-print(f"PNoise IRN: {pnoise['irn_uV_band']:.2f} µVrms")
-```
-
-The PSS→PAC→PNoise pipeline is the local equivalent of Cadence Spectre
-`pss` + `pac` + `pnoise`. PAC has two first-class kernels:
-
-- Generic default: analytic-adjoint harmonic balance
-  (`method="pss_analytic_adjoint"`). It is the most general path and supports
-  bordered MNA cases.
-- Chopper default: time-domain Floquet PAC (`method="pss_time_domain"`). It
-  builds the one-period monodromy once and then solves a small quasi-periodic
-  boundary system per frequency, avoiding the large `(2K+1)n` HB matrix. For
-  PMOS_TFT periodic conversion it retains each device's internal `gate1`
-  small-signal state (`R_cap`, `R_cap2`, `Cgs`, `Cgd`) instead of collapsing the
-  device to terminal `{gm,gds,Cgs,Cgd}` at every orbit sample. The conversion
-  linearization uses the Verilog-A-style `C(V)*ddt(V)` operator, separate from
-  the orbit's transient Q/average companion, because this is what Spectre PAC
-  folds. When Numba is available and the PMOS devices all expose `gate1`
-  dynamics, this gate1-retained conversion assembly uses the compiled
-  `pac_linearize_orbit_gate1` kernel. This fixes the former slow-corner −1.89%
-  chopper PAC error; the D3 slow guard is now within 1% of Cadence.
-
-Set `analytic=False` only for the original finite-difference shooting path
-(accurate but costs `n_state+2` transient runs per frequency). Chopper PNoise now
-defaults to a time-domain Floquet adjoint (`pnoise_time_domain_used=True`): it
-solves the sparse periodic adjoint BVP directly, so the conversion is not limited
-by the HB sideband truncation that made the old K=32 result look comfortable but
-left a 0.6-1.8% IRN error. The HB PNoise path remains available with
-`time_domain=False` and as the generic fallback.
-For the D3 `chop_tb_d3` slow-corner Spectre reference at `f_chop=200 Hz`,
-the default chopper PAC gain is now about +0.03%, and TD PNoise IRN is about
-+0.02%. Across the three chopper corners the old HB-K32 IRN errors
-(slow/typical/fast) were +1.81% / +1.05% / +0.66%; the TD-adjoint errors are now
-+0.02% / -0.00% / +0.57%. No calibration constants are used.
-`pmos_chopper_pac` / `pmos_chopper_pnoise` are chopper compatibility wrappers;
-generic periodic topologies can call `circuitopt.pac_solver.pac_solve` and
-`circuitopt.pnoise_solver.pnoise_solve` directly using the orbit returned by
-`pss_solve` plus an `input_drive` mapping.
-
-**JSON dispatch** — when the circuit JSON has `periodic` and `analyses` blocks,
-run everything with one call:
-
-```python
-from circuitopt.analysis_dispatch import run_analysis_suite
-from circuitopt.circuit_loader import load_circuit_json
-
-spec = load_circuit_json("examples/periodic_rc.json")
-results = run_analysis_suite(spec)
-# results["pss"], results["pac"], results["pnoise"] — all ready
-```
-
-JSON dispatch supports the same PAC switch for generic periodic circuits:
-`"analyses": {"pac": {"time_domain": true, "td_integration": "gear2"}}`.
-
-### 4. Design-Space Exploration / Optimization
-
-```python
-from circuitopt.explore import explore
-from circuitopt.circuit_loader import load_circuit_json
-
-spec = load_circuit_json("examples/afe_explore.json")
-
-# The JSON's "explore" block defines variables, constraints, and objectives.
-# explore() samples candidates, evaluates each through the solvers,
-# filters by constraints, and returns the Pareto front.
-result = explore(spec.topology, spec.sizes, spec.bias, spec.nf,
-                 spec.explore, n=500, method="lhs", seed=42)
-
-print(f"Candidates: {result['n_total']},  "
-      f"Feasible: {result['n_feasible']},  "
-      f"Pareto-optimal: {len(result['pareto'])}")
-# → Candidates: 500,  Feasible: 87,  Pareto-optimal: 12
-```
-
-Or from the command line:
-
-```bash
-python -m circuitopt.explore examples/afe_explore.json --n 500 --seed 42
-```
-
-Results are exported as CSV and JSONL. The explore config in the JSON file
-specifies which variables to sweep (device W/L, bias voltages), what constraints
-to enforce (gain > X, IRN < Y, etc.), and which objectives to optimize.
-
-### 5. Process Corners & Mismatch
-
-```python
-from circuitopt.corners import CORNERS, corner_table, mismatch_mc, latch_screen
-import numpy as np
-
-# Corner sweep — one design at typ/slow/fast
-table = corner_table(spec.sizes, spec.bias, np.logspace(-2, 4, 121),
-                     topo=spec.topology, nf=spec.nf)
-for row in table:
-    print(f"{row['corner']:>6s}:  gain={row['gain_peak_dB']:.2f} dB,  "
-          f"BW={row['bw_Hz']:.0f} Hz,  IRN={row['irn_uV']:.2f} µVrms")
-# → typical:  gain=22.89 dB,  BW=549 Hz,  IRN=36.97 µVrms
-# →   slow:  gain=20.81 dB,  BW=328 Hz,  IRN=45.72 µVrms
-# →   fast:  gain=24.41 dB,  BW=846 Hz,  IRN=28.40 µVrms
-
-# Quick latch screen (deterministic, fast enough for inner-loop use)
-rng = np.random.default_rng(0)
-latch = latch_screen(spec.sizes, spec.bias, topo=spec.topology,
-                     nf=spec.nf, rng=rng, k_sigma=3.0)
-print(f"Latch dV: {latch['latch_dV']*1e3:.2f} mV  "
-      f"({'LATCHED' if latch['latched'] else 'ok'})")
-
-# Full mismatch Monte Carlo (slower, for final verification)
-mc = mismatch_mc(spec.sizes, spec.bias, np.logspace(-2, 4, 61),
-                 topo=spec.topology, nf=spec.nf, n=200,
-                 corner=CORNERS["typical"], seed=1)
-print(f"Latch rate: {mc['latch_rate']*100:.1f}%,  "
-      f"IRN: {mc['irn_mean']:.2f} ± {mc['irn_std']:.2f} µVrms")
-```
-
-### 6. ML-Surrogate Design Optimization
-
-The calibrated solvers are the "teacher"; a fast surrogate learns their metrics and
-lets you screen orders of magnitude more candidates than a brute-force solver sweep.
-The loop is one CLI command chain — build a labeled dataset, train a surrogate, then
-screen-and-verify:
-
-```bash
-# 1. Build a labeled dataset from the config's "explore" block (every sample kept,
-#    including DC failures — a training set, not a filtered search result)
-python -m circuitopt dataset examples/single_stage.json -n 500 --out ds/run1
-
-# 2. Train a metric surrogate (gradient-boosted trees; needs `pip install -r requirements-ml.txt`)
-python -m circuitopt.surrogate train ds/run1.npz --out ds/run1.pkl
-
-# 3. Screen a large pool with the surrogate, Pareto-select, and verify the
-#    shortlist on the actual calibrated solver
-python -m circuitopt.optimize examples/single_stage.json ds/run1.pkl -n 100000 --top-k 20
-# → screened 100000 designs with the surrogate in 1.64s (60,802/s)
-# →   feasible: 89038   Pareto front: 19
-# → verified top-19 on the solver in 0.45s (23.6 ms/design)
-# →   solver-confirmed feasible: 18/19   (speedup: ~1,436× vs. solving all 100000)
-```
-
-The solver, not the surrogate, always has the final word: only the small verified
-shortlist is trusted for a real design decision. `--filter label:lo:hi` on
-`surrogate train` restricts training to a region of interest (e.g. drop railed/
-collapsed designs that would otherwise dominate the fit). See
-[CLI Reference §1.7–1.8](cli_reference.md) for the full dataset/surrogate/optimize
-option reference, and `docs/module_overview.md` for the surrogate architecture and honest
-accuracy numbers.
-
-### 7. Silicon PDKs (SKY130 + FreePDK45 + TSMC28HPC+)
-
-A circuit's `models` field binds specific devices to a non-default PDK — e.g. real
-silicon SKY130 transistors (NMOS + PMOS, via an OpenVAF-compiled BSIM4 running
-through the same `TransistorModel` interface as the OTFT). This is purely additive:
-devices without a `models` entry use the default OTFT PDK.
-
-```json
-"models": {
-  "M1": {"type": "sky130.nmos", "extract_w": 24.0},
-  "M3": {"type": "sky130.pmos", "vb": 1.8, "extract_w": 12.0}
-}
-```
-
-Silicon devices run through the exact same DC/AC/noise pipeline — including the
-ML-surrogate design loop above and cross-corner (`tt`/`ss`/`ff`/`sf`/`fs`) verification:
-
-```bash
-python -m circuitopt dataset examples/sky130_5t_ota.json -n 400 --out ds/ota          # build a silicon dataset
-python -m circuitopt.surrogate train ds/ota.npz --filter gain_dB:0:60 --out ds/ota.pkl # train on the operating region
-python -m circuitopt.optimize examples/sky130_5t_ota.json ds/ota.pkl -n 50000 --top-k 10          # screen + verify (typical corner)
-python -m circuitopt.optimize examples/sky130_5t_ota.json ds/ota.pkl -n 50000 --corner ss          # re-verify at the slow corner
-```
-
-On the complementary 5T OTA example, this screens 50,000 designs ~6,000× faster
-than the solver, confirms 9/10 shortlisted designs feasible on the solver, and the
-same designs hold (9/10) when re-verified at the slow (`ss`) corner. Needs the
-SKY130 PDK + OpenVAF + ngspice toolchain (see `docs/module_overview.md`); solvers
-raise a clear error if it isn't installed. **Design note:** like any single-stage
-silicon amplifier, this example uses an active current-mirror load (for the DC
-operating point / gain) plus a capacitive load (for bandwidth) — a resistor-loaded
-common-source stage isn't representative of on-chip design and rails easily under a
-size/bias sweep, which is why no such example is included.
-
-**FreePDK45 (45 nm, 1.0 V)** binds the same way (`"freepdk45.nmos"` / `.pmos`) but
-uses a *different evaluator*: its BSIM4 cards are tuned for ngspice's built-in
-C-BSIM4, so instead of the OSDI VA the oracle is **ngspice-C itself** — each device
-is characterised once into a cached `(Vsb,Vds,Vgs)` grid and interpolated (exact
-ngspice-C at the nodes, µs/eval). It supports `extract_w` (fast W-sweeps) and
-`temperature` (PVT) just like SKY130, plus exact ngspice `.noise`. The worked
-[FreePDK45 FD-OTA case](freepdk45_fd_ota_design.md) runs the full flow — architecture
-→ 600-sample GBT surrogate → screen/verify/polish → whole-OTA cross-check against
-ngspice's own `.ac` → 27-corner PVT — landing a fully-differential telescopic OTA at
-**58.9 dB / 119.9 MHz / 17 µW** (all metrics vs the ngspice oracle).
-
-FreePDK45 transient automatically bypasses the small-signal grid, renders a complete
-four-terminal MOS netlist, and runs native ngspice `.tran`, retaining BSIM4 terminal
-charge, junction capacitance, and switching behavior. `examples/freepdk45_sar3.json`
-demonstrates a differential CDAC, CMOS sampling gates, transistor-level comparator,
-and Python SAR controller in a closed loop. Its current 65-point ramp measures
-`max|DNL|=0.108 LSB`, `max|INL|=0.062 LSB`, with no missing codes.
-`examples/freepdk45_sar6.json` scales this to a 6-bit differential SAR with a
-**clocked StrongARM dynamic latched comparator** (strobe generated by the optional
-`adc.clock` block) — all 64 code centers convert correctly at nom/ss/ff; see the
-[FreePDK45 SAR ADC design case](freepdk45_sar_design.md).
-
-**TSMC28HPC+ (28 nm, 0.9 V core)** uses `"tsmc28hpcp.nmos"` and
-`"tsmc28hpcp.pmos"`. Its adapter references the foundry `nch_mac`/`pch_mac`
-subcircuits, expands the required HSPICE `.lib` section closure, runs ngspice in
-HSPICE compatibility mode, and reads hierarchical operating-point vectors. Full
-`.tran`, `.ac`, `.noise`, and `.op` use the original deck; cached device grids remain
-available for optimization loops. Install the single required model file at the
-portable project-relative entry documented in the
-[TSMC28HPC+ adapter guide](tsmc28hpcp.md). Do not commit the licensed payload.
-
----
-
-## JSON Circuit Format
-
-New circuits are defined in JSON — no solver source edits needed. See
-[JSON Circuit Description](json_circuit_format.md) for the full field reference.
-
-Quick example (`examples/single_stage.json`):
-
-```json
-{
-  "solved": ["OUT"],
-  "rails": {"VDD": 40.0, "GND": 0.0},
-  "devices": [
-    {"name": "M1", "drain": "OUT", "gate": "IN", "source": "VDD",
-     "W": 2000, "L": 80, "NF": 1}
-  ],
-  "bias": {"VDD": 40.0, "VIN": 30.0, "VB": 10.0},
-  "outputs": ["OUT"],
-  "input_drives": {"IN": 1.0},
-  "load_caps": {"OUT": 1e-12}
-}
-```
-
-Key top-level fields:
-
-| Field | Required | Purpose |
-|-------|----------|---------|
-| `solved` | yes | Nodes whose voltages the solver must find |
-| `rails` | yes | Fixed-voltage nodes: `{"VDD": 40.0, "GND": 0.0, ...}` |
-| `devices` | yes | PMOS transistors; passive circuits may use an empty array `[]` |
-| `bias` | yes | DC voltage at every rail node: `{"VDD": 40.0, "VIN": 30.0, ...}` |
-| `outputs` | yes | Which node(s) to measure gain/noise at |
-| `input_drives` | — | Where to inject the AC small-signal stimulus for gain calculation |
-| `load_caps` | — | Load capacitance per output node (F): `{"OUT": 1e-12}` |
-| `resistors` | — | `[name, node_a, node_b, R_ohm]` |
-| `capacitors` | — | `[name, node_a, node_b, C_farad]` |
-| `current_sources` | — | Ideal DC current sources: `[name, nplus, nminus, I_amp]` |
-| `vccs` | — | Voltage-controlled current sources: `[name, p, q, ctrl_p, ctrl_n, gm]` |
-| `vsources` | — | Ideal voltage sources (true MNA): `[name, p, q, value]` — constant EMF or waveform key |
-| `nf` | — | Global NF (fingers) applied to all devices; overridden by per-device `NF` |
-| `dc_guesses` | — | Initial voltage guesses for DC convergence on tricky circuits |
-| `transient_inputs` | — | Maps input waveform names to the nodes they drive |
-| `ac_drives` | — | Like `input_drives` but drives a *node* rather than a device gate (used for testbench front-ends) |
-| `periodic` | — | Large-signal periodic input description for PSS/PAC/PNoise and periodic transient |
-| `analyses` | — | `run_analysis_suite()` dispatch config for `ac/noise/transient/pss/pac/pnoise` |
-| `aliases` | — | Shortcuts so tools/sweeps can find key nodes by name (e.g. `"VOP"`, `"VON"`) |
-| `explore` | — | Design-space exploration config (variables, constraints, objectives) |
-
----
-
-## Interactive AFE Tuner
-
-A web-based tuner for real-time exploration:
-
-```bash
-python3 -m pip install -r requirements-demo.txt
-python3 demo/server.py
-# Open http://localhost:5100
-```
-
-Adjust device W/L and bias voltages in the browser, see gain/BW/IRN update
-live. Includes preset designs and DC warm-start logic.
-
----
-
-## Local Service API
-
-A local FastAPI HTTP layer over the same solver stack the CLI drives — the
-shared base for a future desktop GUI and MCP server. Synchronous endpoints
-(`health`/`capabilities`/`validate`/`solve`) plus background-job endpoints for
-`explore`/`mc` (submit, poll, WebSocket progress, cancel), all thin adapters
-over the existing single sources of truth, so CLI and HTTP stay in lockstep.
-
-```bash
-pip install -e ".[serve]"
-circuit-opt serve   # http://127.0.0.1:8341, swagger at /docs
-```
-
-See [Service API](service_api.md) for the full endpoint reference.
-
----
-
-## Benchmarks
-
-Five fixed benchmarks for performance tracking:
-
-```bash
-python3 -m benchmarks.bench_afe --warm-runs 3         # AC+noise+transient
-python3 -m benchmarks.bench_model --warm-runs 3       # Single-device micro
-python3 -m benchmarks.bench_chopper --warm-runs 3     # Chopper: 5 analysis levels
-python3 -m benchmarks.bench_periodic --warm-runs 3    # Periodic solvers (PSS/PAC/PNoise)
-python3 -m benchmarks.bench_sweep --n-candidates 200  # Batch explore workload
-```
-
-Set `CIRCUIT_USE_NUMBA=0` for pure-Python comparison. Numba kernels use on-disk
-cache by default, so later Python processes can avoid most repeated cold-JIT
-startup cost; set `CIRCUIT_NUMBA_CACHE=0` to disable that cache. Typical warm
-timings on a modern Mac (Numba enabled):
-
-| Benchmark | Time |
-|-----------|------|
-| AC 121 points | ~1.5 ms |
-| Noise 121 points (standalone) | ~1.7 ms |
-| DC+AC+Noise 121 points (AC reused) | ~1.8 ms |
-| Transient 200 steps | ~5 ms |
-| Ideal chopper (31 harmonics) | ~5 ms |
-| PMOS chopper LPTV | ~22 ms |
-| Chopper transient (8-PMOS, 225 Hz, 2 cycles, UI sizes) | ~0.15–0.19 s |
-| Chopper PSS+PAC(HB)+PNoise (61 points, UI sizes, `time_domain=False`) | ~25.6 s |
-| Chopper PSS+PAC(HB)+PNoise (121 points, UI sizes, `time_domain=False`) | ~48.9 s |
-| Chopper PAC time-domain only (61 points, same PSS orbit, gate1 states) | ~1.4 s |
-| Chopper PAC time-domain only (121 points, same PSS orbit, gate1 states) | ~1.9 s |
-| Batch sweep (200 candidates, AC+noise) | ~0.5 s |
-
-Those 25.6 s / 48.9 s full-flow numbers are for the portable HB PAC path. On
-rail-driven choppers, `pmos_chopper_pac` now defaults to the time-domain path,
-so PAC is no longer the dominant bottleneck. Use `time_domain=False` only when
-you explicitly need the HB comparison path.
-
----
-
-## Example Files
-
-| File | What it is |
-|------|-----------|
-| `examples/afe_explore.json` | The locked 10-transistor AFE design with sizes, bias, NF, and explore sweep config |
-| `examples/single_stage.json` | Minimal single-transistor common-source stage — best starting point for a new circuit |
-| `examples/resistor_load_stage.json` | Single transistor with resistive load, demoing `resistors` and `current_sources` fields |
-| `examples/periodic_rc.json` | Passive RC lowpass with PSS/PAC/PNoise dispatch — simplest end-to-end periodic example |
-| `examples/voltage_divider.json` | Ideal voltage source (true MNA) divider with resistors, capacitors — vsource demo |
-| `examples/vcvs_amplifier.json` | VCVS amplifier — linear gain 100×, demoing controlled sources |
-| `examples/sc_lpf.json` | Switched-capacitor low-pass filter (2-phase, single-ended LPTV) |
-| `examples/sky130_5t_ota.json` | Silicon SKY130 complementary 5T OTA — `models` block + full dataset/surrogate/optimize design loop |
-| `examples/sky130_fd_ota.json` | Silicon SKY130 fully-differential telescopic OTA + CT CMFB — the [SKY130 FD-OTA design case](sky130_fd_ota_design.md) |
-| `examples/freepdk45_5t_ota.json` | FreePDK45 (45 nm) 5T OTA — ngspice-C evaluator, single-ended output |
-| `examples/freepdk45_fd_ota.json` | FreePDK45 fully-differential telescopic OTA + CT CMFB — the [FreePDK45 FD-OTA design case](freepdk45_fd_ota_design.md) |
-| `examples/freepdk45_sar6.json` | FreePDK45 6-bit differential SAR ADC with a clocked StrongARM dynamic comparator (`adc.clock`) — the [FreePDK45 SAR ADC design case](freepdk45_sar_design.md) |
-| `examples/afe_testbench.py` | Full testbench: dry-electrode front-end (R∥C network) → AFE core → AC + noise + transient |
-| `examples/mc_mismatch.py` | Monte Carlo mismatch driver: corner table + 3-corner MC figure |
-| `examples/find_max_gain.py` | Max gain scan for PMOS inverter amplifier |
-| `examples/sweep_vin_vout.py` | DC transfer curve (VIN→VOUT) for PMOS inverter |
-| `examples/sc_lpf.py` | Switched-capacitor LPF transient simulation |
-
----
-
-## Troubleshooting
-
-**DC solve doesn't converge.**
-Start with `examples/single_stage.json` (one transistor, trivial to converge).
-For larger circuits, add `dc_guesses` to the JSON — a dictionary of approximate
-node voltages. The locked AFE JSON includes these.
-
-**Transient returns `nfail > 0`.**
-Some Newton steps failed. Try: (a) more time points (`np.linspace(0, T, more_steps)`),
-(b) tighter `newton_vtol` (default `1e-8`), or (c) enable
-`fallback_least_squares=True`. For switched circuits, make sure `max_step` is
-smaller than the fastest edge. If using `integration_method="gear2"` on a stiff
-circuit with `max_step` / `max_retry_subdivisions`, the hot path stays in the
-Numba gear2 grid. Python fallback is only a last resort if the compiled robust
-step is rejected. Check `numba_grid_solver`, `gear2_python_retry_solver`, and
-`transient_profile.failed_intervals`.
-
-**PSS doesn't converge (`converged=False`).**
-Increase `tstab_periods` (extra stabilization cycles before shooting starts)
-or reduce `max_shooting_iters`. Check `pss['shooting_history']` to see if the
-residual is decreasing. If it stalls, the orbit may be genuinely aperiodic —
-check that all input waveforms are periodic with the same period.
-
-**PNoise is slow.**
-For the generic HB path, reduce `max_sideband` (odd harmonics dominate the fold)
-or `n_period_samples` (trade time-domain resolution for speed). For the chopper
-default TD-adjoint path, `max_sideband` no longer controls the conversion
-truncation, and `n_period_samples` below 640 is bumped to 768 for convergence.
-Reuse the same `pss_result` when sweeping output bands or repeated frequency
-grids: PNoise caches LPTV linearization, HB blocks, and identical-frequency
-adjoint solves where applicable.
-With Numba installed, large HB block assembly, noise folding, and gm/gds
-linearization also use compiled kernels. The chopper PAC gate1 conversion
-linearization is compiled too when the topology is the all-PMOS gate1 case; mixed
-or unsupported topologies fall back to the Python assembly with the same stamps.
-The older HB PNoise path was about 0.55 s for 61 points and 0.93 s for 121
-points on the UI chopper; the TD path is now the accuracy default for chopper
-verification.
-
-**PSS / periodic transient is slow.**
-For chopper PSS, first ensure `analytic_jacobian=True` (the default), which builds
-the shooting Jacobian in one orbit pass instead of `n_state` finite-difference
-period runs. Chopper PSS defaults now use `fallback_least_squares=False`, keeping
-the full period in the Numba grid solver and recording failed intervals without
-rerunning the period in Python. Use `fallback_least_squares=True` only when
-debugging a difficult convergence case. One stabilization period is usually
-enough for the PMOS chopper wrappers; extra stabilization cycles are mostly a
-throughput tradeoff.
-
-**PAC is slow.**
-Leave `compute_condition` unset for normal runs. PAC condition diagnostics are
-computed only for `profile=True`, `debug=True`, or explicit
-`compute_condition=True`, because the diagnostic runs an SVD of the HB matrix at
-every frequency and does not affect gain/BW/noise.
-For rail-driven choppers, the wrapper already defaults to the accelerated
-time-domain Floquet PAC path. Generic JSON circuits can opt in with
-`"time_domain": true`. If you force the HB path with `time_domain=false`, PAC
-frequency solves are the dominant cost: about 24–25 s for 61 points and
-47–48 s for 121 points. Further HB-only speed work should target factorization
-reuse or batched linear solves.
-
-**A `models`/silicon device raises a toolchain error.**
-The silicon PDKs need an external toolchain that isn't a pip dependency: SKY130 wants
-OpenVAF + ngspice + SKY130; FreePDK45 wants ngspice + its cards; TSMC28HPC+ wants
-ngspice + the licensed 1d8 HSPICE model. The
-compile / ngspice wrappers are vendored in-repo under `tools/`; only the binaries live
-outside. Install them and point `PDK_ROOT` plus the binaries — `OPENVAF_BIN` (or
-`OPENVAF_ROOT`, which resolves `$OPENVAF_ROOT/target/release/openvaf-r`) and
-`NGSPICE_BIN` — at them (see `docs/module_overview.md`). Without it, any circuit using a
-`sky130.*` / `freepdk45.*` / `tsmc28hpcp.*` model type raises a clear error at first use; every other
-PDK (the default AT4000TG OTFT) is unaffected. Tests gated on the toolchain
-(`tests/test_sky130*.py`, `tests/test_freepdk45.py`, `tests/test_osdi_host.py`) skip
-cleanly when it's absent.
-
----
-
-## Further Reading
-
-| Document | When to read it |
-|----------|----------------|
-| [Core Solver Overview](module_overview.md) | Understand how each solver works, import dependencies, and calibration data |
-| [JSON Circuit Format](json_circuit_format.md) | Full field-by-field reference for writing your own circuit JSON |
-| [CLI Reference](cli_reference.md) | Every subcommand and flag, including `dataset`/`surrogate`/`optimize` and the `models`/silicon-corner options |
-| [Service API](service_api.md) | The local FastAPI HTTP layer: endpoints, job state machine, and CLI equivalence |
-| [SKY130 FD-OTA design case](sky130_fd_ota_design.md) | End-to-end 130 nm fully-differential OTA: architecture → surrogate → optimize → PVT |
-| [FreePDK45 FD-OTA design case](freepdk45_fd_ota_design.md) | End-to-end 45 nm/1.0 V FD-OTA, incl. the whole-OTA ngspice `.ac` cross-check |
-| [FreePDK45 SAR ADC design case](freepdk45_sar_design.md) | End-to-end 45 nm/1.0 V 6-bit differential SAR with a clocked StrongARM comparator: architecture → nom/ss/ff → dynamic → mismatch MC |
-| [TSMC28HPC+ MDAC OTA design](tsmc28_mdac_ota_design.md) | 14-bit pipeline first-stage 4-bit/gain-8 MDAC OTA: specification derivation, transistor sizing, three-loop stability, residue/code-transition transient, noise, and 45-point PVT |
-| [TSMC28HPC+ local adapter](tsmc28hpcp.md) | Portable local model entry, process binding, supported analyses, corners, and verification |
-| [Future Plan](futureplan.md) | Strategic direction: desktop client, MCP server, ML scaling |
-| `tests/` directory | Working examples of every API call with expected outputs |
-| `benchmarks/` directory | Performance baselines and how the hardware-accelerated paths compare |
-
----
-
-## Contributing
-
-Issues and PRs welcome.
+Licensing and attribution details are maintained in
+[Licenses and Third-Party Software](third_party_licenses.md).
+
+## Documentation Policy
+
+- Commands in maintained guides must correspond to current `--help` output.
+- Capability claims must distinguish the local solver, an external oracle, and
+  sign-off tooling.
+- Result tables must identify their source file and coverage. Partial PVT data
+  must not be described as a completed campaign.
+- Roadmaps and completed implementation plans do not belong in the user-facing
+  documentation. Durable implementation details are folded into architecture or
+  PDK guides.
+- The JSON schema in `schemas/circuit.schema.json` and the loader are the source
+  of truth when prose and code disagree.

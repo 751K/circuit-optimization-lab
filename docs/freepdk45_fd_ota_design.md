@@ -1,4 +1,8 @@
-# FreePDK45 全差分 OTA:完整设计流程报告
+# FreePDK45 全差分 OTA 设计记录
+
+> **文档状态：可复现设计快照。** 本文保留架构、尺寸和 ngspice 交叉核对结果。
+> FreePDK45 快速 AC 网格缺少部分结电容，整机带宽应以显式 ngspice AC oracle
+> 复核；本文不是版图后 sign-off 报告。
 
 用本仓库工具链在 **FreePDK45(45 nm, 1.0 V)** 上从零走完的设计案例——器件由
 **ngspice-C BSIM4**(FreePDK45 的 oracle,经缓存特性化网格 `circuitopt.ngspice_device`)精确

@@ -2,6 +2,9 @@
 
 [English](json_circuit_format.md) | [中文说明](README_zh.md) | [核心求解器概览](module_overview_zh.md)
 
+> **文档状态：持续维护。** Loader 和 `schemas/circuit.schema.json` 是单一事实来源；
+> 修改任一字段时必须同步更新本文。
+
 ## 目的
 
 JSON 电路描述用于把电路拓扑、尺寸、偏置和分析元数据从 Python 源码中抽出来。这样换电路时优先修改 JSON，而不是修改 `circuitopt/ac_solver.py`、`circuitopt/noise_solver.py` 或 `circuitopt/transient_solver.py`。
@@ -741,6 +744,6 @@ pnoise_irn = results["pnoise"]["irn_uV_band"]
 - ADC transient noise、FreePDK45 逐器件 mismatch、版图寄生提取和晶体管级 SAR 数字状态机。
 - 多输出同时分析。
 - 层次化子电路。
-- SPICE 语法解析。
+- 任意用户电路 SPICE 网表导入。项目内部 HSPICE 解析器当前只用于受支持的本地模型库展开。
 
 电路描述能力的扩展通过 ``circuitopt/device_model.py``（器件模型注册表）和 ``circuitopt/ac_mna.py``（MNA 电压源 / VCCS / VCVS / CCCS / CCVS stamp 原语）实现。

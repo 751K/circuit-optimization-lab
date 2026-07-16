@@ -2,6 +2,10 @@
 
 [Project Overview](README.md) | [Core Solver Overview](module_overview.md) | [中文版](json_circuit_format_zh.md)
 
+> **Status: maintained reference.** The loader and
+> `schemas/circuit.schema.json` are the source of truth. This document describes
+> the user-facing contract and should be updated with either one.
+
 ## Purpose
 
 The JSON circuit description separates topology, sizes, bias, and analysis metadata
@@ -793,4 +797,5 @@ Not yet supported:
 - ADC transient noise, per-device FreePDK45 mismatch, layout parasitic extraction, and transistor-level SAR digital control.
 - Multi-output simultaneous analysis.
 - Hierarchical subcircuits.
-- SPICE syntax parsing.
+- Arbitrary user-circuit SPICE netlist import. The internal HSPICE parser is
+  currently scoped to supported local model-library elaboration.

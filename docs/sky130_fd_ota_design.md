@@ -1,4 +1,8 @@
-# SKY130 全差分 OTA:完整设计流程报告
+# SKY130 全差分 OTA 设计记录
+
+> **文档状态：可复现设计快照。** 电路和命令仍保留，但需要外部 SKY130、
+> ngspice 和 OpenVAF 工具链。本文数字只适用于记录的模型解析路径和测试台，
+> 不代表官方 SKY130 sign-off 模型精度。
 
 用本仓库工具链(OSDI/BSIM4 硅求解器 + dataset/surrogate/optimize ML 管线)从零走完的
 设计案例。测试台:[examples/sky130_fd_ota.json](https://github.com/751K/circuit-optimization-lab/blob/main/examples/sky130_fd_ota.json)(其中

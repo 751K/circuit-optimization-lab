@@ -1,9 +1,14 @@
 # FreePDK45 MDAC 第一级 OTA:从 ADC 规格到晶体管尺寸的推导链
 
+> **文档状态：未完成 PVT 的设计记录。** 仓库不版本化 `results/` campaign CSV；
+> 本次文档审计时，本机 `results/mdac_ota_pvt45.csv` 含 42 个唯一点，目标为 45 点。
+> 本文可用于理解指标推导、DUT 和测试台约定，但不能作为完整 45 点签核报告。
+
 14-bit / 100 MS/s 流水线 ADC 第一级 MDAC(4-bit sub-ADC,残差增益 8,保持相 ≈5 ns)
 的全差分两级 OTA。器件评估全部使用 ngspice C-BSIM4(FreePDK45 oracle)全电路仿真
 (`circuitopt.ngspice_ac` / `ngspice_transient`)。测试台 JSON 由单一事实来源
-[examples/mdac_ota_gen.py](../examples/mdac_ota_gen.py) 生成,DUT 块在所有测试台中逐字节一致。
+[examples/mdac_ota_gen.py](https://github.com/751K/circuit-optimization-lab/blob/main/examples/mdac_ota_gen.py)
+生成,DUT 块在所有测试台中逐字节一致。
 
 ## 0. 设计约定(供电/共模歧义的解决)
 

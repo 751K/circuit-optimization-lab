@@ -1,5 +1,9 @@
 # AFE 设计方程 (SLiCAP 符号推导)
 
+> **文档状态：参考推导。** 本文记录 AT4000TG AFE 的符号分析和历史交叉核对，
+> 用于理解拓扑与参数灵敏度；当前接口和运行方式以
+> [核心求解器概览](module_overview_zh.md)及代码为准。
+
 > 生成日期: 2026-06-19
 > 工具: SLiCAP 5.0.3 + Python AFE Solver
 > 方法: 小信号等效电路 (VCCS + R + C) → SLiCAP Laplace 符号分析

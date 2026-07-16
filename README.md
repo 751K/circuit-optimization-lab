@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/751K/circuit-optimization-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/751K/circuit-optimization-lab/actions/workflows/ci.yml)
 [![Docs](https://github.com/751K/circuit-optimization-lab/actions/workflows/docs.yml/badge.svg)](https://751k.github.io/circuit-optimization-lab/)
-[![Version](https://img.shields.io/badge/version-v1.1.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.2.0-blue)](CHANGELOG.md)
 
 A local analog-circuit simulation and optimization framework with DC, AC, noise,
 transient, PSS, PAC, PNoise, process-corner, mismatch, dataset, surrogate-model,
@@ -30,6 +30,12 @@ circuit-opt run examples/periodic_rc.json --analysis ac,noise
 - [Core solver architecture](docs/module_overview.md)
 - [TSMC28HPC+ adapter](docs/tsmc28hpcp.md)
 - [Service API](docs/service_api.md)
+- [Licenses and third-party notices](THIRD_PARTY_NOTICES.md)
 - [Changelog](CHANGELOG.md)
 
-Licensed under the [MIT License](LICENSE).
+## License
+
+CircuitOpt's original code is licensed under the [MIT License](LICENSE).
+Vendored BSIM4 and ngspice compatibility sources retain their original
+copyright notices and terms; see
+[Third-Party Notices / 第三方软件声明](THIRD_PARTY_NOTICES.md).

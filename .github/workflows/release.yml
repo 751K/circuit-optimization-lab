@@ -1,6 +1,6 @@
 name: Release
 
-# Fires when a semantic-version tag is pushed (e.g. `git tag v1.1.0 && git push --tags`).
+# Fires when a semantic-version tag is pushed (e.g. `git tag v1.2.0 && git push --tags`).
 # Builds the sdist + wheel and attaches them to a GitHub Release for that tag.
 on:
   push:

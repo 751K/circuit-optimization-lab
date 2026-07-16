@@ -39,8 +39,8 @@ htmlcov/
 
 # Generated data and reports
 outputs/
-results/
-!results/README.md
+/results/
+!/results/README.md
 runs/
 tmp/
 temp/

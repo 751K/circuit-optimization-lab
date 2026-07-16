@@ -1,4 +1,8 @@
-# FreePDK45 6-bit 差分 SAR ADC:完整设计流程报告
+# FreePDK45 6-bit 差分 SAR ADC 设计记录
+
+> **文档状态：可复现实验记录。** 本文展示晶体管级 CDAC/比较器与 Python SAR
+> 状态机的联合流程。它不是完整晶体管级数字控制、瞬态噪声或版图后 ADC
+> sign-off 流程。
 
 用本仓库工具链在 **FreePDK45(45 nm, 1.0 V)** 上从零走完的第二个设计案例——一个 **6-bit
 全差分共模翻转 SAR ADC**,核心是一个**时钟同步 StrongARM 动态锁存比较器**。器件由

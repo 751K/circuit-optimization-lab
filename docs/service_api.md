@@ -3,12 +3,15 @@
 [Project overview](README.md) | [Core Solver Overview](module_overview.md) |
 [CLI Reference](cli_reference.md) | [中文版](service_api_zh.md)
 
+> **Status: maintained API reference.** The service is local, in-process, and
+> unauthenticated by default.
+
 A local FastAPI HTTP layer over the same solver stack the CLI drives. It is a
 **thin adapter** — every route hands a request straight to an existing single
 source of truth (`circuit_from_dict`, `analysis_options`, `run_analysis_suite`,
 `explore_from_dict`, `mismatch_mc_from_dict`) and carries no numerical logic of
-its own. This is the base the desktop GUI and an MCP server sit on top of (see
-[Future Plan](futureplan.md)).
+its own. Local client applications can use this layer instead of importing the
+solver package directly.
 
 ## Quick Start
 
@@ -28,7 +31,7 @@ Swagger/OpenAPI docs are served automatically at `http://127.0.0.1:8341/docs`
 
 ```bash
 curl http://127.0.0.1:8341/api/v1/health
-# {"status":"ok","version":"1.1.0","api":"v1"}
+# {"status":"ok","version":"1.2.0","api":"v1"}
 ```
 
 ### Server flags
@@ -79,7 +82,7 @@ curl http://127.0.0.1:8341/api/v1/health
 ```
 
 ```json
-{"status": "ok", "version": "1.1.0", "api": "v1"}
+{"status": "ok", "version": "1.2.0", "api": "v1"}
 ```
 
 ### `GET /api/v1/capabilities`
@@ -93,7 +96,7 @@ curl http://127.0.0.1:8341/api/v1/capabilities
 
 ```json
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "api": "v1",
   "models": {"pmos_tft": "circuitopt.pmos_tft_model.PMOS_TFT", "sky130.nmos": "...", "...": "..."},
   "analyses": {
@@ -457,5 +460,3 @@ results through the corresponding HTTP endpoint (same seed -> same output).
   command line entry point.
 - [Core Solver Overview](module_overview.md) — the `service/` subpackage entry
   in the module map, and the solver internals every endpoint calls into.
-- [Future Plan](futureplan.md) — where the service layer fits into the
-  broader desktop/MCP roadmap.

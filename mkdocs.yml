@@ -1,5 +1,5 @@
 site_name: Circuit Optimization Lab
-site_description: A local, Cadence-calibrated, multi-PDK framework for analog circuit simulation and ML-driven design optimization.
+site_description: A local analog-circuit simulation and optimization framework.
 site_url: https://751k.github.io/circuit-optimization-lab/
 repo_url: https://github.com/751K/circuit-optimization-lab
 repo_name: 751K/circuit-optimization-lab
@@ -33,31 +33,38 @@ theme:
 
 nav:
   - Home: README.md
+  - Getting Started:
+      - Installation and First Run: getting_started.md
+      - 安装与快速上手: getting_started_zh.md
   - User Guide:
-      - JSON Circuit Format: json_circuit_format.md
       - CLI Reference: cli_reference.md
+      - JSON Circuit Format: json_circuit_format.md
+      - PDK Support Matrix: pdk_support.md
       - Service API: service_api.md
   - Architecture:
       - Module Overview: module_overview.md
-      - Native TSMC28 BSIM4 Backend: development/native_bsim4_plan.md
+      - Developer Handoff: development.md
+      - ngspice Oracle Helpers: ngspice_oracles.md
+      - Environment & Benchmarks: environment_performance.md
+  - Licenses & Notices: third_party_licenses.md
+  - PDK Guides:
+      - TSMC28HPC+ Native Adapter: tsmc28hpcp.md
   - Design Cases:
+      - Status and Index: design_cases.md
       - SKY130 FD-OTA: sky130_fd_ota_design.md
       - FreePDK45 FD-OTA: freepdk45_fd_ota_design.md
       - FreePDK45 SAR ADC: freepdk45_sar_design.md
+      - FreePDK45 MDAC OTA: mdac_ota_derivation.md
       - TSMC28HPC+ MDAC OTA: tsmc28_mdac_ota_design.md
-      - TSMC28HPC+ Local Adapter: tsmc28hpcp.md
       - AFE Design Equations: afe_design_equations.md
-  - Performance:
-      - Environment & Benchmarks: environment_performance.md
-  - Roadmap:
-      - Future Plan: futureplan.md
   - 中文文档:
       - 项目说明: README_zh.md
-      - TSMC28HPC+ MDAC OTA: tsmc28_mdac_ota_design.md
+      - PDK 支持矩阵: pdk_support_zh.md
       - TSMC28HPC+ 本地适配: tsmc28hpcp_zh.md
       - 核心求解器概览: module_overview_zh.md
       - JSON 电路描述格式: json_circuit_format_zh.md
       - 本地服务 API: service_api_zh.md
+      - 许可证与第三方软件: third_party_licenses.md
 
 markdown_extensions:
   - admonition

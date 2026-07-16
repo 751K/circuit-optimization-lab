@@ -34,7 +34,7 @@
     },
     "devices": {
       "type": "array",
-      "description": "PMOS_TFT devices. Object form may carry W/L/NF/M (M = parallel-instance multiplicity, default 1); array form is [name, drain, gate, source].",
+      "description": "Transistor devices. Object form may carry W/L/NF/M (M = parallel-instance multiplicity, default 1); array form is [name, drain, gate, source]. Per-device model selection lives in the top-level models field.",
       "items": {
         "oneOf": [
           {"$ref": "#/$defs/deviceObject"},
@@ -201,7 +201,7 @@
     },
     "explore": {
       "$ref": "#/$defs/explore",
-      "description": "Optional design-space exploration spec (see core/explore.py)."
+      "description": "Optional design-space exploration spec (see circuitopt/explore.py)."
     },
     "models": {
       "$ref": "#/$defs/models",

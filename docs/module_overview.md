@@ -2,6 +2,10 @@
 
 [Project overview](README.md) | [中文说明](README_zh.md) | [中文版](module_overview_zh.md)
 
+> **Status: maintained architecture reference.** Module responsibilities and
+> data flow are maintained; benchmark and calibration numbers near the end are
+> dated snapshots and should be reproduced before use in a new report.
+
 This document introduces the current `circuitopt/` solver stack. The code is a compact local implementation of an AT4000TG OTFT ECG AFE solver, calibrated against Cadence/Spectre behavior. It is intended as the first concrete backend of the broader local circuit optimization flow.
 
 ## Scope
@@ -807,7 +811,7 @@ match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see th
   Vsb slice (op-vars `@m[id/gm/gds/cgs/cgd]`); `characterize_noise()` runs one `.noise` per
   coarse bias. Both take a `temp_c` (`.options temp`, keyed into the cache — 27 °C stays
   tag-free so nominal caches persist) and cache under a process namespace such as
-  `data/pdk/freepdk45/` or `data/pdk/tsmc28hpcp/`, so reuse needs no ngspice. Both run
+  `data/pdk/freepdk45/`, so reuse needs no ngspice. Both run
   through a shared `_run_ngspice()` helper that makes failures explicit:
   a non-zero ngspice return code, or a silently-missing output file on return code 0, raises
   `RuntimeError` carrying the tail of ngspice's stderr — instead of the batch decks and output
@@ -891,9 +895,7 @@ OTFT+silicon (or all-silicon) circuit is just configuration — see
 An **optional** local FastAPI HTTP layer over the whole solver stack, gated on the
 `serve` extra (`pip install -e ".[serve]"`). It is a thin adapter — every route hands
 a request straight to an existing single source of truth and carries no numerical
-logic of its own — and is the shared base a future desktop GUI or MCP server would
-sit on top of (see [Future Plan](futureplan.md)). Full endpoint reference:
-[Service API](service_api.md).
+logic of its own. Full endpoint reference: [Service API](service_api.md).
 
 - **`app.py`** — `create_app(job_workers=1) -> FastAPI` builds the `/api/v1` app:
   `GET health`/`capabilities`, `POST validate`/`solve` (synchronous, calling

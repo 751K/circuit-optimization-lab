@@ -2,6 +2,9 @@
 
 [English](tsmc28hpcp.md) | [中文说明](tsmc28hpcp_zh.md)
 
+> **Status: maintained adapter guide.** Scope is the documented 0.9 V core MOS
+> wrappers and the analysis paths listed below, not the complete iPDK.
+
 The `tsmc28hpcp` binding evaluates a locally installed, licensed TSMC 28HPC+
 model deck inside circuitopt. The default `tsmc28hpcp.nmos` and
 `tsmc28hpcp.pmos` model types do not launch ngspice: circuitopt parses the

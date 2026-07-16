@@ -2,6 +2,9 @@
 
 [English](tsmc28hpcp.md) | [中文说明](tsmc28hpcp_zh.md)
 
+> **文档状态：持续维护的适配指南。** 当前范围是下文列出的 0.9 V core MOS
+> wrapper 和分析链路，不代表完整 iPDK 支持。
+
 `tsmc28hpcp` binding 在 circuitopt 内部直接求值用户本地已有许可的 TSMC
 28HPC+ 模型。默认的 `tsmc28hpcp.nmos` / `tsmc28hpcp.pmos` 不会启动
 ngspice：代码自行解析 HSPICE library 闭包、foundry MOS 宏和尺寸 bin，再由

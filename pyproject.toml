@@ -1,13 +1,19 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "circuit-optimization"
-version = "1.1.0"
-description = "Local circuit solvers and benchmarks for TFT circuit optimization."
+version = "1.2.0"
+description = "Local analog-circuit simulation and optimization framework."
 readme = "README.md"
 license = "MIT"
+license-files = [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "circuitopt/compact_models/bsim4/native_src/NOTICE.md",
+    "circuitopt/compact_models/bsim4/native_src/vendor/bsim4v5/B4TERMS_OF_USE",
+]
 requires-python = ">=3.10"
 keywords = ["circuit", "simulation", "spice", "analog", "eda", "optimization", "surrogate"]
 classifiers = [
@@ -32,6 +38,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/751K/circuit-optimization-lab"
 Repository = "https://github.com/751K/circuit-optimization-lab"
+"Third-Party Notices" = "https://github.com/751K/circuit-optimization-lab/blob/main/THIRD_PARTY_NOTICES.md"
 
 [project.optional-dependencies]
 # Optional feature groups. Each maps to a real lazy import in circuitopt/ (or demo/):
