@@ -1,17 +1,17 @@
-"""Per-instance mismatch Monte-Carlo for the FreePDK45 / ngspice SAR ADC workflow.
+"""Per-instance mismatch Monte-Carlo for the FreePDK45 SAR ADC workflow.
 
 The local-solver mismatch MC in :mod:`circuitopt.corners` perturbs OTFT model
 params (``mvt0``/``mbeta0``) inside circuitopt's own device model; it never
-reaches the silicon path, where the transistors are BSIM4 cards evaluated by
-ngspice. This module fills that gap for the SAR ADC: it draws two families of
+reaches the silicon path, where the transistors are BSIM4 card devices. This
+module fills that gap for the SAR ADC: it draws two families of
 per-instance variation, feeds them into the closed-loop conversion, and reports
 static-linearity yield.
 
 Two mismatch sources, matching how a real CDAC SAR fails to hit its codes:
 
   * **Transistor Vth** — a per-device threshold offset injected as the BSIM4
-    instance parameter ``delvto`` (verified honored by the bundled ngspice: a
-    positive offset raises Vth and cuts drain current). Comparator input-pair Vth
+    instance parameter ``delvto`` (a positive offset raises Vth and cuts drain
+    current). Comparator input-pair Vth
     mismatch is the dominant SAR offset/first-transition error, so this is the
     knob that moves DNL/INL. Sigma follows Pelgrom's area law
     ``sigma_vth0 / sqrt(W*L / (w0*l0))`` — bigger devices average out local

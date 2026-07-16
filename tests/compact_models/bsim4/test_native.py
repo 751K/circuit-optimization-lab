@@ -62,10 +62,18 @@ def test_native_tsmc_core_device_is_finite_and_conservative(
     assert result.operating_point["internal_nodes"] == 2
 
 
-def test_native_jacobian_and_charge_derivative_match_finite_difference():
-    model, instance = _cards()
+@pytest.mark.parametrize(
+    ("polarity", "voltage"),
+    [
+        ("nmos", np.asarray((0.75, 0.68, 0.05, 0.0))),
+        ("pmos", np.asarray((0.15, 0.22, 0.85, 0.9))),
+    ],
+)
+def test_native_jacobian_and_charge_derivative_match_finite_difference(
+    polarity, voltage
+):
+    model, instance = _cards(polarity)
     backend = NativeBsim4Backend()
-    voltage = np.asarray((0.75, 0.68, 0.05, 0.0))
 
     def evaluate(values):
         return backend.evaluate(model, instance, Bsim4Bias(*values))

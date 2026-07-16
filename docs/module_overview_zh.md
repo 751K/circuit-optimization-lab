@@ -24,8 +24,8 @@
 
 实现刻意保持小而自包含，包含 `__init__.py`、CLI 入口 `__main__.py`、校准/PSF/Cadence 网表辅助模块、共享诊断/profiling
 模块、主求解器栈、一套 ML surrogate 层（数据集构建、surrogate 训练、筛选-校验优化器）、接入同一套
-`TransistorModel` 接口的三个硅 PDK——SKY130（OpenVAF/OSDI）、FreePDK45（ngspice-C）与
-TSMC28HPC+（内部 HSPICE 解析器与原生 Berkeley BSIM4.5）——
+`TransistorModel` 接口的三个硅 PDK——SKY130（OpenVAF/OSDI）、FreePDK45（平铺卡解析 +
+原生 Berkeley BSIM4.5）与 TSMC28HPC+（内部 HSPICE 解析器 + 同一原生后端）——
 以及架在整个栈之上的可选本地 HTTP 服务层（`circuitopt/service/`）。
 
 ## 文件结构
@@ -65,12 +65,14 @@ circuitopt/
   optimize.py          surrogate 筛选 / Pareto 选择 / solver 校验闭环。
   osdi_host.py         OSDI 0.4 ctypes 宿主——加载编译好的 Verilog-A（.osdi）模型，单器件 DC/AC/noise 求值。
   osdi_device.py       OSDI 宿主紧凑模型的 TransistorModel 适配器（把任意 OSDI PDK 桥接进求解器栈）。
-  osdi_transient.py    OSDI 器件的后向欧拉瞬态（在 numba 循环之外）。
+  osdi_transient.py    在 Numba 内直接调用 OSDI ABI 的固定网格/自适应瞬态。
   sky130_model.py      SKY130 nfet/pfet PDK：BSIM4 参数卡提取（经 ngspice）+ PDK 注册。
   ngspice_char.py      model-card 求值器：批量 ngspice .dc/.noise 表征 → 缓存 (Vsb,Vds,Vgs) 网格。
   ngspice_device.py    基于缓存 ngspice 网格的 TransistorModel（插值 Id/gm/gds/caps/noise；extract_w + 温度）。
   ngspice_process.py   工艺适配协议：deck 前导、器件语法、op 向量、仿真器参数。
-  freepdk45_model.py   FreePDK45 nmos/pmos PDK：角卡绑定 + PDK 注册（ngspice-C 求值器）。
+  freepdk45_model.py   FreePDK45 兼容导出 + 显式 ngspice oracle 注册。
+  pdk/freepdk45/       平铺模型卡加载器与原生 FreePDK45 nmos/pmos 适配器。
+  compact_models/bsim4/ 原生 Berkeley BSIM4 host、ABI、Numba 编组与瞬态。
   tsmc28_model.py      TSMC28HPC+ core nmos/pmos：nch_mac/pch_mac + HSPICE library 闭包。
   service/             可选的本地 FastAPI HTTP 服务层（`serve` extra）——见下文。
     __init__.py        只重导出 CLI 胶水代码；从不 import fastapi（import circuitopt 保持无 fastapi 依赖）。
@@ -120,7 +122,8 @@ sky130_model.py      <- device_model, osdi_device
 ngspice_char.py      <- 无内部依赖；ngspice 子进程 + numpy
 ngspice_device.py    <- device_model, ngspice_char；运行期可选 scipy
 ngspice_process.py   <- device_model
-freepdk45_model.py   <- device_model, ngspice_device
+freepdk45_model.py   <- pdk/freepdk45, device_model, ngspice_device
+pdk/freepdk45/*      <- spice 解析器、compact_models/bsim4、device_model、toolchain
 tsmc28_model.py      <- device_model, ngspice_device, ngspice_process, toolchain
 service/app.py       <- analysis_dispatch, analysis_options, circuit_loader, device_factory, device_model,
                         freepdk45_model, service/jobs, service/serialize；import 时可选 fastapi/pydantic
@@ -666,11 +669,11 @@ mismatch/latch 相关工作：
   （默认 +1，即 source-high——匹配 PMOS/OTFT）让 `ac_solve` 的 DC KCL 也能支持 NMOS（source-low，
   `kcl_sign=-1`），且不改变 OTFT 路径（byte-identical：`1.0 * abs(x) == abs(x)`）。`OsdiDevice`
   覆写基类的能力类属性：`HAS_TERMINAL_LINEARIZATION = True`（提供 `get_terminal_linearization`）和
-  `TRANSIENT_BACKEND = "osdi"`。三个瞬态专用的 ABC 钩子仍会抛 `NotImplementedError`——`.osdi`
-  不能进 numba 瞬态循环。
-- **`osdi_transient.py`** ——`transient_osdi(sizes, bias, tgrid, ...)` 是电路级入口：一个固定步长
-  后向欧拉积分器，每步直接调用 OSDI 宿主（在 numba 循环之外），建立在更底层的单器件辅助函数
-  `cs_transient()` 上，是一个基础性（非全保真度）的硅瞬态实现。`transient_solver.py` 里的
+  `TRANSIENT_BACKEND = "osdi"`。通用 OTFT 瞬态 ABC 钩子仍保持分离；OSDI 瞬态使用自己的
+  ABI 感知 Numba 路径。
+- **`osdi_transient.py`** ——`transient_osdi(sizes, bias, tgrid, ...)` 是电路级入口。固定网格和
+  自适应内核在 Numba 内直接调用 OSDI 函数指针，并把外部节点与器件内部动态节点放进同一个全局
+  Newton 系统；`cs_transient()` 保留为可读参考。`transient_solver.py` 里的
   `transient()` 会检查器件的 `TRANSIENT_BACKEND` 类属性，若为 `"osdi"` 就延迟 import 并路由到
   `transient_osdi`——单向依赖。`osdi_transient.py` 自身不再 import `transient_solver.py`，
   两个模块不再构成循环 import（这次拆分之前是的）。
@@ -683,39 +686,28 @@ mismatch/latch 相关工作：
   SKY130-vs-VA 的 BSIM4 版本差异无关（SKY130 的 ngspice 内置模型是 4.5，VA 源码是 4.8——这是一个真实的
   130nm 工艺，不是 SkyWater 逐字节对齐的 sign-off 模型，但对优化器泛化而言这是正确的取舍）。
 
-### 第三个 PDK：FreePDK45（`ngspice_char.py` / `ngspice_device.py` / `freepdk45_model.py`）
+### 第三个 PDK：FreePDK45 原生适配（`pdk/freepdk45/`）
 
-FreePDK45（45nm，1.0V，用户目标工艺）接入**同一个** `TransistorModel` 接口，但用**不同的求值器**。
-FreePDK45 的 BSIM4 卡声明 `version = 4.0`,而我们 OpenVAF 编的 BSIM4.8 VA 没有版本开关,在这些 45nm 卡上
-算出 ~30% 不同的 I-V(与版本无关——已用改卡验证),所以 OSDI 宿主复现不了 FreePDK45 的预期行为。它的
-oracle 因此是 **ngspice-C 本身**:`ngspice_char.characterize()` 按 `(model, W, L, corner, temp)` 跑一次批
-量 `.dc` 扫（~0.03s/1000 点）成缓存的 Id/gm/gds/Cgs/Cgd 网格,`NgspiceDevice` 插值它（µs/eval,节点处即
-exact ngspice-C）。已验证 model==oracle:单器件 op 逐位对 ngspice `.op`,5T OTA 过 `ac_solve` 与 ngspice
-自己的 `.ac` 差 0.05dB/0.3%,输出噪声在 ngspice `.noise` 的 ~5% 内。噪声也是精确 ngspice-C
-（`characterize_noise` 逐偏置跑 `.noise`,CCVS 跨阻→漏噪 PSD,拟合 S_id=A+B/f,log 空间插值）。
-快速网格负责 DC+AC+noise；`transient()` 遇到 FreePDK45 会路由到 `ngspice_transient.py`，生成完整
-四端网表并直接跑 ngspice `.tran`，因此保留 BSIM4 端口电荷和 Cdb/Csb。PSS/PAC/PNoise 尚未接入该后端。
-网格 AC 模型带 Cgs/Cgd 但**不含**漏/源结电容 Cdb/Csb,故整机 `ac_solve`
-的 UGBW 比 ngspice 自己的 `.ac` 偏高 ~8%（增益/PM 对到 <0.2dB / <8°）——头条数字取 ngspice 值并留裕量。
+FreePDK45 现与 TSMC28HPC+ 共用原生 Berkeley BSIM4.5 内核。
+`pdk/freepdk45/library.py` 把平铺的 level-54 VTG 卡解析为数值模型卡；
+`pdk/freepdk45/device.py` 通过 `freepdk45.nmos` / `.pmos` 提供完整四端电流、
+电导、电荷、电容和相关噪声。源卡声明 `version=4.0`；内置 Berkeley 源码仅把
+该字段作为元数据，回归测试以 ngspice 核对单管工作点/噪声和五管 OTA。
 
-- **`ngspice_char.py`** ——批量表征器。`characterize()` 按 Vsb 切片扫 `.dc vg vd`（op-vars
-  `@m[id/gm/gds/cgs/cgd]`）;`characterize_noise()` 逐偏置跑一次 `.noise`。两者都接受 `temp_c`
-  （`.options temp`,进缓存键——27°C 保持无标签故标称缓存不失效）,按工艺缓存到
-  `data/pdk/freepdk45/`。
-  两者都经由共享的 `_run_ngspice()` 帮手让失败显式化：ngspice 非零 returncode，或 returncode
-  为 0 但输出文件缺失（静默失败），都会抛出携带 ngspice stderr 尾部的 `RuntimeError`——而不是让
-  临时 deck/输出文件（现在建在 `tempfile.TemporaryDirectory()` 里，不再是裸 `mktemp`）悄悄丢失，
-  最终在下游 `numpy.loadtxt` 里报一个看不出原因的 `FileNotFoundError`。
-- **`ngspice_device.py`** ——`NgspiceDevice(TransistorModel)` 插值网格（`scipy.RegularGridInterpolator`,
-  **线性**——cubic 在 ~1e-17 电容数组上返回 0）。`extract_w`:在参考 W 处表征一次,线性缩放实际 W（BSIM4
-  近似正比 W,<0.7% vs 逐 W 真卡）,使 dataset/优化器的 W 扫描变纯插值;`temperature`（开尔文 kwarg）→
-  `temp_c` 物理重表征。Cgs/Cgd 取自 ngspice C 矩阵;瞬态钩子 `NotImplementedError`。
-- **`ngspice_transient.py`** ——完整电路 `.tran` 后端：MOS/R/C/独立源/受控源/PWL、corner/温度、
-  节点与电源电流回读；统一 `transient()` 自动路由，网格对象本身无需伪造电荷 companion。
-- **`freepdk45_model.py`** ——`Fp45Nfet`/`Fp45Pfet(NgspiceDevice)` + `register_pdk("freepdk45", ...)`。
-  `corner` 支持 nom/tt/ss/ff/sf/fs，并按极性选择卡目录。`FREEPDK45_CORNERS`
-  是合法 corner 名的公开元组；服务层 `GET /api/v1/capabilities` 直接读取它
-  （连同 `device_factory.SKY130_CORNERS`、`device_factory.CORNERS`），而不是硬编码三个工艺角家族。
+原生 host 使用带主元的小型线性求解消去 FreePDK45 的漏源、栅和体电阻内部节点；
+四端电荷聚合包含分布式体结电荷，并统一 PMOS 电荷符号。因此 N/P 两种极性的
+AC 电容与电荷有限差分一致，DC、AC、noise、transient、PSS、PAC、PNoise
+可以共用同一进程内紧凑模型路径。
+
+原生 host 还提供带版本号的守恒求值 ABI、全 `void *` 入口和批量求值器。
+固定网格 BSIM4 瞬态把矩阵盖章、Newton 与时间步循环留在 Numba 内，再通过运行时
+ctypes 函数指针调用 C 紧凑模型；禁用 Numba 时保留 Python 参考实现。
+
+- **`pdk/freepdk45/library.py`** ——可迁移卡路径解析、严格 corner/极性校验、数值解析与缓存。
+- **`pdk/freepdk45/device.py`** ——原生 `TransistorModel` 适配器和默认 `freepdk45.*` 注册。
+- **`freepdk45_model.py`** ——兼容导出与可选的旧 `freepdk45_ngspice.*` 网格别名。
+- **`ngspice_char.py` / `ngspice_device.py` / `ngspice_transient.py`** ——保留为外部
+  回归 oracle 基础设施，不再是 FreePDK45 默认运行路径。
 
 ### TSMC28HPC+ 原生适配（`spice/` / `compact_models/bsim4/` / `pdk/tsmc28/`）
 

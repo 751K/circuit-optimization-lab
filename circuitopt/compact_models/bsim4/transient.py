@@ -181,20 +181,41 @@ def transient_native_bsim4(
             (rho * rho) / ((1.0 + rho) * h),
         )
 
-    xhist = np.zeros((len(tgrid), n_aug), dtype=float)
-    xhist[0] = V0
-    q_prev = {}
-    q_prev2 = {}
-    for item in plan.devices:
-        q_prev[item.name] = device_state(item, V0, 0)[1]
-        q_prev2[item.name] = q_prev[item.name].copy()
-
-    nfail = 0
     nnear = 0
-    first_fail = -1
     failed_residuals = []
     near_residuals = []
-    for sample in range(1, len(tgrid)):
+    from ...numba_kernels import NUMBA_AVAILABLE
+
+    if NUMBA_AVAILABLE:
+        from .numba_transient import solve_bsim4_numba
+
+        xhist, nfail, first_fail = solve_bsim4_numba(
+            plan,
+            devices,
+            V0,
+            tgrid,
+            input_matrix,
+            dynamic_sources,
+            method=method,
+            newton_maxit=newton_maxit,
+            newton_vtol=newton_vtol,
+            newton_step_limit=newton_step_limit,
+            gmin=gmin,
+        )
+        solve_samples = ()
+    else:
+        xhist = np.zeros((len(tgrid), n_aug), dtype=float)
+        xhist[0] = V0
+        q_prev = {}
+        q_prev2 = {}
+        for item in plan.devices:
+            q_prev[item.name] = device_state(item, V0, 0)[1]
+            q_prev2[item.name] = q_prev[item.name].copy()
+        nfail = 0
+        first_fail = -1
+        solve_samples = range(1, len(tgrid))
+
+    for sample in solve_samples:
         a0, a1, a2 = coefficients(sample)
         x = xhist[sample - 1].copy()
 
@@ -625,6 +646,8 @@ def transient_native_bsim4(
         "nretry": 0,
         "nsubsteps": int(len(tgrid) - len(requested_t)),
         "bsim4_native_transient": True,
+        "numba_grid_solver": bool(NUMBA_AVAILABLE),
+        "bsim4_numba_transient": bool(NUMBA_AVAILABLE),
         "backend": "bsim4_native",
         "integration_method": "gear2" if method in {"gear2", "bdf2"} else "be",
         "X_final": sampled[-1].copy(),

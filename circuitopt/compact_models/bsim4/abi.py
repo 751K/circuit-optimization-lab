@@ -42,12 +42,15 @@ class Bsim4ModelCard:
     def __post_init__(self):
         if self.polarity not in {-1, 1}:
             raise Bsim4ValidationError("BSIM4 polarity must be +1 (NMOS) or -1 (PMOS)")
-        if float(self.version) != 4.5:
+        version = float(self.version)
+        if version not in {4.0, 4.5}:
             raise Bsim4ValidationError(
-                f"native backend currently requires BSIM4 4.5, got {self.version}")
+                "native backend accepts BSIM4 4.0-compatible and 4.5 cards, "
+                f"got {self.version}")
         normalized = _numeric_map(self.parameters, "model")
         normalized.pop("level", None)
         normalized.pop("version", None)
+        object.__setattr__(self, "version", version)
         object.__setattr__(self, "parameters", normalized)
 
 

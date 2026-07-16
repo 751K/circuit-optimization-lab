@@ -4,18 +4,18 @@
 > comparison paths. They are not the default TSMC28 native backend and do not
 > turn an ngspice result into foundry sign-off.
 
-FreePDK45 uses cached ngspice-C characterization in its local solvers. TSMC28HPC+
-normally uses circuitopt's native BSIM4.5 backend; ngspice is retained as an
-independent regression oracle. The oracle helpers render the **complete** circuit
-and let ngspice run the original compact-model deck with full charge. They live in
+FreePDK45 and TSMC28HPC+ normally use CircuitOpt's native BSIM4.5 backend.
+ngspice is retained as an independent regression oracle. The oracle helpers
+render the **complete** circuit and let ngspice run the original compact-model
+deck with full charge. They live in
 `circuitopt/ngspice_ac.py` and share the deck renderer in `circuitopt/ngspice_render.py`
 with the `.tran` backend, so device M/X lines, R/C, E/G/F/H controlled sources,
 rails, per-polarity corner routing, temperature and supply bias render identically.
 
-FreePDK45's local grid carries only `Cgs`/`Cgd`, so its 45 nm FD-OTA reads about 8%
-optimistic UGBW versus the complete deck (see `freepdk45_fd_ota_design.md` §4.5).
-Use the full-circuit oracle whenever junction charge, exact bandwidth, switching, or
-foundry wrapper behavior matters.
+The historical FreePDK45 characterization grid remains registered as
+`freepdk45_ngspice.*`. New circuits should use `freepdk45.*`; use the explicit
+aliases or the full-circuit helpers when reproducing old grid results or checking
+native results against an external simulator.
 
 All four honor: **temperature** (`temperature=` in Kelvin → `.options temp=`),
 **corner** (`corner=` including the mixed `sf`/`fs`, via `binding.at_corner(...)` or
@@ -28,7 +28,7 @@ The registered model types choose the renderer:
 
 | Model type | SPICE instance | Model setup | ngspice arguments |
 |------------|----------------|-------------|-------------------|
-| `freepdk45.nmos` / `.pmos` | flat `M` device | per-polarity `.include` cards | default |
+| `freepdk45.nmos` / `.pmos` or `freepdk45_ngspice.*` | flat `M` device | per-polarity `.include` cards | default |
 | `tsmc28hpcp_ngspice.nmos` / `.pmos` | `X` wrapper using `nch_mac` / `pch_mac` | explicit five-section `.lib` closure | `-D ngbehavior=hsa` |
 
 A complete circuit must use one process adapter for every MOS. Mixed foundry setup
@@ -54,11 +54,10 @@ directory **per polarity** (`circuitopt.freepdk45_model.corner_card_dir`):
 | `sf` | `models_ss` | `models_ff` |
 | `fs` | `models_ff` | `models_ss` |
 
-`sf` = NMOS slow + PMOS fast; `fs` the reverse; `tt` is an alias of `nom`. Both the
-characterisation-grid path and the full-circuit ngspice render honor them; the grid
-cache keys on the corner **name**, so an `sf` NMOS grid (built from the `ss` card) is
-cached separately from — and never collides with — the `ss` grid. When the two
-polarities differ (`sf`/`fs`), the rendered deck `.include`s **both** card files.
+`sf` = NMOS slow + PMOS fast; `fs` the reverse; `tt` is an alias of `nom`. The native
+card loader, historical characterization grid, and full-circuit ngspice renderer all
+honor this mapping. When the two polarities differ (`sf`/`fs`), the rendered deck
+`.include`s **both** card files.
 nom/ss/ff decks are byte-identical to the pre-change renderer (golden-locked).
 
 Corner names are **case-insensitive** (`"SF"` behaves as `sf`) and **strictly

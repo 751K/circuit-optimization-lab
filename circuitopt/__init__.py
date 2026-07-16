@@ -48,7 +48,7 @@ from .ngspice_ac import (ac_ngspice, ac_response, dc_gain_db, gain_margin_db,
 from .pac_solver import pac_solve
 from . import pmos_tft_model  # noqa: F401 — triggers register_pdk("at4000tg", …)
 from . import sky130_model    # noqa: F401 — triggers register_pdk("sky130", …)
-from . import freepdk45_model  # noqa: F401 — triggers register_pdk("freepdk45", …)
+from . import freepdk45_model  # noqa: F401 — native FreePDK45 + ngspice oracle
 from . import tsmc28_model  # noqa: F401 — registers explicit ngspice oracle PDK
 from .pdk.tsmc28 import device as _tsmc28_native_device  # noqa: F401
 from .pnoise_solver import pnoise_solve

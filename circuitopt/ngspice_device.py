@@ -1,17 +1,15 @@
-"""``TransistorModel`` backed by ngspice-C via a cached characterisation grid.
+"""Optional ``TransistorModel`` backed by a cached ngspice characterization grid.
 
-For model-card-backed processes the oracle is ngspice's built-in C-BSIM4. FreePDK45's
-``version = 4.0`` cards
-diverge ~30 % from our BSIM4.8 OSDI VA — see :mod:`circuitopt.ngspice_char`). This adapter
-makes ngspice the evaluator: a device characterises its ``(model, W, L, corner)`` once
+This is retained for explicit regression-oracle model types such as
+``freepdk45_ngspice.*``. A device characterises its ``(model, W, L, corner)`` once
 into a (Vsb, Vds, Vgs) grid of Id / gm / gds / Cgs / Cgd (:func:`circuitopt.ngspice_char.characterize`,
 exact ngspice-C at the nodes), then answers the ABC's Phase-A methods by interpolating
 that grid — µs / eval, so the DC Newton and AC/noise sweeps run at solver speed.
 
 **Grid scope:** DC + small-signal (gm/gds) + capacitances + noise. The grid-level
 transient hooks raise :class:`NotImplementedError` because it carries no charge
-companion; complete FreePDK45 circuits are instead routed by ``transient()`` to
-the direct-ngspice full-charge backend in :mod:`circuitopt.ngspice_transient`.
+companion; an explicitly grid-bound complete circuit is routed by ``transient()``
+to the direct-ngspice full-charge backend in :mod:`circuitopt.ngspice_transient`.
 gm / gds / Cgs / Cgd are read straight from
 ngspice op-vars (Cgs = −dQg/dVs, Cgd = −dQg/dVd — the same definition the OSDI host
 uses), i.e. true ngspice-C quantities, not differentiated interpolants.

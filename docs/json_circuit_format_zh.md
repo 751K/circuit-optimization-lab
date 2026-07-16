@@ -179,20 +179,16 @@ examples/periodic_rc.json
   `corner`（SKY130 工艺角——`tt`/`ss`/`ff`/`sf`/`fs`；默认 `tt`）、`extract_w`
   （µm——在这个参考宽度处解析一次 SKY130 参数卡，让紧凑模型缩放实际 `W`，避免设计
   扫描时逐候选重新提取）、`temperature`（开尔文；默认 300.15）、`NF`（整数）。
-- **FreePDK45**（`"freepdk45.nmos"` / `"freepdk45.pmos"`）是第二个硅 PDK,用**不同的求值器**。
-  它的 BSIM4 卡声明 `version = 4.0`,而我们的 OpenVAF BSIM4.8 VA 无版本开关、在 45nm 卡上算出
-  ~30% 不同 I-V（与版本无关）,故 FreePDK45 走不了 SKY130 的 OSDI 路径。它的 oracle 是
-  **ngspice-C 本身**:每个器件按 `(model, W, L, corner, temp)` 用批量 ngspice `.dc` 扫表征一次成
-  缓存的 Id/gm/gds/Cgs/Cgd 网格（`circuitopt.ngspice_char` / `circuitopt.ngspice_device`）再插值——每个值都是
-  节点处 exact ngspice-C。噪声同样精确 ngspice-C（逐偏置 `.noise` → S_thermal + S_flicker@1Hz,
-  log 空间插值,5T OTA 上验证在 ngspice `.noise` 的 ~5% 内）。器件键:`vb`（NMOS=0,PMOS=VDD=1.0）、
-  `corner`（`nom`/`tt`/`ss`/`ff`/`sf`/`fs`；默认 `nom`）、`extract_w`（µm——参考宽度表征一次、线性缩放
-  实际 `W`,<0.7% vs 逐 W 真卡,使 dataset/优化器的 W 扫描保持纯插值）、`temperature`（开尔文,按该
-  温度重表征卡做 PVT）、`NF`。快速网格负责 DC + AC + 噪声；统一 `transient()` 检测到 FreePDK45
-  后会自动生成完整四端网表并调用 `circuitopt.ngspice_transient`，由 ngspice 原生 BSIM4 处理
-  `Qg/Qd/Qs/Qb`、结电容和开关电荷。PSS/PAC/PNoise 尚未接入此 ngspice 后端。网格 AC 模型不含漏/源结电容
-  （Cdb/Csb）,故整机 `ac_solve` 的 UGBW 比 ngspice 自己的 `.ac` 偏高 ~8%——头条数字取 ngspice 值。
-  卡在 `PDK_ROOT/freepdk45/` 下;见 `examples/freepdk45_5t_ota.json`（简单）与
+- **FreePDK45**（`"freepdk45.nmos"` / `"freepdk45.pmos"`）直接解析平铺的
+  BSIM4 level-54 模型卡，并使用进程内 Berkeley BSIM4.5 后端求值。模型卡声明
+  `version=4.0`；该元数据字段不会在内置内核中切换另一套方程，原生单管与五管 OTA
+  结果已用 ngspice 回归核对。器件键包括 `vb`（NMOS 为 0，PMOS 通常为 1.0V）、
+  `corner`（`nom`/`tt`/`ss`/`ff`/`sf`/`fs`；默认 `nom`）、开尔文
+  `temperature`、`NF`、`M` 以及内核支持的数值 BSIM4 实例参数。后端向 DC、AC、
+  noise、transient、PSS、PAC、PNoise 提供完整端口电流、电导、电荷、电容和相关噪声。
+  `extract_w` 仅作为旧配置兼容参数接受，原生器件始终使用实际几何尺寸。可选的
+  `freepdk45_ngspice.nmos` / `.pmos` 保留旧缓存网格求值器，完整电路 ngspice helper
+  则作为外部 oracle。模型卡位于 `PDK_ROOT/freepdk45/`；见
   `examples/freepdk45_fd_ota.json`（全差分 OTA 设计案例,[docs/freepdk45_fd_ota_design.md](freepdk45_fd_ota_design.md)）。
 - **TSMC28HPC+**（`"tsmc28hpcp.nmos"` / `"tsmc28hpcp.pmos"`）绑定 licensed 1d8
   HSPICE deck 中的 0.9V `nch_mac` / `pch_mac` core wrapper。PMOS bulk 接 core 电源时使用
@@ -206,8 +202,8 @@ examples/periodic_rc.json
   [TSMC28HPC+ 适配说明](tsmc28hpcp.md)。
 - 一个电路里部分器件是 OTFT、部分是硅是合法的——例如互补硅 OTA 独立绑定 NMOS/PMOS
   器件。见 `examples/sky130_5t_ota.json`。
-- SKY130 和 FreePDK45 仍需要各自文档中的外部仿真工具链。TSMC28HPC+ 原生路径只需要
-  licensed 模型文件，以及首次编译 BSIM4 后端时可用的 C 编译器；ngspice 仅为可选 oracle。
+- SKY130 仍需要其文档中的外部仿真工具链。FreePDK45 与 TSMC28HPC+ 原生路径只需要
+  各自模型文件，以及首次编译 BSIM4 后端时可用的 C 编译器；ngspice 仅为可选 oracle。
   缺少前置条件时求解器会清晰报错。详见
   [核心求解器概览](module_overview_zh.md) 的"硅 PDK / OSDI 层"一节。
 
@@ -269,7 +265,7 @@ bit 的 `decision_time` 附近脉冲到 `high`（评估）——锁存器在 CDA
 
 #### `adc.mismatch`
 
-可选。FreePDK45/ngspice SAR 的逐器件失配蒙特卡洛配置，由 `circuitopt.sar_mismatch_mc`
+可选。FreePDK45 SAR 的逐器件失配蒙特卡洛配置，由 `circuitopt.sar_mismatch_mc`
 使用。所有 sigma 默认 `0.0`，因此省略该块（或全部置零）即复现标称转换。
 
 ```json
@@ -735,13 +731,12 @@ pnoise_irn = results["pnoise"]["irn_uV_band"]
   （nmos + pmos，经 OpenVAF 编译的 BSIM4，通过 OSDI 宿主接入）。
 - 通过 `models` 字段做逐器件模型绑定——混合 OTFT/硅电路（不覆盖时默认 PDK 仍是
   ``"at4000tg.pmos"``）。
-- 硅 DC/AC/noise；SKY130 走 OSDI 瞬态，FreePDK45 走 ngspice 全电荷瞬态，
-  TSMC28HPC+ 走项目内部原生 BSIM4 后端。
+- 硅 DC/AC/noise；SKY130 走 OSDI 瞬态，FreePDK45 与 TSMC28HPC+
+  走项目内部原生 BSIM4 后端。
 
 尚未支持：
 
-- FreePDK45 的 PSS/PAC/PNoise（当前 ngspice 后端只接入 `.tran`）。
-- ADC transient noise、FreePDK45 逐器件 mismatch、版图寄生提取和晶体管级 SAR 数字状态机。
+- ADC transient noise、版图寄生提取和晶体管级 SAR 数字状态机。
 - 多输出同时分析。
 - 层次化子电路。
 - 任意用户电路 SPICE 网表导入。项目内部 HSPICE 解析器当前只用于受支持的本地模型库展开。

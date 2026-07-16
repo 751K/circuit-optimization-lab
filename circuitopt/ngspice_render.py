@@ -77,7 +77,8 @@ def _current_input(item):
 def resolve_freepdk45_cards(model_types, device_kwargs, device_names):
     """Resolve the per-polarity model-card paths for a full-circuit ngspice deck.
 
-    Every transistor must be bound to ``freepdk45.{nmos,pmos}`` (mixed-PDK decks are
+    Every transistor must be bound to ``freepdk45.{nmos,pmos}`` or the explicit
+    ``freepdk45_ngspice.{nmos,pmos}`` oracle aliases (mixed-PDK decks are
     rejected). All devices share one silicon corner name (one of
     :data:`~circuitopt.freepdk45_model.FREEPDK45_CORNERS`, matched case-insensitively
     via :func:`~circuitopt.freepdk45_model.normalize_corner`; an unknown name raises
@@ -102,8 +103,12 @@ def resolve_freepdk45_cards(model_types, device_kwargs, device_names):
         raise NotImplementedError(
             "ngspice FreePDK45 full-circuit analysis requires every transistor to be "
             f"explicitly bound to freepdk45; missing model bindings: {', '.join(missing)}")
-    bad = {name: mt for name, mt in model_types.items()
-           if name in device_names and not str(mt).startswith("freepdk45.")}
+    prefixes = ("freepdk45.", "freepdk45_ngspice.")
+    bad = {
+        name: mt
+        for name, mt in model_types.items()
+        if name in device_names and not str(mt).startswith(prefixes)
+    }
     if bad:
         raise NotImplementedError(
             "mixed FreePDK45/other-model ngspice analysis is not supported: "

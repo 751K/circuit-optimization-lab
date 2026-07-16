@@ -19,6 +19,82 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+## [1.3.0] - 2026-07-17
+
+### Added / 新增
+
+- **Native FreePDK45 BSIM4 adapter / 原生 FreePDK45 BSIM4 适配器**
+
+  **English:** Added a flat level-54 model-card loader and native
+  `freepdk45.nmos` / `freepdk45.pmos` devices backed by the bundled Berkeley
+  BSIM4.5 kernel. The adapter exposes four-terminal current, conductance,
+  charge, capacitance, and correlated noise across `nom`, `tt`, `ss`, `ff`,
+  `sf`, and `fs` corners without launching ngspice.
+
+  **中文：** 新增平铺 level-54 模型卡加载器，以及由仓库内 Berkeley
+  BSIM4.5 内核驱动的原生 `freepdk45.nmos` / `freepdk45.pmos` 器件。
+  适配器在 `nom`、`tt`、`ss`、`ff`、`sf`、`fs` 工艺角下提供四端电流、
+  电导、电荷、电容和相关噪声，正常仿真不再启动 ngspice。
+
+- **FreePDK45 native regression coverage / FreePDK45 原生回归覆盖**
+
+  **English:** Added no-ngspice single-device and 5T OTA DC, AC, noise, and
+  transient tests, plus optional ngspice comparisons for device operating
+  points/noise and complete OTA AC behavior.
+
+  **中文：** 新增不依赖 ngspice 的单管与五管 OTA DC、AC、噪声、瞬态测试，
+  并保留可选 ngspice 对照，用于核对器件工作点、噪声和完整 OTA AC 行为。
+
+- **Native BSIM4 Numba bridge / 原生 BSIM4 Numba 桥**
+
+  **English:** Added a versioned C ABI with conserved four-terminal evaluation,
+  an all-`void *` runtime entry point, and a batch evaluator. Native BSIM4
+  transient now calls the C compact model directly from a Numba Newton/time-step
+  loop for both FreePDK45 and TSMC28HPC+, while retaining the Python reference
+  path when Numba is disabled.
+
+  **中文：** 新增带版本号的 C ABI、守恒四端求值入口、全 `void *` 运行时入口
+  和批量求值器。FreePDK45 与 TSMC28HPC+ 的原生 BSIM4 瞬态现可在 Numba
+  Newton/时间步循环内直接调用 C 紧凑模型；禁用 Numba 时仍保留 Python
+  参考路径。
+
+### Changed / 变更
+
+- **FreePDK45 default backend / FreePDK45 默认后端**
+
+  **English:** `freepdk45.*` now selects the native in-process BSIM4 path.
+  The historical cached-ngspice evaluator remains available explicitly as
+  `freepdk45_ngspice.*`, and complete-circuit ngspice helpers remain optional
+  regression oracles.
+
+  **中文：** `freepdk45.*` 现默认选择进程内原生 BSIM4 路径。旧的 ngspice
+  缓存网格求值器以 `freepdk45_ngspice.*` 显式保留，完整电路 ngspice helper
+  继续作为可选回归 oracle。
+
+- **Historical SAR oracle binding / 历史 SAR oracle 绑定**
+
+  **English:** Kept the existing 3-bit and 6-bit FreePDK45 SAR/StrongARM
+  examples explicitly on `freepdk45_ngspice.*`. Native migration is validated
+  with the 5T OTA; the dynamic SAR examples no longer change backend implicitly.
+
+  **中文：** 现有 3-bit 与 6-bit FreePDK45 SAR/StrongARM 示例显式使用
+  `freepdk45_ngspice.*`。原生迁移以五管 OTA 完成验证，动态 SAR 示例不再随
+  默认模型名称隐式切换后端。
+
+### Fixed / 修复
+
+- **Native BSIM internal topology and charge reduction / 原生 BSIM 内部拓扑与电荷归并**
+
+  **English:** Replaced the two-internal-node limit with pivoted reduction for
+  the complete BSIM4 drain/source, distributed-gate, and body-resistance
+  network. Corrected external bulk aggregation of distributed junction charge
+  and normalized PMOS terminal-charge signs, making charge derivatives agree
+  with the AC capacitance matrix for both polarities.
+
+  **中文：** 将原生 host 的两个内部节点上限改为带主元消元，覆盖完整 BSIM4
+  漏源、分布式栅和体电阻网络；同时修正分布式结电荷向外部 bulk 的归并及
+  PMOS 端口电荷符号，使 N/P 两种极性的电荷导数与 AC 电容矩阵一致。
+
 ## [1.2.0] - 2026-07-17
 
 ### Added / 新增
@@ -494,7 +570,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.0.5...v1.1.0
 [1.0.5]: https://github.com/751K/circuit-optimization-lab/compare/v0.1.0...v1.0.5

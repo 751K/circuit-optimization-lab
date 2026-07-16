@@ -30,8 +30,8 @@ The implementation is intentionally small and self-contained. Its modules includ
 calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
 modules, the main solver stack, an ML-surrogate layer (dataset builder, surrogate
 training, screen-and-verify optimizer), three silicon PDKs — SKY130 (via an
-OpenVAF/OSDI bridge), FreePDK45 (via an ngspice-C evaluator), and TSMC28HPC+
-(via the internal HSPICE parser and native Berkeley BSIM4.5 backend) — plugged into the
+OpenVAF/OSDI bridge), FreePDK45 (via a flat-card loader and native Berkeley
+BSIM4.5), and TSMC28HPC+ (via the internal HSPICE parser and the same native backend) — plugged into the
 same `TransistorModel` interface as the original AT4000TG OTFT model, and an
 optional local HTTP service layer (`circuitopt/service/`) over the whole stack.
 
@@ -74,12 +74,14 @@ circuitopt/
   optimize.py          Screen-with-surrogate / Pareto-select / verify-with-solver optimization loop.
   osdi_host.py         OSDI 0.4 ctypes host — loads a compiled Verilog-A (.osdi) model, single-device DC/AC/noise eval.
   osdi_device.py       TransistorModel adapter over an OSDI-hosted compact model (bridges any OSDI PDK into the solver stack).
-  osdi_transient.py    Backward-Euler transient for OSDI devices (outside the numba loop).
+  osdi_transient.py    Numba fixed-grid/adaptive transient with direct OSDI ABI calls.
   sky130_model.py      SKY130 nfet/pfet PDK: BSIM4 param-card extraction (via ngspice) + PDK registration.
   ngspice_char.py      Model-card evaluator: batch ngspice .dc/.noise characterization → cached (Vsb,Vds,Vgs) grid.
   ngspice_device.py    TransistorModel over a cached ngspice grid (interpolated Id/gm/gds/caps/noise; extract_w + temperature).
   ngspice_process.py   Process-adapter protocol: deck preamble, instance syntax, op vectors, simulator flags.
-  freepdk45_model.py   FreePDK45 nmos/pmos PDK: corner-card binding + PDK registration (ngspice-C evaluator).
+  freepdk45_model.py   FreePDK45 compatibility exports + explicit ngspice oracle registration.
+  pdk/freepdk45/       Flat-card loader and native FreePDK45 nmos/pmos adapter.
+  compact_models/bsim4/ Native Berkeley BSIM4 host, ABI, Numba marshal, and transient.
   tsmc28_model.py      TSMC28HPC+ core nmos/pmos binding: nch_mac/pch_mac + HSPICE library closure.
   service/             Optional local FastAPI HTTP service layer (the `serve` extra) — see below.
     __init__.py        Re-exports CLI glue only; never imports fastapi (import circuitopt stays fastapi-free).
@@ -129,7 +131,8 @@ sky130_model.py      <- device_model, osdi_device
 ngspice_char.py      <- no internal dependency; ngspice subprocess + numpy only
 ngspice_device.py    <- device_model, ngspice_char; optional scipy at runtime
 ngspice_process.py   <- device_model
-freepdk45_model.py   <- device_model, ngspice_device
+freepdk45_model.py   <- pdk/freepdk45, device_model, ngspice_device
+pdk/freepdk45/*      <- spice parser, compact_models/bsim4, device_model, toolchain
 tsmc28_model.py      <- device_model, ngspice_device, ngspice_process, toolchain
 service/app.py       <- analysis_dispatch, analysis_options, circuit_loader, device_factory, device_model,
                         freepdk45_model, service/jobs, service/serialize; optional fastapi/pydantic at import time
@@ -787,47 +790,35 @@ Plugs a **second, industry-standard device physics model (BSIM4)** into the same
 PDK (SKY130 today) runs through the *same* DC/AC/noise solver engine, additively
 (`default=False`; the OTFT PDK is untouched and remains byte-identical).
 
-A **third PDK, FreePDK45** (`ngspice_char.py` / `ngspice_device.py` /
-`freepdk45_model.py`), plugs into the *same* `TransistorModel` interface but with a
-different **evaluator**. FreePDK45's BSIM4 cards declare `version = 4.0`; our
-OpenVAF BSIM4.8 VA has no version switch and computes ~30 % different I-V on these
-45 nm cards (version-independently — proven by mutating the card version), so the
-OSDI host cannot reproduce FreePDK45's intended behaviour. Its oracle is therefore
-**ngspice-C itself**: `ngspice_char.characterize()` runs one batch `.dc` sweep per
-`(model, W, L, corner, temp)` (~0.03 s / 1000 points) into a cached Id/gm/gds/Cgs/Cgd grid,
-and `NgspiceDevice` interpolates it (µs/eval, exact ngspice-C at nodes). Validated
-model==oracle: single-device op bit-exact vs ngspice `.op`, a 5T OTA through
-`ac_solve` within 0.05 dB / 0.3 % of ngspice's own `.ac`, and output noise within
-~5 % of ngspice `.noise`. Noise is also exact ngspice-C — `characterize_noise` runs a
-`.noise` per coarse-grid bias (CCVS transimpedance → drain-noise PSD, fit S_id=A+B/f
-→ S_thermal + S_flicker@1Hz, log-space interpolated). The fast grid handles DC+AC+noise;
-``transient()`` routes FreePDK45 circuits to ``ngspice_transient.py`` for native
-full-charge BSIM4 `.tran`. PSS/PAC/PNoise are not yet connected to that backend. The
-grid AC model carries Cgs/Cgd but **not** the drain/source junction caps
-Cdb/Csb, so a whole-OTA `ac_solve` reads ~8 % high on UGBW vs ngspice's own `.ac` (gain/PM
-match to <0.2 dB / <8°) — quote the ngspice value and design a margin (see the FD-OTA case).
+A **third PDK, FreePDK45**, now uses the same native Berkeley BSIM4.5 kernel as
+TSMC28HPC+. `pdk/freepdk45/library.py` parses each flat level-54 VTG card into a
+numeric model card; `pdk/freepdk45/device.py` exposes four-terminal current,
+conductance, charge, capacitance, and correlated noise through
+`freepdk45.nmos` / `.pmos`. The source cards declare `version=4.0`; the bundled
+Berkeley source treats that field as metadata, and regression tests compare
+single-device operating points/noise plus a 5T OTA against ngspice.
 
-- **`ngspice_char.py`** — the batch characterizer. `characterize()` sweeps `.dc vg vd` per
-  Vsb slice (op-vars `@m[id/gm/gds/cgs/cgd]`); `characterize_noise()` runs one `.noise` per
-  coarse bias. Both take a `temp_c` (`.options temp`, keyed into the cache — 27 °C stays
-  tag-free so nominal caches persist) and cache under a process namespace such as
-  `data/pdk/freepdk45/`, so reuse needs no ngspice. Both run
-  through a shared `_run_ngspice()` helper that makes failures explicit:
-  a non-zero ngspice return code, or a silently-missing output file on return code 0, raises
-  `RuntimeError` carrying the tail of ngspice's stderr — instead of the batch decks and output
-  files (now built under a `tempfile.TemporaryDirectory()`, not bare `mktemp`) going missing
-  and surfacing as an opaque downstream `FileNotFoundError` from `numpy.loadtxt`.
-- **`ngspice_device.py`** — `NgspiceDevice(TransistorModel)` interpolates the grid
-  (`scipy.RegularGridInterpolator`, **linear** — cubic returns 0 on the ~1e-17 cap arrays).
-  `extract_w`: characterize once at a reference W and linearly scale the actual W (BSIM4 is
-  ~linear in W, <0.7 % vs the true per-W card) so dataset/optimizer W-sweeps are pure
-  interpolation. `temperature` (Kelvin kwarg) → `temp_c` re-characterizes the card physically.
-  Cgs/Cgd from the ngspice C-matrix (`Cgs=-cgs`, `Cgd=-cgd`); transient hooks `NotImplementedError`.
-- **`freepdk45_model.py`** — `Fp45Nfet`/`Fp45Pfet(NgspiceDevice)` + `register_pdk("freepdk45",
-  ...)`. `corner` supports nom/tt/ss/ff/sf/fs and selects card directories per polarity.
-  `FREEPDK45_CORNERS` is the public tuple of legal corner names; the service
-  layer's `GET /api/v1/capabilities` reads it directly (alongside `device_factory.SKY130_CORNERS`
-  and `device_factory.CORNERS`) rather than hardcoding the three corner families.
+The native host reduces the complete FreePDK45 internal drain/source, gate, and
+body-resistance network with a small pivoted linear solve. Four-terminal charge
+aggregation includes distributed body-junction charge and normalizes PMOS charge
+signs, so AC capacitance and finite-difference charge derivatives agree for both
+polarities. DC, AC, noise, transient, PSS, PAC, and PNoise therefore share one
+in-process compact-model path.
+
+The native host also exports a versioned conserved-evaluation ABI, an all-`void *`
+entry point, and a batch evaluator. The fixed-grid BSIM4 transient keeps matrix
+assembly, Newton iteration, and time stepping inside Numba while calling the C
+compact model through a runtime ctypes function pointer. Disabling Numba retains
+the Python implementation as a reference path.
+
+- **`pdk/freepdk45/library.py`** — portable card resolution, strict corner and
+  polarity validation, numeric parsing, and path/mtime/size caching.
+- **`pdk/freepdk45/device.py`** — native `TransistorModel` adapter and default
+  `freepdk45.*` registration.
+- **`freepdk45_model.py`** — compatibility exports and the optional historical
+  `freepdk45_ngspice.*` grid aliases.
+- **`ngspice_char.py` / `ngspice_device.py` / `ngspice_transient.py`** — retained
+  external regression-oracle infrastructure, not the default FreePDK45 runtime.
 
 ### TSMC28HPC+ native adapter (`spice/` / `compact_models/bsim4/` / `pdk/tsmc28/`)
 
@@ -862,12 +853,12 @@ entry, then `PDK_ROOT/tsmc28hpcp`. See [TSMC28HPC+ Local Adapter](tsmc28hpcp.md)
   NMOS (source-low, `kcl_sign=-1`) without changing the OTFT path (byte-identical:
   `1.0 * abs(x) == abs(x)`). `OsdiDevice` overrides the base capability class attributes:
   `HAS_TERMINAL_LINEARIZATION = True` (it provides `get_terminal_linearization`) and
-  `TRANSIENT_BACKEND = "osdi"`. The three transient-only ABC hooks still raise
-  `NotImplementedError` — `.osdi` can't run inside the numba transient loop.
+  `TRANSIENT_BACKEND = "osdi"`. The generic OTFT transient-only ABC hooks remain
+  separate; OSDI transient uses its own ABI-aware Numba path.
 - **`osdi_transient.py`** — `transient_osdi(sizes, bias, tgrid, ...)` is the circuit-level
-  entry point: a fixed-step backward-Euler integrator that calls the OSDI host directly
-  each step (outside the numba loop), for a foundational (not full-fidelity) silicon
-  transient, built on the lower-level single-device `cs_transient()` helper. `transient()`
+  entry point. Its fixed-grid and adaptive kernels call OSDI function pointers directly
+  inside Numba and include external plus device-internal dynamic nodes in one global
+  Newton system. The lower-level `cs_transient()` remains a readable reference. `transient()`
   in `transient_solver.py` checks the device's `TRANSIENT_BACKEND` class attribute and, when
   it is `"osdi"`, lazily imports and routes to `transient_osdi` — a one-way dependency.
   `osdi_transient.py` itself never imports `transient_solver.py`, so the two modules no

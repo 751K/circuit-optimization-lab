@@ -1256,6 +1256,227 @@ def _osdi_stamp_elements_impl(
             Aflat[r * ntot + r] += gmin
 
 
+def _bsim4_dev_eval_impl(
+        f_eval, i, handle_a, terminal_ptr_a, current_ptr_a,
+        conductance_ptr_a, charge_ptr_a, capacitance_ptr_a,
+        terminals2d, currents2d, conductance2d, charges2d, capacitance2d,
+        term_kind2d, term_ref2d, term_val2d, X, input_now):
+    """Evaluate one reduced four-terminal BSIM4 handle inside a Numba loop."""
+    for terminal in range(4):
+        terminals2d[i, terminal] = _term_value_impl(
+            term_kind2d[i, terminal],
+            term_ref2d[i, terminal],
+            term_val2d[i, terminal],
+            X,
+            input_now,
+        )
+    return f_eval(
+        int(handle_a[i]),
+        int(terminal_ptr_a[i]),
+        int(current_ptr_a[i]),
+        int(conductance_ptr_a[i]),
+        int(charge_ptr_a[i]),
+        int(capacitance_ptr_a[i]),
+    )
+
+
+def _bsim4_transient_grid_impl(
+        f_eval, handle_a, terminal_ptr_a, current_ptr_a,
+        conductance_ptr_a, charge_ptr_a, capacitance_ptr_a,
+        terminals2d, currents2d, conductance2d, charges2d, capacitance2d,
+        term_kind2d, term_ref2d, term_val2d, term_row2d,
+        X0, tgrid, input_values, method_id,
+        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref, res_b_val,
+        res_ai, res_bi, res_g,
+        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref, cap_b_val,
+        cap_ai, cap_bi, cap_value,
+        isrc_pi, isrc_qi, isrc_value,
+        dyn_pi, dyn_qi, dyn_idx,
+        vs_pi, vs_qi, vs_bi, vs_e_const, vs_e_idx,
+        vccs_pi, vccs_qi, vccs_cp_kind, vccs_cp_ref, vccs_cp_val,
+        vccs_cn_kind, vccs_cn_ref, vccs_cn_val, vccs_gm,
+        vcvs_pi, vcvs_qi, vcvs_bi,
+        vcvs_p_kind, vcvs_p_ref, vcvs_p_val, vcvs_q_kind, vcvs_q_ref, vcvs_q_val,
+        vcvs_cp_kind, vcvs_cp_ref, vcvs_cp_val,
+        vcvs_cn_kind, vcvs_cn_ref, vcvs_cn_val, vcvs_mu,
+        cccs_pi, cccs_qi, cccs_ctrl_bi, cccs_beta,
+        ccvs_pi, ccvs_qi, ccvs_bi,
+        ccvs_p_kind, ccvs_p_ref, ccvs_p_val, ccvs_q_kind, ccvs_q_ref, ccvs_q_val,
+        ccvs_ctrl_bi, ccvs_gamma,
+        n_kcl, n_aug, newton_maxit, newton_vtol, step_limit, gmin):
+    """Fixed-grid BE/BDF2 transient using the native BSIM4 ``void *`` ABI.
+
+    Device internal nodes remain Schur-reduced by the C host, matching the
+    established ``transient_native_bsim4`` semantics. The circuit time-step
+    loop, Newton solve, matrix assembly, and calls into the C compact model all
+    execute inside this kernel.
+    """
+    count = tgrid.shape[0]
+    ntot = X0.shape[0]
+    ndev = handle_a.shape[0]
+    Xhist = np.zeros((count, ntot))
+    Xhist[0] = X0
+    X = X0.copy()
+    F = np.zeros(ntot)
+    Aflat = np.zeros(ntot * ntot)
+    A = Aflat.reshape(ntot, ntot)
+    Qcur = np.zeros((ndev, 4))
+    Qh1 = np.zeros((ndev, 4))
+    Qh2 = np.zeros((ndev, 4))
+    ncap = cap_value.shape[0]
+    vab1 = np.zeros(ncap)
+    vab2 = np.zeros(ncap)
+    nfail = 0
+    fail_idx = -1
+    status = 0
+
+    input_now = input_values[:, 0]
+    for i in range(ndev):
+        status = _bsim4_dev_eval_impl(
+            f_eval, i, handle_a, terminal_ptr_a, current_ptr_a,
+            conductance_ptr_a, charge_ptr_a, capacitance_ptr_a,
+            terminals2d, currents2d, conductance2d, charges2d, capacitance2d,
+            term_kind2d, term_ref2d, term_val2d, X, input_now)
+        if status != 0:
+            return Xhist, -1, 0, status
+        for terminal in range(4):
+            Qh1[i, terminal] = charges2d[i, terminal]
+            Qh2[i, terminal] = charges2d[i, terminal]
+    for element in range(ncap):
+        va = _term_value_impl(
+            cap_a_kind[element], cap_a_ref[element], cap_a_val[element],
+            X, input_now)
+        vb = _term_value_impl(
+            cap_b_kind[element], cap_b_ref[element], cap_b_val[element],
+            X, input_now)
+        vab1[element] = va - vb
+        vab2[element] = va - vb
+
+    for t_idx in range(1, count):
+        h1 = tgrid[t_idx] - tgrid[t_idx - 1]
+        if method_id == 1 and t_idx >= 2:
+            h2 = tgrid[t_idx - 1] - tgrid[t_idx - 2]
+            a0 = (2.0 * h1 + h2) / (h1 * (h1 + h2))
+            a1 = -(h1 + h2) / (h1 * h2)
+            a2 = h1 / (h2 * (h1 + h2))
+        else:
+            a0 = 1.0 / h1
+            a1 = -1.0 / h1
+            a2 = 0.0
+        input_now = input_values[:, t_idx]
+        converged = False
+        for _ in range(newton_maxit):
+            for row in range(ntot):
+                F[row] = 0.0
+            for offset in range(ntot * ntot):
+                Aflat[offset] = 0.0
+
+            for i in range(ndev):
+                status = _bsim4_dev_eval_impl(
+                    f_eval, i, handle_a, terminal_ptr_a, current_ptr_a,
+                    conductance_ptr_a, charge_ptr_a, capacitance_ptr_a,
+                    terminals2d, currents2d, conductance2d, charges2d,
+                    capacitance2d, term_kind2d, term_ref2d, term_val2d,
+                    X, input_now)
+                if status != 0:
+                    return Xhist, -1, t_idx, status
+                for row_terminal in range(4):
+                    row = term_row2d[i, row_terminal]
+                    charge = charges2d[i, row_terminal]
+                    Qcur[i, row_terminal] = charge
+                    if row < 0:
+                        continue
+                    F[row] += (
+                        currents2d[i, row_terminal]
+                        + a0 * charge
+                        + a1 * Qh1[i, row_terminal]
+                        + a2 * Qh2[i, row_terminal]
+                    )
+                    for col_terminal in range(4):
+                        if term_kind2d[i, col_terminal] != 0:
+                            continue
+                        column = term_ref2d[i, col_terminal]
+                        Aflat[row * ntot + column] += (
+                            conductance2d[i, row_terminal, col_terminal]
+                            + a0 * capacitance2d[
+                                i, row_terminal, col_terminal]
+                        )
+
+            _osdi_stamp_elements_impl(
+                F, Aflat, X, input_now, a0, a1, a2, vab1, vab2,
+                res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
+                res_b_val, res_ai, res_bi, res_g,
+                cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
+                cap_b_val, cap_ai, cap_bi, cap_value,
+                isrc_pi, isrc_qi, isrc_value, dyn_pi, dyn_qi, dyn_idx,
+                vs_pi, vs_qi, vs_bi, vs_e_const, vs_e_idx,
+                vccs_pi, vccs_qi, vccs_cp_kind, vccs_cp_ref, vccs_cp_val,
+                vccs_cn_kind, vccs_cn_ref, vccs_cn_val, vccs_gm,
+                vcvs_pi, vcvs_qi, vcvs_bi,
+                vcvs_p_kind, vcvs_p_ref, vcvs_p_val,
+                vcvs_q_kind, vcvs_q_ref, vcvs_q_val,
+                vcvs_cp_kind, vcvs_cp_ref, vcvs_cp_val,
+                vcvs_cn_kind, vcvs_cn_ref, vcvs_cn_val, vcvs_mu,
+                cccs_pi, cccs_qi, cccs_ctrl_bi, cccs_beta,
+                ccvs_pi, ccvs_qi, ccvs_bi,
+                ccvs_p_kind, ccvs_p_ref, ccvs_p_val,
+                ccvs_q_kind, ccvs_q_ref, ccvs_q_val,
+                ccvs_ctrl_bi, ccvs_gamma,
+                n_kcl, n_aug, ntot, gmin)
+            ok, dx = _solve_dense_neg_rhs_inplace_impl(A, F)
+            if not ok:
+                break
+            peak = 0.0
+            for row in range(ntot):
+                value = abs(dx[row])
+                if not math.isfinite(value):
+                    ok = False
+                    break
+                if row < n_kcl and value > peak:
+                    peak = value
+            if not ok:
+                break
+            if peak <= newton_vtol:
+                converged = True
+                break
+            if peak > step_limit:
+                scale = step_limit / peak
+                for row in range(ntot):
+                    dx[row] *= scale
+                peak = step_limit
+            for row in range(ntot):
+                X[row] += dx[row]
+        if not converged:
+            nfail += 1
+            if fail_idx < 0:
+                fail_idx = t_idx
+        Xhist[t_idx] = X
+
+        # Refresh charges at the accepted point before rotating histories.
+        for i in range(ndev):
+            status = _bsim4_dev_eval_impl(
+                f_eval, i, handle_a, terminal_ptr_a, current_ptr_a,
+                conductance_ptr_a, charge_ptr_a, capacitance_ptr_a,
+                terminals2d, currents2d, conductance2d, charges2d,
+                capacitance2d, term_kind2d, term_ref2d, term_val2d,
+                X, input_now)
+            if status != 0:
+                return Xhist, -1, t_idx, status
+            for terminal in range(4):
+                Qh2[i, terminal] = Qh1[i, terminal]
+                Qh1[i, terminal] = charges2d[i, terminal]
+        for element in range(ncap):
+            va = _term_value_impl(
+                cap_a_kind[element], cap_a_ref[element], cap_a_val[element],
+                X, input_now)
+            vb = _term_value_impl(
+                cap_b_kind[element], cap_b_ref[element], cap_b_val[element],
+                X, input_now)
+            vab2[element] = vab1[element]
+            vab1[element] = va - vb
+    return Xhist, nfail, fail_idx, status
+
+
 def _osdi_transient_grid_impl(
         f_ev0, f_lr0, f_lj0, f_lrr0, f_ljr0, handle0,
         f_ev1, f_lr1, f_lj1, f_lrr1, f_ljr1, handle1, lib_a,
@@ -3675,6 +3896,9 @@ if NUMBA_AVAILABLE:
     _osdi_op_solve_impl = njit(cache=NUMBA_CACHE)(_osdi_op_solve_impl)
     _osdi_dev_eval_impl = njit(cache=NUMBA_CACHE)(_osdi_dev_eval_impl)
     _osdi_stamp_elements_impl = njit(cache=NUMBA_CACHE)(_osdi_stamp_elements_impl)
+    _bsim4_dev_eval_impl = njit(cache=NUMBA_CACHE)(_bsim4_dev_eval_impl)
+    _bsim4_transient_grid_impl = njit(cache=NUMBA_CACHE)(
+        _bsim4_transient_grid_impl)
     _osdi_transient_grid_impl = njit(cache=NUMBA_CACHE)(_osdi_transient_grid_impl)
     _osdi_transient_adaptive_impl = njit(cache=NUMBA_CACHE)(_osdi_transient_adaptive_impl)
     _stamp_transient_system_impl = njit(cache=NUMBA_CACHE)(_stamp_transient_system_impl)

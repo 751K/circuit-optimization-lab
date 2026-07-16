@@ -1,11 +1,9 @@
 """Full-circuit model-card oracles through ngspice: ``.ac`` / ``.noise`` / ``.op``.
 
-The local grid solvers (:mod:`circuitopt.ac_solver`, :mod:`circuitopt.noise_solver`)
-carry only Cgs/Cgd on their device model, so on FreePDK45 they read ~8 % optimistic
-UGBW (drain/source junction caps omitted — see ``docs/freepdk45_fd_ota_design.md`` §4.5).
-These oracles instead render the complete circuit and let ngspice run the analysis
-against the selected process adapter, so AC bandwidth, phase margin, noise and
-operating-region checks include the model deck's full device behavior.
+The default FreePDK45 and TSMC28HPC+ paths are native. These helpers render the
+complete circuit and let ngspice run the original model deck as an independent
+reference for AC bandwidth, phase margin, noise, and operating-region checks.
+They also reproduce historical FreePDK45 grid-based design records.
 
 All four entry points share the deck renderer in :mod:`circuitopt.ngspice_render`
 (the same one the ``.tran`` backend uses), so device M-lines, R/C, controlled sources,

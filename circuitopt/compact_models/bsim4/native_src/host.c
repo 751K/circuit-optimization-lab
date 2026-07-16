@@ -20,9 +20,10 @@
 #define CO_MAX_NODES 24
 #define CO_STATES 256
 #define CO_TERMINALS 4
-#define CO_MAX_INTERNAL 2
+#define CO_MAX_INTERNAL 7
 #define CO_MAX_NOISE_SOURCES 16
 #define CO_PI 3.14159265358979323846
+#define CO_BSIM4_ABI_VERSION 1
 
 struct MatrixFrame {
     double value[CO_MAX_NODES][CO_MAX_NODES][2];
@@ -51,6 +52,11 @@ typedef struct {
     int setup_done;
     char error[256];
 } CoBsim4;
+
+unsigned int co_bsim4_abi_version(void)
+{
+    return CO_BSIM4_ABI_VERSION;
+}
 
 double CONSTroot2 = 1.4142135623730950488;
 double CONSTvt0 = 0.02586419;
@@ -333,14 +339,53 @@ static void co_clear(CoBsim4 *device)
     memset(device->irhs, 0, sizeof(device->irhs));
 }
 
-static int co_solve_2x2(double a00, double a01, double a10, double a11,
-                        double b0, double b1, double *x0, double *x1)
+static int co_solve_real(
+    int size,
+    double matrix[CO_MAX_INTERNAL][CO_MAX_INTERNAL],
+    double rhs[CO_MAX_INTERNAL],
+    double solution[CO_MAX_INTERNAL])
 {
-    double det = a00 * a11 - a01 * a10;
-    if (fabs(det) < 1.0e-30)
-        return E_PANIC;
-    *x0 = (b0 * a11 - a01 * b1) / det;
-    *x1 = (a00 * b1 - b0 * a10) / det;
+    double work[CO_MAX_INTERNAL][CO_MAX_INTERNAL];
+    double values[CO_MAX_INTERNAL];
+    memcpy(work, matrix, sizeof(work));
+    memcpy(values, rhs, sizeof(values));
+
+    for (int pivot = 0; pivot < size; ++pivot) {
+        int best = pivot;
+        double magnitude = fabs(work[pivot][pivot]);
+        for (int row = pivot + 1; row < size; ++row) {
+            double candidate = fabs(work[row][pivot]);
+            if (candidate > magnitude) {
+                magnitude = candidate;
+                best = row;
+            }
+        }
+        if (magnitude < 1.0e-30)
+            return E_PANIC;
+        if (best != pivot) {
+            for (int col = pivot; col < size; ++col) {
+                double temporary = work[pivot][col];
+                work[pivot][col] = work[best][col];
+                work[best][col] = temporary;
+            }
+            double temporary = values[pivot];
+            values[pivot] = values[best];
+            values[best] = temporary;
+        }
+        for (int row = pivot + 1; row < size; ++row) {
+            double factor = work[row][pivot] / work[pivot][pivot];
+            work[row][pivot] = 0.0;
+            for (int col = pivot + 1; col < size; ++col)
+                work[row][col] -= factor * work[pivot][col];
+            values[row] -= factor * values[pivot];
+        }
+    }
+    for (int row = size - 1; row >= 0; --row) {
+        double value = values[row];
+        for (int col = row + 1; col < size; ++col)
+            value -= work[row][col] * solution[col];
+        solution[row] = value / work[row][row];
+    }
     return OK;
 }
 
@@ -384,6 +429,66 @@ static CoComplex co_complex_div(CoComplex a, CoComplex b)
         (a.imag * b.real - a.real * b.imag) / scale,
     };
     return result;
+}
+
+static double co_complex_abs2(CoComplex value)
+{
+    return value.real * value.real + value.imag * value.imag;
+}
+
+static int co_solve_complex(
+    int size,
+    CoComplex matrix[CO_MAX_INTERNAL][CO_MAX_INTERNAL],
+    CoComplex rhs[CO_MAX_INTERNAL],
+    CoComplex solution[CO_MAX_INTERNAL])
+{
+    CoComplex work[CO_MAX_INTERNAL][CO_MAX_INTERNAL];
+    CoComplex values[CO_MAX_INTERNAL];
+    memcpy(work, matrix, sizeof(work));
+    memcpy(values, rhs, sizeof(values));
+
+    for (int pivot = 0; pivot < size; ++pivot) {
+        int best = pivot;
+        double magnitude = co_complex_abs2(work[pivot][pivot]);
+        for (int row = pivot + 1; row < size; ++row) {
+            double candidate = co_complex_abs2(work[row][pivot]);
+            if (candidate > magnitude) {
+                magnitude = candidate;
+                best = row;
+            }
+        }
+        if (magnitude < 1.0e-60)
+            return E_PANIC;
+        if (best != pivot) {
+            for (int col = pivot; col < size; ++col) {
+                CoComplex temporary = work[pivot][col];
+                work[pivot][col] = work[best][col];
+                work[best][col] = temporary;
+            }
+            CoComplex temporary = values[pivot];
+            values[pivot] = values[best];
+            values[best] = temporary;
+        }
+        for (int row = pivot + 1; row < size; ++row) {
+            CoComplex factor = co_complex_div(
+                work[row][pivot], work[pivot][pivot]);
+            work[row][pivot] = (CoComplex){0.0, 0.0};
+            for (int col = pivot + 1; col < size; ++col)
+                work[row][col] = co_complex_sub(
+                    work[row][col],
+                    co_complex_mul(factor, work[pivot][col]));
+            values[row] = co_complex_sub(
+                values[row], co_complex_mul(factor, values[pivot]));
+        }
+    }
+    for (int row = size - 1; row >= 0; --row) {
+        CoComplex value = values[row];
+        for (int col = row + 1; col < size; ++col)
+            value = co_complex_sub(
+                value, co_complex_mul(work[row][col], solution[col]));
+        solution[row] = co_complex_div(value, work[row][row]);
+    }
+    return OK;
 }
 
 static CoComplex co_matrix_value(
@@ -464,32 +569,23 @@ int co_bsim4_dc(CoBsim4 *device, const double terminals[CO_TERMINALS],
         if (internal_count == 0)
             break;
 
-        double next[CO_MAX_INTERNAL] = {0.0, 0.0};
-        if (internal_count == 1) {
-            int row = internal[0];
-            double b = device->rhs[row];
+        double system[CO_MAX_INTERNAL][CO_MAX_INTERNAL] = {{0.0}};
+        double right[CO_MAX_INTERNAL] = {0.0};
+        double next[CO_MAX_INTERNAL] = {0.0};
+        for (int row = 0; row < internal_count; ++row) {
+            right[row] = device->rhs[internal[row]];
             for (int j = 0; j < CO_TERMINALS; ++j)
-                b -= device->matrix.value[row][external[j]][0] * terminals[j];
-            double a = device->matrix.value[row][row][0];
-            if (fabs(a) < 1.0e-30)
-                return E_PANIC;
-            next[0] = b / a;
-        } else {
-            double b[CO_MAX_INTERNAL] = {
-                device->rhs[internal[0]], device->rhs[internal[1]]};
-            for (int row = 0; row < CO_MAX_INTERNAL; ++row)
-                for (int j = 0; j < CO_TERMINALS; ++j)
-                    b[row] -= device->matrix.value[internal[row]][external[j]][0]
-                              * terminals[j];
-            int status2 = co_solve_2x2(
-                device->matrix.value[internal[0]][internal[0]][0],
-                device->matrix.value[internal[0]][internal[1]][0],
-                device->matrix.value[internal[1]][internal[0]][0],
-                device->matrix.value[internal[1]][internal[1]][0],
-                b[0], b[1], &next[0], &next[1]);
-            if (status2 != OK)
-                return status2;
+                right[row] -=
+                    device->matrix.value[internal[row]][external[j]][0]
+                    * terminals[j];
+            for (int col = 0; col < internal_count; ++col)
+                system[row][col] =
+                    device->matrix.value[internal[row]][internal[col]][0];
         }
+        int status2 = co_solve_real(
+            internal_count, system, right, next);
+        if (status2 != OK)
+            return status2;
         double error = 0.0;
         for (int i = 0; i < internal_count; ++i) {
             error = fmax(error, fabs(next[i] - device->rhs_old[internal[i]]));
@@ -520,26 +616,25 @@ int co_bsim4_dc(CoBsim4 *device, const double terminals[CO_TERMINALS],
     for (int row = 0; row < CO_TERMINALS; ++row) {
         for (int col = 0; col < CO_TERMINALS; ++col) {
             double reduced = device->matrix.value[external[row]][external[col]][0];
-            if (internal_count == 1) {
-                int ii = internal[0];
-                reduced -= device->matrix.value[external[row]][ii][0]
-                           * device->matrix.value[ii][external[col]][0]
-                           / device->matrix.value[ii][ii][0];
-            } else if (internal_count == 2) {
-                int i0 = internal[0], i1 = internal[1];
-                double a00 = device->matrix.value[i0][i0][0];
-                double a01 = device->matrix.value[i0][i1][0];
-                double a10 = device->matrix.value[i1][i0][0];
-                double a11 = device->matrix.value[i1][i1][0];
-                double det = a00 * a11 - a01 * a10;
-                double x0 = (
-                    a11 * device->matrix.value[i0][external[col]][0]
-                    - a01 * device->matrix.value[i1][external[col]][0]) / det;
-                double x1 = (
-                    -a10 * device->matrix.value[i0][external[col]][0]
-                    + a00 * device->matrix.value[i1][external[col]][0]) / det;
-                reduced -= device->matrix.value[external[row]][i0][0] * x0
-                           + device->matrix.value[external[row]][i1][0] * x1;
+            if (internal_count > 0) {
+                double system[CO_MAX_INTERNAL][CO_MAX_INTERNAL] = {{0.0}};
+                double right[CO_MAX_INTERNAL] = {0.0};
+                double solution[CO_MAX_INTERNAL] = {0.0};
+                for (int i = 0; i < internal_count; ++i) {
+                    right[i] =
+                        device->matrix.value[internal[i]][external[col]][0];
+                    for (int j = 0; j < internal_count; ++j)
+                        system[i][j] =
+                            device->matrix.value[internal[i]][internal[j]][0];
+                }
+                status = co_solve_real(
+                    internal_count, system, right, solution);
+                if (status != OK)
+                    return status;
+                for (int i = 0; i < internal_count; ++i)
+                    reduced -=
+                        device->matrix.value[external[row]][internal[i]][0]
+                        * solution[i];
             }
             conductance[row * CO_TERMINALS + col] = reduced;
         }
@@ -554,6 +649,12 @@ int co_bsim4_dc(CoBsim4 *device, const double terminals[CO_TERMINALS],
     charges[1] = device->state0[device->instance.BSIM4v5qg];
     charges[2] = device->state0[device->instance.BSIM4v5qs];
     charges[3] = device->state0[device->instance.BSIM4v5qb];
+    if (device->instance.BSIM4v5rbodyMod) {
+        charges[3] += device->state0[device->instance.BSIM4v5qbd];
+        charges[3] += device->state0[device->instance.BSIM4v5qbs];
+    }
+    for (int terminal = 0; terminal < CO_TERMINALS; ++terminal)
+        charges[terminal] *= device->model.BSIM4v5type;
 
     device->ckt.CKTomega = 1.0;
     co_clear(device);
@@ -564,45 +665,28 @@ int co_bsim4_dc(CoBsim4 *device, const double terminals[CO_TERMINALS],
         for (int col = 0; col < CO_TERMINALS; ++col) {
             CoComplex reduced =
                 co_matrix_value(device, external[row], external[col]);
-            if (internal_count == 1) {
-                CoComplex left =
-                    co_matrix_value(device, external[row], internal[0]);
-                CoComplex center =
-                    co_matrix_value(device, internal[0], internal[0]);
-                CoComplex right =
-                    co_matrix_value(device, internal[0], external[col]);
-                reduced = co_complex_sub(
-                    reduced, co_complex_mul(left, co_complex_div(right, center)));
-            } else if (internal_count == 2) {
-                CoComplex a00 = co_matrix_value(device, internal[0], internal[0]);
-                CoComplex a01 = co_matrix_value(device, internal[0], internal[1]);
-                CoComplex a10 = co_matrix_value(device, internal[1], internal[0]);
-                CoComplex a11 = co_matrix_value(device, internal[1], internal[1]);
-                CoComplex det = co_complex_sub(
-                    co_complex_mul(a00, a11), co_complex_mul(a01, a10));
-                CoComplex right0 =
-                    co_matrix_value(device, internal[0], external[col]);
-                CoComplex right1 =
-                    co_matrix_value(device, internal[1], external[col]);
-                CoComplex x0 = co_complex_div(
-                    co_complex_sub(
-                        co_complex_mul(a11, right0),
-                        co_complex_mul(a01, right1)),
-                    det);
-                CoComplex x1 = co_complex_div(
-                    co_complex_sub(
-                        co_complex_mul(a00, right1),
-                        co_complex_mul(a10, right0)),
-                    det);
-                CoComplex left0 =
-                    co_matrix_value(device, external[row], internal[0]);
-                CoComplex left1 =
-                    co_matrix_value(device, external[row], internal[1]);
-                reduced = co_complex_sub(
-                    reduced,
-                    co_complex_add(
-                        co_complex_mul(left0, x0),
-                        co_complex_mul(left1, x1)));
+            if (internal_count > 0) {
+                CoComplex system[CO_MAX_INTERNAL][CO_MAX_INTERNAL] = {{{0.0}}};
+                CoComplex right[CO_MAX_INTERNAL] = {{0.0}};
+                CoComplex solution[CO_MAX_INTERNAL] = {{0.0}};
+                for (int i = 0; i < internal_count; ++i) {
+                    right[i] =
+                        co_matrix_value(device, internal[i], external[col]);
+                    for (int j = 0; j < internal_count; ++j)
+                        system[i][j] =
+                            co_matrix_value(device, internal[i], internal[j]);
+                }
+                status = co_solve_complex(
+                    internal_count, system, right, solution);
+                if (status != OK)
+                    return status;
+                for (int i = 0; i < internal_count; ++i)
+                    reduced = co_complex_sub(
+                        reduced,
+                        co_complex_mul(
+                            co_matrix_value(
+                                device, external[row], internal[i]),
+                            solution[i]));
             }
             capacitance[row * CO_TERMINALS + col] = reduced.imag;
         }
@@ -617,6 +701,126 @@ int co_bsim4_dc(CoBsim4 *device, const double terminals[CO_TERMINALS],
     op[6] = device->instance.BSIM4v5ueff;
     op[7] = (double)internal_count;
     return OK;
+}
+
+static int co_bsim4_enforce_terminal_conservation(
+    double currents[CO_TERMINALS],
+    double conductance[CO_TERMINALS * CO_TERMINALS],
+    double charges[CO_TERMINALS],
+    double capacitance[CO_TERMINALS * CO_TERMINALS])
+{
+    double current_error = 0.0;
+    double current_scale = 1.0e-18;
+    double charge_error = 0.0;
+    double charge_scale = 1.0e-24;
+    for (int terminal = 0; terminal < CO_TERMINALS; ++terminal) {
+        current_error += currents[terminal];
+        current_scale = fmax(current_scale, fabs(currents[terminal]));
+        charge_error += charges[terminal];
+        charge_scale = fmax(charge_scale, fabs(charges[terminal]));
+    }
+    if (fabs(current_error) > fmax(1.0e-8 * current_scale, 1.0e-9))
+        return E_PANIC;
+    if (fabs(charge_error) > fmax(1.0e-8 * charge_scale, 1.0e-18))
+        return E_PANIC;
+    currents[CO_TERMINALS - 1] -= current_error;
+    charges[CO_TERMINALS - 1] -= charge_error;
+
+    double conductance_scale = 1.0e-18;
+    double capacitance_scale = 1.0e-24;
+    for (int offset = 0; offset < CO_TERMINALS * CO_TERMINALS; ++offset) {
+        conductance_scale = fmax(conductance_scale, fabs(conductance[offset]));
+        capacitance_scale = fmax(capacitance_scale, fabs(capacitance[offset]));
+    }
+    for (int column = 0; column < CO_TERMINALS; ++column) {
+        double conductance_error = 0.0;
+        double capacitance_error = 0.0;
+        for (int row = 0; row < CO_TERMINALS; ++row) {
+            conductance_error +=
+                conductance[row * CO_TERMINALS + column];
+            capacitance_error +=
+                capacitance[row * CO_TERMINALS + column];
+        }
+        if (fabs(conductance_error) >
+            fmax(1.0e-8 * conductance_scale, 1.0e-9))
+            return E_PANIC;
+        if (fabs(capacitance_error) >
+            fmax(1.0e-8 * capacitance_scale, 1.0e-18))
+            return E_PANIC;
+        conductance[(CO_TERMINALS - 1) * CO_TERMINALS + column] -=
+            conductance_error;
+        capacitance[(CO_TERMINALS - 1) * CO_TERMINALS + column] -=
+            capacitance_error;
+    }
+    return OK;
+}
+
+int co_bsim4_eval(
+    CoBsim4 *device,
+    const double terminals[CO_TERMINALS],
+    double currents[CO_TERMINALS],
+    double conductance[CO_TERMINALS * CO_TERMINALS],
+    double charges[CO_TERMINALS],
+    double capacitance[CO_TERMINALS * CO_TERMINALS],
+    double op[8])
+{
+    int status = co_bsim4_dc(
+        device, terminals, currents, conductance, charges, capacitance, op);
+    if (status != OK)
+        return status;
+    return co_bsim4_enforce_terminal_conservation(
+        currents, conductance, charges, capacitance);
+}
+
+/*
+ * Numba calls ctypes function pointers efficiently when every pointer-shaped
+ * argument is a plain machine word. Keep this wrapper free of Python-specific
+ * types and return the ordinary BSIM/ngspice status code.
+ */
+int co_bsim4_eval_vp(
+    void *device,
+    void *terminals,
+    void *currents,
+    void *conductance,
+    void *charges,
+    void *capacitance)
+{
+    double op[8];
+    return co_bsim4_eval(
+        (CoBsim4 *)device,
+        (const double *)terminals,
+        (double *)currents,
+        (double *)conductance,
+        (double *)charges,
+        (double *)capacitance,
+        op);
+}
+
+int co_bsim4_eval_batch(
+    void *const *devices,
+    size_t count,
+    const double *terminals,
+    double *currents,
+    double *conductance,
+    double *charges,
+    double *capacitance,
+    int *statuses)
+{
+    int first_error = OK;
+    for (size_t index = 0; index < count; ++index) {
+        int status = co_bsim4_eval_vp(
+            devices[index],
+            (void *)(terminals + index * CO_TERMINALS),
+            currents + index * CO_TERMINALS,
+            conductance + index * CO_TERMINALS * CO_TERMINALS,
+            charges + index * CO_TERMINALS,
+            capacitance + index * CO_TERMINALS * CO_TERMINALS);
+        if (statuses)
+            statuses[index] = status;
+        if (first_error == OK && status != OK)
+            first_error = status;
+    }
+    return first_error;
 }
 
 int co_bsim4_noise(
@@ -694,27 +898,16 @@ int co_bsim4_noise(
 
         CoComplex internal_voltage[CO_MAX_INTERNAL];
         memset(internal_voltage, 0, sizeof(internal_voltage));
-        if (internal_count == 1) {
-            internal_voltage[0] = co_complex_div(
-                internal_incidence[0],
-                co_matrix_value(device, internal[0], internal[0]));
-        } else if (internal_count == 2) {
-            CoComplex a00 = co_matrix_value(device, internal[0], internal[0]);
-            CoComplex a01 = co_matrix_value(device, internal[0], internal[1]);
-            CoComplex a10 = co_matrix_value(device, internal[1], internal[0]);
-            CoComplex a11 = co_matrix_value(device, internal[1], internal[1]);
-            CoComplex determinant = co_complex_sub(
-                co_complex_mul(a00, a11), co_complex_mul(a01, a10));
-            internal_voltage[0] = co_complex_div(
-                co_complex_sub(
-                    co_complex_mul(a11, internal_incidence[0]),
-                    co_complex_mul(a01, internal_incidence[1])),
-                determinant);
-            internal_voltage[1] = co_complex_div(
-                co_complex_sub(
-                    co_complex_mul(a00, internal_incidence[1]),
-                    co_complex_mul(a10, internal_incidence[0])),
-                determinant);
+        if (internal_count > 0) {
+            CoComplex system[CO_MAX_INTERNAL][CO_MAX_INTERNAL] = {{{0.0}}};
+            for (int row = 0; row < internal_count; ++row)
+                for (int col = 0; col < internal_count; ++col)
+                    system[row][col] =
+                        co_matrix_value(device, internal[row], internal[col]);
+            status = co_solve_complex(
+                internal_count, system, internal_incidence, internal_voltage);
+            if (status != OK)
+                return status;
         }
 
         CoComplex reduced[CO_TERMINALS];

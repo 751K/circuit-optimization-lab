@@ -178,27 +178,20 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
   parameter card once at this reference width and let the compact model scale the
   actual `W`, avoiding a per-candidate re-extraction during a design sweep),
   `temperature` (kelvin; default 300.15), `NF` (int).
-- **FreePDK45** (`"freepdk45.nmos"` / `"freepdk45.pmos"`) is a second silicon PDK
-  with a *different* evaluator. Its BSIM4 cards declare `version = 4.0`; our OpenVAF
-  BSIM4.8 VA carries no version switch and computes ~30 % different I-V on these
-  45 nm cards (version-independently), so FreePDK45 cannot use the SKY130 OSDI path.
-  Instead the oracle is **ngspice-C itself**: each device characterises its
-  `(model, W, L, corner)` once via a batch ngspice `.dc` sweep into a cached
-  Id/gm/gds/Cgs/Cgd grid (`circuitopt.ngspice_char` / `circuitopt.ngspice_device`) and
-  interpolates it — so every value is exact ngspice-C at the grid nodes. Noise is
-  likewise exact ngspice-C (a `.noise` characterisation per bias → S_thermal +
-  S_flicker@1Hz, log-space interpolated; validated within ~5 % of ngspice `.noise`
-  on the 5T OTA). Device keys: `vb` (0 for NMOS, `VDD`=1.0 for PMOS), `corner`
-  (`nom`/`tt`/`ss`/`ff`/`sf`/`fs`; default `nom`), `extract_w`
-  (µm — characterise once at this reference width and linearly scale the actual `W`,
-  <0.7 % vs the true per-W card, so dataset/optimizer W-sweeps stay pure interpolation),
-  `temperature` (kelvin; re-characterises the card at that °C for PVT), `NF`. The fast
-  grid handles DC + AC + noise. Unified ``transient()`` automatically routes a complete
-  FreePDK45 circuit to ``circuitopt.ngspice_transient``, where native ngspice BSIM4
-  integrates four-terminal charge and junction capacitance. PSS/PAC/PNoise are not yet
-  connected to this ngspice backend. The grid AC model omits drain/source junction
-  caps (Cdb/Csb) so a whole-OTA `ac_solve` reads ~8 % high on UGBW vs ngspice's own
-  `.ac` — quote the ngspice value. Cards live under `PDK_ROOT/freepdk45/`; see
+- **FreePDK45** (`"freepdk45.nmos"` / `"freepdk45.pmos"`) directly parses the
+  flat BSIM4 level-54 cards and evaluates them with the in-process Berkeley
+  BSIM4.5 backend. The cards declare `version=4.0`; this metadata field does not
+  select a separate equation path in the bundled kernel, and native device/5T
+  OTA results are regression-checked against ngspice. Device keys include `vb`
+  (0 for NMOS, normally 1.0 V for PMOS), `corner`
+  (`nom`/`tt`/`ss`/`ff`/`sf`/`fs`; default `nom`), `temperature` (kelvin), `NF`,
+  `M`, and supported numeric BSIM4 instance parameters. The backend supplies
+  full terminal current, conductance, charge, capacitance, and correlated noise
+  to DC, AC, noise, transient, PSS, PAC, and PNoise. `extract_w` is accepted as a
+  legacy hint but native devices always use their actual geometry. The optional
+  `freepdk45_ngspice.nmos` / `.pmos` aliases retain the old cached-grid evaluator,
+  while the full-circuit ngspice helpers provide an external oracle. Cards live
+  under `PDK_ROOT/freepdk45/`; see
   `examples/freepdk45_5t_ota.json` (simple) and `examples/freepdk45_fd_ota.json`
   (the fully differential OTA design case, [docs/freepdk45_fd_ota_design.md](freepdk45_fd_ota_design.md)).
 - **TSMC28HPC+** (`"tsmc28hpcp.nmos"` / `"tsmc28hpcp.pmos"`) binds the 0.9 V
@@ -215,8 +208,8 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
   [TSMC28HPC+ Local Adapter](tsmc28hpcp.md).
 - A mixed circuit (some devices OTFT, some silicon) is valid — e.g. a complementary
   silicon OTA binds NMOS/PMOS devices independently. See `examples/sky130_5t_ota.json`.
-- SKY130 and FreePDK45 need their documented external simulator toolchains.
-  TSMC28HPC+ native simulation needs the licensed model file and a C compiler
+- SKY130 needs its documented external simulator toolchain. FreePDK45 and
+  TSMC28HPC+ native simulation need their model files and a C compiler
   for the first BSIM4 backend build; ngspice is optional and used only by its
   explicit oracle aliases. Missing prerequisites raise a clear error. See the
   "Silicon PDK / OSDI layer" section in [Core Solver Overview](module_overview.md).
@@ -272,7 +265,7 @@ the block reproduces the static-comparator behaviour (no clock waveform emitted,
 
 #### `adc.mismatch`
 
-Optional per-instance mismatch Monte-Carlo config for the FreePDK45/ngspice SAR
+Optional per-instance mismatch Monte-Carlo config for the FreePDK45 SAR
 path, consumed by `circuitopt.sar_mismatch_mc`. Every sigma defaults to `0.0`, so
 omitting the block (or leaving sigmas zero) reproduces the nominal conversion.
 
@@ -788,13 +781,12 @@ Supported (model abstraction):
 - NMOS and PMOS across AT4000TG (PMOS-only), SKY130, FreePDK45, and TSMC28HPC+.
 - Per-device model binding via the ``models`` field — mixed OTFT/silicon circuits
   (default PDK stays ``"at4000tg.pmos"`` unless overridden).
-- Silicon DC/AC/noise; SKY130 uses OSDI transient, FreePDK45 uses ngspice
-  full-charge transient, and TSMC28HPC+ uses the internal native BSIM4 backend.
+- Silicon DC/AC/noise; SKY130 uses OSDI transient, while FreePDK45 and
+  TSMC28HPC+ use the internal native BSIM4 backend.
 
 Not yet supported:
 
-- FreePDK45 PSS/PAC/PNoise on its direct-ngspice backend.
-- ADC transient noise, per-device FreePDK45 mismatch, layout parasitic extraction, and transistor-level SAR digital control.
+- ADC transient noise, layout parasitic extraction, and transistor-level SAR digital control.
 - Multi-output simultaneous analysis.
 - Hierarchical subcircuits.
 - Arbitrary user-circuit SPICE netlist import. The internal HSPICE parser is

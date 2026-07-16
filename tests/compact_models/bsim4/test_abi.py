@@ -24,6 +24,12 @@ def test_cards_normalize_and_validate_parameters():
     assert model.parameters == {"vth0": 0.4}
     assert instance.parameters["nf"] == 2
     assert Bsim4Bias(0.9, 0.6, 0.0, 0.0).terminals.shape == (4,)
+    compatible = Bsim4ModelCard(
+        polarity=-1,
+        parameters={"LEVEL": 54, "VERSION": 4.0, "VTH0": -0.4},
+        version=4.0,
+    )
+    assert compatible.version == 4.0
 
 
 def test_evaluation_enforces_terminal_conservation():

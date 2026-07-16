@@ -1,6 +1,6 @@
 {
   "name": "freepdk45_sar3",
-  "description": "3-bit fully differential common-mode-switching SAR ADC. Dual 4C/2C/1C/1C-dummy CDACs sample a differential input, FreePDK45 CMOS transmission gates release both top plates, and a transistor-level 5T comparator resolves each bit. circuitopt replays ngspice .tran for every physical comparator decision.",
+  "description": "3-bit fully differential common-mode-switching SAR ADC. Dual 4C/2C/1C/1C-dummy CDACs sample a differential input, FreePDK45 CMOS transmission gates release both top plates, and a transistor-level 5T comparator resolves each bit. This historical end-to-end SAR example explicitly uses the optional ngspice oracle; use freepdk45_5t_ota.json for the native BSIM4 path.",
   "solved": [
     "TOPP", "TOPN", "B2P", "B1P", "B0P", "BDP",
     "B2N", "B1N", "B0N", "BDN", "tail", "n1", "vout"
@@ -23,15 +23,15 @@
     {"name": "M5", "drain": "tail", "gate": "VBIAS", "source": "GND", "W": 2.0, "L": 0.1}
   ],
   "models": {
-    "MSNP": {"type": "freepdk45.nmos"},
-    "MSPP": {"type": "freepdk45.pmos", "vb": 1.0},
-    "MSNN": {"type": "freepdk45.nmos"},
-    "MSPN": {"type": "freepdk45.pmos", "vb": 1.0},
-    "M1": {"type": "freepdk45.nmos"},
-    "M2": {"type": "freepdk45.nmos"},
-    "M3": {"type": "freepdk45.pmos", "vb": 1.0},
-    "M4": {"type": "freepdk45.pmos", "vb": 1.0},
-    "M5": {"type": "freepdk45.nmos"}
+    "MSNP": {"type": "freepdk45_ngspice.nmos"},
+    "MSPP": {"type": "freepdk45_ngspice.pmos", "vb": 1.0},
+    "MSNN": {"type": "freepdk45_ngspice.nmos"},
+    "MSPN": {"type": "freepdk45_ngspice.pmos", "vb": 1.0},
+    "M1": {"type": "freepdk45_ngspice.nmos"},
+    "M2": {"type": "freepdk45_ngspice.nmos"},
+    "M3": {"type": "freepdk45_ngspice.pmos", "vb": 1.0},
+    "M4": {"type": "freepdk45_ngspice.pmos", "vb": 1.0},
+    "M5": {"type": "freepdk45_ngspice.nmos"}
   },
   "bias": {"VDD": 1.0, "VCM": 0.5, "VBIAS": 0.55},
   "outputs": ["vout"],

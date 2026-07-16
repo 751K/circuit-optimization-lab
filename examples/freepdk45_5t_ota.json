@@ -1,6 +1,6 @@
 {
   "name": "freepdk45_5t_ota",
-  "description": "FreePDK45 (45nm, 1.0V) 5-transistor OTA: NMOS input pair M1/M2 -> PMOS diode/mirror load M3/M4 -> single-ended vout, NMOS tail M5. Evaluated by ngspice-C BSIM4 (the FreePDK45 oracle) through a cached characterization grid (core.ngspice_device). Validated: single-device Id/gm/gds are bit-exact vs ngspice op, and the OTA gain/BW match ngspice .ac on the equivalent netlist (see tests/test_freepdk45.py).",
+  "description": "FreePDK45 (45nm, 1.0V) 5-transistor OTA: NMOS input pair M1/M2 -> PMOS diode/mirror load M3/M4 -> single-ended vout, NMOS tail M5. Evaluated by CircuitOpt's in-process Berkeley BSIM4 kernel with full four-terminal currents, charges, capacitances, and noise. Optional ngspice comparisons remain available as regression oracles.",
   "solved": ["tail", "n1", "vout"],
   "rails": {"VDD": "VDD", "GND": 0.0, "vinp": "VCM", "vinn": "VCM", "vbias": "VB"},
   "devices": [

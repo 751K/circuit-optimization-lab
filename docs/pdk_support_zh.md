@@ -11,8 +11,9 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 |---|---|---|---|---|---|---|
 | AT4000TG | `at4000tg.pmos` | 内置校准 PMOS 模型 | 支持 | 原生 | 支持 | 无 |
 | SKY130 | `sky130.nmos`、`sky130.pmos` | 参数卡解析 + OpenVAF OSDI | 支持 | OSDI 后端 | 在模型提供完整端口线性化时可用，需按拓扑验证 | SKY130 PDK、用于解析的 ngspice、OpenVAF/BSIM4 VA |
-| FreePDK45 | `freepdk45.nmos`、`freepdk45.pmos` | ngspice-C 表征网格 | 支持 | 完整电路 ngspice `.tran` | 没有直接 FreePDK45 周期后端 | FreePDK45 模型卡和 ngspice |
-| TSMC28HPC+ core | `tsmc28hpcp.nmos`、`tsmc28hpcp.pmos` | 内部 HSPICE 前端 + 原生 Berkeley BSIM4.5 | 支持 | 原生电荷守恒 BE/Gear2 | 支持 | Licensed 模型文件；首次构建需要 C 编译器 |
+| FreePDK45 | `freepdk45.nmos`、`freepdk45.pmos` | 平铺模型卡加载器 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 已接入原生端口后端，需按周期拓扑验证 | FreePDK45 模型卡；首次构建需要 C 编译器 |
+| FreePDK45 oracle | `freepdk45_ngspice.nmos`、`freepdk45_ngspice.pmos` | ngspice-C 缓存网格 / 完整网表 oracle | 仅用于 oracle | 仅用于 oracle | 不是默认周期后端 | FreePDK45 模型卡和 ngspice |
+| TSMC28HPC+ core | `tsmc28hpcp.nmos`、`tsmc28hpcp.pmos` | 内部 HSPICE 前端 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 支持 | Licensed 模型文件；首次构建需要 C 编译器 |
 | TSMC28HPC+ oracle | `tsmc28hpcp_ngspice.nmos`、`tsmc28hpcp_ngspice.pmos` | 显式 ngspice 对照路径 | 仅用于 oracle | 仅用于 oracle | 不是默认周期后端 | Licensed 模型文件和 ngspice |
 
 这里的“支持”表示分析链路已经接通，不表示自动达到 foundry sign-off 等价。每个新拓扑仍应对合适的
@@ -38,11 +39,19 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 
 ### FreePDK45
 
-- 由于模型卡 BSIM4 版本与现有 OSDI BSIM 源不匹配，使用 ngspice-C 作为器件求值器。
-- DC、AC、噪声使用缓存表征网格。
-- 瞬态把完整受支持电路路由到 ngspice，以保留 BSIM 电荷和结电容。
-- 快速 AC 网格缺少部分漏/源结电容，整机带宽应使用显式 ngspice AC oracle 复核。
+- 直接解析平铺的 level-54 VTG 模型卡，并交给进程内 Berkeley BSIM4.5 内核求值。
+- 模型卡声明 BSIM4 `version=4.0`。在仓库内 Berkeley 源码中，version 字段是元数据，
+  不会切换另一套负载方程；单管 `Id/gm/gds`、噪声和五管 OTA AC 均以 ngspice
+  做回归核对。
+- 原生后端提供完整四端电流、电导、电荷、电容和相关噪声，接入 DC、AC、noise、
+  transient 及周期分析。
+- 固定时间网格瞬态的 Newton 迭代和矩阵盖章位于 Numba 内核中，并通过运行时
+  `void *` 函数指针直接调用 C 紧凑模型；设置 `CIRCUIT_USE_NUMBA=0` 可切换到
+  Python 参考路径。
+- `freepdk45_ngspice.*` 与完整电路 ngspice helper 继续作为独立 oracle 保留，
+  正常仿真不需要安装 ngspice。
 - 工艺角：`nom`、`tt`、`ss`、`ff`、`sf`、`fs`。
+- `tt` 等价于 `nom`；`sf` 为 NMOS slow + PMOS fast，`fs` 相反。
 - `circuit-opt mc` 尚未提供通用硅工艺逐器件失配语义。
 
 ### TSMC28HPC+
@@ -50,6 +59,7 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 - 当前适配 1d8 HSPICE 模型文件中的 0.9 V `nch_mac` / `pch_mac` core wrapper。
 - 内部解析器在内存中处理 `.lib`、参数、子电路、macro 和尺寸 bin。
 - 原生后端提供四端电流、电导、电荷、电容和相关噪声。
+- 瞬态使用与 FreePDK45 相同的 Numba 到 C BSIM4 桥。
 - 工艺角：`tt`、`ss`、`ff`、`sf`、`fs`；`nom` 等价于 `tt`。
 - 器件绑定 API 中温度使用开尔文。
 - 当前不声称支持完整 iPDK 中的 IO、RF、SRAM、eFuse、可靠性、统计模型、版图提取或

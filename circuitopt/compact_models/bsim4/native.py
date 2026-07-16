@@ -61,6 +61,16 @@ _STATUS = {
     10: "requested BSIM4 topology is outside the native core-MOS scope",
     13: "parameters cannot be changed after BSIM4 setup",
 }
+_ABI_VERSION = 1
+_EVAL_VP_T = C.CFUNCTYPE(
+    C.c_int,
+    C.c_void_p,
+    C.c_void_p,
+    C.c_void_p,
+    C.c_void_p,
+    C.c_void_p,
+    C.c_void_p,
+)
 _build_lock = threading.RLock()
 _library = None
 
@@ -165,6 +175,12 @@ def _bind_library():
         path = _build_library()
         library = C.CDLL(str(path))
         double_pointer = C.POINTER(C.c_double)
+        library.co_bsim4_abi_version.argtypes = ()
+        library.co_bsim4_abi_version.restype = C.c_uint
+        abi_version = int(library.co_bsim4_abi_version())
+        if abi_version != _ABI_VERSION:
+            raise Bsim4NativeError(
+                f"native BSIM4 ABI version {abi_version} != expected {_ABI_VERSION}")
         library.co_bsim4_create.argtypes = (C.c_int, C.c_double)
         library.co_bsim4_create.restype = C.c_void_p
         library.co_bsim4_destroy.argtypes = (C.c_void_p,)
@@ -193,6 +209,21 @@ def _bind_library():
             double_pointer,
         )
         library.co_bsim4_dc.restype = C.c_int
+        library.co_bsim4_eval.argtypes = library.co_bsim4_dc.argtypes
+        library.co_bsim4_eval.restype = C.c_int
+        library.co_bsim4_eval_vp.argtypes = (C.c_void_p,) * 6
+        library.co_bsim4_eval_vp.restype = C.c_int
+        library.co_bsim4_eval_batch.argtypes = (
+            C.POINTER(C.c_void_p),
+            C.c_size_t,
+            double_pointer,
+            double_pointer,
+            double_pointer,
+            double_pointer,
+            double_pointer,
+            C.POINTER(C.c_int),
+        )
+        library.co_bsim4_eval_batch.restype = C.c_int
         library.co_bsim4_noise.argtypes = (
             C.c_void_p,
             C.c_double,
@@ -202,6 +233,8 @@ def _bind_library():
             double_pointer,
         )
         library.co_bsim4_noise.restype = C.c_int
+        library._co_bsim4_eval_vp = _EVAL_VP_T(
+            ("co_bsim4_eval_vp", library))
         _library = library
     return _library
 
@@ -244,6 +277,18 @@ class _NativeDevice:
             self.close()
             raise
 
+    @property
+    def pointer(self) -> int:
+        """Process-local opaque handle used by the Numba/ctypes runtime bridge."""
+        if not self._pointer:
+            raise Bsim4NativeError("BSIM4 native device is closed")
+        return int(self._pointer)
+
+    @property
+    def kernel_evaluator(self):
+        """Runtime ctypes pointer for the all-``void *`` evaluation ABI."""
+        return self._library._co_bsim4_eval_vp
+
     def close(self) -> None:
         pointer = getattr(self, "_pointer", None)
         if pointer:
@@ -269,7 +314,7 @@ class _NativeDevice:
         op = np.empty(8, dtype=np.float64)
         pointer = C.POINTER(C.c_double)
         with self._lock:
-            status = self._library.co_bsim4_dc(
+            status = self._library.co_bsim4_eval(
                 self._pointer,
                 terminals.ctypes.data_as(pointer),
                 currents.ctypes.data_as(pointer),
@@ -365,6 +410,7 @@ class NativeBsim4Backend:
 
     name = "berkeley-bsim4v5-native"
     version = "4.5.0"
+    abi_version = _ABI_VERSION
 
     def __init__(self, *, cache_size: int | None = None):
         if cache_size is None:
@@ -383,6 +429,7 @@ class NativeBsim4Backend:
     ) -> tuple:
         return (
             model.polarity,
+            model.version,
             tuple(sorted(model.parameters.items())),
             tuple(sorted(instance.parameters.items())),
             float(temperature_k),
@@ -423,6 +470,66 @@ class NativeBsim4Backend:
         finally:
             if self._cache_size == 0:
                 device.close()
+
+    def create_device(
+        self,
+        model: Bsim4ModelCard,
+        instance: Bsim4InstanceCard,
+        temperature_k: float,
+    ) -> _NativeDevice:
+        """Create an independently owned handle for a compiled solver loop.
+
+        Unlike the ordinary evaluator cache, the caller owns this handle and
+        must close it. A dedicated handle avoids sharing mutable BSIM state
+        between concurrent transient simulations.
+        """
+        return _NativeDevice(model, instance, float(temperature_k))
+
+    @staticmethod
+    def evaluate_batch(
+        devices,
+        terminals,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Evaluate existing native handles through the stable C batch ABI."""
+        device_list = list(devices)
+        values = np.ascontiguousarray(terminals, dtype=np.float64)
+        count = len(device_list)
+        if values.shape != (count, 4):
+            raise ValueError(
+                f"terminals must have shape ({count}, 4), got {values.shape}")
+        if count == 0:
+            return (
+                np.empty((0, 4)),
+                np.empty((0, 4, 4)),
+                np.empty((0, 4)),
+                np.empty((0, 4, 4)),
+            )
+        library = device_list[0]._library
+        if any(device._library is not library for device in device_list):
+            raise ValueError("all BSIM4 batch handles must use the same native library")
+        handles = (C.c_void_p * count)(
+            *(C.c_void_p(device.pointer) for device in device_list))
+        currents = np.empty((count, 4), dtype=np.float64)
+        conductance = np.empty((count, 4, 4), dtype=np.float64)
+        charges = np.empty((count, 4), dtype=np.float64)
+        capacitance = np.empty((count, 4, 4), dtype=np.float64)
+        statuses = np.empty(count, dtype=np.int32)
+        pointer = C.POINTER(C.c_double)
+        status = library.co_bsim4_eval_batch(
+            handles,
+            count,
+            values.ctypes.data_as(pointer),
+            currents.ctypes.data_as(pointer),
+            conductance.ctypes.data_as(pointer),
+            charges.ctypes.data_as(pointer),
+            capacitance.ctypes.data_as(pointer),
+            statuses.ctypes.data_as(C.POINTER(C.c_int)),
+        )
+        if status:
+            failed = int(np.flatnonzero(statuses)[0])
+            _raise_status(
+                int(statuses[failed]), f"batch evaluation at index {failed}")
+        return currents, conductance, charges, capacitance
 
     def close(self) -> None:
         with self._lock:

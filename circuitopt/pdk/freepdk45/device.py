@@ -1,4 +1,4 @@
-"""CircuitOpt device-model adapter for native TSMC28HPC+ core MOS."""
+"""CircuitOpt device adapter for native FreePDK45 BSIM4 MOS models."""
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -12,13 +12,13 @@ from ...compact_models.bsim4 import (
     NativeBsim4Backend,
 )
 from ...device_model import TransistorModel, register_pdk
-from .library import load_tsmc28_core_library
+from .library import load_freepdk45_library, normalize_corner
 
 
 _BACKEND = NativeBsim4Backend()
 
 
-class _Tsmc28NativeCoreFet(TransistorModel):
+class _Fp45NativeFet(TransistorModel):
     POLARITY = "nmos"
     TYPE = 1
     HAS_TERMINAL_LINEARIZATION = True
@@ -29,43 +29,42 @@ class _Tsmc28NativeCoreFet(TransistorModel):
 
     def __init__(
         self,
-        W: float = 1.0,
-        L: float = 0.03,
+        W: float = 0.09,
+        L: float = 0.05,
         NF: int = 1,
         *,
-        corner: str = "tt",
+        corner: str = "nom",
         vb: float = 0.0,
         temperature: float = 300.15,
         mismatch: float = 0.0,
         delvto: float = 0.0,
         mult: int = 1,
+        extract_w: float | None = None,
         **parameters,
     ):
         mismatch_v = parameters.pop("_delvto", mismatch or delvto)
-        if parameters:
-            names = ", ".join(sorted(parameters))
-            raise TypeError(f"unsupported native TSMC28 instance parameters: {names}")
         self.W = float(W)
         self.L = float(L)
         self.NF = int(NF)
         self.mult = int(mult)
-        self.corner = str(corner).lower()
+        self.corner = normalize_corner(corner)
         self.vb = float(vb)
         self.temperature = float(temperature)
+        self.extract_w = extract_w
         self.g_area = self.W * self.L * self.mult
         self.kcl_sign = -1.0 if self.TYPE > 0 else 1.0
-        card = load_tsmc28_core_library().core_card(
-            self.POLARITY,
-            width_um=self.W,
-            length_um=self.L,
-            nf=self.NF,
-            mult=self.mult,
-            corner=self.corner,
-            temperature_c=self.temperature - 273.15,
-            mismatch_v=float(mismatch_v),
-        )
+        card = load_freepdk45_library(
+            self.POLARITY, self.corner).device_card(
+                width_um=self.W,
+                length_um=self.L,
+                nf=self.NF,
+                mult=self.mult,
+                mismatch_v=float(mismatch_v),
+                instance_parameters=parameters,
+            )
         self.model_card, self.instance_card = card.to_bsim4_cards()
-        self.bin_name = card.bin_name
+        self.card_path = card.path
+        self.model_name = card.model_name
         self._evaluations: OrderedDict[tuple, Bsim4Evaluation] = OrderedDict()
 
     def _evaluate(
@@ -175,18 +174,18 @@ class _Tsmc28NativeCoreFet(TransistorModel):
             self.model_card, self.instance_card, self.temperature)
 
 
-class Tsmc28NativeNfet(_Tsmc28NativeCoreFet):
+class Fp45Nfet(_Fp45NativeFet):
     POLARITY = "nmos"
     TYPE = 1
 
 
-class Tsmc28NativePfet(_Tsmc28NativeCoreFet):
+class Fp45Pfet(_Fp45NativeFet):
     POLARITY = "pmos"
     TYPE = -1
 
 
 register_pdk(
-    "tsmc28hpcp",
-    {"nmos": Tsmc28NativeNfet, "pmos": Tsmc28NativePfet},
+    "freepdk45",
+    {"nmos": Fp45Nfet, "pmos": Fp45Pfet},
     default=False,
 )

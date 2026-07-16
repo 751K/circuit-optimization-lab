@@ -1,16 +1,14 @@
-"""FreePDK45 PDK — ngspice-C as the device evaluator.
+"""FreePDK45 native BSIM4 results checked against an optional ngspice oracle.
 
-FreePDK45's BSIM4 ``version = 4.0`` cards diverge ~30 % from our BSIM4.8 OSDI VA
-(version-independently), so FreePDK45 binds to ngspice-C via a cached
-characterisation grid (:mod:`circuitopt.ngspice_device`) rather than the OSDI host. The
-oracle is therefore ngspice itself: these tests pin that (1) a device's Id/gm/gds
-reproduce a direct ngspice ``.op`` at the grid nodes, and (2) a 5T OTA through the
-project's ``ac_solve`` matches ngspice's own ``.ac`` on the equivalent netlist.
+The default devices load the flat BSIM4 ``version = 4.0`` cards into CircuitOpt's
+in-process Berkeley BSIM4 kernel. These tests pin single-device operating points,
+noise, and OTA AC behavior against ngspice when that independent oracle is present.
 
 Needs the external ngspice + FreePDK45 cards; skips cleanly without them.
 """
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -23,9 +21,14 @@ from circuitopt.toolchain import pdk_root
 PDK_ROOT = pdk_root()
 _FP45 = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
 _RUN = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools", "run-ngspice.sh")
-_HAVE = os.path.exists(_FP45) and ngspice_binary() is not None
+_HAVE = (
+    os.path.exists(_FP45)
+    and ngspice_binary() is not None
+    and any(shutil.which(name) for name in ("clang", "cc", "gcc"))
+)
 
-pytestmark = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards / ngspice not present")
+pytestmark = pytest.mark.skipif(
+    not _HAVE, reason="FreePDK45 cards / ngspice / C compiler not present")
 
 _CFG = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                     "examples", "freepdk45_5t_ota.json")
@@ -61,7 +64,7 @@ def test_pdk_registered():
 
 
 def test_nmos_matches_ngspice_op():
-    """Grid-node Id/gm/gds are exact ngspice-C (this is the model==oracle anchor)."""
+    """Native Id/gm/gds reproduce ngspice-C at the same bias."""
     from circuitopt.device_model import create_transistor
     card = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
     n = create_transistor("nmos", pdk="freepdk45", W=0.09, L=0.05, corner="nom")
@@ -157,9 +160,7 @@ def _ngspice_noise(card, model, W, L, vgs, vds, vb):
 
 
 def test_noise_matches_ngspice():
-    """get_noise_psd (grid-interpolated) tracks a direct ngspice .noise fit — the
-    thermal (BSIM4 tnoimod, 45 nm velocity-sat excess) and 1/f coefficient are the
-    real ngspice-C values, not an 8/3·kT·gm estimate."""
+    """Native terminal noise tracks a direct ngspice .noise fit."""
     from circuitopt.device_model import create_transistor
     card = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
     n = create_transistor("nmos", pdk="freepdk45", W=0.5, L=0.1, corner="nom")
@@ -184,9 +185,7 @@ def test_grid_cache_roundtrips(tmp_path):
 
 
 def test_extract_w_matches_true_w():
-    """extract_w characterises one reference-W grid and linearly scales the actual W;
-    for a wide device it reproduces the true per-W card to <2 % (BSIM4 W-linearity),
-    which is what makes the dataset/optimizer W sweeps cheap."""
+    """The legacy extract_w hint does not alter native per-instance geometry."""
     from circuitopt.device_model import create_transistor
     vs, vd, vg = 0.0, 0.5, 0.55
     true = create_transistor("nmos", pdk="freepdk45", W=4.0, L=0.1, corner="nom")
@@ -223,10 +222,7 @@ def _fd_ota_diff_ugbw(freqs, H):
 
 
 def test_fd_ota_ac_matches_ngspice(tmp_path):
-    """The WHOLE FD-OTA — CMFB loop, AC-coupled input, Rs/CL — through ac_solve vs
-    ngspice's own .ac on the equivalent netlist. Passband gain and PM match tightly;
-    UGBW reads ~8 % high because the grid AC model omits drain/source junction caps
-    (Cdb/Csb) that ngspice includes, so the crossing is pinned only to <12 %."""
+    """The full native FD-OTA AC result tracks ngspice's equivalent netlist."""
     from circuitopt.ac_solver import ac_solve
     from circuitopt.circuit_loader import circuit_from_dict
     cfg = json.load(open(os.path.join(os.path.dirname(os.path.dirname(__file__)),

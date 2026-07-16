@@ -12,8 +12,9 @@ process consistently.
 |---|---|---|---|---|---|---|
 | AT4000TG | `at4000tg.pmos` | Built-in calibrated PMOS model | Yes | Native | Yes | None |
 | SKY130 | `sky130.nmos`, `sky130.pmos` | Resolved card + OpenVAF OSDI | Yes | OSDI backend | Available where terminal linearization is supported; validate each topology | SKY130 PDK, ngspice for card resolution, OpenVAF/BSIM4 VA |
-| FreePDK45 | `freepdk45.nmos`, `freepdk45.pmos` | Cached ngspice-C characterization grid | Yes | Full-circuit ngspice `.tran` | No direct FreePDK45 PSS/PAC/PNoise backend | FreePDK45 cards and ngspice |
-| TSMC28HPC+ core | `tsmc28hpcp.nmos`, `tsmc28hpcp.pmos` | Internal HSPICE frontend + native Berkeley BSIM4.5 | Yes | Native charge-conserving BE/Gear2 | Yes | Licensed supported model file; C compiler on first build |
+| FreePDK45 | `freepdk45.nmos`, `freepdk45.pmos` | Flat-card loader + native Berkeley BSIM4.5 | Yes | Numba circuit loop + native C BSIM4 BE/Gear2 | Native terminal backend; validate each periodic topology | FreePDK45 cards; C compiler on first build |
+| FreePDK45 oracle | `freepdk45_ngspice.nmos`, `freepdk45_ngspice.pmos` | Cached ngspice-C grid / complete-deck oracle | Oracle only | Oracle only | Not the default periodic backend | FreePDK45 cards and ngspice |
+| TSMC28HPC+ core | `tsmc28hpcp.nmos`, `tsmc28hpcp.pmos` | Internal HSPICE frontend + native Berkeley BSIM4.5 | Yes | Numba circuit loop + native C BSIM4 BE/Gear2 | Yes | Licensed supported model file; C compiler on first build |
 | TSMC28HPC+ oracle | `tsmc28hpcp_ngspice.nmos`, `tsmc28hpcp_ngspice.pmos` | Explicit ngspice comparison path | Oracle only | Oracle only | Not the default periodic backend | Licensed model file and ngspice |
 
 “Supported” means the backend is connected to the analysis path. It does not
@@ -43,14 +44,22 @@ an appropriate reference.
 
 ### FreePDK45
 
-- Uses ngspice-C as the model evaluator because the supplied BSIM4 version and
-  the available OSDI BSIM source do not match closely enough.
-- DC, AC, and noise use cached characterization grids.
-- Transient routes the complete supported circuit to ngspice so BSIM charge and
-  junction capacitance remain in the simulation.
-- The fast AC grid omits some drain/source junction capacitance. Whole-circuit
-  bandwidth should be cross-checked with the explicit ngspice AC oracle.
+- Parses the flat level-54 VTG cards directly and evaluates them with the
+  in-process Berkeley BSIM4.5 kernel.
+- The cards declare BSIM4 `version=4.0`. In the bundled Berkeley source the
+  version field is metadata rather than an equation switch; single-device
+  `Id/gm/gds`, noise, and 5T OTA AC are regression-checked against ngspice.
+- The native backend exposes full four-terminal current, conductance, charge,
+  capacitance, and correlated noise for DC, AC, noise, transient, and periodic
+  analyses.
+- The fixed-grid transient hot path keeps Newton iteration and matrix stamping
+  in Numba and calls the C compact model through a runtime `void *` function
+  pointer. `CIRCUIT_USE_NUMBA=0` selects the Python reference path.
+- `freepdk45_ngspice.*` and the full-circuit ngspice helpers remain available as
+  independent regression oracles. They are optional for normal simulation.
 - Corners: `nom`, `tt`, `ss`, `ff`, `sf`, `fs`.
+- `tt` aliases `nom`; `sf` selects NMOS slow plus PMOS fast, and `fs` the
+  reverse.
 - Generic silicon mismatch semantics are not yet implemented through `circuit-opt mc`.
 
 ### TSMC28HPC+
@@ -61,6 +70,7 @@ an appropriate reference.
   and geometry bins in memory.
 - The native backend exposes four-terminal current, conductance, charge,
   capacitance, and correlated noise.
+- Transient uses the same Numba-to-C BSIM4 bridge as FreePDK45.
 - Corners: `tt`, `ss`, `ff`, `sf`, `fs`; `nom` aliases `tt`.
 - Temperature is passed in kelvin at the device binding API.
 - The current adapter does not claim support for IO devices, RF devices, SRAM,

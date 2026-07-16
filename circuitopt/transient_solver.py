@@ -1170,7 +1170,8 @@ def native_bsim4_model_names(model_types):
 def freepdk45_model_names(model_types):
     """Compatibility alias for callers that previously queried ngspice routing."""
     return tuple(name for name in ngspice_model_names(model_types)
-                 if str(model_types[name]).startswith("freepdk45."))
+                 if str(model_types[name]).startswith(
+                     ("freepdk45.", "freepdk45_ngspice.")))
 
 
 def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float],
@@ -1254,11 +1255,10 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         path exactly.
 
     mismatch : optional ``{device: delta_vth[V]}`` per-instance threshold-voltage
-        offset map on the model-card ngspice path. Each process adapter emits its
-        supported instance parameter (``delvto`` for FreePDK45, ``_delvto`` for
-        TSMC28HPC+; see :mod:`circuitopt.ngspice_transient`).
-        Rejected for the local-solver paths, which have no per-instance Vth knob.
-        ``None`` reproduces the legacy netlist exactly.
+        offset map. Native BSIM4 devices receive the instance offset in-process;
+        model-card ngspice paths render the process-specific parameter
+        (``delvto`` for FreePDK45, ``_delvto`` for TSMC28HPC+).
+        ``None`` leaves every instance nominal.
     """
     topo, nf, corner, model_types, device_kwargs, _ = resolve_binding(
         binding, topo=topo, nf=nf, corner=corner, model_types=model_types,

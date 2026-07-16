@@ -1,8 +1,9 @@
 # FreePDK45 全差分 OTA 设计记录
 
 > **文档状态：可复现设计快照。** 本文保留架构、尺寸和 ngspice 交叉核对结果。
-> FreePDK45 快速 AC 网格缺少部分结电容，整机带宽应以显式 ngspice AC oracle
-> 复核；本文不是版图后 sign-off 报告。
+> 本文头条数据来自旧 ngspice 网格流程及完整网表 oracle。当前
+> `freepdk45.*` 已切换为原生 BSIM4；使用 `freepdk45_ngspice.*` 或完整电路
+> ngspice helper 可复现历史对照。本文不是新版后端的重新优化或版图后 sign-off 报告。
 
 用本仓库工具链在 **FreePDK45(45 nm, 1.0 V)** 上从零走完的设计案例——器件由
 **ngspice-C BSIM4**(FreePDK45 的 oracle,经缓存特性化网格 `circuitopt.ngspice_device`)精确
@@ -171,7 +172,8 @@ UGBW 为 ac_solve 值;按 §4.5 校 ~−8% 得 ngspice ~119–121 MHz,全角仍 
 ## 复现
 
 ```bash
-# 单点验证(需要 PDK_ROOT 指向 FreePDK45 卡 + ngspice)
+# 当前原生单点验证只需 FreePDK45 卡和首次构建用 C 编译器；
+# 复现本文历史 oracle 数字时还需要 ngspice
 python -m circuitopt run examples/freepdk45_fd_ota.json -a ac,noise
 ```
 
@@ -182,5 +184,6 @@ python -m circuitopt run examples/freepdk45_fd_ota.json -a ac,noise
   这些 VDD 参考种子节点要随 VDD 平移。
 - dataset/筛选阶段给器件加 `extract_w=1.0`(参考 W 特性化 + 线性 W 缩放,单器件误差 ~0.7%),
   免逐候选 ngspice 重表征;**终选设计务必逐 W 真卡复核**。
-- FreePDK45 器件评估器是 ngspice-C(非 SKY130 的 OSDI VA)——见
+- 本文历史优化使用 ngspice-C 网格（非 SKY130 的 OSDI VA）；当前默认已迁移到
+  原生 BSIM4——旧流程背景见
   [freepdk45-ngspice-eval 记忆](https://github.com/751K/circuit-optimization-lab/blob/main/README.md) 与 `circuitopt/ngspice_char.py` 头注。

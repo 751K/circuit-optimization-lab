@@ -1,11 +1,12 @@
-"""ngspice-C as the device evaluator — batch DC characterization + cache.
+"""Optional ngspice-C device oracle — batch characterization + cache.
 
 FreePDK45 declares BSIM4 ``version = 4.0``; our OpenVAF ``bsim4va`` is BSIM4.8 and
 carries no version switch, so it computes ~30 % different I-V from ngspice's built-in
 C-BSIM4 on these aggressive 45 nm cards (confirmed version-independent: ngspice gives
 the same Id for a card marked 4.0 … 4.8). The OSDI host therefore cannot reproduce
-"real FreePDK45" behaviour. For FreePDK45 the *oracle is ngspice-C itself*, so we make
-ngspice the evaluator.
+"real FreePDK45" behaviour. The default FreePDK45 backend is now the native Berkeley
+BSIM4 kernel; this module preserves the historical ngspice grid as an independent
+regression oracle.
 
 Per-bias ngspice subprocess calls are far too slow for the DC Newton inner loop, and
 no ``libngspice`` shared build is present. Instead we exploit that a batch ``.dc``
