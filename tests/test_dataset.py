@@ -17,16 +17,15 @@ from circuitopt.toolchain import pdk_root
 import circuitopt.dataset as ds
 from circuitopt.dataset import (_finite_or_none, _resolve_corner, _row, _topology_hash,
                           build_dataset, load_dataset_config, to_arrays)
-from circuitopt.ngspice_char import ngspice_binary
 
 CONFIG = "examples/single_stage.json"
 
 # ── FreePDK45 availability gate (mirrors tests/test_freepdk45.py) ────────────
 _PDK_ROOT = pdk_root()
 _FP45_INC = os.path.join(_PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
-_HAVE_FP45 = os.path.exists(_FP45_INC) and ngspice_binary() is not None
+_HAVE_FP45 = os.path.exists(_FP45_INC)
 _requires_fp45 = pytest.mark.skipif(
-    not _HAVE_FP45, reason="FreePDK45 cards / ngspice not present")
+    not _HAVE_FP45, reason="FreePDK45 cards not present")
 
 
 def _build(n=6, seed=0):

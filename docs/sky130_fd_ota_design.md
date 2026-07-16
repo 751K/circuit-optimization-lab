@@ -1,10 +1,10 @@
 # SKY130 全差分 OTA 设计记录
 
-> **文档状态：可复现设计快照。** 电路和命令仍保留，但需要外部 SKY130、
-> ngspice 和 OpenVAF 工具链。本文数字只适用于记录的模型解析路径和测试台，
-> 不代表官方 SKY130 sign-off 模型精度。
+> **文档状态：可复现设计快照。** 已记录几何使用随包 BSIM4.5 参数卡和原生
+> C BSIM 后端；探索新几何若缺少对应参数卡，才需要本地 SKY130/ngspice 显式提取。
+> 本文数字不代表官方 SKY130 sign-off 模型精度。
 
-用本仓库工具链(OSDI/BSIM4 硅求解器 + dataset/surrogate/optimize ML 管线)从零走完的
+用本仓库工具链(原生 C BSIM4 + dataset/surrogate/optimize ML 管线)从零走完的
 设计案例。测试台:[examples/sky130_fd_ota.json](https://github.com/751K/circuit-optimization-lab/blob/main/examples/sky130_fd_ota.json)(其中
 的尺寸即最终优化设计,直接可复现)。
 

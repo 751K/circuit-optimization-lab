@@ -23,8 +23,8 @@ without breaking another backend.”
 | `circuitopt/spice/` | HSPICE library parser and elaborator |
 | `circuitopt/compact_models/bsim4/` | Native BSIM4 ABI and implementation |
 | `circuitopt/pdk/tsmc28/` | TSMC-specific model resolution and device adapter |
-| `circuitopt/ngspice_*.py` | External ngspice characterization and oracle paths |
-| `circuitopt/osdi_*.py` | OpenVAF/OSDI compact-model host |
+| `circuitopt/ngspice_*.py` | Explicit external ngspice characterization and oracle paths |
+| `circuitopt/osdi_*.py` | Explicit OpenVAF/OSDI compact-model oracle host |
 | `circuitopt/dataset.py` | Dataset generation and provenance |
 | `circuitopt/surrogate*.py` / `optimize.py` | Surrogate training and optimization |
 | `circuitopt/service/` | Optional local HTTP layer |
@@ -60,6 +60,20 @@ Then run the full suite:
 pytest -q
 ruff check .
 ```
+
+The default pytest configuration excludes external simulator oracles. Normal
+PDK tests exercise the in-process C BSIM path and should pass even when
+`NGSPICE_BIN` points to a nonexistent executable. Run the optional comparison
+suite explicitly when changing compact-model equations, card parsing, or an
+oracle adapter:
+
+```bash
+pytest -q -m ngspice_oracle
+```
+
+That marker includes ngspice and OpenVAF/OSDI comparison workflows and may
+require local PDK payloads. It is intentionally outside the routine test gate
+because full-circuit subprocess campaigns are much slower than native tests.
 
 Documentation:
 
@@ -128,9 +142,10 @@ release workflow rejects a tag that does not match the canonical version.
 Check every backend capability path touched by the change:
 
 - built-in AT4000TG;
-- OSDI/SKY130;
-- characterized-grid FreePDK45;
+- native SKY130 BSIM4;
+- native FreePDK45 BSIM4;
 - native TSMC28 BSIM4;
+- explicit OSDI and ngspice oracle paths;
 - explicit ngspice oracle helpers.
 
 A solver optimization must preserve numerical behavior within an explicit

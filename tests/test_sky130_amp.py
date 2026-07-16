@@ -1,27 +1,17 @@
-"""Silicon (SKY130) device through the actual ac_solve / noise_analysis engine.
+"""SKY130 native BSIM4 through the actual AC/noise/transient engines.
 
 Phase A end-to-end: a common-source SKY130 PMOS amp (source at VDD → matches the
 solver's +Id-at-drain convention; bulk at VDD via ``vb``) solves DC, its AC gain
 equals the analytic ``gm*(RL||ro)``, and its output noise equals
-``device_S_id*Zout^2 + resistor``. Needs the SKY130 PDK + OpenVAF + ngspice
-(optional local toolchain), so it skips cleanly in CI.
+``device_S_id*Zout^2 + resistor``.
 """
-import os
-
 import numpy as np
 import pytest
 
 import circuitopt
 from circuitopt.ac_solver import ac_solve
 from circuitopt.noise_solver import noise_analysis
-from circuitopt.osdi_device import openvaf_binary
-from circuitopt.toolchain import bsim4_va_path, pdk_root
 from circuitopt.topology import Topology
-
-_PDK_ROOT = pdk_root()
-_HAVE = os.path.exists(os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")) \
-    and openvaf_binary() is not None and bsim4_va_path() is not None
-pytestmark = pytest.mark.skipif(not _HAVE, reason="SKY130 PDK / OpenVAF toolchain not present")
 
 _RL = 5e3
 _SIZES = {"M1": (10.0, 0.15)}
@@ -30,11 +20,16 @@ _MT = {"M1": "sky130.pmos"}
 _DK = {"M1": {"vb": 1.8}}
 
 
-def _amp():
+def _amp(*, load_cap=0.0, transient_input=False):
     return Topology(
         solved=["vout"], devices=[("M1", "vout", "vin", "VDD")],
         rails={"VDD": "VDD", "GND": 0.0, "vin": "VIN"},
         resistors=[("RL", "vout", "GND", _RL)],
+        capacitors=(
+            [("CL", "vout", "GND", float(load_cap))]
+            if load_cap else []
+        ),
+        transient_inputs={"M1": "vin"} if transient_input else {},
         input_drives={"M1": 1.0}, outputs=("vout",))
 
 
@@ -103,13 +98,28 @@ def test_complementary_5t_ota_differential_gain():
 
 
 def test_silicon_transient_settles_to_dc_with_rc_tau():
-    """Phase B: pure-Python backward-Euler OSDI transient settles to the DC op with
-    the right RC time constant."""
-    from circuitopt.osdi_transient import cs_transient
+    """Native BSIM4 transient settles to the DC op with the right RC time."""
+    from circuitopt.transient_solver import transient
     pmos = circuitopt.create_transistor("pmos", pdk="sky130", W=10.0, L=0.15, vb=1.8)
     CL = 1e-12
     tg = np.linspace(0, 20e-9, 160)
-    vout = cs_transient(pmos, 1.8, _RL, CL, lambda t: 0.5 if t <= 0 else 0.51, tg)
+    dc0 = ac_solve(
+        _SIZES, _BIAS, np.array([1.0]), topo=_amp(),
+        model_types=_MT, device_kwargs=_DK)
+    wave = np.where(tg <= 0.0, 0.5, 0.51)
+    result = transient(
+        _SIZES,
+        _BIAS,
+        tg,
+        topo=_amp(load_cap=CL, transient_input=True),
+        V0=np.array([dc0["dc_op"]["vout"]]),
+        inputs={"vin": wave},
+        model_types=_MT,
+        device_kwargs=_DK,
+        integration_method="be",
+    )
+    assert result["backend"] == "bsim4_native"
+    vout = result["nodes"]["vout"]
     # settles to the DC operating point at the stepped input
     dc = ac_solve(_SIZES, {"VDD": 1.8, "VIN": 0.51}, np.array([1.0]),
                   topo=_amp(), model_types=_MT, device_kwargs=_DK)

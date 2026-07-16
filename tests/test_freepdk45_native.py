@@ -34,10 +34,12 @@ def _spec(*, driven=False):
 
 
 def test_native_devices_load_flat_version_4_cards_without_ngspice(monkeypatch):
-    from circuitopt.device_model import create_transistor, list_pdks
+    from circuitopt.device_model import create_transistor, get_model_class, list_pdks
 
     monkeypatch.setenv("NGSPICE_BIN", "/definitely/not/ngspice")
-    assert {"freepdk45", "freepdk45_ngspice"} <= set(list_pdks())
+    assert "freepdk45" in list_pdks()
+    assert get_model_class("freepdk45.nmos").TRANSIENT_BACKEND == "bsim4_native"
+    assert get_model_class("freepdk45.pmos").TRANSIENT_BACKEND == "bsim4_native"
     nmos = create_transistor(
         "nmos", pdk="freepdk45", W=0.09, L=0.05, corner="nom")
     pmos = create_transistor(

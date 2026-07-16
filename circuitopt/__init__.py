@@ -42,14 +42,10 @@ from .device_model import (TransistorModel, NumbaParams, PDK, create_device,
                            get_default_model_type, get_default_pdk, get_pdk,
                            list_pdks, registered_models, transistor_type)
 from .noise_solver import band_rms, noise_analysis
-from .ngspice_ac import (ac_ngspice, ac_response, dc_gain_db, gain_margin_db,
-                        loop_gain_ngspice, noise_ngspice, op_ngspice,
-                        peak_gain_db, phase_margin, unity_gain_freq)
 from .pac_solver import pac_solve
 from . import pmos_tft_model  # noqa: F401 — triggers register_pdk("at4000tg", …)
-from . import sky130_model    # noqa: F401 — triggers register_pdk("sky130", …)
-from . import freepdk45_model  # noqa: F401 — native FreePDK45 + ngspice oracle
-from . import tsmc28_model  # noqa: F401 — registers explicit ngspice oracle PDK
+from .pdk.sky130 import device as _sky130_native_device  # noqa: F401
+from .pdk.freepdk45 import device as _freepdk45_native_device  # noqa: F401
 from .pdk.tsmc28 import device as _tsmc28_native_device  # noqa: F401
 from .pnoise_solver import pnoise_solve
 from .pss_solver import pss_solve
@@ -100,17 +96,6 @@ __all__ = [
     "noise_analysis",
     "band_rms",
     "transient",
-    # full-circuit model-card ngspice oracles
-    "ac_ngspice",
-    "noise_ngspice",
-    "op_ngspice",
-    "loop_gain_ngspice",
-    "ac_response",
-    "dc_gain_db",
-    "peak_gain_db",
-    "unity_gain_freq",
-    "phase_margin",
-    "gain_margin_db",
     "pss_solve",
     "pac_solve",
     "pnoise_solve",

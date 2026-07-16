@@ -19,7 +19,19 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+## [1.4.0] - 2026-07-17
+
 ### Added / 新增
+
+- **Native SKY130 BSIM4 adapter / 原生 SKY130 BSIM4 适配器**
+
+  **English:** Added packaged geometry-resolved SKY130 BSIM4.5 cards and native
+  `sky130.nmos` / `sky130.pmos` devices using the in-process C backend. OpenVAF,
+  OSDI, and ngspice are now explicit regression/card-generation tools.
+
+  **中文：** 新增随包分发的按几何展开 SKY130 BSIM4.5 参数卡，以及使用进程内
+  C 后端的原生 `sky130.nmos` / `sky130.pmos`。OpenVAF、OSDI 与 ngspice
+  现仅作为显式回归或参数卡生成工具。
 
 - **Centralized version management / 集中式版本管理**
 
@@ -31,6 +43,35 @@ release checklist.
   **中文：** 新增 `tools/version.py`，提供 show、check、sync、set 和 release
   命令。`pyproject.toml` 现为 Python、npm 与 Tauri 清单的版本号唯一来源；
   CI 和发布工作流会拒绝版本漂移及不匹配的 tag。
+
+### Changed / 变更
+
+- **Native-only normal workflows / 正常流程统一使用原生后端**
+
+  **English:** Migrated the FreePDK45 3-bit and 6-bit SAR examples to
+  `freepdk45.*`. The package root and default model registry now expose only
+  native silicon PDK keys; ngspice/OSDI aliases require an explicit oracle
+  module import. Default pytest runs exclude the `ngspice_oracle` suite, and
+  MDAC full-circuit campaigns are named as explicit oracle regressions.
+
+  **中文：** 将 FreePDK45 3-bit/6-bit SAR 示例迁移到 `freepdk45.*`，移除
+  正常测试对 ngspice 的前置依赖。包根接口和默认模型注册表仅暴露原生硅工艺
+  模型键；ngspice/OSDI 别名需要显式导入 oracle 模块。默认 pytest 排除
+  `ngspice_oracle` 测试集，MDAC 全电路 campaign 也明确命名为 oracle 回归。
+
+### Fixed / 修复
+
+- **Native transient initialization and source power / 原生瞬态初值与源功耗**
+
+  **English:** The SAR workflow now passes circuit `dc_guesses` into native
+  transient, avoiding unnecessary shared AC initialization in parallel runs,
+  and native transient reports MOS rail/gate source currents with the
+  source-power sign convention. All transient backends now reject mismatch maps
+  that reference devices absent from the topology.
+
+  **中文：** SAR 工作流现将电路 `dc_guesses` 传给原生瞬态，避免并行运行中
+  不必要的共享 AC 初值求解；MOS 电源与门极驱动支路电流也统一为源功耗符号约定。
+  所有瞬态后端现会拒绝引用拓扑中不存在器件的 mismatch 映射。
 
 ## [1.3.0] - 2026-07-17
 
@@ -583,7 +624,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.0.5...v1.1.0

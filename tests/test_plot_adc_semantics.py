@@ -15,15 +15,14 @@ import pytest
 matplotlib = pytest.importorskip("matplotlib")
 matplotlib.use("Agg")
 
-from circuitopt.ngspice_char import ngspice_binary          # noqa: E402
 from circuitopt.toolchain import pdk_root                   # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE3 = ROOT / "examples" / "freepdk45_sar3.json"
-_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file() \
-    and ngspice_binary() is not None
-needs_ngspice = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards / ngspice not present")
+_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
+needs_freepdk45 = pytest.mark.skipif(
+    not _HAVE, reason="FreePDK45 cards not present")
 
 
 def _fake_mc(dnl, inl, offset, *, dnl_thr=0.5, inl_thr=0.5):
@@ -109,7 +108,7 @@ def test_conversion_plot_derives_keys_from_spec_not_hardcoded(tmp_path):
     assert Path(out).is_file() and Path(out).stat().st_size > 1024
 
 
-@needs_ngspice
+@needs_freepdk45
 def test_cli_mc_mode_with_plot(tmp_path):
     """--mc N end-to-end on the 3-bit example: exits 0, prints a yield, renders."""
     proc = subprocess.run(
@@ -122,7 +121,7 @@ def test_cli_mc_mode_with_plot(tmp_path):
     assert pngs and pngs[0].stat().st_size > 1024
 
 
-@needs_ngspice
+@needs_freepdk45
 def test_cli_mc_exclusive_with_vin():
     proc = subprocess.run(
         [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE3),

@@ -214,7 +214,7 @@ def sar_mismatch_mc(spec: CircuitSpec, *, n: int = 50, seed: int = 0,
     integration. ``None`` disables it.
 
     ``workers`` runs the independent trials across a thread pool (the work is
-    ngspice-subprocess-bound; ``run_sar_conversion`` has no shared mutable state).
+    transient-solver-bound; ``run_sar_conversion`` has no shared mutable state).
     To keep results seed-deterministic *regardless of worker count*, ALL trials'
     random draws are taken up front, in trial order, from the single seeded RNG —
     so the RNG stream never depends on completion order. ``workers=1`` keeps the

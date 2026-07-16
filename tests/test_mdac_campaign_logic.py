@@ -6,7 +6,7 @@ handling — WITHOUT any foundry model payload or a real ngspice run.  Every
 simulation entry point is monkeypatched; ``main`` is driven with a fake
 ``run_point`` and a temporary output path.
 
-Importing ``tsmc28_mdac_pvt_campaign`` runs module-level code that imports the
+Importing ``tsmc28_mdac_ngspice_oracle_campaign`` runs module-level code that imports the
 circuitopt oracles and the TSMC28 generator (no sims execute at import), so both
 modules load here as long as ``examples`` and ``experiments`` are on ``sys.path``.
 """
@@ -19,13 +19,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.ngspice_oracle
+
 ROOT = Path(__file__).resolve().parents[1]
 for _p in (ROOT / "examples", ROOT / "experiments"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import mdac_ota_pvt_campaign as base  # noqa: E402
-import tsmc28_mdac_pvt_campaign as tsmc  # noqa: E402
+import freepdk45_mdac_ngspice_oracle_campaign as base  # noqa: E402
+import tsmc28_mdac_ngspice_oracle_campaign as tsmc  # noqa: E402
 
 campaign = tsmc.campaign  # the same module object as ``base`` after monkeypatching
 FS = base.FS

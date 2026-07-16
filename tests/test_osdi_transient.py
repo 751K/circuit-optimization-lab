@@ -49,7 +49,7 @@ def _cs_spec():
         "rails": {"VDD": "VDD", "GND": 0.0, "VG": "VGATE"},
         "devices": [{"name": "M1", "drain": "VOUT", "gate": "VG",
                      "source": "VDD", "W": W, "L": L}],
-        "models": {"M1": {"type": "sky130.pmos", "vb": VDD}},
+        "models": {"M1": {"type": "sky130_osdi.pmos", "vb": VDD}},
         "bias": {"VDD": VDD, "VGATE": VG0}, "outputs": ["VOUT"],
         "resistors": [["RL", "VOUT", "GND", RL]],
         "load_caps": [["VOUT", "GND", CL]],
@@ -76,13 +76,17 @@ def test_ota_dc_hold():
     from circuitopt.transient_solver import transient
     with open(os.path.join(_EXAMPLES, "sky130_5t_ota.json")) as fh:
         spec = circuit_from_dict(json.load(fh))
+    model_types = {
+        name: model.replace("sky130.", "sky130_osdi.")
+        for name, model in spec.model_types.items()
+    }
     ac = ac_solve(spec.sizes, spec.bias, np.array([1.0]), topo=spec.topology,
-                  nf=spec.nf, model_types=spec.model_types,
+                  nf=spec.nf, model_types=model_types,
                   device_kwargs=spec.device_kwargs)
     dc = ac["dc_op"]
     tgrid = np.linspace(0.0, 1e-6, 101)
     r = transient(spec.sizes, spec.bias, tgrid, topo=spec.topology, nf=spec.nf,
-                  model_types=spec.model_types, device_kwargs=spec.device_kwargs)
+                  model_types=model_types, device_kwargs=spec.device_kwargs)
     assert r["nfail"] == 0
     assert r.get("osdi_transient") is True
     for nm, trace in r["nodes"].items():
@@ -92,11 +96,11 @@ def test_ota_dc_hold():
 def test_cs_step_matches_python_reference():
     """Kernel BE trajectory == the independent pure-Python BE demo."""
     from circuitopt.osdi_transient import cs_transient
-    from circuitopt.sky130_model import Sky130Pfet
+    from circuitopt.sky130_model import Sky130OsdiPfet
     tgrid, r = _cs_step("be")
     assert r["nfail"] == 0
     vout = r["nodes"]["VOUT"]
-    dev = Sky130Pfet(W=W, L=L, vb=VDD)
+    dev = Sky130OsdiPfet(W=W, L=L, vb=VDD)
     ref = cs_transient(dev, VDD, RL, CL,
                        lambda t: VG0 if t < TEDGE else VG1, tgrid)
     assert np.max(np.abs(vout - ref)) < 1e-4              # < 0.1 mV everywhere
@@ -104,10 +108,10 @@ def test_cs_step_matches_python_reference():
 
 def test_cs_settling_matches_analytic_tau():
     """63% settling time == (RL‖ro)·CL small-signal time constant."""
-    from circuitopt.sky130_model import Sky130Pfet
+    from circuitopt.sky130_model import Sky130OsdiPfet
     tgrid, r = _cs_step("gear2")
     vout = r["nodes"]["VOUT"]
-    dev = Sky130Pfet(W=W, L=L, vb=VDD)
+    dev = Sky130OsdiPfet(W=W, L=L, vb=VDD)
     op = dev._dev.operating_point(float(vout[-1]), VG1, VDD, VDD)
     ro = 1.0 / max(op["gds"], 1e-15)
     tau = (RL * ro / (RL + ro)) * CL
@@ -127,15 +131,16 @@ def test_gear2_matches_be_when_settled():
     assert np.max(np.abs(vb_[-50:] - vg_[-50:])) < 1e-5   # same settled point
 
 
+@pytest.mark.ngspice_oracle
 @pytest.mark.skipif(ngspice_binary() is None,
                     reason="OSDI-enabled ngspice not present")
 def test_cs_step_matches_ngspice(tmp_path):
     """Same card + same .osdi in ngspice .tran → trajectory oracle."""
     from circuitopt.osdi_device import compile_va
-    from circuitopt.sky130_model import _BSIM4_VA, Sky130Pfet
+    from circuitopt.sky130_model import _BSIM4_VA, Sky130OsdiPfet
     tgrid, r = _cs_step("gear2")
     vout = r["nodes"]["VOUT"]
-    card = Sky130Pfet(W=W, L=L, vb=VDD)._osdi_card
+    card = Sky130OsdiPfet(W=W, L=L, vb=VDD)._osdi_card
     osdi = compile_va(_BSIM4_VA)
     lines, cur = [], "+"
     for k, v in card.items():

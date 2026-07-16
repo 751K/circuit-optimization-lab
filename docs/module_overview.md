@@ -29,8 +29,8 @@ The implementation is intentionally small and self-contained. Its modules includ
 `__init__.py`, the CLI entry `__main__.py`,
 calibration/PSF/Cadence-netlist helpers, shared diagnostics/profiling
 modules, the main solver stack, an ML-surrogate layer (dataset builder, surrogate
-training, screen-and-verify optimizer), three silicon PDKs — SKY130 (via an
-OpenVAF/OSDI bridge), FreePDK45 (via a flat-card loader and native Berkeley
+training, screen-and-verify optimizer), three silicon PDKs — SKY130 (via bundled
+resolved cards and native Berkeley BSIM4.5), FreePDK45 (via a flat-card loader and native Berkeley
 BSIM4.5), and TSMC28HPC+ (via the internal HSPICE parser and the same native backend) — plugged into the
 same `TransistorModel` interface as the original AT4000TG OTFT model, and an
 optional local HTTP service layer (`circuitopt/service/`) over the whole stack.
@@ -75,12 +75,13 @@ circuitopt/
   osdi_host.py         OSDI 0.4 ctypes host — loads a compiled Verilog-A (.osdi) model, single-device DC/AC/noise eval.
   osdi_device.py       TransistorModel adapter over an OSDI-hosted compact model (bridges any OSDI PDK into the solver stack).
   osdi_transient.py    Numba fixed-grid/adaptive transient with direct OSDI ABI calls.
-  sky130_model.py      SKY130 nfet/pfet PDK: BSIM4 param-card extraction (via ngspice) + PDK registration.
+  sky130_model.py      SKY130 compatibility exports + explicit ngspice card-extraction/OSDI oracle tools.
   ngspice_char.py      Model-card evaluator: batch ngspice .dc/.noise characterization → cached (Vsb,Vds,Vgs) grid.
   ngspice_device.py    TransistorModel over a cached ngspice grid (interpolated Id/gm/gds/caps/noise; extract_w + temperature).
   ngspice_process.py   Process-adapter protocol: deck preamble, instance syntax, op vectors, simulator flags.
   freepdk45_model.py   FreePDK45 compatibility exports + explicit ngspice oracle registration.
   pdk/freepdk45/       Flat-card loader and native FreePDK45 nmos/pmos adapter.
+  pdk/sky130/          Bundled resolved-card loader and native SKY130 nmos/pmos adapter.
   compact_models/bsim4/ Native Berkeley BSIM4 host, ABI, Numba marshal, and transient.
   tsmc28_model.py      TSMC28HPC+ core nmos/pmos binding: nch_mac/pch_mac + HSPICE library closure.
   service/             Optional local FastAPI HTTP service layer (the `serve` extra) — see below.
@@ -783,12 +784,12 @@ on the operating region (via `--filter`) gives the tightest metric accuracy but 
 surrogate blind to railed designs during screening. The screen-and-verify architecture
 tolerates this by design: the solver, not the surrogate, has the final word on feasibility.
 
-### Silicon PDK / OSDI layer (`osdi_host.py` / `osdi_device.py` / `osdi_transient.py` / `sky130_model.py`)
+### Silicon PDK and compact-model backends
 
-Plugs a **second, industry-standard device physics model (BSIM4)** into the same
-`TransistorModel` interface the AT4000TG OTFT model implements — so any bulk-BSIM4
-PDK (SKY130 today) runs through the *same* DC/AC/noise solver engine, additively
-(`default=False`; the OTFT PDK is untouched and remains byte-identical).
+The three silicon PDK adapters expose BSIM4 through the same `TransistorModel`
+interface as the AT4000TG OTFT model. SKY130, FreePDK45, and TSMC28HPC+ all use
+the in-process native Berkeley BSIM4 backend for normal DC, AC, noise, transient,
+PSS, PAC, and PNoise operation.
 
 A **third PDK, FreePDK45**, now uses the same native Berkeley BSIM4.5 kernel as
 TSMC28HPC+. `pdk/freepdk45/library.py` parses each flat level-54 VTG card into a
@@ -863,18 +864,14 @@ entry, then `PDK_ROOT/tsmc28hpcp`. See [TSMC28HPC+ Local Adapter](tsmc28hpcp.md)
   it is `"osdi"`, lazily imports and routes to `transient_osdi` — a one-way dependency.
   `osdi_transient.py` itself never imports `transient_solver.py`, so the two modules no
   longer form a circular import (they did before this split).
-- **`sky130_model.py`** — `Sky130Nfet`/`Sky130Pfet(OsdiDevice)` + `register_pdk("sky130",
-  ...)`. SKY130's binned BSIM4 subcircuits (63 bins, 2000+ `.param` expressions) are
-  resolved by **letting ngspice do it**: instantiate the subckt, run an `op`, `showmod`
-  dumps the fully-resolved flat card (731 params), which is cached under
-  `data/pdk/sky130/*.json` and fed to the OpenVAF-compiled `bsim4va`. `EXTRACT_W`/
-  `extract_w`: resolve the card once at a reference width and let `bsim4va` scale the
-  actual W — avoids a per-candidate ngspice subprocess during a design sweep
-  (~2 ms/eval instead). Oracle: **local ngspice loading the same `.osdi`** — since both
-  the solver and the oracle run the identical compiled model, correctness is *model==
-  oracle* regardless of the SKY130-vs-VA BSIM4 version gap (SKY130's ngspice built-in is
-  4.5; the VA source is 4.8 — a realistic 130 nm process, not SkyWater's bit-exact
-  sign-off model, which is the right tradeoff for optimizer generalization).
+- **`pdk/sky130/library.py` / `device.py`** — loads the bundled geometry-resolved
+  BSIM4.5 cards and registers native `sky130.nmos` / `sky130.pmos`. `extract_w`
+  selects a reference-width card while the instance keeps its actual geometry.
+  Missing geometries fail clearly rather than launching an external simulator.
+- **`sky130_model.py`** — compatibility exports plus the explicit
+  `extract_sky130_card()` ngspice preparation utility and unregistered-by-default
+  OpenVAF/OSDI regression classes under `sky130_osdi.*`. Normal simulation never
+  calls these paths.
 
 `circuitopt/circuit_loader.py`'s optional `models` block (`{"M1": {"type": "sky130.nmos",
 ...}}`) binds specific devices in a JSON circuit to a non-default PDK, so a mixed

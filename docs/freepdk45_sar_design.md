@@ -205,7 +205,7 @@ MC 能看见的轴。
 ```bash
 # 当前默认原生转换需要 FreePDK45 卡和首次构建用 C 编译器；
 # 复现本文历史 oracle 结果时还需要 ngspice
-circuit-opt adc examples/freepdk45_sar6.json --vin 0.7109375        # → code 45
+circuit-opt adc examples/freepdk45_sar6.json --vin 0.7109375        # native reference: code 44
 
 # 全 64 码心静态扫描(并行);角用 --corner ss/ff
 circuit-opt adc examples/freepdk45_sar6.json --sweep 64 --workers 8

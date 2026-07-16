@@ -16,9 +16,13 @@ from circuitopt.toolchain import pdk_root
 
 
 ROOT = Path(__file__).resolve().parents[1]
-_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file() \
-    and ngspice_binary() is not None
-pytestmark = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards / ngspice not present")
+_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
+_HAVE = _HAVE and ngspice_binary() is not None
+pytestmark = [
+    pytest.mark.ngspice_oracle,
+    pytest.mark.skipif(
+        not _HAVE, reason="FreePDK45 cards / ngspice oracle not present"),
+]
 
 
 # ── corner-name strictness (campaign safety) ──────────────────────────────────

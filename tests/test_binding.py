@@ -12,8 +12,8 @@ These tests pin two things:
      explicit-kwargs path exactly (``np.array_equal`` on the key output arrays),
      and explicit kwargs still override the binding.
 
-The FreePDK45 cases reuse the ngspice availability gate from the FreePDK45 device
-tests: they skip cleanly when the cards / ngspice runner are absent.
+The FreePDK45 cases require only the local model cards; simulation uses native
+C BSIM4.
 """
 import dataclasses
 import os
@@ -26,7 +26,6 @@ from circuitopt.ac_solver import ac_solve
 from circuitopt.analysis_dispatch import run_analysis_suite
 from circuitopt.circuit_loader import load_circuit_json
 from circuitopt.device_factory import CORNERS, SILICON_CORNERS
-from circuitopt.ngspice_char import ngspice_binary
 from circuitopt.noise_solver import noise_analysis
 from circuitopt.pac_solver import pac_solve
 from circuitopt.pnoise_solver import pnoise_solve
@@ -39,9 +38,9 @@ from circuitopt.toolchain import pdk_root
 # ── FreePDK45 availability gate (mirrors tests/test_freepdk45.py) ────────────
 PDK_ROOT = pdk_root()
 _FP45 = os.path.join(PDK_ROOT, "freepdk45", "models_nom", "NMOS_VTG.inc")
-_HAVE_FP45 = os.path.exists(_FP45) and ngspice_binary() is not None
+_HAVE_FP45 = os.path.exists(_FP45)
 _requires_fp45 = pytest.mark.skipif(
-    not _HAVE_FP45, reason="FreePDK45 cards / ngspice not present")
+    not _HAVE_FP45, reason="FreePDK45 cards not present")
 
 _EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples")
 

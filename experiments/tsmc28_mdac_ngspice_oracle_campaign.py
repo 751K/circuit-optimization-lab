@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""45-point TSMC28HPC+ verification for the 14-bit pipeline MDAC OTA.
+"""Explicit ngspice-oracle 45-point TSMC28HPC+ MDAC OTA regression.
 
 This specializes the established MDAC campaign for TT/SS/FF/SF/FS,
 -40/27/125 C, and 0.85/0.90/0.95 V.  In addition to the five lumped-residue
@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "examples"))
 sys.path.insert(0, str(ROOT / "experiments"))
 
-import mdac_ota_pvt_campaign as campaign  # noqa: E402
+import freepdk45_mdac_ngspice_oracle_campaign as campaign  # noqa: E402
 import tsmc28_mdac_ota_gen as G  # noqa: E402
 from circuitopt.circuit_loader import circuit_from_dict  # noqa: E402
 from circuitopt.ngspice_ac import (  # noqa: E402

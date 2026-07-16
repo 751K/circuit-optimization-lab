@@ -20,16 +20,15 @@ import pytest
 
 pytest.importorskip("matplotlib")
 
-from circuitopt.ngspice_char import ngspice_binary
 from circuitopt.toolchain import pdk_root
 from examples.plot_adc import (plot_sar_conversion, plot_sar_mc, plot_sar_spectrum,
                                plot_sar_static)
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE3 = ROOT / "examples" / "freepdk45_sar3.json"
-_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file() \
-    and ngspice_binary() is not None
-_needs_ngspice = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards / ngspice not present")
+_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
+_needs_freepdk45 = pytest.mark.skipif(
+    not _HAVE, reason="FreePDK45 cards not present")
 
 
 def _png_ok(path):
@@ -116,7 +115,7 @@ def test_conversion_missing_optional_keys(tmp_path):
 
 # ── ngspice-guarded: real 3-bit example, end to end ───────────────────────────
 
-@_needs_ngspice
+@_needs_freepdk45
 def test_conversion_3bit_real(tmp_path):
     from circuitopt.circuit_loader import load_circuit_json
     from circuitopt.sar import run_sar_conversion
@@ -126,7 +125,7 @@ def test_conversion_3bit_real(tmp_path):
     _png_ok(plot_sar_conversion(conv, adc=spec.adc, out_dir=tmp_path))
 
 
-@_needs_ngspice
+@_needs_freepdk45
 def test_static_3bit_real(tmp_path):
     from circuitopt.circuit_loader import load_circuit_json
     from circuitopt.sar import run_sar_sweep
@@ -135,7 +134,7 @@ def test_static_3bit_real(tmp_path):
     _png_ok(plot_sar_static(run_sar_sweep(spec, vin), out_dir=tmp_path))
 
 
-@_needs_ngspice
+@_needs_freepdk45
 def test_spectrum_3bit_real(tmp_path):
     from circuitopt.circuit_loader import load_circuit_json
     from circuitopt.sar import run_sar_signal
@@ -147,7 +146,7 @@ def test_spectrum_3bit_real(tmp_path):
     _png_ok(plot_sar_spectrum(sig, out_dir=tmp_path))
 
 
-@_needs_ngspice
+@_needs_freepdk45
 def test_mc_3bit_real(tmp_path):
     from circuitopt.circuit_loader import load_circuit_json
     from circuitopt.sar_mc import sar_mismatch_mc
@@ -156,7 +155,7 @@ def test_mc_3bit_real(tmp_path):
     _png_ok(plot_sar_mc(mc, out_dir=tmp_path))
 
 
-@_needs_ngspice
+@_needs_freepdk45
 def test_cli_adc_plot_subprocess(tmp_path):
     proc = subprocess.run(
         [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE3),

@@ -27,8 +27,11 @@ _HAVE = (
     and any(shutil.which(name) for name in ("clang", "cc", "gcc"))
 )
 
-pytestmark = pytest.mark.skipif(
-    not _HAVE, reason="FreePDK45 cards / ngspice / C compiler not present")
+pytestmark = [
+    pytest.mark.ngspice_oracle,
+    pytest.mark.skipif(
+        not _HAVE, reason="FreePDK45 cards / ngspice / C compiler not present"),
+]
 
 _CFG = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                     "examples", "freepdk45_5t_ota.json")

@@ -1265,6 +1265,15 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         device_kwargs=device_kwargs)
     if topo is None:
         topo = AFE_TOPO
+    if mismatch:
+        mismatch = {str(name): float(offset)
+                    for name, offset in mismatch.items()}
+        device_names = {item[0] for item in topo.devices}
+        unknown_mismatch = sorted(set(mismatch) - device_names)
+        if unknown_mismatch:
+            raise ValueError(
+                "mismatch references unknown devices: "
+                + ", ".join(unknown_mismatch))
     if native_bsim4_model_names(model_types):
         from .compact_models.bsim4.transient import transient_native_bsim4
         from .device_factory import apply_silicon_corner

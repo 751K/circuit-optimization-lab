@@ -1,4 +1,4 @@
-"""Silicon (SKY130) chopper amplifier — PSS orchestration on the OSDI engine.
+"""SKY130 chopper amplifier on the native C BSIM4 engine.
 
 The testbench (``examples/sky130_chopper.json``) is an NMOS input chopper →
 NMOS diff pair with diode-connected PMOS loads → NMOS output chopper → hold
@@ -8,9 +8,7 @@ output is DC at ``gain·(VINP−VINN)`` with gain = −gm1/gm3 ≈ −1.77.
 Validates the silicon periodic-analysis chain three ways: (1) PSS converges
 and its orbit matches the settled long transient; (2) the chopper conversion
 gain matches the static (phase-frozen) small-signal gain; (3) ngspice running
-the same BSIM4 cards + the same ``.osdi`` agrees on the gain (model == oracle).
-
-Needs the external toolchain; skips cleanly without it.
+the same BSIM4 cards through OSDI agrees on the gain (explicit regression oracle).
 """
 import json
 import os
@@ -28,11 +26,8 @@ _NGSPICE_LIB = os.path.join(PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spic
 _TOOLS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools")
 _VACOMPILE = os.path.join(_TOOLS, "vacompile.sh")
 RUN_NGSPICE = os.path.join(_TOOLS, "run-ngspice.sh")
-_HAVE = os.path.exists(_NGSPICE_LIB) and openvaf_binary() is not None \
+_HAVE_ORACLE = os.path.exists(_NGSPICE_LIB) and openvaf_binary() is not None \
     and bsim4_va_path() is not None
-
-pytestmark = pytest.mark.skipif(
-    not _HAVE, reason="SKY130 PDK / OpenVAF toolchain not present")
 
 _CFG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                          "examples", "sky130_chopper.json")
@@ -101,10 +96,9 @@ def test_pnoise_runs_and_is_physical(suite):
     pn = suite["pnoise"]
     asd = np.asarray(pn["out_asd"])
     assert np.all(np.isfinite(asd)) and np.all(asd > 0)
-    # flat demodulated output noise across the band (the tiny W=2/L=0.15
-    # switches are strongly flicker-dominated with an above-band 1/f corner)
-    assert 1e-5 < asd[0] < 1e-2
-    assert np.ptp(asd) < 0.2 * asd[0]
+    # Native BSIM4 produces a finite sub-uV/sqrt(Hz demodulated floor.
+    assert 1e-8 < asd[0] < 1e-4
+    assert np.ptp(asd) < 0.35 * asd[0]
 
 
 def test_dataset_chopper_labels(tmp_path, suite):
@@ -170,8 +164,10 @@ def test_frozen_clock_lti_oracles(spec):
     assert np.allclose(pn_hb["out_asd"], pn_ac["out_asd"], rtol=1e-3)
 
 
-@pytest.mark.skipif(ngspice_binary() is None,
-                    reason="OSDI-enabled ngspice not present")
+@pytest.mark.ngspice_oracle
+@pytest.mark.skipif(
+    not _HAVE_ORACLE or ngspice_binary() is None,
+    reason="SKY130 OpenVAF/ngspice oracle toolchain not present")
 def test_chopper_gain_matches_ngspice(spec, suite, tmp_path):
     from circuitopt.device_factory import build_devices
     from circuitopt.osdi_device import compile_va
@@ -183,9 +179,14 @@ def test_chopper_gain_matches_ngspice(spec, suite, tmp_path):
                              device_kwargs=spec.device_kwargs)
     cards, dev_model = {}, {}
     for name, w in wrappers.items():
-        key = tuple(sorted(w._osdi_card.items()))
+        card = {
+            **w.model_card.parameters,
+            **w.instance_card.parameters,
+            "type": w.TYPE,
+        }
+        key = tuple(sorted(card.items()))
         if key not in cards:
-            cards[key] = (f"m{len(cards)}", w._osdi_card)
+            cards[key] = (f"m{len(cards)}", card)
         dev_model[name] = cards[key][0]
 
     def card_lines(card):

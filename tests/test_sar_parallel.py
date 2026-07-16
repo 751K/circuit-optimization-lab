@@ -11,15 +11,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from circuitopt.ngspice_char import ngspice_binary
 from circuitopt.toolchain import pdk_root
 
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "freepdk45_sar3.json"
-_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file() \
-    and ngspice_binary() is not None
-pytestmark = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards / ngspice not present")
+_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
+pytestmark = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards not present")
 
 
 def _spec():

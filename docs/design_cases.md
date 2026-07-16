@@ -10,7 +10,7 @@ project guarantee.
 | Design record | Process | What it demonstrates | Current status |
 |---|---|---|---|
 | [AFE Design Equations](afe_design_equations.md) | AT4000TG | SLiCAP symbolic equations and cross-checks | Reference derivation |
-| [SKY130 Fully Differential OTA](sky130_fd_ota_design.md) | SKY130 | Telescopic OTA, CMFB, sizing, PVT workflow | Reproducible design snapshot; depends on external toolchain |
+| [SKY130 Fully Differential OTA](sky130_fd_ota_design.md) | SKY130 | Telescopic OTA, CMFB, sizing, PVT workflow | Reproducible with bundled cards and native BSIM; new geometries may need card extraction |
 | [FreePDK45 Fully Differential OTA](freepdk45_fd_ota_design.md) | FreePDK45 | Full OTA design and ngspice AC cross-check | Reproducible design snapshot; backend limitations apply |
 | [FreePDK45 SAR ADC](freepdk45_sar_design.md) | FreePDK45 | CDAC, StrongARM comparator, static/dynamic/MC workflow | Reproducible experiment; not a sign-off ADC flow |
 | [FreePDK45 MDAC OTA Derivation](mdac_ota_derivation.md) | FreePDK45 | ADC-to-OTA requirement derivation and testbench conventions | No complete versioned campaign; the local audit output covered 42 of 45 points |

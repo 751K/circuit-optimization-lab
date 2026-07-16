@@ -1,19 +1,9 @@
-"""SKY130 PDK — nfet/pfet as OSDI BSIM4 devices, params resolved via ngspice.
+"""SKY130 compatibility exports and explicit ngspice card-extraction oracle.
 
-SKY130's FET models are binned BSIM4 subckts with a huge ``.param``/Monte-Carlo web
-(63 bins, 2000+ expression params, a 45k-line corner file). Rather than reimplement
-that resolution, we let **ngspice resolve it** — instantiate the device, run an op,
-and ``showmod`` the fully-resolved BSIM4 model card — then feed that flat card to our
-OpenVAF-compiled ``bsim4va`` (see the ``silicon-pdk-openvaf`` memory). SKY130 uses
-built-in BSIM4.5; our VA is 4.8, so the result is *"SKY130-parameterized BSIM4.8"* —
-a realistic 130 nm process, not SkyWater's bit-exact sign-off model.
-
-Registered as the ``"sky130"`` PDK with ``default=False`` — the AT4000TG OTFT stays the
-default process, so this is purely additive (the amp/chopper byte-gate is untouched).
-
-Extraction needs the SKY130 PDK + OpenVAF/ngspice toolchain; resolved cards are
-cached under ``data/pdk/sky130/`` so re-use needs no toolchain. Override locations with
-``PDK_ROOT`` / ``OPENVAF_ROOT`` / ``NGSPICE_BIN``.
+Normal ``sky130.nmos`` and ``sky130.pmos`` simulation uses the in-process native
+C BSIM4 backend from :mod:`circuitopt.pdk.sky130`. This module keeps the old
+public class imports working and provides an explicit tool for resolving a new
+geometry/corner card with a local SKY130 ngspice installation.
 """
 from __future__ import annotations
 
@@ -22,122 +12,183 @@ import os
 import re
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Dict
 
 from .device_model import register_pdk
 from .osdi_device import OsdiDevice
-from .toolchain import (bsim4_va_path, ngspice_binary as _resolve_ngspice_binary,
-                        pdk_root)
+from .pdk.sky130 import Sky130Nfet, Sky130Pfet
+from .pdk.sky130.library import (
+    load_sky130_card,
+    normalize_corner,
+    normalize_polarity,
+    sky130_card_dirs,
+    sky130_card_filename,
+)
+from .toolchain import bsim4_va_path, ngspice_binary, pdk_root
 
-_PDK_ROOT = pdk_root()
-_NGSPICE_LIB = os.path.join(_PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")
-# run-ngspice wrapper is vendored in-repo; RUN_NGSPICE env overrides the path.
-_RUN_NGSPICE = os.environ.get(
-    "RUN_NGSPICE",
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tools", "run-ngspice.sh")))
+
+_SUBCKT = {
+    "nmos": "sky130_fd_pr__nfet_01v8",
+    "pmos": "sky130_fd_pr__pfet_01v8",
+}
+_DROP = {
+    "vbd_max", "vbdr_max", "vbs_max", "vbsr_max", "vds_max", "vgb_max",
+    "vgbr_max", "vgd_max", "vgdr_max", "vgs_max", "vgsr_max",
+}
+_LINE = re.compile(
+    r"\s*([a-zA-Z]\w*)\s+([-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*$")
+_CARD_MEMO: Dict[tuple, Dict[str, float]] = {}
 _BSIM4_VA = bsim4_va_path() or ""
-_CARD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/pdk/sky130")
-
-_SUBCKT = {"nmos": "sky130_fd_pr__nfet_01v8", "pmos": "sky130_fd_pr__pfet_01v8"}
-# showmod emits reliability voltage-limit params bsim4va does not model → drop.
-_DROP = {"vbd_max", "vbdr_max", "vbs_max", "vbsr_max", "vds_max", "vgb_max",
-         "vgbr_max", "vgd_max", "vgdr_max", "vgs_max", "vgsr_max"}
-_LINE = re.compile(r"\s*([a-zA-Z]\w*)\s+([-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*$")
 
 
-def _ngspice():
-    return _RUN_NGSPICE if os.path.exists(_RUN_NGSPICE) else \
-        (_resolve_ngspice_binary() or "ngspice")
+def _oracle_output_dir(output_dir: str | os.PathLike[str] | None) -> Path:
+    if output_dir is not None:
+        return Path(output_dir).expanduser()
+    override = os.environ.get("SKY130_CARD_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".cache" / "circuitopt" / "sky130"
 
 
-_card_memo: Dict[tuple, Dict[str, float]] = {}
+def extract_sky130_card(
+    polarity: str,
+    W: float,
+    L: float,
+    corner: str = "tt",
+    *,
+    output_dir: str | os.PathLike[str] | None = None,
+) -> Dict[str, float]:
+    """Resolve and cache one flat BSIM4 card using ngspice explicitly.
 
-
-def extract_sky130_card(polarity: str, W: float, L: float,
-                        corner: str = "tt") -> Dict[str, float]:
-    """Resolved BSIM4 model params for a SKY130 FET at (W, L)[µm], via ngspice.
-
-    Instantiates the SKY130 subckt at the given size/corner, runs an op, and parses
-    ``showmod``'s fully-resolved card. Cached to ``data/pdk/sky130/*.json`` on disk
-    and memoised in-process (device rebuilds during a sweep skip the JSON re-read).
+    This function is an oracle/preparation utility. Device construction never
+    calls it automatically.
     """
+    polarity = normalize_polarity(polarity)
+    corner = normalize_corner(corner)
     memo_key = (polarity, float(W), float(L), corner)
-    memo = _card_memo.get(memo_key)
+    memo = _CARD_MEMO.get(memo_key)
     if memo is not None:
         return dict(memo)
+
+    filename = sky130_card_filename(polarity, W, L, corner)
+    for directory in (*sky130_card_dirs(), _oracle_output_dir(output_dir)):
+        cache = directory / filename
+        if cache.is_file():
+            card = json.loads(cache.read_text(encoding="utf-8"))
+            _CARD_MEMO[memo_key] = card
+            return dict(card)
+
+    library = (
+        Path(pdk_root()) / "sky130A" / "libs.tech" / "ngspice" /
+        "sky130.lib.spice"
+    )
+    if not library.is_file():
+        raise RuntimeError(
+            f"SKY130 ngspice library not found at {library}; set PDK_ROOT")
+    simulator = ngspice_binary()
+    if simulator is None:
+        raise RuntimeError(
+            "ngspice is required only for explicit SKY130 card extraction")
+
     subckt = _SUBCKT[polarity]
-    os.makedirs(_CARD_DIR, exist_ok=True)
-    cache = os.path.join(_CARD_DIR, f"{subckt}_{corner}_W{W:g}_L{L:g}.json")
-    if os.path.exists(cache):
-        with open(cache) as fh:
-            card = json.load(fh)
-        _card_memo[memo_key] = card
-        return dict(card)
-    if not os.path.exists(_NGSPICE_LIB):
-        raise RuntimeError(f"SKY130 PDK ngspice lib not found at {_NGSPICE_LIB}; set PDK_ROOT")
-    # SKY130 ngspice models set `.option scale=1u`, so W/L are bare numbers in µm.
-    net = (f"* extract {subckt}\n.lib \"{_NGSPICE_LIB}\" {corner}\n"
-           f"xn d g s b {subckt} w={W:g} l={L:g}\n"
-           f"vd d 0 1.8\nvg g 0 1.8\nvs s 0 0\nvb b 0 0\n"
-           f".control\nop\nset width=200\nshowmod m.xn.m{subckt}\n.endc\n.end\n")
-    with tempfile.NamedTemporaryFile("w", suffix=".cir", delete=False) as fh:
-        fh.write(net)
-        cir = fh.name
+    netlist = (
+        f"* extract {subckt}\n.lib \"{library}\" {corner}\n"
+        f"xn d g s b {subckt} w={float(W):g} l={float(L):g}\n"
+        "vd d 0 1.8\nvg g 0 1.8\nvs s 0 0\nvb b 0 0\n"
+        ".control\nop\nset width=200\n"
+        f"showmod m.xn.m{subckt}\n.endc\n.end\n"
+    )
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".cir", delete=False, encoding="utf-8"
+    ) as handle:
+        handle.write(netlist)
+        netlist_path = handle.name
     try:
-        out = subprocess.run([_ngspice(), "-b", cir], capture_output=True, text=True).stdout
+        result = subprocess.run(
+            [simulator, "-b", netlist_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     finally:
-        os.unlink(cir)
+        os.unlink(netlist_path)
+    output = result.stdout + result.stderr
     card: Dict[str, float] = {}
-    for line in out.splitlines():
-        m = _LINE.match(line)
-        if m:
-            name = m.group(1).lower()
+    for line in output.splitlines():
+        match = _LINE.match(line)
+        if match:
+            name = match.group(1).lower()
             if name not in _DROP:
-                try:
-                    card[name] = float(m.group(2))
-                except ValueError:
-                    pass
+                card[name] = float(match.group(2))
     if "vth0" not in card:
-        raise RuntimeError(f"SKY130 param extraction failed for {subckt}:\n...{out[-600:]}")
-    with open(cache, "w") as fh:
-        json.dump(card, fh, indent=1, sort_keys=True)
-    _card_memo[memo_key] = card
+        raise RuntimeError(
+            f"SKY130 parameter extraction failed for {subckt}:\n"
+            f"...{output[-600:]}")
+
+    cache_dir = _oracle_output_dir(output_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / filename).write_text(
+        json.dumps(card, indent=1, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _CARD_MEMO[memo_key] = card
     return dict(card)
 
 
-class _Sky130Fet(OsdiDevice):
-    """Base for SKY130 fets: pull the resolved card, then behave as an OsdiDevice."""
+class _Sky130OsdiFet(OsdiDevice):
+    """Explicit OpenVAF/OSDI regression device; never registered as a PDK."""
+
     VA_PATH = _BSIM4_VA
     MODULE = "bsim4va"
     POLARITY = "nmos"
-    EXTRACT_W: float = None    # if set (µm), resolve the card at this fixed W and let
-    #                            bsim4va scale the actual W — fast + smooth for W sweeps
-    #                            (e.g. optimization); default resolves per instance W.
 
-    def __init__(self, W: float = 1.0, L: float = 0.15, NF: int = 1, *,
-                 corner: str = "tt", vb: float = 0.0, temperature: float = 300.15,
-                 extract_w: float = None, **_ignored):
-        # corner is a SKY130 discrete process corner (baked into the extracted card),
-        # not a bsim4va param shift; extra registry kwargs (pvt0/…) don't apply here.
-        # extract_w (per instance) pins the card-extraction reference W so a W sweep
-        # resolves one card and lets bsim4va scale W (fast + smooth for optimization);
-        # it overrides the class-level EXTRACT_W. Absent → resolve per instance W.
-        ref = extract_w if extract_w is not None else self.EXTRACT_W
-        w_card = ref if ref is not None else W
-        self.BASE_CARD = extract_sky130_card(self.POLARITY, w_card, L, corner)
+    def __init__(
+        self,
+        W: float = 1.0,
+        L: float = 0.15,
+        NF: int = 1,
+        *,
+        corner: str = "tt",
+        vb: float = 0.0,
+        temperature: float = 300.15,
+        extract_w: float | None = None,
+        **_ignored,
+    ):
+        card = load_sky130_card(
+            self.POLARITY,
+            width_um=W,
+            length_um=L,
+            nf=NF,
+            corner=corner,
+            reference_width_um=extract_w,
+        )
+        self.BASE_CARD = dict(card.model_parameters)
         self.corner = corner
         super().__init__(W=W, L=L, NF=NF, vb=vb, temperature=temperature)
 
 
-class Sky130Nfet(_Sky130Fet):
+class Sky130OsdiNfet(_Sky130OsdiFet):
     POLARITY = "nmos"
     TYPE = 1
 
 
-class Sky130Pfet(_Sky130Fet):
+class Sky130OsdiPfet(_Sky130OsdiFet):
     POLARITY = "pmos"
     TYPE = -1
 
 
-# Register the SKY130 process (nmos + pmos) — additive; AT4000TG stays default.
-register_pdk("sky130", {"nmos": Sky130Nfet, "pmos": Sky130Pfet}, default=False)
+register_pdk(
+    "sky130_osdi",
+    {"nmos": Sky130OsdiNfet, "pmos": Sky130OsdiPfet},
+    default=False,
+)
+
+
+__all__ = [
+    "Sky130Nfet",
+    "Sky130Pfet",
+    "Sky130OsdiNfet",
+    "Sky130OsdiPfet",
+    "extract_sky130_card",
+]

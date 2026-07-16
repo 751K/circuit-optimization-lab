@@ -24,7 +24,7 @@
 
 实现刻意保持小而自包含，包含 `__init__.py`、CLI 入口 `__main__.py`、校准/PSF/Cadence 网表辅助模块、共享诊断/profiling
 模块、主求解器栈、一套 ML surrogate 层（数据集构建、surrogate 训练、筛选-校验优化器）、接入同一套
-`TransistorModel` 接口的三个硅 PDK——SKY130（OpenVAF/OSDI）、FreePDK45（平铺卡解析 +
+`TransistorModel` 接口的三个硅 PDK——SKY130（随包解析卡 + 原生 Berkeley BSIM4.5）、FreePDK45（平铺卡解析 +
 原生 Berkeley BSIM4.5）与 TSMC28HPC+（内部 HSPICE 解析器 + 同一原生后端）——
 以及架在整个栈之上的可选本地 HTTP 服务层（`circuitopt/service/`）。
 
@@ -66,12 +66,13 @@ circuitopt/
   osdi_host.py         OSDI 0.4 ctypes 宿主——加载编译好的 Verilog-A（.osdi）模型，单器件 DC/AC/noise 求值。
   osdi_device.py       OSDI 宿主紧凑模型的 TransistorModel 适配器（把任意 OSDI PDK 桥接进求解器栈）。
   osdi_transient.py    在 Numba 内直接调用 OSDI ABI 的固定网格/自适应瞬态。
-  sky130_model.py      SKY130 nfet/pfet PDK：BSIM4 参数卡提取（经 ngspice）+ PDK 注册。
+  sky130_model.py      SKY130 兼容导出 + 显式 ngspice 参数卡提取/OSDI oracle 工具。
   ngspice_char.py      model-card 求值器：批量 ngspice .dc/.noise 表征 → 缓存 (Vsb,Vds,Vgs) 网格。
   ngspice_device.py    基于缓存 ngspice 网格的 TransistorModel（插值 Id/gm/gds/caps/noise；extract_w + 温度）。
   ngspice_process.py   工艺适配协议：deck 前导、器件语法、op 向量、仿真器参数。
   freepdk45_model.py   FreePDK45 兼容导出 + 显式 ngspice oracle 注册。
   pdk/freepdk45/       平铺模型卡加载器与原生 FreePDK45 nmos/pmos 适配器。
+  pdk/sky130/          随包解析卡加载器与原生 SKY130 nmos/pmos 适配器。
   compact_models/bsim4/ 原生 Berkeley BSIM4 host、ABI、Numba 编组与瞬态。
   tsmc28_model.py      TSMC28HPC+ core nmos/pmos：nch_mac/pch_mac + HSPICE library 闭包。
   service/             可选的本地 FastAPI HTTP 服务层（`serve` extra）——见下文。
@@ -651,11 +652,11 @@ mismatch/latch 相关工作：
 对甩轨设计一无所知，筛选阶段就分辨不出它们。screen-and-verify 架构正是为容忍这个矛盾设计的：可行性
 的最终话语权在求解器，不在 surrogate。
 
-### 硅 PDK / OSDI 层（`osdi_host.py` / `osdi_device.py` / `osdi_transient.py` / `sky130_model.py`）
+### 硅 PDK 与紧凑模型后端
 
-把**第二套行业标准器件物理模型（BSIM4）**接入 AT4000TG OTFT 模型所用的同一个 `TransistorModel`
-接口——所以任何 bulk-BSIM4 PDK（目前是 SKY130）都跑在同一套 DC/AC/noise 求解器引擎里，且是纯增量的
-（`default=False`；OTFT PDK 不受影响，数值 byte-identical）。
+三套硅 PDK 都通过与 AT4000TG OTFT 相同的 `TransistorModel` 接口暴露 BSIM4。
+SKY130、FreePDK45 与 TSMC28HPC+ 的正常 DC、AC、noise、transient、PSS、PAC、
+PNoise 均使用进程内原生 Berkeley BSIM4 后端。
 
 - **`osdi_host.py`** ——**OSDI 0.4 ABI** 的 ctypes 宿主，这是 [OpenVAF](https://github.com/pascalkuthe/OpenVAF)
   把 Verilog-A 紧凑模型编译成的、仿真器无关的 C 接口（`.osdi`，原生共享库）。`load_osdi()` 内省
@@ -677,14 +678,11 @@ mismatch/latch 相关工作：
   `transient()` 会检查器件的 `TRANSIENT_BACKEND` 类属性，若为 `"osdi"` 就延迟 import 并路由到
   `transient_osdi`——单向依赖。`osdi_transient.py` 自身不再 import `transient_solver.py`，
   两个模块不再构成循环 import（这次拆分之前是的）。
-- **`sky130_model.py`** ——`Sky130Nfet`/`Sky130Pfet(OsdiDevice)` + `register_pdk("sky130", ...)`。
-  SKY130 的 binned BSIM4 子电路（63 个 bin，2000+ 个 `.param` 表达式）**让 ngspice 去解析**：实例化子
-  电路、跑一次 `op`、`showmod` 拿到完全展开的扁平参数卡（731 个参数），缓存到 `data/pdk/sky130/*.json`，
-  喂给 OpenVAF 编译的 `bsim4va`。`EXTRACT_W`/`extract_w`：在参考宽度处解析一次卡片，让 `bsim4va` 缩放
-  实际 W——设计扫描时避免逐候选起一个 ngspice 子进程（改为 ~2ms/eval）。Oracle：**加载同一个 `.osdi` 的
-  本地 ngspice**——因为求解器和 oracle 跑的是同一个编译好的模型，正确性是 *model==oracle*，与
-  SKY130-vs-VA 的 BSIM4 版本差异无关（SKY130 的 ngspice 内置模型是 4.5，VA 源码是 4.8——这是一个真实的
-  130nm 工艺，不是 SkyWater 逐字节对齐的 sign-off 模型，但对优化器泛化而言这是正确的取舍）。
+- **`pdk/sky130/library.py` / `device.py`** ——加载随包的按几何展开 BSIM4.5
+  参数卡，注册原生 `sky130.nmos` / `sky130.pmos`。`extract_w` 选择参考宽度卡，
+  实例仍使用实际几何；缺卡时清晰报错，不自动启动外部仿真器。
+- **`sky130_model.py`** ——兼容导出、显式 `extract_sky130_card()` ngspice
+  准备工具，以及 `sky130_osdi.*` OpenVAF/OSDI 回归类。正常仿真不调用这些路径。
 
 ### 第三个 PDK：FreePDK45 原生适配（`pdk/freepdk45/`）
 

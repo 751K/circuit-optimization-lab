@@ -115,11 +115,12 @@ corner 和 mismatch 覆盖并不相同。
 
 | 变量 | 用途 |
 |---|---|
-| `PDK_ROOT` | SKY130 和 FreePDK45 安装根目录 |
+| `PDK_ROOT` | FreePDK45 根目录，或显式提取参数卡时使用的 SKY130 根目录 |
+| `SKY130_CARD_DIR` | 额外的 SKY130 已解析 BSIM4 参数卡目录 |
 | `TSMC28_MODEL_DIR` | 包含受支持 TSMC HSPICE 模型文件的目录 |
 | `TSMC28_PDK_ROOT` | TSMC iPDK 或交付包外层目录 |
-| `NGSPICE_BIN` | ngspice 可执行文件，用于相关后端或 oracle 对照 |
-| `OPENVAF_BIN` / `OPENVAF_ROOT` | OpenVAF-Reloaded 编译器或源码目录 |
+| `NGSPICE_BIN` | ngspice 可执行文件，仅用于 oracle 对照或参数卡提取 |
+| `OPENVAF_BIN` / `OPENVAF_ROOT` | OpenVAF-Reloaded 编译器或源码，仅用于 OSDI 回归 |
 | `BSIM4_VA` | 显式指定 BSIM4 Verilog-A 源文件 |
 | `OSDI_CACHE_DIR` | OSDI 构建缓存 |
 | `CIRCUITOPT_NATIVE_MODEL_CACHE` | 原生紧凑模型构建缓存 |

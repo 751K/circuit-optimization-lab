@@ -1,24 +1,21 @@
-"""ADC design-space exploration over the transistor-level SAR workflow.
+"""ADC design-space exploration over the native transistor-level SAR workflow.
 
-Skip-guarded like ``test_sar.py`` (the evaluation runs the real ngspice conversion
-oracle). Scale is kept tiny — 2 candidates over a 4-point subsampled code-center
-sweep — so the end-to-end pass stays well under the other SAR tests' runtime.
+Scale is kept tiny: two candidates over a four-point subsampled code-center
+sweep, so the end-to-end pass stays below the larger SAR regressions.
 """
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from circuitopt.ngspice_char import ngspice_binary
 from circuitopt.toolchain import pdk_root
 
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "freepdk45_sar3.json"
 CONFIG = ROOT / "examples" / "freepdk45_sar3_explore.json"
-_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file() \
-    and ngspice_binary() is not None
-pytestmark = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards / ngspice not present")
+_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
+pytestmark = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards not present")
 
 
 def _spec():
@@ -104,7 +101,8 @@ def test_sar_explore_workers_match_serial():
     for a, b in zip(serial["candidates"], parallel["candidates"]):
         assert a["idx"] == b["idx"]
         assert a["metrics"]["max_abs_dnl"] == b["metrics"]["max_abs_dnl"]
-        assert a["metrics"]["power_uw"] == b["metrics"]["power_uw"]
+        assert a["metrics"]["power_uw"] == pytest.approx(
+            b["metrics"]["power_uw"], rel=1e-12, abs=1e-12)
 
 
 def test_example_config_loads_and_matches_positional():

@@ -174,9 +174,8 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
   `circuitopt.device_model.register_pdk`.
 - Remaining keys are forwarded to the device constructor. For SKY130 devices:
   `vb` (bulk bias, volts; default 0), `corner` (SKY130 process corner —
-  `tt`/`ss`/`ff`/`sf`/`fs`; default `tt`), `extract_w` (µm — resolve the SKY130
-  parameter card once at this reference width and let the compact model scale the
-  actual `W`, avoiding a per-candidate re-extraction during a design sweep),
+  `tt`/`ss`/`ff`/`sf`/`fs`; default `tt`), `extract_w` (µm — select a bundled
+  reference-width card while the native BSIM instance uses the actual `W`),
   `temperature` (kelvin; default 300.15), `NF` (int).
 - **FreePDK45** (`"freepdk45.nmos"` / `"freepdk45.pmos"`) directly parses the
   flat BSIM4 level-54 cards and evaluates them with the in-process Berkeley
@@ -208,11 +207,11 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
   [TSMC28HPC+ Local Adapter](tsmc28hpcp.md).
 - A mixed circuit (some devices OTFT, some silicon) is valid — e.g. a complementary
   silicon OTA binds NMOS/PMOS devices independently. See `examples/sky130_5t_ota.json`.
-- SKY130 needs its documented external simulator toolchain. FreePDK45 and
-  TSMC28HPC+ native simulation need their model files and a C compiler
-  for the first BSIM4 backend build; ngspice is optional and used only by its
-  explicit oracle aliases. Missing prerequisites raise a clear error. See the
-  "Silicon PDK / OSDI layer" section in [Core Solver Overview](module_overview.md).
+- SKY130 normal simulation uses bundled resolved cards and the native C BSIM4
+  backend. FreePDK45 and TSMC28HPC+ use their local model files with the same
+  native backend. A C compiler is needed for the first backend build; ngspice
+  and OpenVAF are optional oracle/card-generation tools. Missing prerequisites
+  raise a clear error. See [PDK Support Matrix](pdk_support.md).
 
 ### `bias`
 
@@ -781,8 +780,8 @@ Supported (model abstraction):
 - NMOS and PMOS across AT4000TG (PMOS-only), SKY130, FreePDK45, and TSMC28HPC+.
 - Per-device model binding via the ``models`` field — mixed OTFT/silicon circuits
   (default PDK stays ``"at4000tg.pmos"`` unless overridden).
-- Silicon DC/AC/noise; SKY130 uses OSDI transient, while FreePDK45 and
-  TSMC28HPC+ use the internal native BSIM4 backend.
+- Silicon DC/AC/noise/transient; SKY130, FreePDK45, and TSMC28HPC+ use the
+  internal native BSIM4 backend.
 
 Not yet supported:
 

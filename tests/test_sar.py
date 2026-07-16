@@ -4,15 +4,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from circuitopt.ngspice_char import ngspice_binary
 from circuitopt.toolchain import pdk_root
 
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "freepdk45_sar3.json"
-_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file() \
-    and ngspice_binary() is not None
-pytestmark = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards / ngspice not present")
+_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
+pytestmark = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards not present")
 
 
 def test_sar_example_matches_json_schema():
@@ -39,7 +37,7 @@ def test_sar_physical_comparator_conversion():
     result = run_sar_conversion(spec, 0.7)
     assert result["code"] == 5
     np.testing.assert_array_equal(result["bits"], [1, 0, 1])
-    assert result["transient"]["backend"] == "ngspice"
+    assert result["transient"]["backend"] == "bsim4_native"
     assert len(result["decisions"]) == 3
     assert result["supply_power"]["total_w"] > 0.0
     assert np.isfinite(result["total_power_w"])

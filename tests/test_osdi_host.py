@@ -27,8 +27,11 @@ RUN_NGSPICE = os.path.join(_TOOLS, "run-ngspice.sh")
 BSIM4_VA = bsim4_va_path() or ""
 
 _HAVE_COMPILER = openvaf_binary() is not None and os.path.exists(BSIM4_VA)
-pytestmark = pytest.mark.skipif(
-    not _HAVE_COMPILER, reason="OpenVAF/BSIM4 toolchain not present")
+pytestmark = [
+    pytest.mark.ngspice_oracle,
+    pytest.mark.skipif(
+        not _HAVE_COMPILER, reason="OpenVAF/BSIM4 toolchain not present"),
+]
 
 # A minimal but working NMOS card; l/w/nf are BSIM4 *model* params in this VA.
 CARD = dict(type=1, l=0.15e-6, w=1.0e-6, toxe=4.148e-9, vth0=0.4, u0=0.04)

@@ -9,6 +9,8 @@ import pytest
 def _inverter_spec(*, oracle=False):
     from circuitopt.circuit_loader import circuit_from_dict
 
+    if oracle:
+        import circuitopt.tsmc28_model  # noqa: F401 - registers oracle adapter
     prefix = "tsmc28hpcp_ngspice" if oracle else "tsmc28hpcp"
     return circuit_from_dict({
         "name": "tsmc28_inverter",
@@ -59,6 +61,7 @@ def test_model_root_resolution_handles_outer_delivery(tmp_path, monkeypatch):
     assert tsmc28_model_dir() == str(model_dir)
 
 
+@pytest.mark.ngspice_oracle
 def test_adapter_renders_library_closure_and_macro_instances(tmp_path, monkeypatch):
     _fake_model_dir(tmp_path, monkeypatch)
     from circuitopt.ngspice_transient import render_ngspice_transient_netlist
@@ -87,6 +90,7 @@ def test_adapter_renders_library_closure_and_macro_instances(tmp_path, monkeypat
     assert "@m.xmp.main[gds]" in deck
 
 
+@pytest.mark.ngspice_oracle
 def test_device_multiplicity_renders_m_parameter(tmp_path, monkeypatch):
     """A device dict "M" field must reach the deck as ``m=<int>`` (via
     Topology.device_mult -> render_devices), and M=1/absent must stay
@@ -127,6 +131,7 @@ def test_device_multiplicity_renders_m_parameter(tmp_path, monkeypatch):
     assert without_m == with_m.replace(" m=3", "")        # only delta is the m=
 
 
+@pytest.mark.ngspice_oracle
 def test_transient_rejects_unknown_operating_point_device(tmp_path, monkeypatch):
     _fake_model_dir(tmp_path, monkeypatch)
     from circuitopt.ngspice_transient import render_ngspice_transient_netlist
@@ -141,6 +146,7 @@ def test_transient_rejects_unknown_operating_point_device(tmp_path, monkeypatch)
         )
 
 
+@pytest.mark.ngspice_oracle
 def test_transient_uic_renders_initial_conditions(tmp_path, monkeypatch):
     _fake_model_dir(tmp_path, monkeypatch)
     from circuitopt.ngspice_transient import render_ngspice_transient_netlist
@@ -157,6 +163,7 @@ def test_transient_uic_renders_initial_conditions(tmp_path, monkeypatch):
     assert ".nodeset " not in rendered.netlist
 
 
+@pytest.mark.ngspice_oracle
 def test_adapter_rejects_mixed_process_deck(tmp_path, monkeypatch):
     _fake_model_dir(tmp_path, monkeypatch)
     from circuitopt.ngspice_transient import render_ngspice_transient_netlist
@@ -171,6 +178,7 @@ def test_adapter_rejects_mixed_process_deck(tmp_path, monkeypatch):
             model_types=models, device_kwargs=spec.device_kwargs)
 
 
+@pytest.mark.ngspice_oracle
 def test_tsmc_capacitance_signs_are_normalized():
     from circuitopt.tsmc28_model import TSMC28HPCP_ADAPTER
 

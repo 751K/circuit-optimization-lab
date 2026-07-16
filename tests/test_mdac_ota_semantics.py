@@ -127,6 +127,7 @@ def _settle(vdd, s, corner="nom", temp=300.15):
     return vop, von, h
 
 
+@pytest.mark.ngspice_oracle
 @needs_ngspice
 def test_positive_residue_settles_symmetrically():
     """CI tests only the negative max residue; slewing is single-ended-asymmetric
@@ -139,6 +140,7 @@ def test_positive_residue_settles_symmetrically():
     assert abs(cm - h) < 0.020
 
 
+@pytest.mark.ngspice_oracle
 @needs_ngspice
 def test_zero_residue_has_no_systematic_offset():
     """Zero bottom-plate step: the output must stay put. A differential offset
@@ -149,6 +151,7 @@ def test_zero_residue_has_no_systematic_offset():
     assert abs((vop[-1] + von[-1]) / 2 - h) < 0.020
 
 
+@pytest.mark.ngspice_oracle
 @needs_ngspice
 def test_supply_1v1_cm_and_settling():
     """The user's late supply change added 1.10 V; the CM reference must track
@@ -161,6 +164,7 @@ def test_supply_1v1_cm_and_settling():
     assert abs((vop[0] + von[0]) / 2 - h) < 0.020
 
 
+@pytest.mark.ngspice_oracle
 @needs_ngspice
 def test_half_residue_relative_accuracy():
     """Gain-of-8 must hold at intermediate levels, not just the extremes —
@@ -171,6 +175,7 @@ def test_half_residue_relative_accuracy():
     assert abs(vod[-1] - (-8.0 * s)) / 0.45 < 1e-3
 
 
+@pytest.mark.ngspice_oracle
 @needs_ngspice
 def test_noise_budget_met_at_nominal():
     """Closed-loop output noise integrated 10 MHz - 20 GHz (the documented band)

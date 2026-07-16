@@ -38,6 +38,7 @@ def _spec(*, driven=False, analyses=False):
     return circuit_from_dict(cfg)
 
 
+@pytest.mark.ngspice_oracle
 def test_render_contains_full_bsim4_devices_and_charge_capable_options(tmp_path):
     from circuitopt.ngspice_transient import render_freepdk45_transient_netlist
     spec = _spec(driven=True)
@@ -58,6 +59,7 @@ def test_render_contains_full_bsim4_devices_and_charge_capable_options(tmp_path)
     assert rendered.node_names == ("tail", "n1", "vout")
 
 
+@pytest.mark.ngspice_oracle
 def test_render_accepts_explicit_ngspice_oracle_aliases(tmp_path):
     from circuitopt.ngspice_transient import render_freepdk45_transient_netlist
 
@@ -107,7 +109,7 @@ def test_ota_differential_step_and_supply_current():
     ivdd = result["branch_currents"]["rail:VDD"]
     assert vout[-1] - vout[0] > 0.3
     assert np.all(np.isfinite(vout)) and np.all(np.isfinite(ivdd))
-    assert np.mean(ivdd) > 0.0  # native convention: positive current drawn from VDD
+    assert np.mean(ivdd) < 0.0  # ideal-source convention: delivered current is negative
 
 
 def test_nmos_rc_step_has_finite_charge_settling():

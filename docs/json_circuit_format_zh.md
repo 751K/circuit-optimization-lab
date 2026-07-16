@@ -177,8 +177,8 @@ examples/periodic_rc.json
   `"freepdk45.nmos"`、`"tsmc28hpcp.nmos"`、`"at4000tg.pmos"`）。见 `circuitopt.device_model.register_pdk`。
 - 其余键透传给器件构造函数。对 SKY130 器件：`vb`（衬底偏置，伏特；默认 0）、
   `corner`（SKY130 工艺角——`tt`/`ss`/`ff`/`sf`/`fs`；默认 `tt`）、`extract_w`
-  （µm——在这个参考宽度处解析一次 SKY130 参数卡，让紧凑模型缩放实际 `W`，避免设计
-  扫描时逐候选重新提取）、`temperature`（开尔文；默认 300.15）、`NF`（整数）。
+  （µm——选择一个随包参考宽度参数卡，原生 BSIM 实例仍使用实际 `W`）、
+  `temperature`（开尔文；默认 300.15）、`NF`（整数）。
 - **FreePDK45**（`"freepdk45.nmos"` / `"freepdk45.pmos"`）直接解析平铺的
   BSIM4 level-54 模型卡，并使用进程内 Berkeley BSIM4.5 后端求值。模型卡声明
   `version=4.0`；该元数据字段不会在内置内核中切换另一套方程，原生单管与五管 OTA
@@ -202,10 +202,10 @@ examples/periodic_rc.json
   [TSMC28HPC+ 适配说明](tsmc28hpcp.md)。
 - 一个电路里部分器件是 OTFT、部分是硅是合法的——例如互补硅 OTA 独立绑定 NMOS/PMOS
   器件。见 `examples/sky130_5t_ota.json`。
-- SKY130 仍需要其文档中的外部仿真工具链。FreePDK45 与 TSMC28HPC+ 原生路径只需要
-  各自模型文件，以及首次编译 BSIM4 后端时可用的 C 编译器；ngspice 仅为可选 oracle。
-  缺少前置条件时求解器会清晰报错。详见
-  [核心求解器概览](module_overview_zh.md) 的"硅 PDK / OSDI 层"一节。
+- SKY130 正常仿真使用随包解析卡和原生 C BSIM4；FreePDK45 与 TSMC28HPC+ 使用
+  各自本地模型文件和同一原生后端。首次构建需要 C 编译器，ngspice/OpenVAF
+  仅用于 oracle 或生成新卡。缺少前置条件时会清晰报错。详见
+  [PDK 支持矩阵](pdk_support_zh.md)。
 
 ### `bias`
 
@@ -727,12 +727,12 @@ pnoise_irn = results["pnoise"]["irn_uV_band"]
 - 从 JSON dispatch 周期 PSS/PAC/PNoise。
 - DC 初值。
 - 器件模型抽象（``circuitopt/device_model.py``）——支持新增模型类型而不改求解器代码。
-- NMOS 和 PMOS，两套 PDK 都支持：AT4000TG OTFT（仅 PMOS）和硅 SKY130
-  （nmos + pmos，经 OpenVAF 编译的 BSIM4，通过 OSDI 宿主接入）。
+- NMOS 和 PMOS 覆盖 AT4000TG OTFT（仅 PMOS）以及 SKY130、FreePDK45、
+  TSMC28HPC+ 三套硅 PDK。
 - 通过 `models` 字段做逐器件模型绑定——混合 OTFT/硅电路（不覆盖时默认 PDK 仍是
   ``"at4000tg.pmos"``）。
-- 硅 DC/AC/noise；SKY130 走 OSDI 瞬态，FreePDK45 与 TSMC28HPC+
-  走项目内部原生 BSIM4 后端。
+- 硅 DC/AC/noise/transient；SKY130、FreePDK45 与 TSMC28HPC+ 均走项目内部
+  原生 BSIM4 后端。
 
 尚未支持：
 

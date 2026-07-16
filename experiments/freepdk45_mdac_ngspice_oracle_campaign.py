@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full 45-point PVT verification campaign for the FreePDK45 MDAC first-stage OTA.
+"""Explicit ngspice-oracle 45-point PVT regression for the FreePDK45 MDAC OTA.
 
 Grid: corners {tt, ss, ff, sf, fs} x temperatures {-40, 27, 125} C x supplies
 {0.90, 1.00, 1.10} V = 45 points.  Every point is measured with the ngspice
@@ -43,7 +43,8 @@ releases the GIL).
 
 Usage::
 
-    .venv/bin/python experiments/mdac_ota_pvt_campaign.py [--workers 8] [--force]
+    .venv/bin/python experiments/freepdk45_mdac_ngspice_oracle_campaign.py \
+        [--workers 8] [--force]
 """
 from __future__ import annotations
 

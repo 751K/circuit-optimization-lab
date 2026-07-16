@@ -11,7 +11,8 @@ process consistently.
 | Process | Model keys | Device backend | DC / AC / Noise | Transient | PSS / PAC / PNoise | External prerequisites |
 |---|---|---|---|---|---|---|
 | AT4000TG | `at4000tg.pmos` | Built-in calibrated PMOS model | Yes | Native | Yes | None |
-| SKY130 | `sky130.nmos`, `sky130.pmos` | Resolved card + OpenVAF OSDI | Yes | OSDI backend | Available where terminal linearization is supported; validate each topology | SKY130 PDK, ngspice for card resolution, OpenVAF/BSIM4 VA |
+| SKY130 | `sky130.nmos`, `sky130.pmos` | Bundled resolved cards + native Berkeley BSIM4.5 | Yes | Numba circuit loop + native C BSIM4 BE/Gear2 | Native terminal backend; validate each periodic topology | C compiler on first build; external tools only for new-card extraction |
+| SKY130 OSDI oracle | `sky130_osdi.nmos`, `sky130_osdi.pmos` | Explicit OpenVAF/OSDI comparison path | Oracle only | Oracle only | Not the default periodic backend | OpenVAF/BSIM4 VA; ngspice only for external comparisons |
 | FreePDK45 | `freepdk45.nmos`, `freepdk45.pmos` | Flat-card loader + native Berkeley BSIM4.5 | Yes | Numba circuit loop + native C BSIM4 BE/Gear2 | Native terminal backend; validate each periodic topology | FreePDK45 cards; C compiler on first build |
 | FreePDK45 oracle | `freepdk45_ngspice.nmos`, `freepdk45_ngspice.pmos` | Cached ngspice-C grid / complete-deck oracle | Oracle only | Oracle only | Not the default periodic backend | FreePDK45 cards and ngspice |
 | TSMC28HPC+ core | `tsmc28hpcp.nmos`, `tsmc28hpcp.pmos` | Internal HSPICE frontend + native Berkeley BSIM4.5 | Yes | Numba circuit loop + native C BSIM4 BE/Gear2 | Yes | Licensed supported model file; C compiler on first build |
@@ -34,13 +35,19 @@ an appropriate reference.
 
 ### SKY130
 
-- Uses ngspice to resolve the foundry subcircuit and binned parameter web into a
-  flat card, then evaluates an OpenVAF-compiled BSIM4 Verilog-A model through the
-  OSDI host.
+- Loads bundled, geometry-resolved BSIM4.5 cards and evaluates them directly
+  with the same in-process native C backend used by FreePDK45 and TSMC28HPC+.
+- Normal DC, AC, noise, transient, PSS, PAC, and PNoise runs do not launch
+  ngspice or OpenVAF.
 - This is a useful local optimization model, not a bit-exact replacement for
   the official SKY130 simulator model.
 - Corners accepted by the circuit flow: `tt`, `ss`, `ff`, `sf`, `fs`.
-- Resolved cards and compiled OSDI artifacts are caches, not source inputs.
+- The repository includes the resolved cards used by its examples. For a new
+  geometry/corner that has no card, explicitly run
+  `circuitopt.sky130_model.extract_sky130_card()` with a local SKY130/ngspice
+  installation and point `SKY130_CARD_DIR` at the generated card directory.
+- `sky130_osdi.*` is retained only as an explicit OpenVAF/OSDI regression path.
+  Import `circuitopt.sky130_model` to register those oracle-only model keys.
 
 ### FreePDK45
 
@@ -56,7 +63,8 @@ an appropriate reference.
   in Numba and calls the C compact model through a runtime `void *` function
   pointer. `CIRCUIT_USE_NUMBA=0` selects the Python reference path.
 - `freepdk45_ngspice.*` and the full-circuit ngspice helpers remain available as
-  independent regression oracles. They are optional for normal simulation.
+  independent regression oracles. Import `circuitopt.freepdk45_model` to
+  register the oracle-only model keys. They are optional for normal simulation.
 - Corners: `nom`, `tt`, `ss`, `ff`, `sf`, `fs`.
 - `tt` aliases `nom`; `sf` selects NMOS slow plus PMOS fast, and `fs` the
   reverse.
@@ -76,6 +84,8 @@ an appropriate reference.
 - The current adapter does not claim support for IO devices, RF devices, SRAM,
   eFuse, reliability models, statistical sections, layout extraction, or
   sign-off checks from the full iPDK.
+- Import `circuitopt.tsmc28_model` only when the
+  `tsmc28hpcp_ngspice.*` oracle model keys are required.
 - See the [TSMC28HPC+ Native Adapter](tsmc28hpcp.md).
 
 ## JSON Binding
@@ -115,6 +125,7 @@ documented under `models` in the [Circuit JSON Format](json_circuit_format.md).
 | Input | Resolution |
 |---|---|
 | General PDK root | `PDK_ROOT`, then active/project virtual-environment `pdk/` |
+| Additional SKY130 resolved cards | `SKY130_CARD_DIR`, then bundled package cards |
 | TSMC model directory | `TSMC28_MODEL_DIR`, `TSMC28_PDK_ROOT`, project-local ignored entry, then `PDK_ROOT/tsmc28hpcp` |
 | ngspice | `NGSPICE_BIN`, virtual-environment locations, then `PATH` |
 | OpenVAF | `OPENVAF_BIN`, `OPENVAF_ROOT`, virtual-environment locations, then `PATH` |

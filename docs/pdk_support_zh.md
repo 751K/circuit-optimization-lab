@@ -10,7 +10,8 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 | 工艺 | 模型键 | 器件后端 | DC / AC / Noise | Transient | PSS / PAC / PNoise | 外部前置条件 |
 |---|---|---|---|---|---|---|
 | AT4000TG | `at4000tg.pmos` | 内置校准 PMOS 模型 | 支持 | 原生 | 支持 | 无 |
-| SKY130 | `sky130.nmos`、`sky130.pmos` | 参数卡解析 + OpenVAF OSDI | 支持 | OSDI 后端 | 在模型提供完整端口线性化时可用，需按拓扑验证 | SKY130 PDK、用于解析的 ngspice、OpenVAF/BSIM4 VA |
+| SKY130 | `sky130.nmos`、`sky130.pmos` | 随包解析卡 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 已接入原生端口后端，需按周期拓扑验证 | 首次构建需要 C 编译器；仅生成新卡时需要外部工具 |
+| SKY130 OSDI oracle | `sky130_osdi.nmos`、`sky130_osdi.pmos` | 显式 OpenVAF/OSDI 对照路径 | 仅用于 oracle | 仅用于 oracle | 不是默认周期后端 | OpenVAF/BSIM4 VA；外部对照时可用 ngspice |
 | FreePDK45 | `freepdk45.nmos`、`freepdk45.pmos` | 平铺模型卡加载器 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 已接入原生端口后端，需按周期拓扑验证 | FreePDK45 模型卡；首次构建需要 C 编译器 |
 | FreePDK45 oracle | `freepdk45_ngspice.nmos`、`freepdk45_ngspice.pmos` | ngspice-C 缓存网格 / 完整网表 oracle | 仅用于 oracle | 仅用于 oracle | 不是默认周期后端 | FreePDK45 模型卡和 ngspice |
 | TSMC28HPC+ core | `tsmc28hpcp.nmos`、`tsmc28hpcp.pmos` | 内部 HSPICE 前端 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 支持 | Licensed 模型文件；首次构建需要 C 编译器 |
@@ -31,11 +32,16 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 
 ### SKY130
 
-- 先用 ngspice 展开 foundry 子电路和 bin 参数，再把扁平卡交给 OpenVAF 编译的
-  BSIM4 Verilog-A，通过 OSDI 宿主求值。
+- 默认加载仓库随包提供的、按几何展开的 BSIM4.5 参数卡，并直接交给与 FreePDK45、
+  TSMC28HPC+ 相同的进程内原生 C BSIM4 后端。
+- 正常 DC、AC、noise、transient、PSS、PAC、PNoise 不启动 ngspice 或 OpenVAF。
 - 适合本地优化和方法研究，不是官方 SKY130 模型的逐位替代品。
 - 接受的工艺角：`tt`、`ss`、`ff`、`sf`、`fs`。
-- 解析卡和编译产物属于缓存，不是源模型。
+- 仓库已包含示例所需解析卡。新几何或新 corner 没有对应卡时，可在本地安装
+  SKY130/ngspice 后显式调用 `circuitopt.sky130_model.extract_sky130_card()`，
+  并通过 `SKY130_CARD_DIR` 指向生成目录。
+- `sky130_osdi.*` 仅作为显式 OpenVAF/OSDI 回归路径保留。
+  需要这些 oracle 模型键时再导入 `circuitopt.sky130_model` 完成注册。
 
 ### FreePDK45
 
@@ -49,7 +55,8 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
   `void *` 函数指针直接调用 C 紧凑模型；设置 `CIRCUIT_USE_NUMBA=0` 可切换到
   Python 参考路径。
 - `freepdk45_ngspice.*` 与完整电路 ngspice helper 继续作为独立 oracle 保留，
-  正常仿真不需要安装 ngspice。
+  需要这些模型键时再导入 `circuitopt.freepdk45_model`；正常仿真不需要安装
+  ngspice。
 - 工艺角：`nom`、`tt`、`ss`、`ff`、`sf`、`fs`。
 - `tt` 等价于 `nom`；`sf` 为 NMOS slow + PMOS fast，`fs` 相反。
 - `circuit-opt mc` 尚未提供通用硅工艺逐器件失配语义。
@@ -64,6 +71,8 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 - 器件绑定 API 中温度使用开尔文。
 - 当前不声称支持完整 iPDK 中的 IO、RF、SRAM、eFuse、可靠性、统计模型、版图提取或
   sign-off 检查。
+- 仅在需要 `tsmc28hpcp_ngspice.*` oracle 模型键时导入
+  `circuitopt.tsmc28_model`。
 - 详见 [TSMC28HPC+ 原生适配](tsmc28hpcp_zh.md)。
 
 ## JSON 绑定
@@ -103,6 +112,7 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 | 输入 | 解析顺序 |
 |---|---|
 | 通用 PDK 根目录 | `PDK_ROOT`，然后当前/项目虚拟环境的 `pdk/` |
+| 额外 SKY130 解析卡 | `SKY130_CARD_DIR`，然后使用包内卡 |
 | TSMC 模型目录 | `TSMC28_MODEL_DIR`、`TSMC28_PDK_ROOT`、项目内忽略入口、`PDK_ROOT/tsmc28hpcp` |
 | ngspice | `NGSPICE_BIN`、虚拟环境约定位置、`PATH` |
 | OpenVAF | `OPENVAF_BIN`、`OPENVAF_ROOT`、虚拟环境约定位置、`PATH` |

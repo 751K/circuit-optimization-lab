@@ -13,16 +13,15 @@ import numpy as np
 import pytest
 
 from circuitopt.circuit_loader import load_circuit_json
-from circuitopt.ngspice_char import ngspice_binary
 from circuitopt.sar import _sar_config, sar_input_waveforms, sar_time_grid
 from circuitopt.toolchain import pdk_root
 
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "freepdk45_sar6.json"
-_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file() \
-    and ngspice_binary() is not None
-needs_ngspice = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards / ngspice not present")
+_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
+needs_freepdk45 = pytest.mark.skipif(
+    not _HAVE, reason="FreePDK45 cards not present")
 
 
 def _spec():
@@ -100,7 +99,7 @@ def test_schema_rejects_unknown_clock_key():
 
 
 # ── physical interaction (ngspice) ────────────────────────────────────────────
-@needs_ngspice
+@needs_freepdk45
 def test_independent_pinned_code():
     """Second opinion at a different code than the agent's pinned one."""
     from circuitopt.sar import run_sar_conversion
@@ -109,7 +108,7 @@ def test_independent_pinned_code():
     np.testing.assert_array_equal(result["bits"], [0, 1, 0, 0, 1, 0])
 
 
-@needs_ngspice
+@needs_freepdk45
 def test_delvto_reaches_the_clocked_comparator():
     """A +50 mV Vth offset on one StrongARM input device is ~3 LSB of input-referred
     offset — codes on a short sweep must shift. This proves the WP1 mismatch hook

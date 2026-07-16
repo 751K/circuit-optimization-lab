@@ -106,6 +106,7 @@ def test_native_5t_ota_periodic_noise_uses_terminal_matrix_path():
         pnoise["out_psd"], noise["out_psd"], rtol=2e-6)
 
 
+@pytest.mark.ngspice_oracle
 @needs_oracle
 def test_native_5t_ota_matches_ngspice_ac_and_noise():
     from circuitopt import ac_solve, load_circuit_json, noise_analysis

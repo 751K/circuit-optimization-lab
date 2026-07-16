@@ -535,16 +535,19 @@ def transient_native_bsim4(
         )
         for terminal_index, rail in enumerate(terminals):
             if rail is not None:
-                rail_currents[rail] += total[:, terminal_index]
+                # BSIM terminal currents are positive into the device. Branch
+                # currents reported for ideal sources are positive into the
+                # source, so source-delivered current has the opposite sign.
+                rail_currents[rail] -= total[:, terminal_index]
         if item.name in topo.transient_inputs:
-            waveform_currents[f"gate:{item.name}"] = total[:, 1].copy()
+            waveform_currents[f"gate:{item.name}"] = -total[:, 1].copy()
         else:
             for terminal_index, node in enumerate(
                 (item.d_node, item.g_node, item.s_node)
             ):
                 key = f"node:{node}"
                 if key in waveform_currents:
-                    waveform_currents[key] += total[:, terminal_index]
+                    waveform_currents[key] -= total[:, terminal_index]
 
     for item in plan.resistors:
         a = np.asarray([

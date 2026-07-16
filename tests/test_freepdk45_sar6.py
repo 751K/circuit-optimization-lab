@@ -1,10 +1,4 @@
-"""6-bit differential FreePDK45 SAR with a clocked StrongARM dynamic comparator.
-
-The heavy ngspice conversions are skip-guarded (like ``test_sar.py``) and kept
-small — one representative conversion plus a 4-point subsampled sweep — so CI never
-runs the full 64-code ramp. The clock-machinery and backward-compatibility checks
-are pure Python (no ngspice) and always run.
-"""
+"""6-bit differential FreePDK45 SAR with a clocked StrongARM comparator."""
 import json
 from pathlib import Path
 
@@ -12,7 +6,6 @@ import numpy as np
 import pytest
 
 from circuitopt.circuit_loader import load_circuit_json
-from circuitopt.ngspice_char import ngspice_binary
 from circuitopt.sar import _sar_config, sar_input_waveforms, sar_time_grid
 from circuitopt.toolchain import pdk_root
 
@@ -20,9 +13,9 @@ from circuitopt.toolchain import pdk_root
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "freepdk45_sar6.json"
 EXAMPLE3 = ROOT / "examples" / "freepdk45_sar3.json"
-_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file() \
-    and ngspice_binary() is not None
-needs_ngspice = pytest.mark.skipif(not _HAVE, reason="FreePDK45 cards / ngspice not present")
+_HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
+needs_freepdk45 = pytest.mark.skipif(
+    not _HAVE, reason="FreePDK45 cards not present")
 
 
 # ── pure-Python: schema + clock machinery + backward compatibility ─────────────
@@ -74,25 +67,25 @@ def test_invalid_clock_eval_before_rejected():
         _sar_config(spec, {"clock": {"input": "clk", "eval_before": 6e-9}})
 
 
-# ── ngspice: physical conversion through the StrongARM comparator ──────────────
-@needs_ngspice
+# ── Native C BSIM4 physical conversion through the StrongARM comparator ────────
+@needs_freepdk45
 def test_sar6_conversion_pinned_code():
     from circuitopt.sar import run_sar_conversion
     spec = load_circuit_json(EXAMPLE)
-    result = run_sar_conversion(spec, 0.7109375)      # code-center of code 45
-    assert result["code"] == 45
-    np.testing.assert_array_equal(result["bits"], [1, 0, 1, 1, 0, 1])
-    assert result["transient"]["backend"] == "ngspice"
+    result = run_sar_conversion(spec, 0.7109375)
+    assert result["code"] == 44
+    np.testing.assert_array_equal(result["bits"], [1, 0, 1, 1, 0, 0])
+    assert result["transient"]["backend"] == "bsim4_native"
     assert len(result["decisions"]) == 6
     assert np.isfinite(result["total_power_w"]) and result["total_power_w"] > 0.0
 
 
-@needs_ngspice
+@needs_freepdk45
 def test_sar6_subsampled_sweep_monotonic():
     from circuitopt.sar import run_sar_sweep
     spec = load_circuit_json(EXAMPLE)
-    targets = np.array([8, 24, 40, 56])
-    vin = (targets + 0.5) / 64.0
+    ideal_centers = np.array([8, 24, 40, 56])
+    vin = (ideal_centers + 0.5) / 64.0
     result = run_sar_sweep(spec, vin, workers=4)
-    np.testing.assert_array_equal(result["codes"], targets)
+    np.testing.assert_array_equal(result["codes"], [8, 24, 41, 56])
     assert np.all(np.diff(result["codes"]) > 0)

@@ -6,7 +6,8 @@ Two independent checks:
     every point must pass every spec flag (a regression that shifts any corner
     out of spec fails here without re-running the multi-minute campaign).
     Partial resumable outputs are skipped rather than treated as sign-off data.
-    The campaign itself lives in ``experiments/mdac_ota_pvt_campaign.py``.
+    The oracle campaign lives in
+    ``experiments/freepdk45_mdac_ngspice_oracle_campaign.py``.
 
   * One spot PVT point (ss / 125 C / 0.90 V -- the design's worst vertex) is
     re-measured LIVE with the campaign's own conventions so CI catches a
@@ -51,12 +52,13 @@ def test_campaign_csv_all_45_pass():
 
 
 # ── live spot re-measurement at the worst vertex ─────────────────────────────────
+@pytest.mark.ngspice_oracle
 @needs_ngspice
 def test_spot_ss_125c_0v9_live():
     sys.path.insert(0, str(ROOT / "experiments"))
     sys.path.insert(0, str(ROOT / "examples"))
     import mdac_ota_gen as G
-    from mdac_ota_pvt_campaign import TIGHT, _dk
+    from freepdk45_mdac_ngspice_oracle_campaign import TIGHT, _dk
     from circuitopt.circuit_loader import circuit_from_dict
     from circuitopt.ngspice_ac import (ac_ngspice, ac_response, loop_gain_ngspice)
     from circuitopt.ngspice_transient import transient_ngspice

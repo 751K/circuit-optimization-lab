@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "circuit-optimization"
-version = "1.3.0"
+version = "1.4.0"
 description = "Local analog-circuit simulation and optimization framework."
 readme = "README.md"
 license = "MIT"
@@ -110,6 +110,7 @@ packages = [
     "circuitopt.spice",
     "circuitopt.pdk",
     "circuitopt.pdk.freepdk45",
+    "circuitopt.pdk.sky130",
     "circuitopt.pdk.tsmc28",
     "circuitopt.compact_models",
     "circuitopt.compact_models.bsim4",
@@ -123,12 +124,15 @@ packages = [
     "native_src/vendor/include/ngspice/*",
     "native_src/vendor/support/*",
 ]
+"circuitopt.pdk.sky130" = ["cards/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-m 'not ngspice_oracle'"
 markers = [
     "cadence_regression: tests that compare against archived Cadence/Spectre references",
+    "ngspice_oracle: optional tests that launch ngspice or validate its oracle-only workflows",
     "slow_regression: slower regression tests that still run by default",
 ]
 

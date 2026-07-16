@@ -211,8 +211,8 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
     """Run one closed-loop SAR conversion using physical comparator decisions.
 
     Each bit replays the conversion from sampling through that decision. Replaying
-    preserves ngspice's device and capacitor state exactly while allowing Python
-    to update future CDAC controls from the comparator result.
+    preserves the simulator's device and capacitor state exactly while allowing
+    Python to update future CDAC controls from the comparator result.
 
     ``mismatch`` is an optional ``{device: delvto[V]}`` per-instance Vth-offset map
     threaded to every replayed transient (see :mod:`circuitopt.sar_mc`); ``None``
@@ -224,6 +224,15 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
         raise ValueError("vin must lie between 0 and adc.vref")
     tgrid = sar_time_grid(spec, cfg)
     binding = spec.binding().at_corner(corner)
+    initial = None
+    if isinstance(binding.dc_seed, Mapping):
+        try:
+            initial = np.asarray(
+                [binding.dc_seed[name] for name in binding.topo.solved],
+                dtype=float,
+            )
+        except KeyError:
+            initial = None
     decisions: list[int | None] = [None] * cfg["n_bits"]
     trace = []
     for bit in range(cfg["n_bits"]):
@@ -231,7 +240,8 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
             spec, vin, decisions, bit, config=cfg, tgrid=tgrid)
         result = transient(
             spec.sizes, spec.bias, tgrid, binding=binding, inputs=waveforms,
-            integration_method="gear2", max_step=cfg["edge_time"], mismatch=mismatch,
+            V0=initial, integration_method="gear2",
+            max_step=cfg["edge_time"], mismatch=mismatch,
         )
         node = cfg["comparator_node"]
         if node not in result["nodes"]:
@@ -251,7 +261,8 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
         spec, vin, decisions, cfg["n_bits"] - 1, config=cfg, tgrid=tgrid)
     result = transient(
         spec.sizes, spec.bias, tgrid, binding=binding, inputs=waveforms,
-        integration_method="gear2", max_step=cfg["edge_time"], mismatch=mismatch,
+        V0=initial, integration_method="gear2",
+        max_step=cfg["edge_time"], mismatch=mismatch,
     )
     bits = np.asarray(decisions, np.int8)
     weights = 1 << np.arange(cfg["n_bits"] - 1, -1, -1, dtype=np.int64)
