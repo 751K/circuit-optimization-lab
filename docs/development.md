@@ -70,6 +70,29 @@ mkdocs build --strict
 
 Use `git diff --check` before committing.
 
+## Version Management
+
+`pyproject.toml` is the canonical source for the project version. Do not edit
+the frontend, npm lockfile, or Tauri versions by hand.
+
+```bash
+# Show or verify the current version
+python tools/version.py show
+python tools/version.py check
+
+# Set one version everywhere
+python tools/version.py set 1.4.0
+
+# Prepare a release: set all versions and archive Unreleased changelog entries
+python tools/version.py release 1.4.0
+```
+
+`set` synchronizes `pyproject.toml`, `frontend/package.json`,
+`frontend/package-lock.json`, `frontend/src-tauri/Cargo.toml`, and
+`frontend/src-tauri/tauri.conf.json`. `release` also creates the dated
+changelog heading and comparison links. CI rejects version drift, and the
+release workflow rejects a tag that does not match the canonical version.
+
 ## Change Boundaries
 
 ### Adding a JSON field
@@ -145,8 +168,8 @@ version history, not in the formal documentation navigation.
 
 Before a release:
 
-1. Confirm `pyproject.toml`, the package version, README badge, service health
-   version, and changelog agree.
+1. Run `python tools/version.py release X.Y.Z`, then
+   `python tools/version.py check --tag vX.Y.Z`.
 2. Run the full tests and lint.
 3. Build the documentation with `mkdocs build --strict`.
 4. Re-run representative passive, AT4000TG, and available silicon smoke tests.

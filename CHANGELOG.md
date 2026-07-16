@@ -19,6 +19,19 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Added / 新增
+
+- **Centralized version management / 集中式版本管理**
+
+  **English:** Added `tools/version.py` with show, check, sync, set, and release
+  commands. `pyproject.toml` is now the canonical version source for Python,
+  npm, and Tauri manifests; CI and release workflows reject version drift or
+  mismatched tags.
+
+  **中文：** 新增 `tools/version.py`，提供 show、check、sync、set 和 release
+  命令。`pyproject.toml` 现为 Python、npm 与 Tauri 清单的版本号唯一来源；
+  CI 和发布工作流会拒绝版本漂移及不匹配的 tag。
+
 ## [1.3.0] - 2026-07-17
 
 ### Added / 新增

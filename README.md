@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/751K/circuit-optimization-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/751K/circuit-optimization-lab/actions/workflows/ci.yml)
 [![Docs](https://github.com/751K/circuit-optimization-lab/actions/workflows/docs.yml/badge.svg)](https://751k.github.io/circuit-optimization-lab/)
-[![Version](https://img.shields.io/badge/version-v1.3.0-blue)](CHANGELOG.md)
+[![GitHub Release](https://img.shields.io/github/v/release/751K/circuit-optimization-lab)](https://github.com/751K/circuit-optimization-lab/releases/latest)
 
 A local analog-circuit simulation and optimization framework with DC, AC, noise,
 transient, PSS, PAC, PNoise, process-corner, mismatch, dataset, surrogate-model,

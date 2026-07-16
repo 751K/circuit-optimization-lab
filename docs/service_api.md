@@ -31,8 +31,12 @@ Swagger/OpenAPI docs are served automatically at `http://127.0.0.1:8341/docs`
 
 ```bash
 curl http://127.0.0.1:8341/api/v1/health
-# {"status":"ok","version":"1.3.0","api":"v1"}
+# {"status":"ok","version":"<package-version>","api":"v1"}
 ```
+
+The reported version is read from the installed `circuit-optimization`
+package metadata. The repository's canonical version is
+`project.version` in `pyproject.toml`.
 
 ### Server flags
 
@@ -82,7 +86,7 @@ curl http://127.0.0.1:8341/api/v1/health
 ```
 
 ```json
-{"status": "ok", "version": "1.3.0", "api": "v1"}
+{"status": "ok", "version": "<package-version>", "api": "v1"}
 ```
 
 ### `GET /api/v1/capabilities`
@@ -96,7 +100,7 @@ curl http://127.0.0.1:8341/api/v1/capabilities
 
 ```json
 {
-  "version": "1.3.0",
+  "version": "<package-version>",
   "api": "v1",
   "models": {"pmos_tft": "circuitopt.pmos_tft_model.PMOS_TFT", "sky130.nmos": "...", "...": "..."},
   "analyses": {
