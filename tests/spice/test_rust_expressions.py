@@ -81,6 +81,27 @@ def _assert_expression_parity(expression: str) -> None:
         )
 
 
+def test_negative_base_fractional_exponent_is_adjudicated_deviation():
+    """The one accepted parity deviation from the frozen Python reference.
+
+    ``(-8)**(1/3)`` (negative base, fractional exponent): Python's ``**``
+    returns a complex, and the subsequent ``float(complex)`` raises ``TypeError``
+    which the reference ``evaluate`` does not catch (its except tuple is
+    ArithmeticError/ValueError/OverflowError), so the reference leaks a raw
+    ``TypeError``. The Rust port instead maps this domain error into the clean
+    ``SpiceExpressionError`` taxonomy. Both reject the input — raise/no-raise
+    parity holds and no value is ever silently mis-evaluated — and this shape
+    does not occur anywhere in the real PDK corpus (0 mismatches over 198k
+    expressions). Only the exception *type* differs, by design.
+    """
+    expr = "(-8)**(1/3)"
+    ref_ok, _, ref_exc = _reference_outcome(expr)
+    rust_ok, _, rust_exc = _rust_outcome(expr)
+    assert ref_ok is False and rust_ok is False, "both engines must reject the input"
+    assert ref_exc == "TypeError"
+    assert rust_exc == "SpiceExpressionError"
+
+
 # ---------------------------------------------------------------------------
 # Exception surface
 # ---------------------------------------------------------------------------
