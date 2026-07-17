@@ -5,29 +5,14 @@ NMOS diff pair with diode-connected PMOS loads → NMOS output chopper → hold
 caps, clocked at 250 kHz by square-wave vsources. The demodulated differential
 output is DC at ``gain·(VINP−VINN)`` with gain = −gm1/gm3 ≈ −1.77.
 
-Validates the silicon periodic-analysis chain three ways: (1) PSS converges
-and its orbit matches the settled long transient; (2) the chopper conversion
-gain matches the static (phase-frozen) small-signal gain; (3) ngspice running
-the same BSIM4 cards through OSDI agrees on the gain (explicit regression oracle).
+Validates the silicon periodic-analysis chain through PSS/transient agreement,
+PAC conversion gain, PNoise, and frozen-clock LTI reductions.
 """
 import json
 import os
-import subprocess
 
 import numpy as np
 import pytest
-
-from circuitopt.ngspice_char import ngspice_binary
-from circuitopt.osdi_device import openvaf_binary
-from circuitopt.toolchain import bsim4_va_path, pdk_root
-
-PDK_ROOT = pdk_root()
-_NGSPICE_LIB = os.path.join(PDK_ROOT, "sky130A/libs.tech/ngspice/sky130.lib.spice")
-_TOOLS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools")
-_VACOMPILE = os.path.join(_TOOLS, "vacompile.sh")
-RUN_NGSPICE = os.path.join(_TOOLS, "run-ngspice.sh")
-_HAVE_ORACLE = os.path.exists(_NGSPICE_LIB) and openvaf_binary() is not None \
-    and bsim4_va_path() is not None
 
 _CFG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                          "examples", "sky130_chopper.json")
@@ -162,79 +147,3 @@ def test_frozen_clock_lti_oracles(spec):
                          input_drive=drive, nf=fspec.nf, lti_fast_path=True,
                          band=(100.0, 1e4))
     assert np.allclose(pn_hb["out_asd"], pn_ac["out_asd"], rtol=1e-3)
-
-
-@pytest.mark.ngspice_oracle
-@pytest.mark.skipif(
-    not _HAVE_ORACLE or ngspice_binary() is None,
-    reason="SKY130 OpenVAF/ngspice oracle toolchain not present")
-def test_chopper_gain_matches_ngspice(spec, suite, tmp_path):
-    from circuitopt.device_factory import build_devices
-    from circuitopt.osdi_device import compile_va
-    from circuitopt.sky130_model import _BSIM4_VA
-    with open(_CFG_PATH) as fh:
-        cfg = json.load(fh)
-    wrappers = build_devices(spec.sizes, nf=spec.nf, topo=spec.topology,
-                             model_types=spec.model_types,
-                             device_kwargs=spec.device_kwargs)
-    cards, dev_model = {}, {}
-    for name, w in wrappers.items():
-        card = {
-            **w.model_card.parameters,
-            **w.instance_card.parameters,
-            "type": w.TYPE,
-        }
-        key = tuple(sorted(card.items()))
-        if key not in cards:
-            cards[key] = (f"m{len(cards)}", card)
-        dev_model[name] = cards[key][0]
-
-    def card_lines(card):
-        lines, cur = [], "+"
-        for k, v in card.items():
-            tok = f" {k}={v:g}"
-            if len(cur) + len(tok) > 110:
-                lines.append(cur)
-                cur = "+"
-            cur += tok
-        lines.append(cur)
-        return "\n".join(lines)
-
-    node_map = {"GND": "0", "VDD": "vdd", "VINP": "vinp", "VINN": "vinn",
-                "VBIAS": "vbias"}
-
-    def nm(node):
-        return node_map.get(node, node.lower())
-
-    vdd, vb = cfg["bias"]["VDD"], cfg["bias"]["VB"]
-    tstop = 10 * PERIOD
-    out_csv = str(tmp_path / "out.csv")
-    lines = [f"* sky130 chopper (osdi)\n.control\npre_osdi {compile_va(_BSIM4_VA)}\n.endc",
-             f"vdd vdd 0 dc {vdd}",
-             f"vinp vinp 0 dc {cfg['bias']['VINP']:g}",
-             f"vinn vinn 0 dc {cfg['bias']['VINN']:g}",
-             f"vb vbias 0 dc {vb}",
-             f"vck clk 0 pulse({vdd} 0 {PERIOD/2:g} 100n 100n {PERIOD/2:g} {PERIOD:g})",
-             f"vckb clkb 0 pulse(0 {vdd} {PERIOD/2:g} 100n 100n {PERIOD/2:g} {PERIOD:g})"]
-    for d in cfg["devices"]:
-        b = "vdd" if cfg["models"][d["name"]]["type"].endswith("pmos") else "0"
-        lines.append(f"N{d['name'].lower()} {nm(d['drain'])} {nm(d['gate'])} "
-                     f"{nm(d['source'])} {b} {dev_model[d['name']]}")
-    for c in cfg["capacitors"]:
-        lines.append(f"c{c['name'].lower()} {nm(c['a'])} {nm(c['b'])} {c['C']:g}")
-    for _, (mname, card) in cards.items():
-        lines.append(f".model {mname} bsim4va\n{card_lines(card)}")
-    lines.append(f".control\ntran {PERIOD/400:g} {tstop:g}\n"
-                 f"wrdata {out_csv} v(outp) v(outn)\n.endc\n.end")
-    cir = str(tmp_path / "deck.cir")
-    with open(cir, "w") as fh:
-        fh.write("\n".join(lines))
-    subprocess.run([RUN_NGSPICE, "-b", cir], capture_output=True,
-                   text=True, timeout=600)
-    data = np.loadtxt(out_csv)
-    t_ng, vod_ng = data[:, 0], data[:, 1] - data[:, 3]
-    sel = t_ng >= (tstop - PERIOD)
-    gain_ng = float(vod_ng[sel].mean() / DELTA)
-    vod_ps = suite["pss"]["nodes"]["OUTP"] - suite["pss"]["nodes"]["OUTN"]
-    gain_ps = float(vod_ps.mean() / DELTA)
-    assert gain_ps == pytest.approx(gain_ng, rel=0.01)    # model == oracle

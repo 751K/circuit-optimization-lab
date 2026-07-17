@@ -196,9 +196,8 @@ class TransistorModel(ABC):
     # ── Backend-capability flags ──────────────────────────────────────
     # Generic solvers dispatch on *capabilities*, never on a concrete backend
     # type.  A model advertises what it can do via these class attributes and
-    # solvers read them (e.g. ``dev.HAS_TERMINAL_LINEARIZATION``), instead of
-    # ``isinstance(dev, OsdiDevice)``.  Base defaults describe the plain OTFT
-    # analytic model; only backends that add a capability override them.
+    # solvers read them (e.g. ``dev.HAS_TERMINAL_LINEARIZATION``). Base defaults
+    # describe the plain OTFT analytic model; backends add capabilities explicitly.
 
     HAS_TERMINAL_LINEARIZATION: bool = False
     """True if the model exposes :meth:`get_terminal_linearization` — the full
@@ -207,8 +206,7 @@ class TransistorModel(ABC):
 
     TRANSIENT_BACKEND: str | None = None
     """Which specialised transient integrator this model routes to, or ``None``
-    to use the generic (OTFT numba) transient path.  ``"osdi"`` routes the
-    circuit to :func:`circuitopt.osdi_transient.transient_osdi`."""
+    to use the generic (OTFT numba) transient path."""
 
     # ── Auxiliary (optional; subclasses may override or set as attributes) ─
 

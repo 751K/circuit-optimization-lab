@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_normal_examples_do_not_bind_oracle_models():
-    forbidden = ("_ngspice.", "sky130_osdi.")
+    forbidden = ("_ngspice.",)
     violations = []
     for path in sorted((ROOT / "examples").glob("*.json")):
         config = json.loads(path.read_text(encoding="utf-8"))
@@ -58,10 +58,7 @@ print(json.dumps({
     )
     state = json.loads(proc.stdout)
     assert state["pdks"] == ["at4000tg", "freepdk45", "sky130", "tsmc28hpcp"]
-    assert not any(
-        "_ngspice." in name or name.startswith("sky130_osdi.")
-        for name in state["models"]
-    )
+    assert not any("_ngspice." in name for name in state["models"])
     assert state["top_level_ngspice"] is False
 
 

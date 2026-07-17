@@ -28,6 +28,7 @@ from .device_factory import (
 from .numba_kernels import (_pnoise_hb_blocks_impl, pac_hb_blocks_numba,
                             pac_linearize_orbit_numba,
                             pac_linearize_orbit_gate1_numba, py_impl)
+from ._engine import current_engine
 from .topology import Topology
 from .transient_solver import transient
 from . import diagnostics
@@ -423,17 +424,18 @@ def _stamp_pmos_gate1_dynamic_cap_terms(
             _stamp_branch_control(G, d, g1, ctrl, dCgd * vdot_dg1)
 
 
-def _assemble_pac_linearization_python(
+def _reference_pac_linearization(
         all_sizes, all_nf, corner, topo, tbias, t_uniform,
         node_wave, input_wave, node_inputs, drive_list, drive_amps, *,
         charge_caps, internal_gate_states=True, dev_inst=None,
         model_types=None, device_kwargs=None):
-    """Build time-sampled PAC G/C matrices, optionally retaining PMOS gate1.
+    """Reference-engine PAC G/C assembly.
 
-    Devices bound to OSDI (compiled Verilog-A) models stamp their full 4×4
-    quasi-static terminal (G, C) — see
-    :meth:`OsdiDevice.get_terminal_linearization`; OTFT devices keep the
-    original gm/gds/Cgs/Cgd (+gate1/dynamic-cap) stamps unchanged.
+    The Rust production engine does not call this function. It remains during
+    the migration as the interpreted oracle for the Numba/Python engines.
+
+    Native BSIM devices stamp their full 4×4 quasi-static terminal (G, C).
+    OTFT devices keep the original gm/gds/Cgs/Cgd (+gate1/dynamic-cap) stamps.
     """
     N = len(t_uniform)
     n = topo.n
@@ -515,7 +517,7 @@ def _assemble_pac_linearization_python(
             if dev_inst[name].HAS_TERMINAL_LINEARIZATION:
                 # silicon: full quasi-static 4×4 terminal stamp (bulk is a
                 # constant bias -> known-voltage term, drops). The OTFT
-                # dynamic-cap corrections below are model-specific; the OSDI
+                # dynamic-cap corrections below are model-specific; the BSIM
                 # C(V) block is the dQ/dV operator at the orbit point.
                 G4, C4 = dev_inst[name].get_terminal_linearization(Vs, Vd, Vg)
                 stamp_dense_lti(Gt_full[m], Ct_full[m], rg, rc,
@@ -563,6 +565,11 @@ def _pac_hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
     """Dense HB conversion blocks (same kernel as pnoise). Single-sourced onto
     ``_pnoise_hb_blocks_impl`` (jitted for large systems, interpreted `.py_func`
     below the JIT-worthwhile size)."""
+    if current_engine() == "rust":
+        from ._rust_periodic import hb_blocks
+
+        Y_base, C_block = hb_blocks(Gf, Cf, K, fundamental, charge_caps)
+        return Y_base, C_block, False, True
     use_numba = (
         pac_hb_blocks_numba is not None and
         (2 * int(K) + 1) * int(n) >= 16
@@ -572,7 +579,7 @@ def _pac_hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
         np.asarray(Gf, dtype=np.complex128),
         np.asarray(Cf, dtype=np.complex128),
         int(K), float(fundamental), bool(charge_caps))
-    return Y_base, C_block, use_numba
+    return Y_base, C_block, use_numba, False
 
 
 def _stamp_arrays(terms):
@@ -582,6 +589,141 @@ def _stamp_arrays(terms):
         kind[pos] = int(term[0])
         ref[pos] = int(term[1])
     return kind, ref
+
+
+def _otft_param_vector(params):
+    return [
+        params.Vfb, params.Vss, params.Lc, params.lambda_,
+        params.contact_scale, params.channel_exponent, params.current_scale,
+        params.inv_Rleak, params.two_over_pi, params.cap_cgs1,
+        params.cap_cgd1, params.cap_half_wl_ci, params.cap_cgs3_base,
+        params.cap_cgd3_base, params.k1, params.gate_leak_g,
+    ]
+
+
+def _try_rust_pac_linearization(
+        all_sizes, all_nf, corner, topo, tbias, t_uniform, node_wave,
+        input_wave, node_inputs, drive_list, *, charge_caps,
+        internal_gate_states, dev_inst=None):
+    """Compile the periodic topology once and linearize the orbit in Rust."""
+    if current_engine() != "rust":
+        return None
+    if (getattr(topo, "vccs", ()) or getattr(topo, "vcvs", ()) or
+            getattr(topo, "cccs", ()) or getattr(topo, "ccvs", ())):
+        raise NotImplementedError(
+            "Rust PAC orbit linearization does not yet support controlled sources")
+
+    N = len(t_uniform)
+    n = topo.n
+    idx = topo.idx
+    rails = topo.rail_values(tbias)
+    if dev_inst is None:
+        dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
+    input_keys = tuple(input_wave)
+    input_index = {key: i for i, key in enumerate(input_keys)}
+    drive_index = {node: i for i, node in enumerate(drive_list)}
+    if any(key not in input_index for key in node_inputs.values()):
+        raise ValueError("periodic input wave is missing a topology input")
+
+    def value_term(node):
+        if node in idx:
+            return (0, idx[node], 0.0)
+        if node in node_inputs:
+            return (1, input_index[node_inputs[node]], 0.0)
+        return (2, 0, float(rails[node]))
+
+    def stamp_term(node):
+        if node in idx:
+            return (0, idx[node])
+        if node in drive_index:
+            return (1, drive_index[node])
+        return (2, 0)
+
+    def orbit_value(node, sample):
+        if node in idx:
+            return float(node_wave[node][sample])
+        if node in node_inputs:
+            return float(input_wave[node_inputs[node]][sample])
+        return float(rails[node])
+
+    gate1_names = [
+        name for name, *_ in topo.devices
+        if internal_gate_states and _has_gate1_dynamics(dev_inst.get(name))
+    ]
+    otft_names = [
+        name for name, *_ in topo.devices
+        if not getattr(dev_inst.get(name), "HAS_TERMINAL_LINEARIZATION", False)
+    ]
+    if not charge_caps and any(name not in gate1_names for name in otft_names):
+        raise NotImplementedError(
+            "non-conservative Rust PAC requires retained gate1 states")
+    gate1_index = {name: n + pos for pos, name in enumerate(gate1_names)}
+    devices = []
+    dense_devices = []
+    dense_info = []
+    for name, d, g, s in topo.devices:
+        dev = dev_inst[name]
+        if getattr(dev, "HAS_TERMINAL_LINEARIZATION", False):
+            dense_devices.append([
+                stamp_term(d), stamp_term(g), stamp_term(s), (2, 0)])
+            dense_info.append((dev, d, g, s))
+            continue
+        gate1 = None
+        if name in gate1_index:
+            gate1 = (gate1_index[name], float(dev.R_cap), float(dev.R_cap2))
+        devices.append((
+            value_term(d), value_term(g), value_term(s),
+            stamp_term(d), stamp_term(g), stamp_term(s),
+            _otft_param_vector(dev.get_numba_params()), gate1,
+        ))
+    resistors = [
+        (stamp_term(a), stamp_term(b), 1.0 / float(R))
+        for _name, a, b, R in topo.resistors
+    ]
+    capacitors = [
+        (stamp_term(a), stamp_term(b), float(value))
+        for a, b, value in topo.cap_list()
+    ]
+    import circuitopt_core
+
+    problem = circuitopt_core.PeriodicLinearizationProblem({
+        "node_count": n,
+        "state_count": n + len(gate1_names),
+        "input_count": len(input_keys),
+        "drive_count": len(drive_list),
+        "devices": devices,
+        "dense_devices": dense_devices,
+        "resistors": resistors,
+        "capacitors": capacitors,
+        "gmin": 1e-12,
+        "fd_step": 1e-4,
+    })
+    node_wave_arr = np.ascontiguousarray(np.vstack([
+        np.asarray(node_wave[node], float) for node in topo.solved]).T)
+    input_wave_arr = np.ascontiguousarray(
+        np.vstack([np.asarray(input_wave[key], float) for key in input_keys])
+        if input_keys else np.empty((0, N), dtype=float))
+    period = float(t_uniform[1] - t_uniform[0]) * float(N) if N > 1 else 0.0
+    node_dot = _periodic_wave_derivatives(node_wave, period)
+    input_dot = _periodic_wave_derivatives(input_wave, period)
+    node_dot_arr = np.ascontiguousarray(np.vstack([
+        np.asarray(node_dot[node], float) for node in topo.solved]).T)
+    input_dot_arr = np.ascontiguousarray(
+        np.vstack([np.asarray(input_dot[key], float) for key in input_keys])
+        if input_keys else np.empty((0, N), dtype=float))
+    dense_g = np.empty((N, len(dense_info), 4, 4), dtype=float)
+    dense_c = np.empty_like(dense_g)
+    for sample in range(N):
+        for position, (dev, d, g, s) in enumerate(dense_info):
+            G4, C4 = dev.get_terminal_linearization(
+                orbit_value(s, sample), orbit_value(d, sample),
+                orbit_value(g, sample))
+            dense_g[sample, position] = np.asarray(G4, dtype=float)
+            dense_c[sample, position] = np.asarray(C4, dtype=float)
+    Gt, Ct, Gin, Cin = problem.linearize(
+        node_wave_arr, input_wave_arr, node_dot_arr, input_dot_arr,
+        dense_g, dense_c)
+    return Gt, Ct, Gin, Cin, len(gate1_names)
 
 
 def _try_numba_pac_linearization(
@@ -597,8 +739,8 @@ def _try_numba_pac_linearization(
         getattr(topo, "ccvs", ())
     ):
         return None
-    # the kernel evaluates the OTFT compact model; silicon (OSDI) devices go
-    # through the Python assembler's dense terminal stamp instead
+    # The kernel evaluates the OTFT compact model; dense four-terminal devices
+    # go through the Python assembler instead.
     if dev_inst is not None and any(
             getattr(dev_inst.get(name), "HAS_TERMINAL_LINEARIZATION", False)
             for name, *_ in topo.devices):
@@ -743,7 +885,7 @@ def _try_numba_pac_linearization_gate1(
         if dev_inst is None:
             dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo)
         # The kernel assumes EVERY device has a gate1 node (index n+pos, in topo order,
-        # matching _assemble_pac_linearization_python). Mixed topologies -> Python.
+        # matching _reference_pac_linearization). Mixed topologies -> reference.
         if not all(_has_gate1_dynamics(dev_inst.get(name)) for name, *_ in topo.devices):
             return None
 
@@ -1058,6 +1200,7 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     )
     lin_cache_hit = bool(cache and lin_key in cache_store)
     lin_numba_used = False
+    lin_rust_used = False
     t_linear0 = time.perf_counter()
     if lin_cache_hit:
         lin = cache_store[lin_key]
@@ -1065,22 +1208,45 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         n_state = int(lin.get("n_state", Gf.shape[1]))
         n_gate1 = int(lin.get("n_gate1", max(0, n_state - n)))
         lin_numba_used = bool(lin.get("numba_used", False))
+        lin_rust_used = bool(lin.get("rust_used", False))
     else:
+        rust_lin = _try_rust_pac_linearization(
+            all_sizes, all_nf, corner, topo, tbias, t_uniform,
+            node_wave, input_wave, node_inputs, drive_list,
+            charge_caps=charge_caps,
+            internal_gate_states=internal_gate_states,
+            dev_inst=lin_dev_inst,
+        )
         fast_lin = None
         gate1_fast = None
-        if not internal_gate_states:
+        if rust_lin is None and not internal_gate_states:
             fast_lin = _try_numba_pac_linearization(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
                 charge_caps=charge_caps, dev_inst=lin_dev_inst,
             )
-        elif not charge_caps:
+        elif rust_lin is None and not charge_caps:
             gate1_fast = _try_numba_pac_linearization_gate1(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
                 dev_inst=lin_dev_inst,
             )
-        if fast_lin is not None:
+        if rust_lin is not None:
+            Gt, Ct, Gin, Cin, n_gate1 = rust_lin
+            n_state = Gt.shape[1]
+            if len(drive_list):
+                damp = np.asarray(drive_amps, complex)
+                gdrive = np.tensordot(Gin, damp, axes=([2], [0]))
+                cdrive = np.tensordot(Cin, damp, axes=([2], [0]))
+            else:
+                gdrive = np.zeros((N, n_state), dtype=complex)
+                cdrive = np.zeros((N, n_state), dtype=complex)
+            Gf = np.fft.fft(Gt, axis=0) / N
+            Cf = np.fft.fft(Ct, axis=0) / N
+            Ginf = np.fft.fft(gdrive, axis=0) / N
+            Cinf = np.fft.fft(cdrive, axis=0) / N
+            lin_rust_used = True
+        elif fast_lin is not None:
             Gf, Cf, Ginf, Cinf = fast_lin
             n_state = n
             n_gate1 = 0
@@ -1090,7 +1256,7 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             n_state = Gf.shape[1]
             lin_numba_used = True
         else:
-            Gt, Ct, gdrive, cdrive, n_gate1 = _assemble_pac_linearization_python(
+            Gt, Ct, gdrive, cdrive, n_gate1 = _reference_pac_linearization(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
                 charge_caps=charge_caps,
@@ -1111,11 +1277,12 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
                 "n_state": int(n_state),
                 "n_gate1": int(n_gate1),
                 "numba_used": bool(lin_numba_used),
+                "rust_used": bool(lin_rust_used),
             }
     linearization_time_s = time.perf_counter() - t_linear0
 
     t_hb0 = time.perf_counter()
-    Y_base, C_block, hb_numba_used = _pac_hb_blocks(
+    Y_base, C_block, hb_numba_used, hb_rust_used = _pac_hb_blocks(
         Gf, Cf, K, N, n_state, fundamental, charge_caps=charge_caps)
     hb_assembly_time_s = time.perf_counter() - t_hb0
     e = np.zeros(nb * n_state, dtype=complex)
@@ -1211,7 +1378,9 @@ def _analytic_adjoint_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         "pac_state_size": int(n_state),
         "pac_internal_gate1_states": int(n_gate1),
         "pac_numba_linearization_used": bool(lin_numba_used),
+        "pac_rust_linearization_used": bool(lin_rust_used),
         "pac_numba_hb_used": bool(hb_numba_used),
+        "pac_rust_hb_used": bool(hb_rust_used),
         "pac_linearization_time_s": float(linearization_time_s),
         "pac_hb_assembly_time_s": float(hb_assembly_time_s),
         "nfail": np.zeros(len(freqs), dtype=int),
@@ -1300,20 +1469,35 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
         Gt, Ct, Gin, Cin = lin["Gt"], lin["Ct"], lin["Gin"], lin["Cin"]
         n_gate1 = int(lin.get("n_gate1", max(0, Gt.shape[1] - n)))
     else:
+        rust_lin = _try_rust_pac_linearization(
+            all_sizes, all_nf, corner, topo, tbias, t_uniform,
+            node_wave, input_wave, node_inputs, drive_list,
+            charge_caps=charge_caps,
+            internal_gate_states=internal_gate_states,
+            dev_inst=lin_dev_inst,
+        )
         fast_lin = None
         gate1_fast = None
-        if not internal_gate_states:
+        if rust_lin is None and not internal_gate_states:
             fast_lin = _try_numba_pac_linearization(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
                 charge_caps=charge_caps, dev_inst=lin_dev_inst)
-        elif not charge_caps:
+        elif rust_lin is None and not charge_caps:
             gate1_fast = _try_numba_pac_linearization_gate1(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
                 dev_inst=lin_dev_inst)
-        if fast_lin is None and gate1_fast is None:
-            Gt, Ct, Gin, Cin, n_gate1 = _assemble_pac_linearization_python(
+        if rust_lin is not None:
+            Gt, Ct, Gin, Cin, n_gate1 = rust_lin
+            if len(drive_list):
+                Gin = np.tensordot(Gin, drive_amps, axes=([2], [0]))
+                Cin = np.tensordot(Cin, drive_amps, axes=([2], [0]))
+            else:
+                Gin = np.zeros((N, Gt.shape[1]), dtype=complex)
+                Cin = np.zeros((N, Gt.shape[1]), dtype=complex)
+        elif fast_lin is None and gate1_fast is None:
+            Gt, Ct, Gin, Cin, n_gate1 = _reference_pac_linearization(
                 all_sizes, all_nf, corner, topo, tbias, t_uniform,
                 node_wave, input_wave, node_inputs, drive_list, drive_amps,
                 charge_caps=charge_caps,

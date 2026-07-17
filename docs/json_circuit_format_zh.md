@@ -203,7 +203,7 @@ examples/periodic_rc.json
 - 一个电路里部分器件是 OTFT、部分是硅是合法的——例如互补硅 OTA 独立绑定 NMOS/PMOS
   器件。见 `examples/sky130_5t_ota.json`。
 - SKY130 正常仿真使用随包解析卡和原生 C BSIM4；FreePDK45 与 TSMC28HPC+ 使用
-  各自本地模型文件和同一原生后端。首次构建需要 C 编译器，ngspice/OpenVAF
+  各自本地模型文件和同一原生后端。首次构建需要 C 编译器，ngspice
   仅用于 oracle 或生成新卡。缺少前置条件时会清晰报错。详见
   [PDK 支持矩阵](pdk_support_zh.md)。
 

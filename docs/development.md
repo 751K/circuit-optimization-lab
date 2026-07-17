@@ -24,7 +24,6 @@ without breaking another backend.”
 | `circuitopt/compact_models/bsim4/` | Native BSIM4 ABI and implementation |
 | `circuitopt/pdk/tsmc28/` | TSMC-specific model resolution and device adapter |
 | `circuitopt/ngspice_*.py` | Explicit external ngspice characterization and oracle paths |
-| `circuitopt/osdi_*.py` | Explicit OpenVAF/OSDI compact-model oracle host |
 | `circuitopt/dataset.py` | Dataset generation and provenance |
 | `circuitopt/surrogate*.py` / `optimize.py` | Surrogate training and optimization |
 | `circuitopt/service/` | Optional local HTTP layer |
@@ -71,8 +70,8 @@ oracle adapter:
 pytest -q -m ngspice_oracle
 ```
 
-That marker includes ngspice and OpenVAF/OSDI comparison workflows and may
-require local PDK payloads. It is intentionally outside the routine test gate
+That marker includes ngspice comparison workflows and may require local PDK
+payloads. It is intentionally outside the routine test gate
 because full-circuit subprocess campaigns are much slower than native tests.
 
 The default run also excludes `heavy_e2e`: complete SAR/ADC conversions on the
@@ -230,7 +229,6 @@ Check every backend capability path touched by the change:
 - native SKY130 BSIM4;
 - native FreePDK45 BSIM4;
 - native TSMC28 BSIM4;
-- explicit OSDI and ngspice oracle paths;
 - explicit ngspice oracle helpers.
 
 A solver optimization must preserve numerical behavior within an explicit

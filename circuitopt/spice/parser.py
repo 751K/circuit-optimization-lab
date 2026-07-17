@@ -6,7 +6,7 @@ model.  Keeping those jobs separate is important:
 
 * the parser handles continuations, library sections, model cards and subcircuits;
 * a future elaborator resolves parameters, binning and subcircuit instances;
-* an OSDI or native BSIM implementation evaluates the resulting flat model card.
+* a native compact-model implementation evaluates the resulting flat model card.
 
 No source text or parsed parameter data is written to disk.
 """

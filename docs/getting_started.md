@@ -123,9 +123,7 @@ Common variables:
 | `TSMC28_MODEL_DIR` | Directory containing the supported TSMC HSPICE model file |
 | `TSMC28_PDK_ROOT` | Outer TSMC iPDK or delivery root |
 | `NGSPICE_BIN` | Explicit ngspice executable for oracle comparisons/card extraction |
-| `OPENVAF_BIN` / `OPENVAF_ROOT` | OpenVAF-Reloaded compiler/source for OSDI regression |
 | `BSIM4_VA` | Explicit BSIM4 Verilog-A source |
-| `OSDI_CACHE_DIR` | OSDI build cache |
 | `CIRCUITOPT_NATIVE_MODEL_CACHE` | Native compact-model build cache |
 
 Do not commit licensed model files, generated model cards, local virtual

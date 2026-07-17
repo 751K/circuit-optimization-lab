@@ -210,7 +210,7 @@ use the default PDK — this is purely additive, so an OTFT-only config never ne
 - SKY130 normal simulation uses bundled resolved cards and the native C BSIM4
   backend. FreePDK45 and TSMC28HPC+ use their local model files with the same
   native backend. A C compiler is needed for the first backend build; ngspice
-  and OpenVAF are optional oracle/card-generation tools. Missing prerequisites
+  is an optional oracle/card-generation tool. Missing prerequisites
   raise a clear error. See [PDK Support Matrix](pdk_support.md).
 
 ### `bias`

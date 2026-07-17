@@ -923,16 +923,6 @@ def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         if len(edge_mask) != len(tgrid):
             raise ValueError("edge_mask length must match tgrid")
 
-    if model_types:
-        from .transient_solver import osdi_model_names
-        if osdi_model_names(model_types) and analytic_jacobian:
-            # the analytic monodromy rebuilds G/C from the OTFT compact model —
-            # silicon (OSDI) circuits shoot with the FD Jacobian instead
-            analytic_jacobian = False
-            diagnostics.note("pss.osdi_fd_jacobian",
-                             detail="silicon circuit: analytic monodromy is "
-                                    "OTFT-only, using FD shooting Jacobian")
-
     step_fallback_tol = min(float(fallback_tol), 0.1 * float(residual_tol))
     transient_kwargs = dict(
         topo=topo,

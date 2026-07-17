@@ -41,9 +41,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   # ── Test matrix ──
-  # Silicon tests (SKY130 / OSDI / FreePDK45) self-skip on CI: their guards look
-  # for the OpenVAF/ngspice toolchain + PDK cards (external drive), absent here,
-  # so they resolve to pytest.mark.skipif and never error at collection.
+  # Licensed-PDK and external-ngspice oracle tests self-skip when their local
+  # model files or simulator are absent.
   test:
     needs: lint
     runs-on: ${{ matrix.os }}

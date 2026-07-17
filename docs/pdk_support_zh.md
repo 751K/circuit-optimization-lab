@@ -11,7 +11,6 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 |---|---|---|---|---|---|---|
 | AT4000TG | `at4000tg.pmos` | 内置校准 PMOS 模型 | 支持 | 原生 | 支持 | 无 |
 | SKY130 | `sky130.nmos`、`sky130.pmos` | 随包解析卡 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 已接入原生端口后端，需按周期拓扑验证 | 首次构建需要 C 编译器；仅生成新卡时需要外部工具 |
-| SKY130 OSDI oracle | `sky130_osdi.nmos`、`sky130_osdi.pmos` | 显式 OpenVAF/OSDI 对照路径 | 仅用于 oracle | 仅用于 oracle | 不是默认周期后端 | OpenVAF/BSIM4 VA；外部对照时可用 ngspice |
 | FreePDK45 | `freepdk45.nmos`、`freepdk45.pmos` | 平铺模型卡加载器 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 已接入原生端口后端，需按周期拓扑验证 | FreePDK45 模型卡；首次构建需要 C 编译器 |
 | FreePDK45 oracle | `freepdk45_ngspice.nmos`、`freepdk45_ngspice.pmos` | ngspice-C 缓存网格 / 完整网表 oracle | 仅用于 oracle | 仅用于 oracle | 不是默认周期后端 | FreePDK45 模型卡和 ngspice |
 | TSMC28HPC+ core | `tsmc28hpcp.nmos`、`tsmc28hpcp.pmos` | 内部 HSPICE 前端 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 支持 | Licensed 模型文件；首次构建需要 C 编译器 |
@@ -34,14 +33,12 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 
 - 默认加载仓库随包提供的、按几何展开的 BSIM4.5 参数卡，并直接交给与 FreePDK45、
   TSMC28HPC+ 相同的进程内原生 C BSIM4 后端。
-- 正常 DC、AC、noise、transient、PSS、PAC、PNoise 不启动 ngspice 或 OpenVAF。
+- 正常 DC、AC、noise、transient、PSS、PAC、PNoise 不启动外部仿真器。
 - 适合本地优化和方法研究，不是官方 SKY130 模型的逐位替代品。
 - 接受的工艺角：`tt`、`ss`、`ff`、`sf`、`fs`。
 - 仓库已包含示例所需解析卡。新几何或新 corner 没有对应卡时，可在本地安装
   SKY130/ngspice 后显式调用 `circuitopt.sky130_model.extract_sky130_card()`，
   并通过 `SKY130_CARD_DIR` 指向生成目录。
-- `sky130_osdi.*` 仅作为显式 OpenVAF/OSDI 回归路径保留。
-  需要这些 oracle 模型键时再导入 `circuitopt.sky130_model` 完成注册。
 
 ### FreePDK45
 
@@ -115,7 +112,6 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 | 额外 SKY130 解析卡 | `SKY130_CARD_DIR`，然后使用包内卡 |
 | TSMC 模型目录 | `TSMC28_MODEL_DIR`、`TSMC28_PDK_ROOT`、项目内忽略入口、`PDK_ROOT/tsmc28hpcp` |
 | ngspice | `NGSPICE_BIN`、虚拟环境约定位置、`PATH` |
-| OpenVAF | `OPENVAF_BIN`、`OPENVAF_ROOT`、虚拟环境约定位置、`PATH` |
 | 原生模型缓存 | `CIRCUITOPT_NATIVE_MODEL_CACHE`，否则使用选定虚拟环境 |
 
 ## 不替代的流程

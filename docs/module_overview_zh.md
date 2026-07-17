@@ -63,10 +63,7 @@ circuitopt/
   surrogate.py         基线指标 surrogate（GBT，可选 scikit-learn）+ 感兴趣区域过滤。
   surrogate_torch.py   可微 surrogate（torch/MPS）+ 基于梯度的设计优化。
   optimize.py          surrogate 筛选 / Pareto 选择 / solver 校验闭环。
-  osdi_host.py         OSDI 0.4 ctypes 宿主——加载编译好的 Verilog-A（.osdi）模型，单器件 DC/AC/noise 求值。
-  osdi_device.py       OSDI 宿主紧凑模型的 TransistorModel 适配器（把任意 OSDI PDK 桥接进求解器栈）。
-  osdi_transient.py    在 Numba 内直接调用 OSDI ABI 的固定网格/自适应瞬态。
-  sky130_model.py      SKY130 兼容导出 + 显式 ngspice 参数卡提取/OSDI oracle 工具。
+  sky130_model.py      SKY130 兼容导出 + 显式 ngspice 参数卡提取工具。
   ngspice_char.py      model-card 求值器：批量 ngspice .dc/.noise 表征 → 缓存 (Vsb,Vds,Vgs) 网格。
   ngspice_device.py    基于缓存 ngspice 网格的 TransistorModel（插值 Id/gm/gds/caps/noise；extract_w + 温度）。
   ngspice_process.py   工艺适配协议：deck 前导、器件语法、op 向量、仿真器参数。
@@ -97,7 +94,7 @@ ac_mna.py            <- 无内部依赖
 ac_solver.py         <- device_factory, dc_solver, topology, compiled_topology, diagnostics
 dc_solver.py         <- device_factory, topology, diagnostics
 noise_solver.py      <- device_model, ac_mna, ac_solver, device_factory, topology, compiled_topology, diagnostics
-transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, numba_kernels, diagnostics；按需延迟 import osdi_transient（OSDI 器件路由）
+transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, numba_kernels, diagnostics
 transient_profile.py <- 无内部依赖（计数器槽位常量）
 pss_solver.py        <- ac_mna, ac_solver, device_factory, adaptive_config, topology, transient_solver, diagnostics
 pac_solver.py        <- ac_mna, ac_solver, device_factory, numba_kernels, topology, transient_solver, diagnostics
@@ -116,10 +113,7 @@ dataset.py           <- diagnostics, circuit_loader, corners, device_model, devi
 surrogate.py         <- 无内部依赖；运行时可选 scikit-learn/joblib
 surrogate_torch.py   <- dataset（仅 CLI）；运行时可选 torch
 optimize.py          <- surrogate, circuit_loader, dataset, explore
-osdi_host.py         <- 无内部依赖；仅 ctypes + numpy
-osdi_device.py       <- device_model, osdi_host（延迟导入）
-osdi_transient.py    <- diagnostics, numba_kernels, osdi_host, compiled_topology（通过 OsdiDevice 通用接口调用；不 import transient_solver）
-sky130_model.py      <- device_model, osdi_device
+sky130_model.py      <- pdk/sky130, toolchain
 ngspice_char.py      <- 无内部依赖；ngspice 子进程 + numpy
 ngspice_device.py    <- device_model, ngspice_char；运行期可选 scipy
 ngspice_process.py   <- device_model
@@ -163,11 +157,11 @@ AC 和噪声分析时，求解器通过有限差分 `get_Idc` 提取端 `gm` 和
 
 - **`TransistorModel` (ABC)** — 七个抽象方法（`get_Idc`、`get_op`、`get_capacitances`、`get_capacitance_charges_from_op`、`get_capacitance_branch_terms_from_op`、`get_noise_psd`、`get_numba_params`）；`get_ss_params` 提供有限差分默认实现，子类可覆盖。
 - **`NumbaParams` (frozen dataclass)** — 16 个标量参数，瞬态求解器每个器件提取一次，传入 Numba 加速内核。
-- **后端能力类属性** — 通用求解器按*能力*分派，而非具体后端类型（不再 `isinstance(dev, OsdiDevice)`）。
-  `HAS_TERMINAL_LINEARIZATION`（默认 `False`）标记该模型是否暴露周期 PAC/PNoise 线性化用的完整
-  quasi-static 4×4 terminal `(G, C)` stamp（`get_terminal_linearization`）；`OsdiDevice` 覆写为 `True`。
-  `TRANSIENT_BACKEND`（默认 `None`，即走通用 OTFT numba 瞬态路径）指定要路由的专用积分器名称；
-  `OsdiDevice` 设为 `"osdi"`，`transient_solver.py` 读取它并路由到 `circuitopt.osdi_transient.transient_osdi`。
+- **后端能力类属性** — 通用求解器按*能力*分派，而非具体后端类型。
+  `HAS_TERMINAL_LINEARIZATION`（默认 `False`）标记该模型是否暴露 AC/PAC/PNoise 使用的完整
+  quasi-static 4×4 terminal `(G, C)` stamp；原生 BSIM 器件设为 `True`。
+  `TRANSIENT_BACKEND`（默认 `None`，即走所选引擎的通用 OTFT 瞬态路径）指定专用积分器，
+  例如 `"bsim4_native"` 或显式外部 oracle 后端。
 - **`register_model()` / `create_device()` + PDK/极性分层** — 工厂 + 注册表。每个 `(pdk, polarity)` 以结构化键 `"<pdk>.<polarity>"`（如 `"at4000tg.pmos"`）注册；`register_pdk()` 把一个工艺的各极性归组并标记默认。求解器文件调用 `create_device(get_default_model_type(), …)`（单一切换点）而非硬编码模型名，新增工艺或 `nmos` 极性只需一次 `register_pdk`、不改任何求解器。`"pmos_tft"` 保留为向后兼容别名。`get_model_class(model_type)` 是公开只读的注册表访问器，让求解器无需 import 具体后端类即可读取模型的能力标志。`registered_models()` 返回整个注册表的只读快照 `{model_type: "module.QualName"}`（按插入顺序），供需要*枚举*而非查单条的调用者使用——服务层 `GET /api/v1/capabilities` 用它列出全部可选模型键。通用元件（电阻/电容/理想 V/I/受控源）是与工艺无关的拓扑原语，**不在**此注册表中，故每个 PDK 零改动复用。`register_model()` 重复注册时仍会*覆盖*旧条目（有意替换——例如测试打桩——继续静默生效）；但真正的冲突——不同类（按 `__module__.__qualname__` 判断）抢占已被占用的名字，比如两个 PDK 模块争同一别名——现在会在覆盖前发出 `RuntimeWarning`；对*同一个*类的重复 import 或 `importlib.reload` 仍保持静默。
 
 ### `device_factory.py`
@@ -220,7 +214,7 @@ leaf 器件构建层：只依赖 `device_model`（不 import 任何 solver 或 w
 
 它还承载两个小的编组辅助函数 `term_arrays()`（把 `(kind, ref_or_value)` terminal token 拆成并行的
 `kind`/`ref`/`value` int/float 数组）和 `index_array()`（把可选整数 index 打包成 int64 数组，`None`
-→ `-1`）。`transient_solver.py` 的 raw-transient 编组和 `osdi_transient.py` 的 OSDI transient 编组都
+→ `-1`）。通用瞬态与原生 BSIM 瞬态编组都
 基于这两个辅助函数构建同一套 stamp-ready 数组，所以它们和拓扑 token 放在一起，而不是每个后端各自
 复制一份。
 
@@ -482,10 +476,10 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   默认小矩阵继续走 dense BLAS/LAPACK；HB 规模变大且非常稀疏时切到 SciPy sparse
   direct。强制 `iterative` 时使用按谐波对角块 LU 的 block-Jacobi 预条件 GMRES，
   若不收敛会回退 sparse direct，避免损失精度。
-- Numba 可用时，大规模 LPTV PNoise 会使用编译版 HB block 组装和
-  `freq × source × sideband²` 噪声折叠；`get_ss_params()` 也会用编译端导数
-  计算 gm/gds，在小电流或 kink 附近自动回退原有限差分。全 PMOS `gate1` PAC
-  转换装配也会在可用时走编译内核。Numba/Rust 这类编译实现主要能加速矩阵填充和
+- 设置 `CIRCUIT_ENGINE=rust` 时，HB block 组装、标量
+  `freq × source × sideband²` 噪声折叠、OTFT 轨道线性化、保留的 `gate1`
+  动态，以及硅器件通用四端口 G/C 盖章都由 Rust core 执行。迁移期间 Numba 和
+  Python 引擎保留参考实现。编译实现主要能加速矩阵填充和
   噪声折叠循环；HB 线性求解本身主要由 BLAS/LAPACK、SuperLU 或 GMRES 决定，
   不是 Python 循环开销主导。
 - 如果未显式传入 `gains` 或 `pac_result`，可传入同一套 `input_drive`，函数会调用
@@ -658,31 +652,11 @@ mismatch/latch 相关工作：
 SKY130、FreePDK45 与 TSMC28HPC+ 的正常 DC、AC、noise、transient、PSS、PAC、
 PNoise 均使用进程内原生 Berkeley BSIM4 后端。
 
-- **`osdi_host.py`** ——**OSDI 0.4 ABI** 的 ctypes 宿主，这是 [OpenVAF](https://github.com/pascalkuthe/OpenVAF)
-  把 Verilog-A 紧凑模型编译成的、仿真器无关的 C 接口（`.osdi`，原生共享库）。`load_osdi()` 内省
-  descriptor（节点/参数/opvar），带 struct 尺寸自检；`Device` 通过 ABI 的 `access()` 设置模型/实例参数、
-  复现仿真器侧的节点合并、跑内部节点 Newton（对 DC 悬空的内部节点做 gmin 正则化），暴露
-  `operating_point()`（Id/gm/gds/gmb/电容通过对内部节点做 Schur 补得到——BSIM4 不暴露任何 opvar，
-  所以小信号量全部来自 Jacobian）和 `noise_psd()`。这是一个**单器件** DC/AC/noise 求值器；电路级的
-  MNA/Newton 仍由现有的 `ac_solver`/`noise_solver` 负责。
-- **`osdi_device.py`** ——`OsdiDevice(TransistorModel)` 包装一个 `Device`，实现
-  `get_Idc`/`get_ss_params`/`get_capacitances`/`get_noise_psd`。`TransistorModel.kcl_sign`
-  （默认 +1，即 source-high——匹配 PMOS/OTFT）让 `ac_solve` 的 DC KCL 也能支持 NMOS（source-low，
-  `kcl_sign=-1`），且不改变 OTFT 路径（byte-identical：`1.0 * abs(x) == abs(x)`）。`OsdiDevice`
-  覆写基类的能力类属性：`HAS_TERMINAL_LINEARIZATION = True`（提供 `get_terminal_linearization`）和
-  `TRANSIENT_BACKEND = "osdi"`。通用 OTFT 瞬态 ABC 钩子仍保持分离；OSDI 瞬态使用自己的
-  ABI 感知 Numba 路径。
-- **`osdi_transient.py`** ——`transient_osdi(sizes, bias, tgrid, ...)` 是电路级入口。固定网格和
-  自适应内核在 Numba 内直接调用 OSDI 函数指针，并把外部节点与器件内部动态节点放进同一个全局
-  Newton 系统；`cs_transient()` 保留为可读参考。`transient_solver.py` 里的
-  `transient()` 会检查器件的 `TRANSIENT_BACKEND` 类属性，若为 `"osdi"` 就延迟 import 并路由到
-  `transient_osdi`——单向依赖。`osdi_transient.py` 自身不再 import `transient_solver.py`，
-  两个模块不再构成循环 import（这次拆分之前是的）。
 - **`pdk/sky130/library.py` / `device.py`** ——加载随包的按几何展开 BSIM4.5
   参数卡，注册原生 `sky130.nmos` / `sky130.pmos`。`extract_w` 选择参考宽度卡，
   实例仍使用实际几何；缺卡时清晰报错，不自动启动外部仿真器。
-- **`sky130_model.py`** ——兼容导出、显式 `extract_sky130_card()` ngspice
-  准备工具，以及 `sky130_osdi.*` OpenVAF/OSDI 回归类。正常仿真不调用这些路径。
+- **`sky130_model.py`** ——兼容导出与显式 `extract_sky130_card()` ngspice
+  准备工具。正常仿真使用随包卡，不调用该提取路径。
 
 ### 第三个 PDK：FreePDK45 原生适配（`pdk/freepdk45/`）
 
@@ -822,7 +796,7 @@ tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
 
 ## 基准测试
 
-`benchmarks/` 下有四个基准：
+`benchmarks/` 下有五个基准：
 
 ```bash
 # 全 AFE 基准（ac121 / noise121 / tran200）
@@ -837,6 +811,9 @@ CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_model --warm-runs 3
 python3 -m benchmarks.bench_chopper --warm-runs 3
 python3 -m benchmarks.bench_chopper --skip-tran --warm-runs 3
 
+# 周期 PSS / PAC / PNoise 基准
+python3 -m benchmarks.bench_periodic --warm-runs 3
+
 # 批量 sweep 基准（N × AC / AC+noise，模拟 explore 层负载）
 python3 -m benchmarks.bench_sweep --n-candidates 200 --warm-runs 3
 ```
@@ -847,14 +824,13 @@ python3 -m benchmarks.bench_sweep --n-candidates 200 --warm-runs 3
 ——从快速的有限边沿谐波计算（~1 ms），到理想 LPTV 折叠、PMOS 静态相位、
 准静态 PMOS 边带折叠，以及最重的 hard-switched PMOS chopper 瞬态。`bench_sweep.py`
 测量 N 个随机扰动候选的 AC / AC+noise 批量吞吐量，模拟 explore 层的逐候选
-评估负载。默认运行在 Numba 可用时启用加速；`CIRCUIT_USE_NUMBA=0` 可用于纯 Python
-对比。
+评估负载。使用 `CIRCUIT_ENGINE=rust|numba|python` 可对比不同引擎。
 
 旧 UI chopper 全流程瓶颈是通用 HB PAC frequency solve：显式
 `PSS+PAC(HB)+PNoise`（`time_domain=False`）61 点约 25.6s（PSS≈0.35s、
 PAC≈24.7s、PNoise≈0.55s），121 点约 48.9s（PSS≈0.44s、PAC≈47.6s、
 PNoise≈0.93s）。当前默认 chopper time-domain PAC 保留 PMOS `gate1` 状态，
-Numba 可用时使用 gate1 转换装配内核；同一 PSS 轨道上 61 点约 1.4s。非 chopper AFE 的 `DC+AC+Noise` 121 点在复用
+并使用所选引擎的编译转换装配；同一 PSS 轨道上 61 点约 1.4s。非 chopper AFE 的 `DC+AC+Noise` 121 点在复用
 AC 结果时约 1.8ms。
 
 ## 校准状态

@@ -27,14 +27,17 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int, c_uint, c_void};
 use std::panic::catch_unwind;
 
-use numpy::ndarray::{Array2, Array3};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::ndarray::{Array1, Array2, Array3};
+use numpy::{
+    Complex64, IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2,
+    PyReadonlyArray3, PyReadonlyArray4,
+};
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use co_bsim4::CoBsim4;
-use co_core::{bsim_transient, lti, mna, otft, transient};
+use co_core::{bsim_transient, lti, mna, otft, periodic, transient};
 
 const OK: c_int = 0;
 /// Vague internal error (ngspice `E_PANIC`); also what we return if a Rust panic
@@ -641,6 +644,321 @@ fn dense_neg_solve<'py>(
         .map_err(|error| PyRuntimeError::new_err(format!("invalid dense matrix shape: {error}")))?
         .into_pyarray(py);
     Ok((solved, matrix, rhs.into_pyarray(py)))
+}
+
+/// Assemble dense harmonic-balance G+jwC and C conversion blocks.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn periodic_hb_blocks<'py>(
+    py: Python<'py>,
+    gf: PyReadonlyArray3<'py, Complex64>,
+    cf: PyReadonlyArray3<'py, Complex64>,
+    sidebands: usize,
+    fundamental: f64,
+    charge_caps: bool,
+) -> PyResult<(
+    Bound<'py, PyArray2<Complex64>>,
+    Bound<'py, PyArray2<Complex64>>,
+)> {
+    let gf_view = gf.as_array();
+    let cf_view = cf.as_array();
+    let shape = gf_view.dim();
+    if shape != cf_view.dim() || shape.0 == 0 || shape.1 == 0 || shape.1 != shape.2 {
+        return Err(PyValueError::new_err(
+            "gf and cf must have matching shape (samples, state, state)",
+        ));
+    }
+    if !gf_view.is_standard_layout() || !cf_view.is_standard_layout() {
+        return Err(PyValueError::new_err(
+            "gf and cf must be C-contiguous complex128 arrays",
+        ));
+    }
+    if !fundamental.is_finite() || fundamental < 0.0 {
+        return Err(PyValueError::new_err(
+            "fundamental must be a finite non-negative frequency",
+        ));
+    }
+    let gf = gf
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("gf must be C-contiguous complex128"))?;
+    let cf = cf
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("cf must be C-contiguous complex128"))?;
+    let result = py
+        .detach(move || {
+            periodic::hb_blocks(
+                gf,
+                cf,
+                shape.0,
+                shape.1,
+                sidebands,
+                fundamental,
+                charge_caps,
+            )
+        })
+        .ok_or_else(|| PyValueError::new_err("periodic HB dimensions overflow"))?;
+    let admittance = Array2::from_shape_vec((result.size, result.size), result.admittance)
+        .map_err(|error| PyRuntimeError::new_err(format!("invalid HB shape: {error}")))?;
+    let capacitance = Array2::from_shape_vec((result.size, result.size), result.capacitance)
+        .map_err(|error| PyRuntimeError::new_err(format!("invalid HB shape: {error}")))?;
+    Ok((admittance.into_pyarray(py), capacitance.into_pyarray(py)))
+}
+
+/// Fold scalar thermal and flicker sources through periodic adjoints.
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn periodic_fold_psd<'py>(
+    py: Python<'py>,
+    adjs: PyReadonlyArray2<'py, Complex64>,
+    frequencies: PyReadonlyArray1<'py, f64>,
+    sidebands: usize,
+    fundamental: f64,
+    p_indices: PyReadonlyArray2<'py, i64>,
+    q_indices: PyReadonlyArray2<'py, i64>,
+    thermal: PyReadonlyArray3<'py, Complex64>,
+    flicker: PyReadonlyArray2<'py, Complex64>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
+    let adj_shape = adjs.as_array().dim();
+    let p_shape = p_indices.as_array().dim();
+    let q_shape = q_indices.as_array().dim();
+    let thermal_shape = thermal.as_array().dim();
+    let flicker_shape = flicker.as_array().dim();
+    let harmonics = sidebands
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| PyValueError::new_err("sideband count overflows"))?;
+    let modulation_width = sidebands
+        .checked_mul(4)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| PyValueError::new_err("sideband count overflows"))?;
+    let frequency_count = frequencies.len()?;
+    let source_count = p_shape.0;
+    if adj_shape.0 != frequency_count
+        || p_shape != (source_count, harmonics)
+        || q_shape != p_shape
+        || thermal_shape != (source_count, harmonics, harmonics)
+        || flicker_shape != (source_count, modulation_width)
+    {
+        return Err(PyValueError::new_err(
+            "periodic noise arrays have inconsistent dimensions",
+        ));
+    }
+    if !fundamental.is_finite() || fundamental < 0.0 {
+        return Err(PyValueError::new_err(
+            "fundamental must be a finite non-negative frequency",
+        ));
+    }
+    let adjs = adjs
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("adjs must be C-contiguous complex128"))?;
+    let frequencies = frequencies
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("frequencies must be contiguous float64"))?;
+    let p_indices = p_indices
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("p_indices must be C-contiguous int64"))?;
+    let q_indices = q_indices
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("q_indices must be C-contiguous int64"))?;
+    let thermal = thermal
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("thermal must be C-contiguous complex128"))?;
+    let flicker = flicker
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("flicker must be C-contiguous complex128"))?;
+    let result = py
+        .detach(move || {
+            periodic::fold_psd(
+                adjs,
+                frequencies,
+                adj_shape.1,
+                sidebands,
+                fundamental,
+                p_indices,
+                q_indices,
+                source_count,
+                thermal,
+                flicker,
+            )
+        })
+        .ok_or_else(|| PyValueError::new_err("invalid periodic noise array contents"))?;
+    let output = Array1::from_vec(result.output);
+    let devices = Array2::from_shape_vec((result.sources, result.frequencies), result.devices)
+        .map_err(|error| PyRuntimeError::new_err(format!("invalid PSD shape: {error}")))?;
+    Ok((output.into_pyarray(py), devices.into_pyarray(py)))
+}
+
+type PacValueRecord = (u8, usize, f64);
+type PacStampRecord = (u8, usize);
+type PacDeviceRecord = (
+    PacValueRecord,
+    PacValueRecord,
+    PacValueRecord,
+    PacStampRecord,
+    PacStampRecord,
+    PacStampRecord,
+    Vec<f64>,
+    Option<(usize, f64, f64)>,
+);
+type PacPassiveRecord = (PacStampRecord, PacStampRecord, f64);
+type PacDenseRecord = [PacStampRecord; 4];
+
+fn pac_value(record: PacValueRecord) -> periodic::ValueTerm {
+    periodic::ValueTerm {
+        kind: record.0,
+        reference: record.1,
+        value: record.2,
+    }
+}
+
+fn pac_stamp(record: PacStampRecord) -> periodic::StampTerm {
+    periodic::StampTerm {
+        kind: record.0,
+        reference: record.1,
+    }
+}
+
+/// Immutable PAC topology and OTFT parameter pack compiled once from Python.
+#[pyclass(frozen)]
+struct PeriodicLinearizationProblem {
+    problem: periodic::PacProblem,
+}
+
+#[pymethods]
+impl PeriodicLinearizationProblem {
+    #[new]
+    fn new(spec: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let devices: Vec<PacDeviceRecord> = required(spec, "devices")?;
+        let dense_devices: Vec<PacDenseRecord> = required(spec, "dense_devices")?;
+        let resistors: Vec<PacPassiveRecord> = required(spec, "resistors")?;
+        let capacitors: Vec<PacPassiveRecord> = required(spec, "capacitors")?;
+        let devices = devices
+            .into_iter()
+            .map(|record| {
+                Ok(periodic::OtftDevice {
+                    value_d: pac_value(record.0),
+                    value_g: pac_value(record.1),
+                    value_s: pac_value(record.2),
+                    stamp_d: pac_stamp(record.3),
+                    stamp_g: pac_stamp(record.4),
+                    stamp_s: pac_stamp(record.5),
+                    params: otft_params(record.6)?,
+                    gate1: record.7,
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let passives = |records: Vec<PacPassiveRecord>| {
+            records
+                .into_iter()
+                .map(|record| periodic::Passive {
+                    a: pac_stamp(record.0),
+                    b: pac_stamp(record.1),
+                    value: record.2,
+                })
+                .collect::<Vec<_>>()
+        };
+        let problem = periodic::PacProblem {
+            node_count: required(spec, "node_count")?,
+            state_count: required(spec, "state_count")?,
+            input_count: required(spec, "input_count")?,
+            drive_count: required(spec, "drive_count")?,
+            devices,
+            dense_devices: dense_devices
+                .into_iter()
+                .map(|record| periodic::DenseDevice {
+                    terminals: record.map(pac_stamp),
+                })
+                .collect(),
+            resistors: passives(resistors),
+            capacitors: passives(capacitors),
+            gmin: required(spec, "gmin")?,
+            fd_step: required(spec, "fd_step")?,
+        };
+        if !problem.validate() {
+            return Err(PyValueError::new_err(
+                "invalid periodic linearization topology",
+            ));
+        }
+        Ok(Self { problem })
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn linearize<'py>(
+        &self,
+        py: Python<'py>,
+        node_wave: PyReadonlyArray2<'py, f64>,
+        input_wave: PyReadonlyArray2<'py, f64>,
+        node_dot: PyReadonlyArray2<'py, f64>,
+        input_dot: PyReadonlyArray2<'py, f64>,
+        dense_conductance: PyReadonlyArray4<'py, f64>,
+        dense_capacitance: PyReadonlyArray4<'py, f64>,
+    ) -> PyResult<(
+        Bound<'py, PyArray3<f64>>,
+        Bound<'py, PyArray3<f64>>,
+        Bound<'py, PyArray3<f64>>,
+        Bound<'py, PyArray3<f64>>,
+    )> {
+        let node_shape = node_wave.as_array().dim();
+        let input_shape = input_wave.as_array().dim();
+        if node_shape.1 != self.problem.node_count
+            || node_dot.as_array().dim() != node_shape
+            || input_shape != (self.problem.input_count, node_shape.0)
+            || input_dot.as_array().dim() != input_shape
+            || dense_conductance.as_array().dim()
+                != (node_shape.0, self.problem.dense_devices.len(), 4, 4)
+            || dense_capacitance.as_array().dim() != dense_conductance.as_array().dim()
+        {
+            return Err(PyValueError::new_err(
+                "periodic orbit arrays have inconsistent dimensions",
+            ));
+        }
+        let node_wave = node_wave
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("node_wave must be C-contiguous float64"))?;
+        let input_wave = input_wave
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("input_wave must be C-contiguous float64"))?;
+        let node_dot = node_dot
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("node_dot must be C-contiguous float64"))?;
+        let input_dot = input_dot
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("input_dot must be C-contiguous float64"))?;
+        let dense_conductance = dense_conductance
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("dense_conductance must be C-contiguous float64"))?;
+        let dense_capacitance = dense_capacitance
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("dense_capacitance must be C-contiguous float64"))?;
+        let problem = &self.problem;
+        let result = py
+            .detach(move || {
+                periodic::linearize_otft_orbit(
+                    problem,
+                    node_wave,
+                    input_wave,
+                    node_dot,
+                    input_dot,
+                    dense_conductance,
+                    dense_capacitance,
+                    node_shape.0,
+                )
+            })
+            .ok_or_else(|| PyRuntimeError::new_err("periodic orbit linearization failed"))?;
+        let matrix_shape = (result.samples, result.state_count, result.state_count);
+        let input_shape = (result.samples, result.state_count, result.drive_count);
+        let array3 = |values, shape, name: &str| {
+            Array3::from_shape_vec(shape, values)
+                .map_err(|error| PyRuntimeError::new_err(format!("invalid {name} shape: {error}")))
+                .map(|array| array.into_pyarray(py))
+        };
+        Ok((
+            array3(result.conductance, matrix_shape, "conductance")?,
+            array3(result.capacitance, matrix_shape, "capacitance")?,
+            array3(result.input_conductance, input_shape, "input conductance")?,
+            array3(result.input_capacitance, input_shape, "input capacitance")?,
+        ))
+    }
 }
 
 type TermRecord = (i64, usize, f64);
@@ -1867,10 +2185,13 @@ fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(otft_newton_batch, m)?)?;
     m.add_function(wrap_pyfunction!(mna_term_values, m)?)?;
     m.add_function(wrap_pyfunction!(dense_neg_solve, m)?)?;
+    m.add_function(wrap_pyfunction!(periodic_hb_blocks, m)?)?;
+    m.add_function(wrap_pyfunction!(periodic_fold_psd, m)?)?;
     m.add_class::<OtftModel>()?;
     m.add_class::<Bsim4Device>()?;
     m.add_class::<OtftTransientProblem>()?;
     m.add_class::<Bsim4TransientProblem>()?;
     m.add_class::<LtiProblem>()?;
+    m.add_class::<PeriodicLinearizationProblem>()?;
     Ok(())
 }

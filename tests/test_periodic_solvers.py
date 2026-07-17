@@ -5,6 +5,7 @@ from circuitopt.numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_nu
 from circuitopt.adaptive_config import AdaptiveConfig, adaptive_lte_wrms, adaptive_next_h
 import circuitopt.numba_kernels as nk
 from circuitopt.pac_solver import pac_solve
+from circuitopt._engine import current_engine
 from circuitopt.pnoise_solver import (
     _fold_terminal_noise_source,
     _psd_matrix_sqrt,
@@ -95,9 +96,12 @@ def test_generic_analytic_pac_matches_rc_transfer():
     assert pac["method"] == "pss_analytic_adjoint"
     assert pac["pac_period_runs"] == 0
     assert pac["pac_condition_computed"] is False
-    if pac_linearize_orbit_numba is not None:
+    if current_engine() == "rust":
+        assert pac["pac_rust_linearization_used"] is True
+        assert pac["pac_rust_hb_used"] is True
+    elif pac_linearize_orbit_numba is not None:
         assert pac["pac_numba_linearization_used"] is True
-    if pac_hb_blocks_numba is not None:
+    if current_engine() != "rust" and pac_hb_blocks_numba is not None:
         assert pac["pac_numba_hb_used"] is True
     np.testing.assert_allclose(pac["response"], expected, rtol=1e-6)
 

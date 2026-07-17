@@ -15,11 +15,11 @@ the requested engine, writes the result back to ``CIRCUIT_ENGINE`` for child
 processes, and — for the pure-Python engine — reuses the existing
 ``CIRCUIT_USE_NUMBA=0`` kill-switch.
 
-R3 dispatches OTFT scalar evaluation, fixed/adaptive transient, BSIM4 transient,
-and AC/noise MNA into the Rust core. Periodic HB/PAC/PNoise assembly remains a
-Python orchestration boundary until R4, while the transient periods it requests
-already use Rust. Requesting ``"rust"`` warns and falls back to ``"numba"`` only
-when the extension cannot be imported.
+R4 dispatches OTFT scalar evaluation, fixed/adaptive transient, BSIM4 transient,
+AC/noise MNA, periodic HB/PAC linearization, and scalar PNoise folding into the
+Rust core. SciPy sparse solves and FFT orchestration remain in Python. Requesting
+``"rust"`` warns and falls back to ``"numba"`` only when the extension cannot be
+imported.
 """
 from __future__ import annotations
 

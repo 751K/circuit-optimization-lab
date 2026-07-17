@@ -122,7 +122,7 @@ def load_sky130_card(
     mismatch_v: float = 0.0,
     instance_parameters: dict[str, float] | None = None,
 ) -> Sky130Card:
-    """Load a flat card without invoking ngspice or OpenVAF."""
+    """Load a flat card without invoking an external simulator."""
     polarity = normalize_polarity(polarity)
     corner = normalize_corner(corner)
     width_um = float(width_um)

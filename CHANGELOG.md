@@ -68,6 +68,21 @@ release checklist.
   `circuitopt_core`，发布工作流归档各平台 wheel 构件。数值路径在 R3 接线前
   仍运行于 numba。
 
+### Changed / 变更
+
+- **Removed the OSDI/OpenVAF compatibility path / 删除 OSDI/OpenVAF 兼容路径**
+
+  **English:** The Rust refactor now standardizes silicon simulation on the
+  native BSIM4 backend. Removed the OSDI host/device/transient modules,
+  OpenVAF discovery and compile tooling, SKY130 OSDI model registration and
+  dispatch, OSDI-specific Numba kernels, tests, and current documentation.
+  Explicit ngspice and Cadence regression oracles remain available.
+
+  **中文：** Rust 重构现将硅工艺仿真统一到原生 BSIM4 后端。已删除 OSDI
+  host/device/transient 模块、OpenVAF 路径解析与编译工具、SKY130 OSDI 模型
+  注册与分派、OSDI 专用 Numba 内核、测试和当前使用文档。显式 ngspice 与
+  Cadence 回归 oracle 继续保留。
+
 ### Fixed / 修复
 
 - **Default test-suite runtime and native BSIM4 build robustness / 默认测试集耗时与原生 BSIM4 构建健壮性**

@@ -216,6 +216,8 @@ def summarize_pnoise(pn):
             pn.get("pnoise_hb_iterative_fallbacks", 0)),
         "pnoise_numba_hb_used": bool(pn.get("pnoise_numba_hb_used", False)),
         "pnoise_numba_fold_used": bool(pn.get("pnoise_numba_fold_used", False)),
+        "pnoise_rust_hb_used": bool(pn.get("pnoise_rust_hb_used", False)),
+        "pnoise_rust_fold_used": bool(pn.get("pnoise_rust_fold_used", False)),
         "pnoise_state_size": int(pn.get("pnoise_state_size", 0)),
         "pnoise_internal_gate1_states": int(
             pn.get("pnoise_internal_gate1_states", 0)),

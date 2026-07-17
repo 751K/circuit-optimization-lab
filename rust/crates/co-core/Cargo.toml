@@ -6,4 +6,5 @@ license.workspace = true
 description = "CircuitOpt device, MNA, LTI, and transient numerical solver core."
 
 [dependencies]
+num-complex = "0.4.6"
 thiserror = "2.0.17"

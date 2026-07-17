@@ -184,6 +184,6 @@ python -m circuitopt run examples/freepdk45_fd_ota.json -a ac,noise
   这些 VDD 参考种子节点要随 VDD 平移。
 - dataset/筛选阶段给器件加 `extract_w=1.0`(参考 W 特性化 + 线性 W 缩放,单器件误差 ~0.7%),
   免逐候选 ngspice 重表征;**终选设计务必逐 W 真卡复核**。
-- 本文历史优化使用 ngspice-C 网格（非 SKY130 的 OSDI VA）；当前默认已迁移到
+- 本文历史优化使用 ngspice-C 网格；当前默认已迁移到
   原生 BSIM4——旧流程背景见
   [freepdk45-ngspice-eval 记忆](https://github.com/751K/circuit-optimization-lab/blob/main/README.md) 与 `circuitopt/ngspice_char.py` 头注。

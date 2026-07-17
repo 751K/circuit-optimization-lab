@@ -120,9 +120,7 @@ corner 和 mismatch 覆盖并不相同。
 | `TSMC28_MODEL_DIR` | 包含受支持 TSMC HSPICE 模型文件的目录 |
 | `TSMC28_PDK_ROOT` | TSMC iPDK 或交付包外层目录 |
 | `NGSPICE_BIN` | ngspice 可执行文件，仅用于 oracle 对照或参数卡提取 |
-| `OPENVAF_BIN` / `OPENVAF_ROOT` | OpenVAF-Reloaded 编译器或源码，仅用于 OSDI 回归 |
 | `BSIM4_VA` | 显式指定 BSIM4 Verilog-A 源文件 |
-| `OSDI_CACHE_DIR` | OSDI 构建缓存 |
 | `CIRCUITOPT_NATIVE_MODEL_CACHE` | 原生紧凑模型构建缓存 |
 
 不要提交 licensed 模型、生成的模型卡、虚拟环境或仿真缓存。

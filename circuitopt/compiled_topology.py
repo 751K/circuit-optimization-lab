@@ -22,9 +22,8 @@ def term_arrays(terms):
     A token is ``(kind, ref_or_value)``: for a solved/input terminal
     (``kind`` in {``TERM_SOLVED``, ``TERM_INPUT``}) the second field is an
     integer index (``ref``); for a rail it is a float bias (``value``).  Both
-    the raw-transient marshal and the OSDI transient marshal build the same
-    stamp-ready arrays, so this helper lives with the topology tokens they
-    share.
+    generic and native-BSIM transient marshals build the same stamp-ready
+    arrays, so this helper lives with the topology tokens they share.
     """
     kind = np.empty(len(terms), dtype=np.int64)
     ref = np.empty(len(terms), dtype=np.int64)

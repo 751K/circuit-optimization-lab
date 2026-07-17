@@ -92,6 +92,7 @@ dependencies = [
 name = "co-core"
 version = "1.4.0"
 dependencies = [
+ "num-complex",
  "thiserror",
 ]
 

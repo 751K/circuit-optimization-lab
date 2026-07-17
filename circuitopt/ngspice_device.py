@@ -11,8 +11,8 @@ transient hooks raise :class:`NotImplementedError` because it carries no charge
 companion; an explicitly grid-bound complete circuit is routed by ``transient()``
 to the direct-ngspice full-charge backend in :mod:`circuitopt.ngspice_transient`.
 gm / gds / Cgs / Cgd are read straight from
-ngspice op-vars (Cgs = −dQg/dVs, Cgd = −dQg/dVd — the same definition the OSDI host
-uses), i.e. true ngspice-C quantities, not differentiated interpolants.
+ngspice op-vars (Cgs = −dQg/dVs, Cgd = −dQg/dVd), i.e. true ngspice-C
+quantities, not differentiated interpolants.
 """
 from __future__ import annotations
 

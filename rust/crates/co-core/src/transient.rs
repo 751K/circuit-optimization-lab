@@ -313,7 +313,7 @@ pub struct DeviceSolveStats {
     pub terminal_fd_fallbacks: usize,
 }
 
-fn solve_internal_with_guesses(
+pub(crate) fn solve_internal_with_guesses(
     params: &Params,
     vs: f64,
     vd: f64,

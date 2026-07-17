@@ -72,10 +72,7 @@ circuitopt/
   surrogate.py         Baseline metric surrogate (GBT via optional scikit-learn) + region-of-interest filtering.
   surrogate_torch.py   Differentiable surrogate (torch/MPS) + gradient-based design optimization.
   optimize.py          Screen-with-surrogate / Pareto-select / verify-with-solver optimization loop.
-  osdi_host.py         OSDI 0.4 ctypes host — loads a compiled Verilog-A (.osdi) model, single-device DC/AC/noise eval.
-  osdi_device.py       TransistorModel adapter over an OSDI-hosted compact model (bridges any OSDI PDK into the solver stack).
-  osdi_transient.py    Numba fixed-grid/adaptive transient with direct OSDI ABI calls.
-  sky130_model.py      SKY130 compatibility exports + explicit ngspice card-extraction/OSDI oracle tools.
+  sky130_model.py      SKY130 compatibility exports + explicit ngspice card-extraction utility.
   ngspice_char.py      Model-card evaluator: batch ngspice .dc/.noise characterization → cached (Vsb,Vds,Vgs) grid.
   ngspice_device.py    TransistorModel over a cached ngspice grid (interpolated Id/gm/gds/caps/noise; extract_w + temperature).
   ngspice_process.py   Process-adapter protocol: deck preamble, instance syntax, op vectors, simulator flags.
@@ -106,7 +103,7 @@ ac_mna.py            <- no internal dependency
 ac_solver.py         <- device_factory, dc_solver, topology, compiled_topology, diagnostics
 dc_solver.py         <- device_factory, topology, diagnostics
 noise_solver.py      <- device_model, ac_mna, ac_solver, device_factory, topology, compiled_topology, diagnostics
-transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, numba_kernels, diagnostics; lazily imports osdi_transient for OSDI-backed devices
+transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, numba_kernels, diagnostics
 transient_profile.py <- no internal dependency (counter slot constants)
 pss_solver.py        <- ac_mna, ac_solver, device_factory, adaptive_config, topology, transient_solver, diagnostics
 pac_solver.py        <- ac_mna, ac_solver, device_factory, numba_kernels, topology, transient_solver, diagnostics
@@ -125,10 +122,7 @@ dataset.py           <- diagnostics, circuit_loader, corners, device_model, devi
 surrogate.py         <- no internal dependency; optional scikit-learn/joblib at runtime
 surrogate_torch.py   <- dataset (CLI only); optional torch at runtime
 optimize.py          <- surrogate, circuit_loader, dataset, explore
-osdi_host.py         <- no internal dependency; ctypes + numpy only
-osdi_device.py       <- device_model, osdi_host (lazy import)
-osdi_transient.py    <- diagnostics, numba_kernels, osdi_host, compiled_topology (calls the OsdiDevice interface generically; does not import transient_solver)
-sky130_model.py      <- device_model, osdi_device
+sky130_model.py      <- pdk/sky130, toolchain
 ngspice_char.py      <- no internal dependency; ngspice subprocess + numpy only
 ngspice_device.py    <- device_model, ngspice_char; optional scipy at runtime
 ngspice_process.py   <- device_model
@@ -175,7 +169,7 @@ Defines the abstract device‑model interface that decouples solvers from concre
 
 - **`TransistorModel` (ABC)** — seven abstract methods (`get_Idc`, `get_op`, `get_capacitances`, `get_capacitance_charges_from_op`, `get_capacitance_branch_terms_from_op`, `get_noise_psd`, `get_numba_params`); `get_ss_params` provides a finite‑difference default that subclasses can override.
 - **`NumbaParams` (frozen dataclass)** — the 16 scalar parameters extracted once per device and passed to numba‑accelerated transient kernels.
-- **Backend-capability class attributes** — generic solvers dispatch on *capabilities*, never on a concrete backend type (no `isinstance(dev, OsdiDevice)`). `HAS_TERMINAL_LINEARIZATION` (default `False`) advertises the full quasi-static 4×4 terminal `(G, C)` stamp used by the periodic PAC/PNoise linearizer; `OsdiDevice` overrides it to `True`. `TRANSIENT_BACKEND` (default `None`, meaning the generic OTFT numba transient path) names a specialised integrator to route to instead; `OsdiDevice` sets it to `"osdi"`, which `transient_solver.py` reads to route to `circuitopt.osdi_transient.transient_osdi`.
+- **Backend-capability class attributes** — generic solvers dispatch on *capabilities*, never on a concrete backend type. `HAS_TERMINAL_LINEARIZATION` (default `False`) advertises the full quasi-static 4×4 terminal `(G, C)` stamp used by AC/PAC/PNoise; native BSIM devices set it to `True`. `TRANSIENT_BACKEND` (default `None`, meaning the selected engine's generic OTFT transient path) names a specialised integrator such as `"bsim4_native"` or an explicit external oracle backend.
 - **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. `get_model_class(model_type)` is a public read-only registry accessor so solvers can inspect a model's capability flags without importing a concrete backend class. `registered_models()` returns a read-only `{model_type: "module.QualName"}` snapshot of the whole registry (insertion order) for a caller that needs to *enumerate* rather than look up one entry — the service layer's `GET /api/v1/capabilities` uses it to list every selectable model key. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged. `register_model()` still *replaces* an existing entry on re-registration (intentional swap-in, e.g. a test stub, keeps working silently), but a genuine collision — a different class (by `__module__.__qualname__`) taking over an already-occupied name, e.g. two PDK modules racing for the same alias — now emits a `RuntimeWarning` before overwriting; a repeat import or `importlib.reload` of the *same* class stays silent.
 
 ### `device_factory.py`
@@ -232,8 +226,8 @@ This keeps AC, noise, and transient on the same indexing/stamping convention whi
 
 It also hosts the small marshalling helpers `term_arrays()` (splits `(kind, ref_or_value)` terminal
 tokens into parallel `kind`/`ref`/`value` int/float arrays) and `index_array()` (packs optional
-integer indices into an int64 array, `None` → `-1`). Both `transient_solver.py`'s raw-transient marshal
-and `osdi_transient.py`'s OSDI transient marshal build the same stamp-ready arrays from these, so the
+integer indices into an int64 array, `None` → `-1`). The generic and native-BSIM
+transient marshals build the same stamp-ready arrays from these, so the
 helpers live with the topology tokens they share instead of being duplicated per backend.
 
 ### `circuit_loader.py`
@@ -546,12 +540,11 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
   large, very sparse HB matrices to SciPy sparse direct solves. Forced
   `iterative` uses block-Jacobi preconditioned GMRES, with per-harmonic diagonal
   block LU factors, and falls back to sparse direct if convergence fails.
-- With Numba available, large LPTV PNoise runs use compiled HB block assembly
-  and compiled `freq × source × sideband²` noise folding. `get_ss_params()` also
-  uses the compiled terminal-derivative path for gm/gds and falls back to the
-  original finite difference near small-current/kink regions. The all-PMOS
-  `gate1` PAC conversion assembly is also compiled when available. Numba/Rust-
-  style compiled code mainly helps the matrix-fill and noise-fold loops; HB
+- With `CIRCUIT_ENGINE=rust`, HB block assembly, scalar
+  `freq × source × sideband²` noise folding, OTFT orbit linearization, retained
+  `gate1` dynamics, and generic four-terminal silicon G/C stamping run in the
+  Rust core. The Numba and Python engines retain their reference implementations
+  during the migration. Compiled code mainly helps the matrix-fill and noise-fold loops; HB
   linear solves are dominated by BLAS/LAPACK, SuperLU, or GMRES rather than
   Python loop overhead.
 - If `gains` or `pac_result` are not provided, pass the same `input_drive` and
@@ -791,6 +784,14 @@ interface as the AT4000TG OTFT model. SKY130, FreePDK45, and TSMC28HPC+ all use
 the in-process native Berkeley BSIM4 backend for normal DC, AC, noise, transient,
 PSS, PAC, and PNoise operation.
 
+- **`pdk/sky130/library.py` / `device.py`** — loads the bundled geometry-resolved
+  BSIM4.5 cards and registers native `sky130.nmos` / `sky130.pmos`. `extract_w`
+  selects a reference-width card while the instance keeps its actual geometry.
+  Missing geometries fail clearly rather than launching an external simulator.
+- **`sky130_model.py`** — compatibility exports plus the explicit
+  `extract_sky130_card()` ngspice preparation utility. Normal simulation uses
+  the bundled cards and does not call this extraction path.
+
 A **third PDK, FreePDK45**, now uses the same native Berkeley BSIM4.5 kernel as
 TSMC28HPC+. `pdk/freepdk45/library.py` parses each flat level-54 VTG card into a
 numeric model card; `pdk/freepdk45/device.py` exposes four-terminal current,
@@ -837,41 +838,6 @@ The default portable model entry is
 `PDK/tsmc28hpcp/models/hspice/cln28hpcp_1d8_elk_v1d0_2p2.l`, which is Git-ignored.
 Resolution priority is `TSMC28_MODEL_DIR`, `TSMC28_PDK_ROOT`, that project-local
 entry, then `PDK_ROOT/tsmc28hpcp`. See [TSMC28HPC+ Local Adapter](tsmc28hpcp.md).
-
-- **`osdi_host.py`** — a ctypes host for the **OSDI 0.4 ABI**, the simulator-independent
-  C interface [OpenVAF](https://github.com/pascalkuthe/OpenVAF) compiles Verilog-A
-  compact models into (`.osdi`, a native shared library). `load_osdi()` introspects the
-  descriptor (nodes/params/opvars) with a struct-size self-check; `Device` sets model/
-  instance params via the ABI's `access()`, replicates the simulator-side node collapse,
-  runs an internal-node Newton (gmin-regularized for DC-floating internal nodes), and
-  exposes `operating_point()` (Id/gm/gds/gmb/capacitances via a Schur complement over
-  internal nodes — BSIM4 exposes zero opvars, so small-signal quantities come from the
-  Jacobian) and `noise_psd()`. This is a **single-device** DC/AC/noise evaluator; the
-  circuit-level MNA/Newton is still owned by the existing `ac_solver`/`noise_solver`.
-- **`osdi_device.py`** — `OsdiDevice(TransistorModel)` wraps a `Device`, implementing
-  `get_Idc`/`get_ss_params`/`get_capacitances`/`get_noise_psd`. `TransistorModel.kcl_sign`
-  (default +1, i.e. source-high — matching PMOS/OTFT) lets `ac_solve`'s DC KCL support
-  NMOS (source-low, `kcl_sign=-1`) without changing the OTFT path (byte-identical:
-  `1.0 * abs(x) == abs(x)`). `OsdiDevice` overrides the base capability class attributes:
-  `HAS_TERMINAL_LINEARIZATION = True` (it provides `get_terminal_linearization`) and
-  `TRANSIENT_BACKEND = "osdi"`. The generic OTFT transient-only ABC hooks remain
-  separate; OSDI transient uses its own ABI-aware Numba path.
-- **`osdi_transient.py`** — `transient_osdi(sizes, bias, tgrid, ...)` is the circuit-level
-  entry point. Its fixed-grid and adaptive kernels call OSDI function pointers directly
-  inside Numba and include external plus device-internal dynamic nodes in one global
-  Newton system. The lower-level `cs_transient()` remains a readable reference. `transient()`
-  in `transient_solver.py` checks the device's `TRANSIENT_BACKEND` class attribute and, when
-  it is `"osdi"`, lazily imports and routes to `transient_osdi` — a one-way dependency.
-  `osdi_transient.py` itself never imports `transient_solver.py`, so the two modules no
-  longer form a circular import (they did before this split).
-- **`pdk/sky130/library.py` / `device.py`** — loads the bundled geometry-resolved
-  BSIM4.5 cards and registers native `sky130.nmos` / `sky130.pmos`. `extract_w`
-  selects a reference-width card while the instance keeps its actual geometry.
-  Missing geometries fail clearly rather than launching an external simulator.
-- **`sky130_model.py`** — compatibility exports plus the explicit
-  `extract_sky130_card()` ngspice preparation utility and unregistered-by-default
-  OpenVAF/OSDI regression classes under `sky130_osdi.*`. Normal simulation never
-  calls these paths.
 
 `circuitopt/circuit_loader.py`'s optional `models` block (`{"M1": {"type": "sky130.nmos",
 ...}}`) binds specific devices in a JSON circuit to a non-default PDK, so a mixed
@@ -981,7 +947,7 @@ tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
 
 ## Benchmarks
 
-Four benchmarks live under `benchmarks/`:
+Five benchmarks live under `benchmarks/`:
 
 ```bash
 # Full-AFE benchmark (ac121 / noise121 / tran200)
@@ -996,6 +962,9 @@ CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_model --warm-runs 3
 python3 -m benchmarks.bench_chopper --warm-runs 3
 python3 -m benchmarks.bench_chopper --skip-tran --warm-runs 3
 
+# Periodic PSS / PAC / PNoise benchmark
+python3 -m benchmarks.bench_periodic --warm-runs 3
+
 # Batch sweep benchmark (N × AC / AC+noise, explore-layer workload)
 python3 -m benchmarks.bench_sweep --n-candidates 200 --warm-runs 3
 ```
@@ -1009,15 +978,14 @@ LPTV folding, PMOS static-phase, quasi-static PMOS sideband folding, and the
 heavy hard-switched PMOS chopper transient. `bench_sweep.py` measures batch
 throughput of AC and AC+noise evaluation across randomly perturbed design
 candidates, simulating the explore layer's per-candidate workload.  The
-default run uses Numba when available; `CIRCUIT_USE_NUMBA=0` is useful for
-pure-Python comparison.
+Use `CIRCUIT_ENGINE=rust|numba|python` to compare engines.
 
 The old UI chopper full-flow bottleneck was the portable HB PAC frequency solve:
 explicit `PSS+PAC(HB)+PNoise` (`time_domain=False`) takes about 25.6 s for
 61 frequency points (PSS≈0.35 s, PAC≈24.7 s, PNoise≈0.55 s) and about 48.9 s for
 121 points (PSS≈0.44 s, PAC≈47.6 s, PNoise≈0.93 s). The default chopper
-time-domain PAC path keeps the PMOS `gate1` states and uses the Numba gate1
-conversion assembly when available; it takes about 1.4 s for 61 points on the
+time-domain PAC path keeps the PMOS `gate1` states and uses the selected engine's
+compiled conversion assembly; it takes about 1.4 s for 61 points on the
 same PSS orbit. A non-chopper AFE `DC+AC+Noise` 121-point run
 is about 1.8 ms when noise reuses the AC result.
 

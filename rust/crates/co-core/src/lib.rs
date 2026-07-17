@@ -9,6 +9,7 @@ pub mod error;
 pub mod lti;
 pub mod mna;
 pub mod otft;
+pub mod periodic;
 pub mod transient;
 
 pub use error::CoreError;

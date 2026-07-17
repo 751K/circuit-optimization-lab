@@ -85,67 +85,6 @@ def ngspice_binary() -> str | None:
     return shutil.which("ngspice")
 
 
-def openvaf_root() -> str | None:
-    """OpenVAF source checkout when configured or vendored locally."""
-    configured = os.environ.get("OPENVAF_ROOT")
-    if configured:
-        return _absolute(configured)
-    for relative in (("third_party", "OpenVAF-Reloaded"),
-                     ("vendor", "OpenVAF-Reloaded")):
-        candidate = os.path.join(PROJECT_ROOT, *relative)
-        if os.path.isdir(candidate):
-            return candidate
-    return None
-
-
-def openvaf_binary() -> str | None:
-    """OpenVAF compiler: explicit binary/root, virtual environment, then PATH."""
-    configured = os.environ.get("OPENVAF_BIN")
-    if configured:
-        return _command(configured)
-    root = openvaf_root()
-    if root:
-        candidate = os.path.join(root, "target", "release", "openvaf-r")
-        if os.access(candidate, os.X_OK):
-            return candidate
-    for venv in _venv_roots():
-        for relative in (("bin", "openvaf-r"), ("openvaf", "bin", "openvaf-r")):
-            candidate = os.path.join(venv, *relative)
-            if os.access(candidate, os.X_OK):
-                return candidate
-    return shutil.which("openvaf-r")
-
-
-def bsim4_va_path() -> str | None:
-    """BSIM4 Verilog-A source, independently overridable with ``BSIM4_VA``."""
-    configured = os.environ.get("BSIM4_VA")
-    if configured:
-        path = _absolute(configured)
-        return path if os.path.isfile(path) else None
-    root = openvaf_root()
-    if root:
-        path = os.path.join(root, "integration_tests", "BSIM4", "bsim4.va")
-        return path if os.path.isfile(path) else None
-    return None
-
-
-def openvaf_source_path(*parts: str) -> str | None:
-    """A source file inside the configured OpenVAF checkout, when present."""
-    root = openvaf_root()
-    if not root:
-        return None
-    path = os.path.join(root, *parts)
-    return path if os.path.isfile(path) else None
-
-
-def osdi_cache_dir() -> str:
-    """Writable OSDI cache, defaulting inside the selected virtual environment."""
-    configured = os.environ.get("OSDI_CACHE_DIR")
-    if configured:
-        return _absolute(configured)
-    return os.path.join(_venv_roots()[0], "cache", "circuitopt", "osdi")
-
-
 def native_model_cache_dir() -> str:
     """Writable cache for locally compiled compact-model numerical kernels."""
     configured = os.environ.get("CIRCUITOPT_NATIVE_MODEL_CACHE")

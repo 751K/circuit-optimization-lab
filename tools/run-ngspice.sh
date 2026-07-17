@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run an OSDI-enabled ngspice with any args.
+# Run the configured ngspice binary with any args.
 #   tools/run-ngspice.sh -b netlist.cir
 #
 # Resolution order: NGSPICE_BIN, active venv, project .venv, then PATH.

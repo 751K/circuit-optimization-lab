@@ -15,17 +15,14 @@ import tempfile
 from pathlib import Path
 from typing import Dict
 
-from .device_model import register_pdk
-from .osdi_device import OsdiDevice
 from .pdk.sky130 import Sky130Nfet, Sky130Pfet
 from .pdk.sky130.library import (
-    load_sky130_card,
     normalize_corner,
     normalize_polarity,
     sky130_card_dirs,
     sky130_card_filename,
 )
-from .toolchain import bsim4_va_path, ngspice_binary, pdk_root
+from .toolchain import ngspice_binary, pdk_root
 
 
 _SUBCKT = {
@@ -39,7 +36,6 @@ _DROP = {
 _LINE = re.compile(
     r"\s*([a-zA-Z]\w*)\s+([-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*$")
 _CARD_MEMO: Dict[tuple, Dict[str, float]] = {}
-_BSIM4_VA = bsim4_va_path() or ""
 
 
 def _oracle_output_dir(output_dir: str | os.PathLike[str] | None) -> Path:
@@ -136,59 +132,8 @@ def extract_sky130_card(
     return dict(card)
 
 
-class _Sky130OsdiFet(OsdiDevice):
-    """Explicit OpenVAF/OSDI regression device; never registered as a PDK."""
-
-    VA_PATH = _BSIM4_VA
-    MODULE = "bsim4va"
-    POLARITY = "nmos"
-
-    def __init__(
-        self,
-        W: float = 1.0,
-        L: float = 0.15,
-        NF: int = 1,
-        *,
-        corner: str = "tt",
-        vb: float = 0.0,
-        temperature: float = 300.15,
-        extract_w: float | None = None,
-        **_ignored,
-    ):
-        card = load_sky130_card(
-            self.POLARITY,
-            width_um=W,
-            length_um=L,
-            nf=NF,
-            corner=corner,
-            reference_width_um=extract_w,
-        )
-        self.BASE_CARD = dict(card.model_parameters)
-        self.corner = corner
-        super().__init__(W=W, L=L, NF=NF, vb=vb, temperature=temperature)
-
-
-class Sky130OsdiNfet(_Sky130OsdiFet):
-    POLARITY = "nmos"
-    TYPE = 1
-
-
-class Sky130OsdiPfet(_Sky130OsdiFet):
-    POLARITY = "pmos"
-    TYPE = -1
-
-
-register_pdk(
-    "sky130_osdi",
-    {"nmos": Sky130OsdiNfet, "pmos": Sky130OsdiPfet},
-    default=False,
-)
-
-
 __all__ = [
     "Sky130Nfet",
     "Sky130Pfet",
-    "Sky130OsdiNfet",
-    "Sky130OsdiPfet",
     "extract_sky130_card",
 ]

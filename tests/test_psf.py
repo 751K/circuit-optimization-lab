@@ -13,7 +13,7 @@ the parsing layer points here, not at a solver.
 Anchor values are transcribed from the raw fixtures (line numbers noted inline);
 they are exact Spectre doubles, so equality is checked with a tight rtol.
 
-Pure local-file parsing -- no ngspice / OSDI / PDK, no skips: the fixtures live
+Pure local-file parsing -- no external simulator or PDK, no skips: the fixtures live
 in the repo and are always available.
 """
 from __future__ import annotations

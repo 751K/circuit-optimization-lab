@@ -35,13 +35,13 @@ def stamp_adm(Y, RHS, P, Q, y):
 
 
 def stamp_dense_lti(G, C, RHS_G, RHS_C, terms, G4, C4):
-    """Dense multi-terminal small-signal stamp (silicon/OSDI devices).
+    """Dense multi-terminal small-signal stamp for compact-model devices.
 
     ``terms`` is a tuple of terminal encodings matching the rows/cols of the
-    dense conductance ``G4`` and capacitance ``C4`` blocks (e.g. (d, g, s, b)
-    from :meth:`OsdiDevice.get_terminal_linearization`). Solved-node terminals
-    stamp ``Y[row, col] += block[i, j]``; known-voltage columns move to the
-    RHS; known-voltage rows have no KCL equation and drop.
+    dense conductance ``G4`` and capacitance ``C4`` blocks, normally (d, g, s,
+    b) from a native BSIM device. Solved-node terminals stamp
+    ``Y[row, col] += block[i, j]``; known-voltage columns move to the RHS;
+    known-voltage rows have no KCL equation and drop.
     """
     for i, ti in enumerate(terms):
         if ti[0] != "n":

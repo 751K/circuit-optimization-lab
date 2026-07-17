@@ -1218,19 +1218,6 @@ def _marshal_transient(
         gear2_retry_requested=gear2_retry_requested)
 
 
-def osdi_model_names(model_types):
-    """Names in a ``model_types`` map bound to OSDI (compiled-VA) devices."""
-    if not model_types:
-        return ()
-    from .device_model import get_model_class
-    names = []
-    for name, mt in model_types.items():
-        cls = get_model_class(mt)
-        if cls is not None and getattr(cls, "TRANSIENT_BACKEND", None) == "osdi":
-            names.append(name)
-    return tuple(names)
-
-
 def ngspice_model_names(model_types):
     """Names bound to a direct-ngspice full-charge transient backend."""
     if not model_types:
@@ -1334,9 +1321,6 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
                require_dc_in_box use a 2 V margin; other topologies are unbounded.
       V0    : optional initial solved-node vector.
       model_types / device_kwargs : optional per-device model binding (silicon).
-               Circuits whose transistors are OSDI (compiled Verilog-A) devices
-               are routed to :func:`circuitopt.osdi_transient.transient_osdi` — the
-               default (OTFT) path is untouched when these are None.
     Returns dict: t, output, vout, nfail, and per-node arrays. AFE legacy vop/von
     fields are included when those nodes exist.
 
@@ -1424,28 +1408,6 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         raise NotImplementedError(
             "per-instance threshold mismatch is only supported on the model-card "
             "ngspice transient path")
-    if osdi_model_names(model_types):
-        from .osdi_transient import transient_osdi
-        _inputs = inputs
-        if _inputs is None:
-            _inputs = {}
-            if vip is not None:
-                _inputs["vip"] = vip
-            if vin is not None:
-                _inputs["vin"] = vin
-        _acfg = resolve_adaptive_config(
-            adaptive_config, adaptive_reltol=adaptive_reltol,
-            adaptive_vabstol=adaptive_vabstol, adaptive_iabstol=adaptive_iabstol,
-            adaptive_max_steps=adaptive_max_steps, adaptive_h0=adaptive_h0)
-        return transient_osdi(
-            sizes, bias, tgrid, topo=topo, nf=nf, V0=V0, inputs=_inputs,
-            node_inputs=node_inputs, current_inputs=current_inputs,
-            corner=corner, model_types=model_types, device_kwargs=device_kwargs,
-            integration_method=integration_method, newton_maxit=newton_maxit,
-            newton_vtol=newton_vtol, newton_step_limit=newton_step_limit,
-            adaptive=bool(adaptive), adaptive_reltol=_acfg.reltol,
-            adaptive_vabstol=_acfg.vabstol, adaptive_iabstol=_acfg.iabstol,
-            adaptive_max_steps=_acfg.max_steps)
     marshalled = _marshal_transient(
         sizes, bias, tgrid, vip=vip, vin=vin, nf=nf, V0=V0, topo=topo,
         inputs=inputs, node_inputs=node_inputs, current_inputs=current_inputs,

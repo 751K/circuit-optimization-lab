@@ -29,24 +29,3 @@ def test_ngspice_resolution_order(tmp_path, monkeypatch):
     assert toolchain.ngspice_binary() == explicit
     monkeypatch.delenv("NGSPICE_BIN")
     assert toolchain.ngspice_binary() == local
-
-
-def test_openvaf_root_binary_and_bsim_source(tmp_path, monkeypatch):
-    root = tmp_path / "OpenVAF-Reloaded"
-    binary = _executable(root / "target" / "release" / "openvaf-r")
-    source = root / "integration_tests" / "BSIM4" / "bsim4.va"
-    source.parent.mkdir(parents=True)
-    source.write_text("module bsim4va; endmodule\n")
-    monkeypatch.delenv("OPENVAF_BIN", raising=False)
-    monkeypatch.delenv("BSIM4_VA", raising=False)
-    monkeypatch.setenv("OPENVAF_ROOT", str(root))
-    assert toolchain.openvaf_root() == str(root)
-    assert toolchain.openvaf_binary() == binary
-    assert toolchain.bsim4_va_path() == str(source)
-
-
-def test_osdi_cache_defaults_to_active_venv(tmp_path, monkeypatch):
-    monkeypatch.delenv("OSDI_CACHE_DIR", raising=False)
-    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path))
-    expected = tmp_path / "cache" / "circuitopt" / "osdi"
-    assert toolchain.osdi_cache_dir() == str(expected)
