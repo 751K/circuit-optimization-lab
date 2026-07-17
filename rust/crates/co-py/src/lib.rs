@@ -41,6 +41,7 @@ use pyo3::types::{PyDict, PyList};
 
 use co_bsim4::CoBsim4;
 use co_core::{bsim_transient, lti, mna, otft, periodic, transient};
+use co_pdk::{CompiledPdk as PdkCompiled, NumericCard, PdkError};
 use co_spice::{
     ErrorKind as SpiceErrorKind, EvalCtx, LibrarySection, NumericModel, ParamValue,
     ParameterAssignment, ScopeInner, SpiceError, SpiceModelLibrary, Statement, Subcircuit,
@@ -2704,6 +2705,118 @@ fn spice_elaborate_instance<'py>(
     Ok(dict)
 }
 
+// ---------------------------------------------------------------------------
+// PDK compilers (co-pdk) — parity surface.
+//
+// A thin PyO3 wrapper over `co_pdk::CompiledPdk`, exposed for differential
+// verification against `circuitopt.pdk.{freepdk45,sky130,tsmc28}`. Not wired
+// into production (the Python PDK adapters stay live). D12: only numeric card
+// values and path/section identifiers cross the boundary — never card text.
+// ---------------------------------------------------------------------------
+
+/// Map a `co-pdk` error onto a Python exception. Errors that originated in
+/// `co-spice` re-raise the matching class; PDK-specific model errors (the
+/// Python `*ModelError`, all `ValueError` subclasses) become `ValueError`.
+fn pdk_error_to_py(error: PdkError) -> PyErr {
+    match error.kind {
+        Some(kind) => spice_error_to_py(SpiceError {
+            kind,
+            message: error.message,
+        }),
+        None => PyValueError::new_err(error.message),
+    }
+}
+
+fn params_to_py<'py>(
+    py: Python<'py>,
+    params: &HashMap<String, f64>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    for (key, value) in params {
+        dict.set_item(key, *value)?;
+    }
+    Ok(dict)
+}
+
+fn numeric_card_to_py<'py>(py: Python<'py>, card: &NumericCard) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "model_parameters",
+        params_to_py(py, &card.model_parameters)?,
+    )?;
+    dict.set_item(
+        "instance_parameters",
+        params_to_py(py, &card.instance_parameters)?,
+    )?;
+    dict.set_item("model_name", &card.model_name)?;
+    dict.set_item("model_type", &card.model_type)?;
+    dict.set_item("source_version", card.source_version)?;
+    match &card.bin {
+        Some(bin) => {
+            let bin_dict = PyDict::new(py);
+            bin_dict.set_item("name", &bin.name)?;
+            bin_dict.set_item("lmin", bin.lmin)?;
+            bin_dict.set_item("lmax", bin.lmax)?;
+            bin_dict.set_item("wmin", bin.wmin)?;
+            bin_dict.set_item("wmax", bin.wmax)?;
+            dict.set_item("bin", bin_dict)?;
+        }
+        None => dict.set_item("bin", py.None())?,
+    }
+    let source = PyDict::new(py);
+    source.set_item("pdk", &card.source.pdk)?;
+    source.set_item("polarity", &card.source.polarity)?;
+    source.set_item("corner", &card.source.corner)?;
+    source.set_item("path", &card.source.path)?;
+    source.set_item("temperature_c", card.source.temperature_c)?;
+    source.set_item("macro_name", card.source.macro_name.clone())?;
+    source.set_item("bin_name", card.source.bin_name.clone())?;
+    dict.set_item("source", source)?;
+    Ok(dict)
+}
+
+/// An immutable PDK compiler with a thread-safe in-memory card/program cache.
+#[pyclass(name = "CompiledPdk")]
+struct PyCompiledPdk {
+    inner: Arc<PdkCompiled>,
+}
+
+#[pymethods]
+impl PyCompiledPdk {
+    #[new]
+    #[pyo3(signature = (pdk, root=None))]
+    fn new(pdk: &str, root: Option<String>) -> PyResult<Self> {
+        let inner = PdkCompiled::new(pdk, root).map_err(pdk_error_to_py)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Compile one numeric BSIM4 card.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (polarity, corner, temp_c, w_um=None, l_um=None, nf=1, mult=1, mismatch=None))]
+    fn numeric_card<'py>(
+        &self,
+        py: Python<'py>,
+        polarity: String,
+        corner: String,
+        temp_c: f64,
+        w_um: Option<f64>,
+        l_um: Option<f64>,
+        nf: i64,
+        mult: i64,
+        mismatch: Option<f64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self.inner.clone();
+        let card = py
+            .detach(move || {
+                inner.numeric_card(&polarity, &corner, temp_c, w_um, l_um, nf, mult, mismatch)
+            })
+            .map_err(pdk_error_to_py)?;
+        numeric_card_to_py(py, &card)
+    }
+}
+
 #[pymodule]
 fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -2751,5 +2864,7 @@ fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spice_select_sections, m)?)?;
     m.add_function(wrap_pyfunction!(spice_elaborate, m)?)?;
     m.add_function(wrap_pyfunction!(spice_elaborate_instance, m)?)?;
+    // PDK compilers parity surface.
+    m.add_class::<PyCompiledPdk>()?;
     Ok(())
 }

@@ -111,6 +111,7 @@ version = "1.4.0"
 dependencies = [
  "co-bsim4",
  "co-core",
+ "co-pdk",
  "co-spice",
  "numpy",
  "pyo3",
