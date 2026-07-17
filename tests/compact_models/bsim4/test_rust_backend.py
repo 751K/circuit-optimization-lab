@@ -17,7 +17,6 @@ absolute path (it is not vendored into per-agent worktrees).
 """
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 

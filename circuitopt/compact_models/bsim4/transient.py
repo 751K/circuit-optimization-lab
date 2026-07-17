@@ -8,6 +8,7 @@ import numpy as np
 from ... import diagnostics
 from ...compiled_topology import CompiledTopology, TERM_SOLVED
 from ...device_factory import build_devices
+from ..._engine import current_engine
 
 
 def _expanded_grid(tgrid, inputs, max_step):
@@ -184,9 +185,31 @@ def transient_native_bsim4(
     nnear = 0
     failed_residuals = []
     near_residuals = []
-    from ...numba_kernels import NUMBA_AVAILABLE
+    used_rust = current_engine() == "rust"
+    if used_rust:
+        used_numba = False
+    else:
+        from ...numba_kernels import NUMBA_AVAILABLE
 
-    if NUMBA_AVAILABLE:
+        used_numba = bool(NUMBA_AVAILABLE)
+    if used_rust:
+        from .rust_transient import solve_bsim4_rust
+
+        xhist, nfail, first_fail = solve_bsim4_rust(
+            plan,
+            devices,
+            V0,
+            tgrid,
+            input_matrix,
+            dynamic_sources,
+            method=method,
+            newton_maxit=newton_maxit,
+            newton_vtol=newton_vtol,
+            newton_step_limit=newton_step_limit,
+            gmin=gmin,
+        )
+        solve_samples = ()
+    elif used_numba:
         from .numba_transient import solve_bsim4_numba
 
         xhist, nfail, first_fail = solve_bsim4_numba(
@@ -649,8 +672,9 @@ def transient_native_bsim4(
         "nretry": 0,
         "nsubsteps": int(len(tgrid) - len(requested_t)),
         "bsim4_native_transient": True,
-        "numba_grid_solver": bool(NUMBA_AVAILABLE),
-        "bsim4_numba_transient": bool(NUMBA_AVAILABLE),
+        "numba_grid_solver": used_numba,
+        "bsim4_numba_transient": used_numba,
+        "bsim4_rust_transient": used_rust,
         "backend": "bsim4_native",
         "integration_method": "gear2" if method in {"gear2", "bdf2"} else "be",
         "X_final": sampled[-1].copy(),

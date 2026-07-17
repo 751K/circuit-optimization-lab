@@ -3,7 +3,7 @@ name = "co-py"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "PyO3 extension module `circuitopt_core` for CircuitOpt (R1 scaffold)."
+description = "PyO3 extension module `circuitopt_core` for CircuitOpt."
 
 [lib]
 # Python import name. Must stay `circuitopt_core` — circuitopt/_engine.py imports
@@ -18,11 +18,11 @@ test = false
 doctest = false
 
 [dependencies]
-# Path dependencies on the placeholder crates so the workspace link is real
-# (engine_info() actually calls into both), not just declared.
+# The extension links both the numerical core and the BSIM4 host.
 co-core = { path = "../co-core" }
 co-bsim4 = { path = "../co-bsim4" }
 # abi3-py310: one wheel works on CPython >= 3.10. The `extension-module` feature
 # is added automatically by maturin at wheel-build time (it must stay OFF here so
 # `cargo test`/`cargo clippy` can link libpython for the workspace test harness).
 pyo3 = { version = "0.29.0", features = ["abi3-py310"] }
+numpy = "0.29.0"

@@ -17,6 +17,7 @@ from .dc_solver import (DC_FALLBACK_TOL, bounded_least_squares_dc,
                         symmetric_seed)
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
+from ._engine import current_engine
 from . import diagnostics
 
 if TYPE_CHECKING:
@@ -59,7 +60,8 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
              nf: int | Mapping[str, int] | None = None,
              model_types: Mapping[str, str] | None = None,
              device_kwargs: Mapping[str, Mapping[str, Any]] | None = None, *,
-             binding: CircuitBinding | None = None) -> dict | None:
+             binding: CircuitBinding | None = None,
+             _rust_reference_retry: bool = False) -> dict | None:
     """
     Full small-signal AC analysis — topology supplied by `topo` (default AFE_TOPO).
 
@@ -93,6 +95,30 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     #     across fsolve iterations instead of being reset on every Id() call.
     _dev_inst = build_devices(sizes, nf=nf, corner=corner, topo=topo,
                               model_types=model_types, device_kwargs=device_kwargs)
+
+    def retry_with_reference_device():
+        is_otft = any(getattr(dev, "PDK", None) == "at4000tg"
+                      for dev in _dev_inst.values())
+        if current_engine() != "rust" or _rust_reference_retry or not is_otft:
+            return None
+        from .pmos_tft_model import rust_otft_reference_mode
+
+        with rust_otft_reference_mode():
+            result = ac_solve(
+                sizes,
+                bias,
+                freqs,
+                corner=corner,
+                x0_guess=x0_guess,
+                topo=topo,
+                nf=nf,
+                model_types=model_types,
+                device_kwargs=device_kwargs,
+                _rust_reference_retry=True,
+            )
+        if result is not None:
+            result["rust_otft_reference_fallback"] = True
+        return result
 
     def Id(name, Vs, Vd, Vg):
         try:
@@ -231,7 +257,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                     sol = bounded_least_squares_dc(residuals, guesses + [flat], topo, bias,
                                                     tol=dc_tol)
             if sol is None:
-                return None  # DC didn't converge even with continuation
+                return retry_with_reference_device()
 
         nv = topo.node_vals(sol)                  # {node_name: voltage}, full asymmetric op
         if topo.n_branches:                       # voltage-source branch currents
@@ -248,10 +274,10 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     if getattr(topo, "require_dc_in_box", False) and not topo.in_voltage_box(nv, bias):
         sbox = bounded_least_squares_dc(residuals, guesses, topo, bias, tol=dc_tol)
         if sbox is None:
-            return None
+            return retry_with_reference_device()
         nv = topo.node_vals(sbox)
         if not topo.in_voltage_box(nv, bias):
-            return None
+            return retry_with_reference_device()
 
     # ── PHYSICALITY GUARD ── No internal node can sit above the supply or below ground
     # here. A solution with e.g. net20 > VDD means the tail M11 is reversed — a
@@ -278,7 +304,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
             box_vecs = [topo.guess_vector(g) for g in box_guesses]
             s3 = bounded_least_squares_dc(residuals, box_vecs + guesses, topo, bias)
             if s3 is None:
-                return None
+                return retry_with_reference_device()
             nv = topo.node_vals(s3)
 
     # ── SYMMETRY GUARD ── No per-device mismatch ⇒ physical op is symmetric (VOP=VON,
@@ -324,42 +350,49 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     ac_res = plan.ac_resistors(ac_drives)
     out_weights = plan.output_weights
 
-    G = np.zeros((NN, NN), dtype=complex)
-    C = np.zeros((NN, NN), dtype=complex)
-    RHS_G = np.zeros(NN, dtype=complex)
-    RHS_C = np.zeros(NN, dtype=complex)
-    for name, d, g, s in devs:
-        dev = _dev_inst[name]
-        if getattr(dev, "HAS_TERMINAL_LINEARIZATION", False):
-            G4, C4 = dev.get_terminal_linearization(*bpts[name])
-            stamp_dense_lti(
-                G, C, RHS_G, RHS_C,
-                (d, g, s, ("v", 0.0)),
-                G4, C4,
-            )
-        else:
-            p = ss[name]
-            stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
-                           p["gm"], p["gds"], p["Cgs"], p["Cgd"])
-    for a, b, cap in ac_caps:
-        stamp_adm(C, RHS_C, a, b, cap)
-    for _, a, b, _, gval in ac_res:
-        stamp_adm(G, RHS_G, a, b, gval)
-    for p, q, cp, cn, gm in plan.ac_vccs(ac_drives):
-        stamp_vccs(G, RHS_G, p, cp, cn, gm)
-    for p, q, bi, e_ac in plan.ac_vsources(ac_drives):  # voltage source: short (E_ac=0)
-        stamp_vsource(G, RHS_G, p, q, bi, e_ac)
-    for p, q, cp, cn, bi, mu in plan.ac_vcvs(ac_drives):   # VCVS: noiseless
-        stamp_vcvs(G, RHS_G, p, q, cp, cn, bi, mu)
-    for p, q, ctrl_bi, beta in plan.ac_cccs(ac_drives):    # CCCS: noiseless
-        stamp_cccs(G, RHS_G, p, q, ctrl_bi, beta)
-    for p, q, ctrl_bi, bi, gamma in plan.ac_ccvs(ac_drives): # CCVS: noiseless
-        stamp_ccvs(G, RHS_G, p, q, ctrl_bi, bi, gamma)
-    # ideal current sources are open-circuit in the small-signal AC system.
-    jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
-    Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]
-    RHS = RHS_G[None, :] + jw[:, None] * RHS_C[None, :]
-    V = np.linalg.solve(Y, RHS[..., None])[..., 0]
+    if current_engine() == "rust":
+        from ._rust_lti import build_lti_problem, complex_array
+
+        lti_problem = build_lti_problem(
+            plan, devs, _dev_inst, bpts, ss, ac_caps, ac_res,
+            plan.ac_vccs(ac_drives), ac_drives)
+        V = complex_array(lti_problem.solve(np.asarray(freqs, float)))
+    else:
+        G = np.zeros((NN, NN), dtype=complex)
+        C = np.zeros((NN, NN), dtype=complex)
+        RHS_G = np.zeros(NN, dtype=complex)
+        RHS_C = np.zeros(NN, dtype=complex)
+        for name, d, g, s in devs:
+            dev = _dev_inst[name]
+            if getattr(dev, "HAS_TERMINAL_LINEARIZATION", False):
+                G4, C4 = dev.get_terminal_linearization(*bpts[name])
+                stamp_dense_lti(
+                    G, C, RHS_G, RHS_C,
+                    (d, g, s, ("v", 0.0)),
+                    G4, C4,
+                )
+            else:
+                p = ss[name]
+                stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
+                               p["gm"], p["gds"], p["Cgs"], p["Cgd"])
+        for a, b, cap in ac_caps:
+            stamp_adm(C, RHS_C, a, b, cap)
+        for _, a, b, _, gval in ac_res:
+            stamp_adm(G, RHS_G, a, b, gval)
+        for p, q, cp, cn, gm in plan.ac_vccs(ac_drives):
+            stamp_vccs(G, RHS_G, p, cp, cn, gm)
+        for p, q, bi, e_ac in plan.ac_vsources(ac_drives):
+            stamp_vsource(G, RHS_G, p, q, bi, e_ac)
+        for p, q, cp, cn, bi, mu in plan.ac_vcvs(ac_drives):
+            stamp_vcvs(G, RHS_G, p, q, cp, cn, bi, mu)
+        for p, q, ctrl_bi, beta in plan.ac_cccs(ac_drives):
+            stamp_cccs(G, RHS_G, p, q, ctrl_bi, beta)
+        for p, q, ctrl_bi, bi, gamma in plan.ac_ccvs(ac_drives):
+            stamp_ccvs(G, RHS_G, p, q, ctrl_bi, bi, gamma)
+        jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
+        Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]
+        RHS = RHS_G[None, :] + jw[:, None] * RHS_C[None, :]
+        V = np.linalg.solve(Y, RHS[..., None])[..., 0]
     out = np.zeros(len(freqs), dtype=complex)
     for node, weight in out_weights.items():
         out += weight * V[:, plan.idx[node]]
@@ -386,6 +419,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
         "branch_currents": branch_currents,
         "ss": ss,
         "corner": corner,
+        "rust_lti_solver": current_engine() == "rust",
     }
 
 

@@ -1,22 +1,24 @@
-//! co-core — CircuitOpt numerical solver core (R1 scaffold).
+//! co-core - CircuitOpt numerical solver core.
 //!
-//! R1 (this commit): placeholder only. The crate exists so the workspace
-//! links end-to-end and `co-py` has a real path dependency to call.
-//!
-//! R3 will port the numerical hot paths here — the MNA stamping, the Newton
-//! loop, and the transient integration currently living in
-//! `circuitopt/numba_kernels.py` and the `*_solver.py` modules — as
-//! allocation-light Rust behind a stable, FFI-friendly surface that `co-py`
-//! can dispatch to in place of the numba kernels.
+//! The crate owns the AT4000TG OTFT device equations, terminal resolution,
+//! dense MNA/GEPP, circuit Newton, fixed and adaptive transient integration,
+//! complex LTI solves, and the BSIM4 fixed-grid orchestration used by `co-py`.
+
+pub mod bsim_transient;
+pub mod error;
+pub mod lti;
+pub mod mna;
+pub mod otft;
+pub mod transient;
+
+pub use error::CoreError;
 
 /// Canonical crate version, surfaced to Python through `engine_info()`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Placeholder numeric probe: proves the crate compiles, links, and is
-/// callable across the workspace. R3 replaces it with the real solver entry
-/// points (stamp / solve / step).
+/// Minimal numeric ABI probe retained for build and linkage diagnostics.
 pub fn core_probe(x: f64) -> f64 {
     2.0 * x + 1.0
 }

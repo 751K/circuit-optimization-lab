@@ -94,17 +94,28 @@ mkdocs build --strict
 
 Use `git diff --check` before committing.
 
-## Rust Core Scaffolding
+## Rust Core
 
-The `rust/` workspace hosts the in-progress compiled core: `co-core` (solver
-kernels, filled in R3), `co-bsim4` (Berkeley BSIM4.5 host, **live as of R2**),
+The `rust/` workspace hosts the compiled core: `co-core` (device, MNA, LTI, and
+transient kernels, **live as of R3**), `co-bsim4` (Berkeley BSIM4.5 host,
+**live as of R2**),
 and `co-py` — the `circuitopt_core` PyO3 extension. `co-bsim4` compiles the
 *unmodified* vendored Berkeley C (the same translation units `native.py`
 builds, minus `host.c`) at build time via the `cc` crate and reimplements the
 `host.c` adapter layer in Rust (parameter binding, internal-node reduction,
 terminal I/G/Q/C extraction, noise combination); `bindgen` derives the shared
-struct layouts so the port keeps an identical ABI with the compiled C. The
-solver hot path still runs through numba until R3.
+struct layouts so the port keeps an identical ABI with the compiled C. With
+`CIRCUIT_ENGINE=rust`, OTFT/BSIM4 transient and AC/noise MNA run through this
+core. Periodic HB/PAC/PNoise assembly remains Python-owned until R4; transient
+period solves already dispatch to Rust.
+
+The coarse PyO3 entry points accept read-only, C-contiguous NumPy arrays for
+frequency grids, source waveforms, states, and device grids. Rust borrows those
+buffers while the GIL is released and returns NumPy-owned matrices/waveforms;
+non-contiguous views are rejected instead of silently copied or reinterpreted.
+Topology dictionaries are converted once when an immutable problem object is
+built. Keep this boundary when adding a solver path: do not introduce a
+per-device or per-time-step Python callback.
 
 Toolchain: stable Rust from rustup with the `rustfmt` and `clippy` components,
 plus `maturin` for the Python bridge. Building `co-bsim4` also needs a C

@@ -15,11 +15,11 @@ the requested engine, writes the result back to ``CIRCUIT_ENGINE`` for child
 processes, and — for the pure-Python engine — reuses the existing
 ``CIRCUIT_USE_NUMBA=0`` kill-switch.
 
-R-phase note: in R1 the ``"rust"`` engine only proves ``circuitopt_core`` is
-importable and reports build metadata; the numerical path *still runs through
-numba*. R3 is where the solvers are actually dispatched into the Rust core.
-Because of that, requesting ``"rust"`` today resolves to a live-but-numba run
-when the core is present, and warns-and-falls-back-to-numba when it is not.
+R3 dispatches OTFT scalar evaluation, fixed/adaptive transient, BSIM4 transient,
+and AC/noise MNA into the Rust core. Periodic HB/PAC/PNoise assembly remains a
+Python orchestration boundary until R4, while the transient periods it requests
+already use Rust. Requesting ``"rust"`` warns and falls back to ``"numba"`` only
+when the extension cannot be imported.
 """
 from __future__ import annotations
 

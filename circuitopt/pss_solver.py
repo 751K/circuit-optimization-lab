@@ -13,6 +13,7 @@ keeps all device/capacitance behavior identical to transient analysis.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import wraps
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
@@ -29,10 +30,25 @@ from .device_factory import (
 from .adaptive_config import resolve_adaptive_config
 from .topology import AFE_TOPO
 from .transient_solver import transient
+from ._engine import current_engine
 from . import diagnostics
 
 if TYPE_CHECKING:
     from .device_factory import CircuitBinding
+
+
+def _r3_periodic_reference_context(function):
+    """Keep pre-R4 OTFT orbit setup on the reference scalar equations."""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        if current_engine() != "rust":
+            return function(*args, **kwargs)
+        from .pmos_tft_model import rust_otft_reference_mode
+
+        with rust_otft_reference_mode():
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def _finite_component_max(a):
@@ -832,6 +848,7 @@ class _PSSShootingStepper:
         )
 
 
+@_r3_periodic_reference_context
 def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float],
               period: float, *, topo: Any = None,
               nf: int | Mapping[str, int] | None = None, tgrid: np.ndarray | None = None,

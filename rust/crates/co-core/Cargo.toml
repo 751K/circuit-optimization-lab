@@ -3,6 +3,7 @@ name = "co-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CircuitOpt numerical solver core (R1 scaffold)."
+description = "CircuitOpt device, MNA, LTI, and transient numerical solver core."
 
 [dependencies]
+thiserror = "2.0.17"

@@ -393,8 +393,11 @@ def test_pmos_chopper_transient_gear2_retry_handles_stiff_edges():
 
     assert not g2.get("gear2_be_fallback_used", False)
     assert not g2.get("gear2_python_retry_solver", False)
-    assert g2.get("numba_grid_solver", False)
-    assert g2.get("transient_profile", {}).get("numba_grid_solver", False)
+    assert g2.get("numba_grid_solver", False) != g2.get("rust_grid_solver", False)
+    assert (
+        g2.get("transient_profile", {}).get("numba_grid_solver", False)
+        != g2.get("transient_profile", {}).get("rust_grid_solver", False)
+    )
     assert g2.get("transient_profile", {}).get("failed_intervals", 0) == 0
     assert g2["nfail"] <= be["nfail"]
     np.testing.assert_allclose(g2["output"], be["output"], rtol=1e-3, atol=3e-3)
@@ -457,7 +460,7 @@ def test_pmos_chopper_transient_flat_step_profile_reduces_work():
 
     assert strict["nfail"] <= 1
     assert fast["nfail"] == 0
-    assert fast["numba_grid_solver"] is True
+    assert fast["numba_grid_solver"] != fast.get("rust_grid_solver", False)
     assert fast["transient_profile"]["numba_grid_partial"] is False
     assert fast["transient_profile"]["failed_substeps"] == 0
     assert fast["transient_profile"]["failed_intervals"] == 0

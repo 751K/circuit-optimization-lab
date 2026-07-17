@@ -207,8 +207,15 @@ def test_real_tsmc28_inverter_transient_when_pdk_is_configured(monkeypatch):
     out = result["nodes"]["OUT"]
     assert result["backend"] == "bsim4_native"
     assert result["bsim4_native_transient"] is True
-    assert result["numba_grid_solver"] is True
-    assert result["bsim4_numba_transient"] is True
+    from circuitopt._engine import current_engine
+    if current_engine() == "rust":
+        assert result["numba_grid_solver"] is False
+        assert result["bsim4_numba_transient"] is False
+        assert result["bsim4_rust_transient"] is True
+    else:
+        assert result["numba_grid_solver"] is True
+        assert result["bsim4_numba_transient"] is True
+        assert result["bsim4_rust_transient"] is False
     assert result["nfail"] == 0
     assert out[0] > 0.85 and out[-1] < 0.05
     assert np.all(np.isfinite(out))

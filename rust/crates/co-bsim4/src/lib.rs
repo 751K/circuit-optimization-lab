@@ -1308,7 +1308,7 @@ pub fn abi_version() -> u32 {
     ABI_VERSION
 }
 
-/// Placeholder retained for the R1 `engine_info()` workspace probe.
+/// Minimal numeric ABI probe retained for build and linkage diagnostics.
 pub fn model_probe(x: f64) -> f64 {
     x + 1.0
 }

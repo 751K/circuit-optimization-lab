@@ -61,6 +61,9 @@ def test_afe_dc_bounded_fallback_recovers_extreme_nominal_point():
     ac = ac_solve(sizes, bias, np.array([1.0]))
 
     assert ac is not None
+    from circuitopt._engine import current_engine
+    if current_engine() == "rust":
+        assert ac["rust_otft_reference_fallback"] is True
     assert np.isfinite(ac["gains"]).all()
     assert all(-0.5 <= ac["dc_op"][node] <= 40.5
                for node in ["VOP", "VON", "VFBP", "VFBN", "NET20", "NET2"])

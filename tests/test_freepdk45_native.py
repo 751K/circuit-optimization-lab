@@ -161,11 +161,75 @@ def test_native_5t_ota_transient_without_ngspice(monkeypatch):
         max_step=0.2e-9,
     )
     assert result["backend"] == "bsim4_native"
-    assert result["numba_grid_solver"] is True
-    assert result["bsim4_numba_transient"] is True
+    from circuitopt._engine import current_engine
+    if current_engine() == "rust":
+        assert result["numba_grid_solver"] is False
+        assert result["bsim4_numba_transient"] is False
+        assert result["bsim4_rust_transient"] is True
+    else:
+        assert result["numba_grid_solver"] is True
+        assert result["bsim4_numba_transient"] is True
+        assert result["bsim4_rust_transient"] is False
     assert result["nfail"] == 0
     assert result["nodes"]["vout"][-1] > result["nodes"]["vout"][0] + 0.2
     assert np.all(np.isfinite(result["nodes"]["vout"]))
+
+
+def test_native_5t_ota_rust_grid_matches_numba(monkeypatch):
+    import circuitopt.compact_models.bsim4.transient as bsim_transient
+    from circuitopt.transient_solver import transient
+
+    spec, _ = _spec(driven=True)
+    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
+    time = np.linspace(0.0, 8e-9, 41)
+    vip = np.where(time < 2e-9, 0.55, 0.56)
+    vin = np.where(time < 2e-9, 0.55, 0.54)
+    kwargs = dict(
+        binding=spec.binding(), inputs={"vip": vip, "vin": vin},
+        V0=np.asarray((0.1, 0.45, 0.45)), integration_method="gear2",
+        max_step=0.2e-9)
+
+    monkeypatch.setattr(bsim_transient, "current_engine", lambda: "numba")
+    reference = transient(spec.sizes, spec.bias, time, **kwargs)
+    monkeypatch.setattr(bsim_transient, "current_engine", lambda: "rust")
+    got = transient(spec.sizes, spec.bias, time, **kwargs)
+
+    assert got["bsim4_rust_transient"] is True
+    assert got["nfail"] == reference["nfail"]
+    for name in got["nodes"]:
+        np.testing.assert_allclose(got["nodes"][name], reference["nodes"][name],
+                                   rtol=1e-12, atol=1e-15)
+
+
+def test_native_5t_ota_rust_grid_does_not_import_numba_transient(monkeypatch):
+    import sys
+
+    import circuitopt.compact_models.bsim4.transient as bsim_transient
+    from circuitopt.transient_solver import transient
+
+    spec, _ = _spec(driven=True)
+    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
+    monkeypatch.setattr(bsim_transient, "current_engine", lambda: "rust")
+    monkeypatch.setitem(
+        sys.modules, "circuitopt.compact_models.bsim4.numba_transient", None)
+    time = np.linspace(0.0, 1e-9, 6)
+    result = transient(
+        spec.sizes,
+        spec.bias,
+        time,
+        binding=spec.binding(),
+        inputs={
+            "vip": np.full_like(time, 0.55),
+            "vin": np.full_like(time, 0.55),
+        },
+        V0=np.asarray((0.1, 0.45, 0.45)),
+        integration_method="be",
+        max_step=0.2e-9,
+    )
+
+    assert result["bsim4_rust_transient"] is True
+    assert result["bsim4_numba_transient"] is False
+    assert result["nfail"] == 0
 
 
 def test_native_5t_ota_pss_without_ngspice(monkeypatch):

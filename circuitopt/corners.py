@@ -17,6 +17,7 @@ This module drives the local Python solvers; Cadence/Spectre comparison should
 live in dedicated verification scripts instead of the core solver package.
 """
 import itertools
+from functools import wraps
 
 import numpy as np
 
@@ -25,6 +26,7 @@ from .circuit_loader import circuit_from_dict
 from .device_factory import CORNERS
 from .noise_solver import band_rms, noise_analysis
 from .topology import AFE_TOPO
+from ._engine import current_engine
 from . import diagnostics
 
 # Per-device mismatch sigmas: Vth (area-scaled inside the model) and beta (flat).
@@ -34,6 +36,20 @@ SIGMA_MBETA0 = 0.019
 AFE_PAIRS = (("M7", "M8"), ("M9", "M10"), ("M12", "M13"), ("M14", "M15"))
 
 _DEFAULT_FREQS = np.logspace(-2, 4, 121)
+
+
+def _root_sensitive_otft_reference_context(function):
+    """Preserve the calibrated root choice for bifurcation-edge OTFT screens."""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        if current_engine() != "rust":
+            return function(*args, **kwargs)
+        from .pmos_tft_model import rust_otft_reference_mode
+
+        with rust_otft_reference_mode():
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def _base(corner):
@@ -61,6 +77,7 @@ def latch_kick_corner(base="slow", pairs=AFE_PAIRS, k=3.0, signs=None):
     return c
 
 
+@_root_sensitive_otft_reference_context
 def latch_screen(sizes, bias, nf=None, base="slow", topo=AFE_TOPO, k=3.0,
                  pairs=AFE_PAIRS, x0_guess=None, freqs=None):
     """Worst-case differential-mismatch latch screen. Pushes each symmetric pair
