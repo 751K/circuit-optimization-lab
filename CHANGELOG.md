@@ -19,6 +19,8 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+## [1.4.1] - 2026-07-17
+
 ### Fixed / 修复
 
 - **Default test-suite runtime and native BSIM4 build robustness / 默认测试集耗时与原生 BSIM4 构建健壮性**
@@ -645,7 +647,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.1.0...v1.2.0

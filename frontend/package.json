@@ -1,7 +1,7 @@
 {
   "name": "circuitopt-frontend",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.4.1",
   "type": "module",
   "description": "Browser circuit builder for circuit-optimization (circuitopt). F1: graph<->JSON mapping core.",
   "scripts": {

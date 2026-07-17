@@ -1,6 +1,6 @@
 [package]
 name = "circuitopt-builder"
-version = "1.4.0"
+version = "1.4.1"
 description = "CircuitOpt Builder — desktop shell for the circuitopt browser circuit editor"
 authors = ["circuit-optimization"]
 edition = "2021"
