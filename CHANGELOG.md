@@ -19,6 +19,29 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Added / 新增
+
+- **Rust core scaffolding and engine switch / Rust 核心脚手架与引擎开关**
+
+  **English:** Added the `rust/` workspace — `co-core` (solver kernels, R3),
+  `co-bsim4` (BSIM4.5 host, R2), and the `circuitopt_core` PyO3 extension —
+  plus a `CIRCUIT_ENGINE` / `--engine` switch selecting `rust`, `numba`, or
+  `python` (precedence argv > env > default; a missing rust core warns once
+  and falls back to numba, and `--no-numba` keeps its exact behavior as the
+  `python` shorthand). `tools/version.py` now synchronizes the Rust workspace
+  version; CI gates `cargo fmt`/`clippy`, installs `circuitopt_core` in the
+  test matrix, and the release workflow archives per-OS wheels as artifacts.
+  The numerical path still runs on numba until R3 wires the rust engine in.
+
+  **中文：** 新增 `rust/` workspace——`co-core`（求解内核，R3）、`co-bsim4`
+  （BSIM4.5 宿主，R2）与 `circuitopt_core` PyO3 扩展——并引入
+  `CIRCUIT_ENGINE` / `--engine` 开关在 `rust`、`numba`、`python` 间选择
+  （优先级 argv > 环境变量 > 默认；rust 核心缺失时警告一次并回退 numba，
+  `--no-numba` 行为完全不变，等价于 `python`）。`tools/version.py` 现同步
+  Rust workspace 版本号；CI 新增 `cargo fmt`/`clippy` 门禁并在测试矩阵安装
+  `circuitopt_core`，发布工作流归档各平台 wheel 构件。数值路径在 R3 接线前
+  仍运行于 numba。
+
 ## [1.4.0] - 2026-07-17
 
 ### Added / 新增

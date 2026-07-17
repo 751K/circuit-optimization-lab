@@ -84,6 +84,42 @@ mkdocs build --strict
 
 Use `git diff --check` before committing.
 
+## Rust Core Scaffolding
+
+The `rust/` workspace hosts the in-progress compiled core: `co-core` (solver
+kernels, filled in R3), `co-bsim4` (vendored Berkeley BSIM4.5 host, filled in
+R2), and `co-py` — the `circuitopt_core` PyO3 extension. R1 ships scaffolding
+only: `circuitopt_core.engine_info()` reports build metadata, and the
+numerical path still runs through numba until R3 wires the solvers in.
+
+Toolchain: stable Rust from rustup with the `rustfmt` and `clippy` components,
+plus `maturin` for the Python bridge.
+
+```bash
+cd rust
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# Build + install circuitopt_core into the active venv for local testing
+maturin develop --release -m crates/co-py/Cargo.toml
+```
+
+Engine selection: the solvers run on one of three engines, chosen by the CLI
+`--engine` flag or the `CIRCUIT_ENGINE` environment variable (precedence
+argv > env > default):
+
+- `numba` (default) — the JIT kernels;
+- `python` — the pure-Python fallback, same switch as `--no-numba`;
+- `rust` — requires `circuitopt_core`; when it is not installed the run warns
+  once and falls back to `numba`.
+
+`circuitopt.current_engine()` reports the resolved engine. CI lints the
+workspace (`cargo fmt` + `clippy`), installs `circuitopt_core` in the test
+matrix so the rust-present tests run, and the release workflow archives
+per-OS `circuitopt_core` wheels as build artifacts (attached to GitHub
+Releases only from R6).
+
 ## Version Management
 
 `pyproject.toml` is the canonical source for the project version. Do not edit
@@ -102,9 +138,10 @@ python tools/version.py release 1.4.0
 ```
 
 `set` synchronizes `pyproject.toml`, `frontend/package.json`,
-`frontend/package-lock.json`, `frontend/src-tauri/Cargo.toml`, and
-`frontend/src-tauri/tauri.conf.json`. `release` also creates the dated
-changelog heading and comparison links. CI rejects version drift, and the
+`frontend/package-lock.json`, `frontend/src-tauri/Cargo.toml`,
+`frontend/src-tauri/tauri.conf.json`, and `rust/Cargo.toml` (the
+`[workspace.package]` version every Rust member crate inherits). `release`
+also creates the dated changelog heading and comparison links. CI rejects version drift, and the
 release workflow rejects a tag that does not match the canonical version.
 
 ## Change Boundaries
