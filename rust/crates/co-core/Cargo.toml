@@ -7,4 +7,5 @@ description = "CircuitOpt device, MNA, LTI, and transient numerical solver core.
 
 [dependencies]
 num-complex = "0.4.6"
+rayon = "1.11.0"
 thiserror = "2.0.17"

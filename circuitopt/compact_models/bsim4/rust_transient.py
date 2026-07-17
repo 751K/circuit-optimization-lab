@@ -12,6 +12,32 @@ from ...compiled_topology import TERM_RAIL
 from .native import Bsim4NativeError, _NativeDevice
 
 
+def build_bsim4_problem(plan, devices, handles, dynamic_sources=()):
+    """Build the shared Rust four-terminal circuit problem around owned handles."""
+    import circuitopt_core
+
+    wrappers = [devices[item.name] for item in plan.devices]
+    circuit = circuitopt_core.OtftTransientProblem(
+        passive_problem_spec(plan, dynamic_sources))
+    device_records = []
+    for item, wrapper in zip(plan.devices, wrappers, strict=True):
+        terms = [
+            _term_record(item.d),
+            _term_record(item.g),
+            _term_record(item.s),
+            _term_record((TERM_RAIL, wrapper.vb)),
+        ]
+        rows = [
+            _optional_index(item.di),
+            _optional_index(item.gi),
+            _optional_index(item.si),
+            -1,
+        ]
+        device_records.append((terms, rows))
+    return circuitopt_core.Bsim4TransientProblem(
+        circuit, device_records, [handle.pointer for handle in handles])
+
+
 def solve_bsim4_rust(
     plan,
     devices,
@@ -27,8 +53,6 @@ def solve_bsim4_rust(
     gmin,
 ):
     """Run BSIM4 model evaluation, MNA stamp, Newton, and grid in Rust."""
-    import circuitopt_core
-
     wrappers = [devices[item.name] for item in plan.devices]
     if not wrappers:
         raise ValueError("native BSIM4 transient requires at least one device")
@@ -42,25 +66,8 @@ def solve_bsim4_rust(
         for wrapper in wrappers
     ]
     try:
-        circuit = circuitopt_core.OtftTransientProblem(
-            passive_problem_spec(plan, dynamic_sources))
-        device_records = []
-        for item, wrapper in zip(plan.devices, wrappers, strict=True):
-            terms = [
-                _term_record(item.d),
-                _term_record(item.g),
-                _term_record(item.s),
-                _term_record((TERM_RAIL, wrapper.vb)),
-            ]
-            rows = [
-                _optional_index(item.di),
-                _optional_index(item.gi),
-                _optional_index(item.si),
-                -1,
-            ]
-            device_records.append((terms, rows))
-        problem = circuitopt_core.Bsim4TransientProblem(
-            circuit, device_records, [handle.pointer for handle in handles])
+        problem = build_bsim4_problem(
+            plan, devices, handles, dynamic_sources)
         completed, states, failures, first_failure = problem.solve_fixed_grid(
             np.asarray(x0, dtype=float),
             np.asarray(tgrid, dtype=float),

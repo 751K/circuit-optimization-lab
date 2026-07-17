@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -57,6 +59,23 @@ def test_cycle_unknown_function_and_nonfinite_fail_loudly():
         EvaluationScope().evaluate("v(0)")
     with pytest.raises(SpiceExpressionError):
         EvaluationScope().evaluate("1 / 0")
+
+
+def test_shared_scope_resolves_parameters_concurrently_without_false_cycles():
+    scope = EvaluationScope(values={"base": 2.0})
+    scope.define("a", "base + 1")
+    scope.define("b", "a * 3")
+    scope.define("result", "b + a")
+    barrier = Barrier(8)
+
+    def resolve_repeatedly(_index):
+        barrier.wait()
+        return tuple(scope.resolve_symbol("result") for _ in range(100))
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(resolve_repeatedly, range(8)))
+
+    assert results == [(12.0,) * 100] * 8
 
 
 def test_all_real_tsmc_parameter_expressions_compile_when_locally_installed():

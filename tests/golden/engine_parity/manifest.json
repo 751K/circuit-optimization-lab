@@ -1,6 +1,6 @@
 {
   "env": {
-    "commit": "36eea1a814db29904eeb361a08d8cde2a81c018a",
+    "commit": "c3d4c564828de017a47b5dd2f771e27b5f1f9838",
     "machine": "arm64",
     "numba": "0.66.0",
     "numpy": "2.4.6",
@@ -11,10 +11,10 @@
   },
   "files": {
     "tests/golden/engine_parity/circuits/afe_explore--ac-noise.json": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-    "tests/golden/engine_parity/circuits/freepdk45_5t_ota--ac-noise-transient.json": "c42daebfeb1bdccb4d29b7acde8b7df1dcb1441f754b03a86497567f9ef35270",
-    "tests/golden/engine_parity/circuits/periodic_rc--ac-noise-pss-pac-pnoise.json": "2a0a17f85010f057e0347fb28b40c6f3e8b34bc3b601f12fc3b8e45cb4526428",
-    "tests/golden/engine_parity/circuits/sky130_5t_ota--ac-noise.json": "a3c846ffe2630680fa285c0ac11933f20f951326267ed55871f6bca9710c98f6",
-    "tests/golden/engine_parity/circuits/tsmc28hpcp_5t_ota--ac-noise.json": "a3b49a81611a67457ce772d79f2040a19c301a078ac1fe02b93854f3473ce7b8",
+    "tests/golden/engine_parity/circuits/freepdk45_5t_ota--ac-noise-transient.json": "00cdbb176ae5c29114d6b9998de631a9f8e52d448f1edae4bdd8e4e4a1bb8fe4",
+    "tests/golden/engine_parity/circuits/periodic_rc--ac-noise-pss-pac-pnoise.json": "be71127aa60097b683435350a4b13cc9a053d8bbcf280fffc2f33809bcee2b45",
+    "tests/golden/engine_parity/circuits/sky130_5t_ota--ac-noise.json": "01fda31480bc06595b1a01e240e6868ecbfa1009b98bacac4501131f2d39b967",
+    "tests/golden/engine_parity/circuits/tsmc28hpcp_5t_ota--ac-noise.json": "f9c0b5e3958f94c75853a417513eab275d88d478b54f6b7ebecdb8df4bbdd9e7",
     "tests/golden/engine_parity/devices.npz": "b4cc5dc1d62775de762296cf5e76e860118d27a73a710690ac97e66cfb8a4002"
   },
   "frozen_circuit_cases": [
@@ -187,7 +187,7 @@
     "tsmc28hpcp|pmos|W2L0.1NF2|ff|T398.15: ok",
     "circuit afe_explore.json [ac,noise]: ok (0.5s)",
     "circuit freepdk45_5t_ota.json [ac,noise,transient]: ok (0.4s)",
-    "circuit sky130_5t_ota.json [ac,noise]: ok (0.4s)",
+    "circuit sky130_5t_ota.json [ac,noise]: ok (0.5s)",
     "circuit tsmc28hpcp_5t_ota.json [ac,noise]: ok (1.9s)",
     "circuit periodic_rc.json [ac,noise,pss,pac,pnoise]: ok (0.5s)"
   ]

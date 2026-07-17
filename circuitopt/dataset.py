@@ -35,6 +35,7 @@ import json
 import math
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import numpy as np
@@ -431,7 +432,7 @@ def candidate_circuit(config_dict, topo, base_sizes, base_bias, nf,
 def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
                   method="lhs", corner=None, label_groups=DEFAULT_GROUPS,
                   seed_fn=None, progress=None, config_dict=None, config_path=None,
-                  model_types=None, device_kwargs=None):
+                  model_types=None, device_kwargs=None, workers=1):
     """Sample the design space and evaluate every candidate → dataset dict.
 
     Returns ``{"manifest": {...}, "rows": [row, ...]}`` where each ``row`` is a
@@ -441,6 +442,9 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
     provides a per-candidate DC seed (as for the AC-coupled AFE testbench).
     ``model_types`` / ``device_kwargs`` bind non-default per-device models (silicon);
     a SKY130 ``corner`` is routed onto those devices rather than an OTFT PVT shift."""
+    if workers is None or workers < 1:
+        raise ValueError("workers must be a positive integer")
+
     # A SKY130 corner is baked into each silicon device's card (a device kwarg); an
     # OTFT corner name/shift-map stays on the solver's continuous PVT path. One binding
     # then carries topo + the (silicon-baked) per-device model map to every candidate
@@ -491,8 +495,7 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
                  if (periodic_groups and not struct_vars) else None)
 
     samples = sample(cfg.variables, n, seed=seed, method=method)
-    rows = []
-    for i, var_values in enumerate(samples):
+    def evaluate_candidate(i, var_values):
         size_vals = {k: v for k, v in var_values.items() if k in size_names}
         sizes, bias, cand_nf = apply_variables(size_vars, size_vals,
                                                base_sizes, base_bias, base_nf=nf)
@@ -527,9 +530,23 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
                                                      sizes, bias, eff_shift))
                 except Exception as exc:
                     diagnostics.note(f"dataset.{'+'.join(suite_groups)}_eval_fail", exc)
-        rows.append(_row(i, var_values, metrics, extra or None, labels))
-        if progress is not None:
-            progress(i + 1, n)
+        return _row(i, var_values, metrics, extra or None, labels)
+
+    rows = [None] * n
+    if workers == 1:
+        for i, var_values in enumerate(samples):
+            rows[i] = evaluate_candidate(i, var_values)
+            if progress is not None:
+                progress(i + 1, n)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(evaluate_candidate, i, var_values): i
+                       for i, var_values in enumerate(samples)}
+            for completed, future in enumerate(as_completed(futures), start=1):
+                rows[futures[future]] = future.result()
+                if progress is not None:
+                    progress(completed, n)
+    rows = [row for row in rows if row is not None]
 
     counts = {
         "total": len(rows),
@@ -668,7 +685,7 @@ def write_dataset(dataset, out_prefix, *, npz=True, parquet=False):
 # ── CLI ─────────────────────────────────────────────────────────────────────
 def run_from_config(config_path, *, n=200, seed=0, method="lhs", corner=None,
                     label_groups=DEFAULT_GROUPS, freqs=None, out=None, npz=True,
-                    parquet=False, progress=None):
+                    parquet=False, progress=None, workers=1):
     """Load a config, build the dataset, and (if ``out``) write it. Returns the dataset.
 
     ``freqs`` (an array) overrides the config's AC/noise analysis grid — e.g. to
@@ -680,7 +697,8 @@ def run_from_config(config_path, *, n=200, seed=0, method="lhs", corner=None,
     dataset = build_dataset(topo, sizes, bias, nf, cfg, n=n, seed=seed, method=method,
                             corner=corner, label_groups=label_groups, progress=progress,
                             config_dict=config_dict, config_path=config_path,
-                            model_types=model_types, device_kwargs=device_kwargs)
+                            model_types=model_types, device_kwargs=device_kwargs,
+                            workers=workers)
     if out:
         dataset["_paths"] = write_dataset(dataset, out, npz=npz, parquet=parquet)
     return dataset
@@ -709,6 +727,8 @@ def add_cli_args(parser):
     parser.add_argument("-n", "--n", type=int, default=200,
                         help="Number of samples (default: 200)")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Parallel candidate workers (default: 1)")
     parser.add_argument("--method", choices=("lhs", "random"), default="lhs",
                         help="Sampling method (default: lhs)")
     parser.add_argument("--corner", default="typical",
@@ -750,7 +770,7 @@ def run_cli(args):
     if not args.quiet:
         print(f"Building dataset from {args.config}  "
               f"(n={args.n}, method={args.method}, corner={args.corner}, "
-              f"labels={args.labels})")
+              f"labels={args.labels}, workers={args.workers})")
     groups = tuple(g.strip() for g in args.labels.split(",") if g.strip())
     freqs = (np.logspace(args.freqs_start, args.freqs_stop, args.freqs_num)
              if args.freqs_stop is not None else None)
@@ -759,7 +779,7 @@ def run_cli(args):
                                   method=args.method, corner=args.corner,
                                   label_groups=groups, freqs=freqs, out=args.out,
                                   npz=not args.no_npz, parquet=args.parquet,
-                                  progress=progress)
+                                  progress=progress, workers=args.workers)
     except ImportError as exc:                  # e.g. --parquet without pyarrow
         raise SystemExit(str(exc))
     except ValueError as exc:                   # e.g. transient labels w/o periodic

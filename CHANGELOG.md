@@ -57,7 +57,8 @@ release checklist.
   `python` shorthand). `tools/version.py` now synchronizes the Rust workspace
   version; CI gates `cargo fmt`/`clippy`, installs `circuitopt_core` in the
   test matrix, and the release workflow archives per-OS wheels as artifacts.
-  The numerical path still runs on numba until R3 wires the rust engine in.
+  As of R3/R4 the numerical hot paths run in `co-core` under
+  `CIRCUIT_ENGINE=rust`; the default engine remains numba until the R6 flip.
 
   **中文：** 新增 `rust/` workspace——`co-core`（求解内核，R3）、`co-bsim4`
   （BSIM4.5 宿主，R2）与 `circuitopt_core` PyO3 扩展——并引入
@@ -65,8 +66,44 @@ release checklist.
   （优先级 argv > 环境变量 > 默认；rust 核心缺失时警告一次并回退 numba，
   `--no-numba` 行为完全不变，等价于 `python`）。`tools/version.py` 现同步
   Rust workspace 版本号；CI 新增 `cargo fmt`/`clippy` 门禁并在测试矩阵安装
-  `circuitopt_core`，发布工作流归档各平台 wheel 构件。数值路径在 R3 接线前
-  仍运行于 numba。
+  `circuitopt_core`，发布工作流归档各平台 wheel 构件。自 R3/R4 起，数值热
+  路径在 `CIRCUIT_ENGINE=rust` 下运行于 `co-core`；默认引擎在 R6 翻转前仍为 numba。
+
+- **Rust solver core (R3/R4) / Rust 求解核心（R3/R4）**
+
+  **English:** Ported the numba-executed solver hot paths into `co-core`: the
+  OTFT device cluster (currents, internal 2-D Newton, capacitances/charges,
+  terminal derivatives), the MNA term/stamp kernels and the same-pivoting dense
+  GEPP, the damped circuit Newton, fixed backward-Euler and adaptive gear2
+  transient, the AC/noise MNA assembly, and — for R4 — the periodic-family
+  kernels (HB block assembly, cyclostationary PSD fold, PAC orbit
+  linearization incl. the `gate1` state). Under `CIRCUIT_ENGINE=rust` these run
+  through `circuitopt_core` with the GIL released, taking zero-copy read-only
+  NumPy views of the compiled-topology flat arrays and returning NumPy
+  waveforms/matrices; the result-dict keys are unchanged. Fixed-grid waveforms
+  match numba to `rel <= 1e-12`; calibration byte-gates hold on both engines.
+
+  **中文：** 将 numba 执行的求解热路径移植进 `co-core`：OTFT 器件簇（电流、
+  内部二维 Newton、电容/电荷、端口导数）、MNA 三元组/stamp 内核与同主元稠密
+  GEPP、阻尼电路 Newton、固定后向欧拉与自适应 gear2 瞬态、AC/噪声 MNA 装配，
+  以及（R4）周期族内核（HB 块装配、cyclostationary PSD fold、含 `gate1` 状态的
+  PAC 轨道线性化）。在 `CIRCUIT_ENGINE=rust` 下经 `circuitopt_core` 执行并释放
+  GIL，以零拷贝只读 NumPy 视图接收编译拓扑平铺数组、返回 NumPy 波形/矩阵；
+  结果字典键不变。固定网格波形与 numba 达 `rel <= 1e-12`；两引擎校准字节门均绿。
+
+- **GIL-free parallel corner/MC workers (R5-A) / 无 GIL 并行 corner/MC（R5-A）**
+
+  **English:** The `corners`, `mc`, and SAR CLI subcommands (and the
+  `corner_table` / `mismatch_mc` APIs) accept a `--workers` count that evaluates
+  independent corners/samples concurrently on a thread pool, relying on the
+  Rust engine releasing the GIL. Results are bit-identical to the serial path.
+  The BSIM4 Rust backend gained a per-handle concurrency model (per-handle lock,
+  one-time front-end init, thread-local noise callback target).
+
+  **中文：** `corners`、`mc` 与 SAR CLI 子命令（及 `corner_table` /
+  `mismatch_mc` API）新增 `--workers` 计数，在线程池上并发评估独立 corner/
+  样本，依赖 Rust 引擎释放 GIL；结果与串行路径逐位一致。BSIM4 Rust 后端引入
+  per-handle 并发模型（逐 handle 锁、一次性前端初始化、thread-local 噪声回调）。
 
 ### Changed / 变更
 

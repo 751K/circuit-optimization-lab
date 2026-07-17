@@ -17,6 +17,7 @@ This module drives the local Python solvers; Cadence/Spectre comparison should
 live in dedicated verification scripts instead of the core solver package.
 """
 import itertools
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import wraps
 
 import numpy as np
@@ -152,11 +153,23 @@ def metrics(sizes, bias, nf=None, corner=None, topo=AFE_TOPO, x0_guess=None,
 
 def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
                  corners=("typical", "slow", "fast"), freqs=None, band=(0.05, 100.0),
-                 include_noise=True):
+                 include_noise=True, workers=1):
     """Evaluate a design across process corners -> {corner: metrics-or-None}."""
-    return {c: metrics(sizes, bias, nf=nf, corner=CORNERS[c], topo=topo,
+    if workers is None or workers < 1:
+        raise ValueError("workers must be a positive integer")
+    corner_names = tuple(corners)
+    corner_values = tuple(CORNERS[c] for c in corner_names)
+
+    def evaluate_corner(corner):
+        return metrics(sizes, bias, nf=nf, corner=corner, topo=topo,
                        freqs=freqs, band=band, include_noise=include_noise)
-            for c in corners}
+
+    if workers == 1:
+        values = map(evaluate_corner, corner_values)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            values = list(executor.map(evaluate_corner, corner_values))
+    return dict(zip(corner_names, values))
 
 
 def _mc_summary(rows, latch_dV, noise_evaluated, *, stopped_early=False):
@@ -188,7 +201,7 @@ def _mc_summary(rows, latch_dV, noise_evaluated, *, stopped_early=False):
 
 def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
                 latch_dV=5.0, freqs=None, band=(0.05, 100.0), include_noise=True,
-                progress=None, should_stop=None):
+                progress=None, should_stop=None, workers=1):
     """Per-device mismatch MC at one process corner, seeded from the nominal op.
 
     Returns {"arrays": {metric: ndarray}, "latched": bool ndarray, "summary": ...}.
@@ -206,8 +219,15 @@ def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
     summary. Cancellation is cooperative: a sample already in flight runs to
     completion before the next check. Default ``None`` never stops.
 
-    With ``progress=None`` and ``should_stop=None`` the result is byte-for-byte
-    identical to the pre-hook behaviour (same seed → same arrays/summary)."""
+    ``workers`` evaluates independent samples concurrently. Random mismatch maps
+    are drawn up front in sample order and final rows are reduced in that same
+    order, so a fixed seed produces identical final results for every worker count.
+    Progress callbacks run on the caller thread with a monotonic completed count.
+
+    With ``workers=1``, ``progress=None`` and ``should_stop=None`` the result is
+    byte-for-byte identical to the pre-hook behaviour."""
+    if workers is None or workers < 1:
+        raise ValueError("workers must be a positive integer")
     if freqs is None:
         freqs = _DEFAULT_FREQS
     devices = [d for d, *_ in topo.devices]
@@ -219,25 +239,77 @@ def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
     keys = ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV")
     rows = {k: [] for k in keys}
     noise_evaluated = 0
-    for i in range(n):
-        if should_stop is not None and should_stop():
-            return _mc_summary(rows, latch_dV, noise_evaluated, stopped_early=True)
-        cm = mismatch_corner(rng, devices, base=base)
-        m = metrics(sizes, bias, nf=nf, corner=cm, topo=topo, x0_guess=x0,
-                    freqs=freqs, band=band, include_noise=include_noise,
-                    noise_gate=lambda out: out["latch_dV"] <= latch_dV)
+    def evaluate_sample(cm):
+        return metrics(sizes, bias, nf=nf, corner=cm, topo=topo, x0_guess=x0,
+                       freqs=freqs, band=band, include_noise=include_noise,
+                       noise_gate=lambda out: out["latch_dV"] <= latch_dV)
+
+    if workers == 1:
+        for i in range(n):
+            if should_stop is not None and should_stop():
+                return _mc_summary(rows, latch_dV, noise_evaluated, stopped_early=True)
+            m = evaluate_sample(mismatch_corner(rng, devices, base=base))
+            if m is not None:
+                noise_evaluated += int(m.get("_noise_evaluated", False))
+                for k in keys:
+                    rows[k].append(m[k])
+            if progress is not None:
+                partial = _mc_summary(rows, latch_dV, noise_evaluated)["summary"]
+                progress(i + 1, n, partial)
+        return _mc_summary(rows, latch_dV, noise_evaluated)
+
+    # Freeze the RNG stream before scheduling. Worker completion order therefore
+    # cannot perturb later draws or the final sample ordering.
+    draws = [mismatch_corner(rng, devices, base=base) for _ in range(n)]
+    results = [None] * n
+    completed = 0
+    next_index = 0
+    stopped_early = False
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = {}
+
+        def submit_available():
+            nonlocal next_index, stopped_early
+            while next_index < n and len(pending) < workers:
+                if should_stop is not None and should_stop():
+                    stopped_early = True
+                    return
+                future = executor.submit(evaluate_sample, draws[next_index])
+                pending[future] = next_index
+                next_index += 1
+
+        submit_available()
+        while pending:
+            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in sorted(finished, key=lambda item: pending[item]):
+                index = pending.pop(future)
+                results[index] = future.result()
+                completed += 1
+                finished_metrics = [item for item in results if item is not None]
+                if progress is not None:
+                    partial_rows = {k: [item[k] for item in finished_metrics] for k in keys}
+                    partial_noise = sum(int(item.get("_noise_evaluated", False))
+                                        for item in finished_metrics)
+                    partial = _mc_summary(partial_rows, latch_dV,
+                                          partial_noise)["summary"]
+                    progress(completed, n, partial)
+            if not stopped_early:
+                submit_available()
+
+    for m in results:
         if m is not None:
             noise_evaluated += int(m.get("_noise_evaluated", False))
             for k in keys:
                 rows[k].append(m[k])
-        if progress is not None:
-            partial = _mc_summary(rows, latch_dV, noise_evaluated)["summary"]
-            progress(i + 1, n, partial)
-    return _mc_summary(rows, latch_dV, noise_evaluated)
+    stopped_early = stopped_early or next_index < n
+    return _mc_summary(rows, latch_dV, noise_evaluated,
+                       stopped_early=stopped_early)
 
 
 def mismatch_mc_from_dict(data, n=300, seed=0, corner="typical", freqs=None,
-                          band=(0.05, 100.0), progress=None, should_stop=None):
+                          band=(0.05, 100.0), progress=None, should_stop=None,
+                          workers=1):
     """Run a mismatch MC from a parsed circuit-JSON *dict*. Returns the
     :func:`mismatch_mc` result dict.
 
@@ -249,4 +321,4 @@ def mismatch_mc_from_dict(data, n=300, seed=0, corner="typical", freqs=None,
     spec = circuit_from_dict(data)
     return mismatch_mc(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
                        base=corner, n=n, seed=seed, freqs=freqs, band=band,
-                       progress=progress, should_stop=should_stop)
+                       progress=progress, should_stop=should_stop, workers=workers)

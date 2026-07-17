@@ -412,17 +412,22 @@ class CompiledTopology:
                 ctrl_bi=ctrl_bi, bi=self.n + offset + k, gamma=float(gamma)))
         return tuple(out)
 
-    def dc_residuals(self, x, Idfun, gmin, terminal_current_fun=None):
+    def dc_residuals(self, x, Idfun, gmin, terminal_current_fun=None,
+                     terminal_current_batch_fun=None):
         """KCL residual using compiled terminal tokens (length n_aug; gmin on node rows)."""
         res = np.zeros(self.n_aug)
-        for dev in self.devices:
-            vs = self.term_value(dev.s, x)
-            vd = self.term_value(dev.d, x)
-            vg = self.term_value(dev.g, x)
+        points = [
+            (self.term_value(dev.s, x), self.term_value(dev.d, x),
+             self.term_value(dev.g, x))
+            for dev in self.devices
+        ]
+        batch_currents = (terminal_current_batch_fun(points)
+                          if terminal_current_batch_fun is not None else None)
+        for position, (dev, (vs, vd, vg)) in enumerate(zip(self.devices, points)):
             currents = (
+                batch_currents[position] if batch_currents is not None else
                 terminal_current_fun(dev.name, vs, vd, vg)
-                if terminal_current_fun is not None
-                else None
+                if terminal_current_fun is not None else None
             )
             if currents is None:
                 i = Idfun(dev.name, vs, vd, vg)

@@ -173,6 +173,11 @@ class _Fp45NativeFet(TransistorModel):
         return _BACKEND.create_device(
             self.model_card, self.instance_card, self.temperature)
 
+    def lease_native_solver_handle(self):
+        """Pin a reusable native handle for one DC/AC analysis."""
+        return _BACKEND.lease_device(
+            self.model_card, self.instance_card, self.temperature)
+
 
 class Fp45Nfet(_Fp45NativeFet):
     POLARITY = "nmos"

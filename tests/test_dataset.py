@@ -28,10 +28,10 @@ _requires_fp45 = pytest.mark.skipif(
     not _HAVE_FP45, reason="FreePDK45 cards not present")
 
 
-def _build(n=6, seed=0):
+def _build(n=6, seed=0, workers=1):
     data, topo, sizes, bias, nf, cfg = load_dataset_config(CONFIG)
     return build_dataset(topo, sizes, bias, nf, cfg, n=n, seed=seed,
-                         config_dict=data, config_path=CONFIG)
+                         config_dict=data, config_path=CONFIG, workers=workers)
 
 
 def test_row_schema_and_all_samples_kept():
@@ -76,6 +76,25 @@ def test_deterministic_for_fixed_seed():
     assert a == b                                  # same (config, seed) ⇒ identical
     c = _build(n=6, seed=6)["rows"]
     assert a != c                                  # different seed ⇒ different samples
+
+
+def test_parallel_workers_match_serial_and_progress_is_monotonic():
+    serial = _build(n=6, seed=11, workers=1)["rows"]
+    calls = []
+    data, topo, sizes, bias, nf, cfg = load_dataset_config(CONFIG)
+    parallel = build_dataset(
+        topo, sizes, bias, nf, cfg, n=6, seed=11, workers=3,
+        config_dict=data, config_path=CONFIG,
+        progress=lambda done, total: calls.append((done, total)))["rows"]
+    assert parallel == serial
+    assert calls == [(i, 6) for i in range(1, 7)]
+
+
+def test_dataset_rejects_invalid_workers():
+    data, topo, sizes, bias, nf, cfg = load_dataset_config(CONFIG)
+    with pytest.raises(ValueError, match="workers"):
+        build_dataset(topo, sizes, bias, nf, cfg, n=1, workers=0,
+                      config_dict=data)
 
 
 def test_to_arrays_shapes_and_masks():
@@ -428,8 +447,8 @@ def test_dataset_cli_end_to_end(tmp_path):
     _add_dataset_parser(sub)
     out = tmp_path / "cli_ds"
     args = ap.parse_args(["dataset", CONFIG, "-n", "5", "--seed", "3",
-                          "--out", str(out), "--quiet"])
-    assert args.n == 5 and args.seed == 3 and args.corner == "typical"
+                          "--workers", "2", "--out", str(out), "--quiet"])
+    assert (args.n, args.seed, args.corner, args.workers) == (5, 3, "typical", 2)
     dataset = _cmd_dataset(args)
     assert dataset["manifest"]["counts"]["total"] == 5
     assert out.with_suffix(".jsonl").exists()

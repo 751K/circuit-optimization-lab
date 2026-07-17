@@ -150,7 +150,8 @@
         "Ich": 0.0001063714233398804
       }
     },
-    "corner": null
+    "corner": null,
+    "rust_lti_solver": false
   },
   "noise": {
     "freqs": [
@@ -352,6 +353,7 @@
       "n1": 0.40240845107305495,
       "vout": 0.40240845025544536
     },
+    "rust_lti_solver": false,
     "out_uV_band": 3047.628619144921,
     "irn_uV_band": 105.8463060259979
   }

@@ -1,7 +1,21 @@
 //! Linear time-invariant MNA assembly and complex frequency solves.
 
 use crate::{CoreError, mna::Term};
+use rayon::prelude::*;
 use std::ops::{Add, AddAssign, Div, Mul, Sub, SubAssign};
+
+// Rayon task dispatch costs more than the tiny LU for the common 61-point,
+// ~10-state sweeps. Use cubic matrix work as a conservative crossover proxy.
+const PARALLEL_LTI_WORK_MIN: usize = 1_000_000;
+
+fn use_parallel_frequency_solve(size: usize, frequency_count: usize) -> bool {
+    frequency_count > 1
+        && frequency_count
+            .saturating_mul(size)
+            .saturating_mul(size)
+            .saturating_mul(size)
+            >= PARALLEL_LTI_WORK_MIN
+}
 
 #[derive(Clone, Debug)]
 pub struct DenseDevice {
@@ -520,27 +534,42 @@ impl System {
         matrix
     }
 
+    fn solve_frequency(&self, frequency: f64) -> Option<Vec<Complex>> {
+        let omega = std::f64::consts::TAU * frequency;
+        let mut matrix = self.matrix_at(omega, false);
+        let mut rhs = self
+            .rhs_g
+            .iter()
+            .zip(&self.rhs_g_im)
+            .zip(&self.rhs_c)
+            .map(|((g, g_im), c)| Complex {
+                re: *g,
+                im: g_im + omega * c,
+            })
+            .collect::<Vec<_>>();
+        solve_complex(&mut matrix, &mut rhs, self.size).then_some(rhs)
+    }
+
+    fn solve_frequencies_serial(&self, frequencies: &[f64]) -> Option<Vec<Vec<Complex>>> {
+        frequencies
+            .iter()
+            .map(|frequency| self.solve_frequency(*frequency))
+            .collect()
+    }
+
+    fn solve_frequencies_parallel(&self, frequencies: &[f64]) -> Option<Vec<Vec<Complex>>> {
+        frequencies
+            .par_iter()
+            .map(|frequency| self.solve_frequency(*frequency))
+            .collect()
+    }
+
     pub fn solve_frequencies(&self, frequencies: &[f64]) -> Option<Vec<Vec<Complex>>> {
-        let mut result = Vec::with_capacity(frequencies.len());
-        for frequency in frequencies {
-            let omega = std::f64::consts::TAU * frequency;
-            let mut matrix = self.matrix_at(omega, false);
-            let mut rhs = self
-                .rhs_g
-                .iter()
-                .zip(&self.rhs_g_im)
-                .zip(&self.rhs_c)
-                .map(|((g, g_im), c)| Complex {
-                    re: *g,
-                    im: g_im + omega * c,
-                })
-                .collect::<Vec<_>>();
-            if !solve_complex(&mut matrix, &mut rhs, self.size) {
-                return None;
-            }
-            result.push(rhs);
+        if use_parallel_frequency_solve(self.size, frequencies.len()) {
+            self.solve_frequencies_parallel(frequencies)
+        } else {
+            self.solve_frequencies_serial(frequencies)
         }
-        Some(result)
     }
 
     pub fn try_solve_frequencies(
@@ -559,27 +588,50 @@ impl System {
             })
     }
 
+    fn solve_transpose_frequency(&self, frequency: f64, sense: &[f64]) -> Option<Vec<Complex>> {
+        let omega = std::f64::consts::TAU * frequency;
+        let mut matrix = self.matrix_at(omega, true);
+        let mut rhs = sense
+            .iter()
+            .map(|value| Complex {
+                re: *value,
+                im: 0.0,
+            })
+            .collect::<Vec<_>>();
+        solve_complex(&mut matrix, &mut rhs, self.size).then_some(rhs)
+    }
+
+    fn solve_transpose_serial(
+        &self,
+        frequencies: &[f64],
+        sense: &[f64],
+    ) -> Option<Vec<Vec<Complex>>> {
+        frequencies
+            .iter()
+            .map(|frequency| self.solve_transpose_frequency(*frequency, sense))
+            .collect()
+    }
+
+    fn solve_transpose_parallel(
+        &self,
+        frequencies: &[f64],
+        sense: &[f64],
+    ) -> Option<Vec<Vec<Complex>>> {
+        frequencies
+            .par_iter()
+            .map(|frequency| self.solve_transpose_frequency(*frequency, sense))
+            .collect()
+    }
+
     pub fn solve_transpose(&self, frequencies: &[f64], sense: &[f64]) -> Option<Vec<Vec<Complex>>> {
         if sense.len() != self.size {
             return None;
         }
-        let mut result = Vec::with_capacity(frequencies.len());
-        for frequency in frequencies {
-            let omega = std::f64::consts::TAU * frequency;
-            let mut matrix = self.matrix_at(omega, true);
-            let mut rhs = sense
-                .iter()
-                .map(|value| Complex {
-                    re: *value,
-                    im: 0.0,
-                })
-                .collect::<Vec<_>>();
-            if !solve_complex(&mut matrix, &mut rhs, self.size) {
-                return None;
-            }
-            result.push(rhs);
+        if use_parallel_frequency_solve(self.size, frequencies.len()) {
+            self.solve_transpose_parallel(frequencies, sense)
+        } else {
+            self.solve_transpose_serial(frequencies, sense)
         }
-        Some(result)
     }
 
     pub fn try_solve_transpose(
@@ -658,5 +710,44 @@ mod tests {
             };
         assert!((value.re - expected.re).abs() < 1e-15);
         assert!((value.im - expected.im).abs() < 1e-15);
+    }
+
+    #[test]
+    fn frequency_parallelism_is_gated_and_bitwise_deterministic() {
+        assert!(!use_parallel_frequency_solve(10, 61));
+        assert!(use_parallel_frequency_solve(64, 4));
+
+        let problem = Problem {
+            size: 1,
+            dense_devices: Vec::new(),
+            mos_devices: Vec::new(),
+            capacitors: vec![Branch {
+                a: node(0),
+                b: known(0.0),
+                value: 1e-9,
+            }],
+            resistors: vec![Branch {
+                a: node(0),
+                b: known(1.0),
+                value: 1e-3,
+            }],
+            vccs: Vec::new(),
+            voltage_sources: Vec::new(),
+            vcvs: Vec::new(),
+            cccs: Vec::new(),
+            ccvs: Vec::new(),
+        };
+        let system = problem.assemble().unwrap();
+        let frequencies = (0..257)
+            .map(|index| 10_f64.powf(index as f64 / 32.0))
+            .collect::<Vec<_>>();
+        let serial = system.solve_frequencies_serial(&frequencies).unwrap();
+        let parallel = system.solve_frequencies_parallel(&frequencies).unwrap();
+        for (serial_row, parallel_row) in serial.iter().zip(parallel) {
+            for (serial_value, parallel_value) in serial_row.iter().zip(parallel_row) {
+                assert_eq!(serial_value.re.to_bits(), parallel_value.re.to_bits());
+                assert_eq!(serial_value.im.to_bits(), parallel_value.im.to_bits());
+            }
+        }
     }
 }

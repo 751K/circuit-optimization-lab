@@ -1,6 +1,8 @@
 """R3 parity tests for Rust AC/noise LTI MNA assembly."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pytest
 
@@ -26,9 +28,8 @@ def _known(value):
     return 2, 0, value
 
 
-@requires_rust_lti
-def test_rust_lti_rc_assembly_and_solve():
-    problem = circuitopt_core.LtiProblem({
+def _rc_problem():
+    return circuitopt_core.LtiProblem({
         "size": 1,
         "dense_devices": [],
         "mos_devices": [],
@@ -36,6 +37,11 @@ def test_rust_lti_rc_assembly_and_solve():
         "resistors": [(_node(0), _known(1.0), 1e-3)],
         "vccs": [], "voltage_sources": [], "vcvs": [], "cccs": [], "ccvs": [],
     })
+
+
+@requires_rust_lti
+def test_rust_lti_rc_assembly_and_solve():
+    problem = _rc_problem()
     conductance, capacitance, rhs_g, rhs_c = problem.matrices()
     np.testing.assert_array_equal(conductance, [[1e-3]])
     np.testing.assert_array_equal(capacitance, [[1e-9]])
@@ -128,3 +134,24 @@ def test_rust_ac_preserves_complex_source_phase(monkeypatch):
     result = ac_solver.ac_solve({}, {}, np.array([1.0]), topo=topology)
 
     np.testing.assert_allclose(result["response"], [0.5j], rtol=1e-13, atol=1e-15)
+
+
+@requires_rust_lti
+def test_rust_lti_parallel_calls_are_bitwise_deterministic():
+    """Rayon frequency solves and concurrent GIL-free calls preserve row order."""
+    problem = _rc_problem()
+    frequencies = np.logspace(0, 8, 257)
+    sense = np.array([1.0])
+    expected_ac = np.asarray(problem.solve(frequencies))
+    expected_noise = np.asarray(problem.solve_transpose(frequencies, sense))
+
+    def solve_once(_):
+        return (np.asarray(problem.solve(frequencies)),
+                np.asarray(problem.solve_transpose(frequencies, sense)))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(solve_once, range(16)))
+
+    for ac_rows, noise_rows in results:
+        np.testing.assert_array_equal(ac_rows, expected_ac)
+        np.testing.assert_array_equal(noise_rows, expected_noise)

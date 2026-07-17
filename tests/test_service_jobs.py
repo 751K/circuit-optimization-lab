@@ -87,7 +87,7 @@ def test_explore_job_lifecycle(client):
 def test_mc_job_lifecycle(client):
     r = client.post("/api/v1/jobs/mc",
                     json={"circuit": _load("afe_explore.json"), "n": 4, "seed": 1,
-                          "corner": "typical"})
+                          "corner": "typical", "workers": 2})
     assert r.status_code == 202
     job_id = r.json()["job_id"]
 

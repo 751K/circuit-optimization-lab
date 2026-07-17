@@ -226,6 +226,35 @@ pub unsafe extern "C" fn co_bsim4_noise(
     .unwrap_or(E_PANIC)
 }
 
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn co_bsim4_noise_batch(
+    devices: *const *mut c_void,
+    count: usize,
+    frequencies: *const c_double,
+    frequency_count: usize,
+    total_real: *mut c_double,
+    total_imag: *mut c_double,
+    flicker_real: *mut c_double,
+    flicker_imag: *mut c_double,
+    statuses: *mut c_int,
+) -> c_int {
+    catch_unwind(|| {
+        co_bsim4::noise_batch(
+            devices as *const *mut CoBsim4,
+            count,
+            frequencies,
+            frequency_count,
+            total_real,
+            total_imag,
+            flicker_real,
+            flicker_imag,
+            statuses,
+        )
+    })
+    .unwrap_or(E_PANIC)
+}
+
 // ---------------------------------------------------------------------------
 // PyO3 surface
 // ---------------------------------------------------------------------------
@@ -1365,6 +1394,54 @@ impl Bsim4TransientProblem {
             devices,
             handles,
         })
+    }
+
+    #[pyo3(signature = (
+        initial, inputs, max_iterations=80, voltage_tolerance=1e-10,
+        step_limit=0.25, gmin=1e-12
+    ))]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn solve_dc<'py>(
+        &self,
+        py: Python<'py>,
+        initial: PyReadonlyArray1<'py, f64>,
+        inputs: PyReadonlyArray1<'py, f64>,
+        max_iterations: usize,
+        voltage_tolerance: f64,
+        step_limit: f64,
+        gmin: f64,
+    ) -> PyResult<(bool, Bound<'py, PyArray1<f64>>, usize, f64)> {
+        let initial = initial
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("initial must be a contiguous float64 array"))?;
+        let inputs = inputs
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("inputs must be a contiguous float64 array"))?;
+        let circuit = self.circuit.clone();
+        let devices = self.devices.clone();
+        let handles = self.handles.clone();
+        let result = py.detach(move || {
+            let mut evaluator = RustBsimEvaluator { handles };
+            bsim_transient::solve_dc(
+                &circuit,
+                &devices,
+                &mut evaluator,
+                initial,
+                inputs,
+                bsim_transient::DcOptions {
+                    max_iterations,
+                    voltage_tolerance,
+                    step_limit,
+                    gmin,
+                },
+            )
+        });
+        Ok((
+            result.converged,
+            result.state.into_pyarray(py),
+            result.iterations,
+            result.residual_inf,
+        ))
     }
 
     #[pyo3(signature = (

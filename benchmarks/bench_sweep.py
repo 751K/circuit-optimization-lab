@@ -18,6 +18,7 @@ Usage:
 import argparse
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
 import time
@@ -36,6 +37,8 @@ BASE_TOPO = _SPEC.topology
 BASE_SIZES = dict(_SPEC.sizes)
 BASE_BIAS = dict(_SPEC.bias)
 BASE_NF = _SPEC.nf
+BASE_BINDING = _SPEC.binding()
+BENCH_CIRCUIT = str(_ROOT / "examples" / "afe_explore.json")
 
 # ── sweep parameters ───────────────────────────────────────────────────
 NFREQ = 61                     # frequency points per candidate
@@ -84,7 +87,13 @@ def _make_candidates(n, rng):
 
     groups = {}
     for key in sorted(BASE_SIZES):
-        groups.setdefault(paired_map.get(key, key), []).append(key)
+        group = paired_map.get(key)
+        if group is None and BASE_BINDING.model_types:
+            # Silicon examples express matched pairs as equal model/geometry
+            # instances (M1/M2, M3/M4). Perturb those together so the benchmark
+            # measures solver throughput instead of intentional pair mismatch.
+            group = (BASE_BINDING.model_types.get(key), BASE_SIZES[key])
+        groups.setdefault(group if group is not None else key, []).append(key)
 
     candidates = []
     for _ in range(n):
@@ -109,28 +118,31 @@ def bench_case(name, fn, summarize, warm_runs):
     return data
 
 
-def run_benchmarks(warm_runs, n, seed=42):
+def run_benchmarks(warm_runs, n, seed=42, workers=1):
+    if workers is None or workers < 1:
+        raise ValueError("workers must be a positive integer")
     rng = np.random.default_rng(seed)
     candidates = _make_candidates(n, rng)
     freqs = np.logspace(np.log10(0.1), np.log10(10e3), NFREQ)
     results = []
 
     # ── ac_only: N × AC solve ────────────────────────────────────────
-    n_ok = 0
-    n_fail = 0
+    def evaluate_ac(sizes):
+        return ac_solve(sizes, BASE_BIAS, freqs, topo=BASE_TOPO, nf=BASE_NF,
+                        binding=BASE_BINDING) is not None
+
+    def run_batch(function):
+        if workers == 1:
+            return [function(sizes) for sizes in candidates]
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return list(executor.map(function, candidates))
 
     def run_ac_only():
-        nonlocal n_ok, n_fail
-        n_ok, n_fail = 0, 0
         t0 = time.perf_counter()
-        for sizes in candidates:
-            ac = ac_solve(sizes, BASE_BIAS, freqs, topo=BASE_TOPO, nf=BASE_NF)
-            if ac is None:
-                n_fail += 1
-            else:
-                n_ok += 1
+        outcomes = run_batch(evaluate_ac)
         elapsed = (time.perf_counter() - t0) * 1e3
-        return {"elapsed_ms": elapsed, "n_ok": n_ok, "n_fail": n_fail}
+        return {"elapsed_ms": elapsed, "n_ok": sum(outcomes),
+                "n_fail": len(outcomes) - sum(outcomes)}
 
     results.append(bench_case(
         f"ac_only_n{n}",
@@ -146,26 +158,22 @@ def run_benchmarks(warm_runs, n, seed=42):
     ))
 
     # ── ac_noise: N × (AC + noise) ───────────────────────────────────
-    n_ok = 0
-    n_fail = 0
+    def evaluate_ac_noise(sizes):
+        ac = ac_solve(sizes, BASE_BIAS, freqs, topo=BASE_TOPO, nf=BASE_NF,
+                      binding=BASE_BINDING)
+        if ac is None:
+            return False
+        noise = noise_analysis(sizes, BASE_BIAS, freqs, topo=BASE_TOPO,
+                               nf=BASE_NF, x0_guess=ac["dc_op"],
+                               binding=BASE_BINDING)
+        return noise is not None
 
     def run_ac_noise():
-        nonlocal n_ok, n_fail
-        n_ok, n_fail = 0, 0
         t0 = time.perf_counter()
-        for sizes in candidates:
-            ac = ac_solve(sizes, BASE_BIAS, freqs, topo=BASE_TOPO, nf=BASE_NF)
-            if ac is None:
-                n_fail += 1
-                continue
-            noise = noise_analysis(sizes, BASE_BIAS, freqs, topo=BASE_TOPO,
-                                   nf=BASE_NF, x0_guess=ac["dc_op"])
-            if noise is None:
-                n_fail += 1
-            else:
-                n_ok += 1
+        outcomes = run_batch(evaluate_ac_noise)
         elapsed = (time.perf_counter() - t0) * 1e3
-        return {"elapsed_ms": elapsed, "n_ok": n_ok, "n_fail": n_fail}
+        return {"elapsed_ms": elapsed, "n_ok": sum(outcomes),
+                "n_fail": len(outcomes) - sum(outcomes)}
 
     results.append(bench_case(
         f"ac_noise_n{n}",
@@ -189,6 +197,8 @@ def run_benchmarks(warm_runs, n, seed=42):
         "perturb": PERTURB,
         "nfreq": NFREQ,
         "warm_runs": warm_runs,
+        "workers": workers,
+        "circuit": BENCH_CIRCUIT,
         "results": results,
     }
 
@@ -200,7 +210,9 @@ def print_text(report):
     print(f"python={report['python']} numpy={report['numpy']} "
           f"numba_enabled={report['numba_enabled']} "
           f"n={report['n_candidates']} perturb={report['perturb']} "
-          f"nfreq={report['nfreq']} warm_runs={report['warm_runs']}")
+          f"nfreq={report['nfreq']} workers={report['workers']} "
+          f"warm_runs={report['warm_runs']}")
+    print(f"circuit={report['circuit']}")
     for item in report["results"]:
         print(f"{item['case']}: cold_ms={item['cold_ms']:.3f} "
               f"warm_median_ms={fmt_ms(item['warm_median_ms'])} "
@@ -223,11 +235,26 @@ def main():
                         help=f"number of candidates per sweep (default: {DEFAULT_N})")
     parser.add_argument("--seed", type=int, default=42,
                         help="RNG seed for reproducible candidates")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="parallel candidate workers (default: 1)")
+    parser.add_argument("--circuit", default=None,
+                        help="circuit JSON to perturb (default: examples/afe_explore.json)")
     parser.add_argument("--json", action="store_true",
                         help="emit machine-readable JSON")
     args = parser.parse_args()
 
-    report = run_benchmarks(args.warm_runs, args.n_candidates, seed=args.seed)
+    if args.circuit is not None:
+        global BASE_TOPO, BASE_SIZES, BASE_BIAS, BASE_NF, BASE_BINDING, BENCH_CIRCUIT
+        spec = load_circuit_json(args.circuit)
+        BASE_TOPO = spec.topology
+        BASE_SIZES = dict(spec.sizes)
+        BASE_BIAS = dict(spec.bias)
+        BASE_NF = spec.nf
+        BASE_BINDING = spec.binding()
+        BENCH_CIRCUIT = str(Path(args.circuit).resolve())
+
+    report = run_benchmarks(args.warm_runs, args.n_candidates, seed=args.seed,
+                            workers=args.workers)
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:

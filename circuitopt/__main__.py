@@ -211,6 +211,8 @@ def _add_run_parser(subparsers):
                         "NMOS slow + PMOS fast, fs the reverse)")
     _add_noise_band_arg(p)
     _add_output_arg(p)
+    p.add_argument("--workers", type=int, default=1,
+                   help="Parallel corner workers (default: 1)")
     p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
     _add_engine_arg(p)
     p.add_argument("--quiet", action="store_true", help="Suppress progress output")
@@ -326,6 +328,8 @@ def _add_corners_parser(subparsers):
     _add_freqs_args(p)
     _add_noise_band_arg(p)
     _add_output_arg(p)
+    p.add_argument("--workers", type=int, default=1,
+                   help="Parallel corner workers (default: 1)")
     p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
     _add_engine_arg(p)
     p.add_argument("--quiet", action="store_true", help="Suppress per-corner output")
@@ -343,9 +347,10 @@ def _cmd_corners(args):
         print(f"Corner sweep for {args.circuit}")
         print(f"  freqs: {args.freqs_start:.2g}–{args.freqs_stop:.2g} Hz ({args.freqs_num} pts)")
         print(f"  band:  {lo}–{hi} Hz")
+        print(f"  workers: {args.workers}")
 
     table = corner_table(spec.sizes, spec.bias, nf=spec.nf,
-                         topo=spec.topology, freqs=freqs)
+                         topo=spec.topology, freqs=freqs, workers=args.workers)
     for corner_name, metrics in table.items():
         if metrics is None:
             print(f"  {corner_name:>7s}:  (failed)")
@@ -379,6 +384,8 @@ def _add_mc_parser(subparsers):
     p.add_argument("-n", "--n", type=int, default=200,
                    help="Number of MC samples (default: 200)")
     p.add_argument("--seed", type=int, default=0, help="RNG seed")
+    p.add_argument("--workers", type=int, default=1,
+                   help="Parallel MC workers (default: 1)")
     p.add_argument("--corner", choices=("typical", "slow", "fast"), default="typical",
                    help="Base process corner (default: typical)")
     _add_freqs_args(p)
@@ -402,14 +409,14 @@ def _cmd_mc(args):
 
     if not args.quiet:
         print(f"Mismatch MC for {args.circuit}")
-        print(f"  n={args.n}  seed={args.seed}  corner={args.corner}")
+        print(f"  n={args.n}  seed={args.seed}  corner={args.corner}  workers={args.workers}")
         print(f"  freqs: {args.freqs_start:.2g}–{args.freqs_stop:.2g} Hz ({args.freqs_num} pts)")
         print(f"  band:  {lo}–{hi} Hz")
 
     # mismatch_mc_from_dict is the shared CLI/service entry (parses the circuit +
     # calls mismatch_mc), so `circuit-opt mc` and POST /jobs/mc can't drift.
     mc = mismatch_mc_from_dict(data, n=args.n, seed=args.seed, corner=args.corner,
-                               freqs=freqs, band=(lo, hi))
+                               freqs=freqs, band=(lo, hi), workers=args.workers)
 
     summary = mc["summary"]
     latch_rate = float(mc["latched"].mean())

@@ -8,6 +8,7 @@ import platform
 import sys
 
 import numpy as np
+import pytest
 
 import circuitopt.corners as corners_mod
 from circuitopt.corners import (
@@ -66,6 +67,25 @@ def test_corner_table_spans_corners():
     assert t["slow"]["gain_peak_dB"] > 24.0          # robust design meets ~25 dB at slow
 
 
+def test_corner_table_workers_match_serial():
+    serial = corner_table(ROBUST["sizes"], ROBUST["bias"], nf=ROBUST["nf"],
+                          freqs=FREQS, include_noise=False, workers=1)
+    parallel = corner_table(ROBUST["sizes"], ROBUST["bias"], nf=ROBUST["nf"],
+                            freqs=FREQS, include_noise=False, workers=3)
+    for corner in serial:
+        for key in ("gain_peak_dB", "bw_Hz", "latch_dV"):
+            assert parallel[corner][key] == serial[corner][key]
+        assert parallel[corner]["dc_op"] == serial[corner]["dc_op"]
+        assert np.isnan(parallel[corner]["irn_uV"])
+        assert np.isnan(serial[corner]["irn_uV"])
+
+
+def test_corner_table_rejects_invalid_workers():
+    with pytest.raises(ValueError, match="workers"):
+        corner_table(ROBUST["sizes"], ROBUST["bias"], nf=ROBUST["nf"],
+                     freqs=FREQS, workers=0)
+
+
 def test_latch_screen_separates_latch_prone_from_robust(monkeypatch):
     # worst-case differential kick: huge imbalance for the drawn design, tiny for robust
     monkeypatch.setattr(
@@ -101,3 +121,34 @@ def test_mismatch_mc_latch_rates():
     assert drawn["summary"]["noise_evaluated"] <= (
         drawn["summary"]["n"] - drawn["summary"]["latched"])
     assert robust["summary"]["noise_evaluated"] == robust["summary"]["n"]
+
+
+def test_mismatch_mc_workers_are_seed_deterministic():
+    kwargs = dict(nf=ROBUST["nf"], base="typical", n=8, seed=17,
+                  freqs=FREQS, include_noise=False)
+    serial = mismatch_mc(ROBUST["sizes"], ROBUST["bias"], workers=1, **kwargs)
+    calls = []
+    parallel = mismatch_mc(
+        ROBUST["sizes"], ROBUST["bias"], workers=3,
+        progress=lambda done, total, partial: calls.append((done, total, partial["n"])),
+        **kwargs)
+    for key in serial["arrays"]:
+        assert np.array_equal(serial["arrays"][key], parallel["arrays"][key],
+                              equal_nan=True)
+    assert parallel["summary"].keys() == serial["summary"].keys()
+    assert parallel["summary"]["n"] == serial["summary"]["n"]
+    assert parallel["summary"]["latched"] == serial["summary"]["latched"]
+    assert parallel["summary"]["latch_rate"] == serial["summary"]["latch_rate"]
+    assert parallel["summary"]["noise_evaluated"] == 0
+    for metric in ("gain_peak_dB", "bw_Hz", "irn_uV"):
+        for stat in ("mean", "std", "p5", "p95"):
+            assert np.allclose(parallel["summary"][metric][stat],
+                               serial["summary"][metric][stat], equal_nan=True)
+    assert [done for done, _, _ in calls] == list(range(1, 9))
+    assert all(total == 8 for _, total, _ in calls)
+
+
+def test_mismatch_mc_rejects_invalid_workers():
+    with pytest.raises(ValueError, match="workers"):
+        mismatch_mc(ROBUST["sizes"], ROBUST["bias"], nf=ROBUST["nf"],
+                    n=1, freqs=FREQS, workers=0)

@@ -132,6 +132,7 @@ def _run_mc(params: dict, emit: Callable[[dict], None],
     n = int(params.get("n", 64))
     seed = int(params.get("seed", 0))
     corner = params.get("corner", "typical")
+    workers = int(params.get("workers", 1))
 
     def progress(done: int, total: int, partial) -> None:
         emit({"type": "progress", "done": done, "total": total,
@@ -139,7 +140,8 @@ def _run_mc(params: dict, emit: Callable[[dict], None],
               "partial": to_jsonable(partial)})
 
     results = mismatch_mc_from_dict(circuit, n=n, seed=seed, corner=corner,
-                                    progress=progress, should_stop=should_stop)
+                                    progress=progress, should_stop=should_stop,
+                                    workers=workers)
     return to_jsonable(results)
 
 

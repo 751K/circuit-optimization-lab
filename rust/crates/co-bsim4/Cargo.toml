@@ -7,6 +7,7 @@ description = "Rust host for the Berkeley BSIM4.5 compact model (R2: build-time 
 
 [dependencies]
 libc = "0.2"
+rayon = "1.11"
 
 [build-dependencies]
 # cc compiles the vendored Berkeley BSIM4.5 C at build time (D-a); bindgen

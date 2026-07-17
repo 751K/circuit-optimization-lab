@@ -42,6 +42,22 @@ pub struct Result {
     pub first_failure: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct DcOptions {
+    pub max_iterations: usize,
+    pub voltage_tolerance: f64,
+    pub step_limit: f64,
+    pub gmin: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct DcResult {
+    pub converged: bool,
+    pub state: Vec<f64>,
+    pub iterations: usize,
+    pub residual_inf: f64,
+}
+
 pub fn validate_fixed_grid_input(
     circuit: &CircuitProblem,
     devices: &[Device],
@@ -322,6 +338,137 @@ fn stamp_linear_elements(
         system.add_jacobian(row, row, gmin);
     }
     true
+}
+
+pub fn solve_dc<E: Evaluator>(
+    circuit: &CircuitProblem,
+    devices: &[Device],
+    evaluator: &mut E,
+    initial: &[f64],
+    inputs: &[f64],
+    options: DcOptions,
+) -> DcResult {
+    let topology_valid = circuit.validate()
+        && circuit.devices.is_empty()
+        && initial.len() == circuit.size
+        && initial.iter().all(|value| value.is_finite())
+        && devices.iter().all(|device| {
+            device
+                .terms
+                .iter()
+                .all(|term| term.is_valid(circuit.node_count, true))
+                && device
+                    .rows
+                    .iter()
+                    .flatten()
+                    .all(|row| *row < circuit.node_count)
+        });
+    if !topology_valid {
+        return DcResult {
+            converged: false,
+            state: initial.to_vec(),
+            iterations: 0,
+            residual_inf: f64::INFINITY,
+        };
+    }
+
+    let mut state = initial.to_vec();
+    let mut system = DenseSystem::new(circuit.size);
+    let history = HistoryTerms::new(circuit);
+    let mut residual_inf = f64::INFINITY;
+    for iteration in 0..options.max_iterations {
+        system.residual.fill(0.0);
+        system.jacobian.fill(0.0);
+        let mut evaluation_failed = false;
+        for device in devices.iter().copied() {
+            let Some(evaluation) = evaluate_device(evaluator, device, &state, inputs) else {
+                evaluation_failed = true;
+                break;
+            };
+            for terminal_row in 0..4 {
+                let Some(row) = device.rows[terminal_row] else {
+                    continue;
+                };
+                system.residual[row] += evaluation.currents[terminal_row];
+                for terminal_col in 0..4 {
+                    let Some(column) = device.rows[terminal_col] else {
+                        continue;
+                    };
+                    system.add_jacobian(
+                        row,
+                        column,
+                        evaluation.conductance[terminal_row * 4 + terminal_col],
+                    );
+                }
+            }
+        }
+        let stamped = !evaluation_failed
+            && stamp_linear_elements(
+                circuit,
+                &state,
+                inputs,
+                [0.0; 3],
+                &history,
+                &history,
+                options.gmin,
+                &mut system,
+            );
+        if !stamped {
+            return DcResult {
+                converged: false,
+                state,
+                iterations: iteration + 1,
+                residual_inf,
+            };
+        }
+        residual_inf = system
+            .residual
+            .iter()
+            .fold(0.0f64, |peak, value| peak.max(value.abs()));
+        if residual_inf <= options.voltage_tolerance {
+            return DcResult {
+                converged: true,
+                state,
+                iterations: iteration + 1,
+                residual_inf,
+            };
+        }
+        if !solve_dense_neg_rhs_in_place(&mut system.jacobian, &mut system.residual) {
+            return DcResult {
+                converged: false,
+                state,
+                iterations: iteration + 1,
+                residual_inf,
+            };
+        }
+        let peak_step = system
+            .residual
+            .iter()
+            .fold(0.0f64, |peak, value| peak.max(value.abs()));
+        if !peak_step.is_finite() {
+            return DcResult {
+                converged: false,
+                state,
+                iterations: iteration + 1,
+                residual_inf,
+            };
+        }
+        if peak_step > options.step_limit {
+            let scale = options.step_limit / peak_step;
+            for value in &mut system.residual {
+                *value *= scale;
+            }
+        }
+        for (value, delta) in state.iter_mut().zip(&system.residual) {
+            *value += delta;
+        }
+    }
+    DcResult {
+        converged: false,
+        state,
+        iterations: options.max_iterations,
+        residual_inf,
+    }
 }
 
 pub fn solve_fixed_grid<E: Evaluator>(

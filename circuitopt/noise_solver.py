@@ -99,10 +99,12 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
     node_vals = {nm: dc[nm] for nm in plan.solved}
     bpts = plan.bias_points(node_vals)
     devs = plan.ac_devices(drive={})
-    dev_inst = build_devices(
-        sizes, nf=nf, corner=corner, topo=topo,
-        model_types=model_types, device_kwargs=device_kwargs,
-    )
+    dev_inst = getattr(ac, "_devices", None)
+    if dev_inst is None:
+        dev_inst = build_devices(
+            sizes, nf=nf, corner=corner, topo=topo,
+            model_types=model_types, device_kwargs=device_kwargs,
+        )
     ac_caps = plan.ac_capacitors()
     ac_res = plan.ac_resistors()
     ac_vccs = plan.ac_vccs()
@@ -134,6 +136,36 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
     res_inj = [(rname, a, b, 4.0 * _KB * _TEMP / R)
                for rname, a, b, R, _ in ac_res]  # (name, term_a, term_b, S_th)
     sense = plan.output_sense(dtype=(float if current_engine() == "rust" else complex))
+
+    native_noise = None
+    if (current_engine() == "rust" and dev_inst and all(
+        getattr(dev_inst[name], "HAS_TERMINAL_NOISE", False)
+        and callable(getattr(dev_inst[name], "create_native_solver_handle", None))
+        for name in bpts
+    )):
+        from .compact_models.bsim4 import NativeBsim4Backend
+
+        native_handles = []
+        try:
+            native_handles = [
+                dev_inst[name].create_native_solver_handle() for name in bpts
+            ]
+            terminals = np.asarray([
+                (Vd, Vg, Vs, float(getattr(dev_inst[name], "vb", 0.0)))
+                for name, (Vs, Vd, Vg) in bpts.items()
+            ], dtype=float)
+            NativeBsim4Backend.evaluate_batch(native_handles, terminals)
+            native_noise = NativeBsim4Backend.noise_batch(
+                native_handles, np.asarray(freqs, dtype=float))
+        except Exception as exc:
+            diagnostics.note(
+                "model.terminal_noise_batch_fallback", exc,
+                detail="BSIM4 noise batch unavailable; using scalar terminal noise",
+            )
+            native_noise = None
+        finally:
+            for handle in native_handles:
+                handle.close()
 
     if current_engine() == "rust":
         from ._rust_lti import build_lti_problem, complex_array
@@ -190,7 +222,7 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
             Z -= tvec[:, term_s[1]]
         return Z
 
-    for name in bpts:
+    for device_index, name in enumerate(bpts):
         d, s = inj[name]
         dev = dev_inst[name]
         if getattr(dev, "HAS_TERMINAL_NOISE", False):
@@ -203,27 +235,40 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
             for terminal_index, term in enumerate(terms):
                 if term[0] == "n":
                     z[:, terminal_index] = tvec[:, term[1]]
-            contrib = np.zeros(len(freqs))
-            white = np.zeros(len(freqs))
-            flicker = np.zeros(len(freqs))
-            Vs, Vd, Vg = bpts[name]
-            for fi, frequency in enumerate(freqs):
-                noise = dev.get_terminal_noise(Vs, Vd, Vg, float(frequency))
-                zi = z[fi]
-                contrib[fi] = max(
-                    float(np.real(zi @ noise.spectral_density @ zi.conj())),
-                    0.0,
-                )
-                for component_name, target in (
-                    ("white", white),
-                    ("flicker", flicker),
-                ):
-                    matrix = noise.components.get(component_name)
-                    if matrix is not None:
-                        target[fi] = max(
-                            float(np.real(zi @ matrix @ zi.conj())),
-                            0.0,
-                        )
+            if native_noise is not None:
+                total_matrix = native_noise[0][device_index]
+                flicker_matrix = native_noise[1][device_index]
+                white_matrix = total_matrix - flicker_matrix
+                def contribution(matrix):
+                    return np.maximum(
+                        np.real(np.einsum("fi,fij,fj->f", z, matrix, z.conj())),
+                        0.0,
+                    )
+                contrib = contribution(total_matrix)
+                white = contribution(white_matrix)
+                flicker = contribution(flicker_matrix)
+            else:
+                contrib = np.zeros(len(freqs))
+                white = np.zeros(len(freqs))
+                flicker = np.zeros(len(freqs))
+                Vs, Vd, Vg = bpts[name]
+                for fi, frequency in enumerate(freqs):
+                    noise = dev.get_terminal_noise(Vs, Vd, Vg, float(frequency))
+                    zi = z[fi]
+                    contrib[fi] = max(
+                        float(np.real(zi @ noise.spectral_density @ zi.conj())),
+                        0.0,
+                    )
+                    for component_name, target in (
+                        ("white", white),
+                        ("flicker", flicker),
+                    ):
+                        matrix = noise.components.get(component_name)
+                        if matrix is not None:
+                            target[fi] = max(
+                                float(np.real(zi @ matrix @ zi.conj())),
+                                0.0,
+                            )
             psd_split[name] = {
                 "white_out_psd": white,
                 "flicker_out_psd": flicker,

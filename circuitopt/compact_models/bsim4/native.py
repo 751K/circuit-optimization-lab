@@ -248,6 +248,19 @@ def _bind_abi(library) -> None:
         double_pointer,
     )
     library.co_bsim4_noise.restype = C.c_int
+    if hasattr(library, "co_bsim4_noise_batch"):
+        library.co_bsim4_noise_batch.argtypes = (
+            C.POINTER(C.c_void_p),
+            C.c_size_t,
+            double_pointer,
+            C.c_size_t,
+            double_pointer,
+            double_pointer,
+            double_pointer,
+            double_pointer,
+            C.POINTER(C.c_int),
+        )
+        library.co_bsim4_noise_batch.restype = C.c_int
     library._co_bsim4_eval_vp = _EVAL_VP_T(
         ("co_bsim4_eval_vp", library))
 
@@ -409,10 +422,11 @@ class _NativeDevice:
         return self._library._co_bsim4_eval_vp
 
     def close(self) -> None:
-        pointer = getattr(self, "_pointer", None)
-        if pointer:
-            self._library.co_bsim4_destroy(pointer)
-            self._pointer = None
+        with self._lock:
+            pointer = getattr(self, "_pointer", None)
+            if pointer:
+                self._library.co_bsim4_destroy(pointer)
+                self._pointer = None
 
     def __del__(self):  # pragma: no cover - deterministic cache eviction handles normal use
         try:
@@ -524,6 +538,27 @@ class _NativeDevice:
         )
 
 
+class _NativeDeviceLease:
+    """Pins one cached native handle until the lease leaves scope."""
+
+    def __init__(self, backend, device, cached):
+        self._backend = backend
+        self.device = device
+        self._cached = cached
+
+    def close(self):
+        device = self.device
+        if device is not None:
+            self.device = None
+            self._backend._release_device(device, self._cached)
+
+    def __del__(self):  # pragma: no cover - CPython scope exit is the normal path
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 class NativeBsim4Backend:
     """Berkeley BSIM4.5 evaluator hosted by CircuitOpt in the current process."""
 
@@ -533,11 +568,12 @@ class NativeBsim4Backend:
 
     def __init__(self, *, cache_size: int | None = None):
         if cache_size is None:
-            cache_size = int(os.environ.get("BSIM4_DEVICE_CACHE_SIZE", "32"))
+            cache_size = int(os.environ.get("BSIM4_DEVICE_CACHE_SIZE", "128"))
         if cache_size < 0:
             raise ValueError("cache_size must be non-negative")
         self._cache_size = cache_size
         self._devices: OrderedDict[tuple, _NativeDevice] = OrderedDict()
+        self._active: dict[int, int] = {}
         self._lock = threading.RLock()
 
     @staticmethod
@@ -556,27 +592,53 @@ class NativeBsim4Backend:
             float(temperature_k),
         )
 
-    def _device(
+    def _evict_idle_locked(self) -> None:
+        """Trim the LRU without closing a handle leased by another worker."""
+        while len(self._devices) > self._cache_size:
+            for key, device in self._devices.items():
+                if self._active.get(id(device), 0) == 0:
+                    self._devices.pop(key)
+                    device.close()
+                    break
+            else:
+                # All excess entries are in flight. They are trimmed when their
+                # leases return instead of invalidating a live native pointer.
+                return
+
+    def _lease_device(
         self,
         model: Bsim4ModelCard,
         instance: Bsim4InstanceCard,
         temperature_k: float,
         backend: str,
-    ) -> _NativeDevice:
+    ) -> tuple[_NativeDevice, bool]:
         if self._cache_size == 0:
-            return _NativeDevice(model, instance, temperature_k, backend=backend)
+            return _NativeDevice(model, instance, temperature_k, backend=backend), False
         key = self._key(model, instance, temperature_k, backend)
         with self._lock:
             device = self._devices.get(key)
             if device is not None:
                 self._devices.move_to_end(key)
-                return device
-            device = _NativeDevice(model, instance, temperature_k, backend=backend)
-            self._devices[key] = device
-            while len(self._devices) > self._cache_size:
-                _, evicted = self._devices.popitem(last=False)
-                evicted.close()
-            return device
+            else:
+                device = _NativeDevice(model, instance, temperature_k, backend=backend)
+                self._devices[key] = device
+            identity = id(device)
+            self._active[identity] = self._active.get(identity, 0) + 1
+            self._evict_idle_locked()
+            return device, True
+
+    def _release_device(self, device: _NativeDevice, cached: bool) -> None:
+        if not cached:
+            device.close()
+            return
+        with self._lock:
+            identity = id(device)
+            remaining = self._active.get(identity, 0) - 1
+            if remaining > 0:
+                self._active[identity] = remaining
+            else:
+                self._active.pop(identity, None)
+            self._evict_idle_locked()
 
     def evaluate(
         self,
@@ -588,12 +650,12 @@ class NativeBsim4Backend:
     ) -> Bsim4Evaluation:
         # Backend is chosen per call (CIRCUIT_BSIM4_BACKEND), never at import.
         backend = _backend_choice()
-        device = self._device(model, instance, bias.temperature_k, backend)
+        device, cached = self._lease_device(
+            model, instance, bias.temperature_k, backend)
         try:
             return device.evaluate(bias, frequency_hz)
         finally:
-            if self._cache_size == 0:
-                device.close()
+            self._release_device(device, cached)
 
     def create_device(
         self,
@@ -609,6 +671,17 @@ class NativeBsim4Backend:
         """
         return _NativeDevice(
             model, instance, float(temperature_k), backend=_backend_choice())
+
+    def lease_device(
+        self,
+        model: Bsim4ModelCard,
+        instance: Bsim4InstanceCard,
+        temperature_k: float,
+    ) -> _NativeDeviceLease:
+        """Pin a cached, already-setup handle for one whole solver call."""
+        device, cached = self._lease_device(
+            model, instance, float(temperature_k), _backend_choice())
+        return _NativeDeviceLease(self, device, cached)
 
     @staticmethod
     def evaluate_batch(
@@ -656,8 +729,74 @@ class NativeBsim4Backend:
                 int(statuses[failed]), f"batch evaluation at index {failed}")
         return currents, conductance, charges, capacitance
 
+    @staticmethod
+    def noise_batch(devices, frequencies) -> tuple[np.ndarray, np.ndarray]:
+        """Evaluate terminal-noise matrices for independent biased handles.
+
+        The handles must already have been evaluated at their operating points.
+        Rust-backed handles execute one frequency sweep per handle outside the
+        GIL and distribute independent handles through Rayon.
+        """
+        device_list = list(devices)
+        values = np.ascontiguousarray(frequencies, dtype=np.float64)
+        count = len(device_list)
+        if values.ndim != 1 or not np.all(np.isfinite(values)) or np.any(values <= 0):
+            raise ValueError("frequencies must be a finite positive 1D array")
+        if count == 0:
+            shape = (0, len(values), 4, 4)
+            return np.empty(shape, dtype=complex), np.empty(shape, dtype=complex)
+        pointers = [device.pointer for device in device_list]
+        if len(set(pointers)) != count:
+            raise ValueError("BSIM4 noise batch requires independent handles")
+        library = device_list[0]._library
+        if any(device._library is not library for device in device_list):
+            raise ValueError("all BSIM4 noise handles must use the same native library")
+
+        handles = (C.c_void_p * count)(*(C.c_void_p(value) for value in pointers))
+        shape = (count, len(values), 4, 4)
+        total_real = np.empty(shape, dtype=np.float64)
+        total_imag = np.empty(shape, dtype=np.float64)
+        flicker_real = np.empty(shape, dtype=np.float64)
+        flicker_imag = np.empty(shape, dtype=np.float64)
+        statuses = np.empty(count, dtype=np.int32)
+        pointer = C.POINTER(C.c_double)
+
+        batch = getattr(library, "co_bsim4_noise_batch", None)
+        if batch is not None:
+            status = batch(
+                handles,
+                count,
+                values.ctypes.data_as(pointer),
+                len(values),
+                total_real.ctypes.data_as(pointer),
+                total_imag.ctypes.data_as(pointer),
+                flicker_real.ctypes.data_as(pointer),
+                flicker_imag.ctypes.data_as(pointer),
+                statuses.ctypes.data_as(C.POINTER(C.c_int)),
+            )
+            if status:
+                failed = int(np.flatnonzero(statuses)[0])
+                _raise_status(int(statuses[failed]), f"noise batch at device {failed}")
+        else:
+            for device_index, device in enumerate(device_list):
+                with device._lock:
+                    for frequency_index, frequency in enumerate(values):
+                        status = library.co_bsim4_noise(
+                            device._pointer,
+                            float(frequency),
+                            total_real[device_index, frequency_index].ctypes.data_as(pointer),
+                            total_imag[device_index, frequency_index].ctypes.data_as(pointer),
+                            flicker_real[device_index, frequency_index].ctypes.data_as(pointer),
+                            flicker_imag[device_index, frequency_index].ctypes.data_as(pointer),
+                        )
+                        _raise_status(status, "noise evaluation")
+        return total_real + 1j * total_imag, flicker_real + 1j * flicker_imag
+
     def close(self) -> None:
         with self._lock:
+            if self._active:
+                raise Bsim4NativeError(
+                    "cannot close BSIM4 backend while evaluations are active")
             for device in self._devices.values():
                 device.close()
             self._devices.clear()

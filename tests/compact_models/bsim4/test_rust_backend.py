@@ -18,7 +18,9 @@ absolute path (it is not vendored into per-agent worktrees).
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import numpy as np
 import pytest
@@ -249,6 +251,98 @@ def test_backend_switch_is_call_time(monkeypatch):
 
     # Both paths compute the same device; agreement confirms the switch took.
     assert _max_rel(rust.terminal_currents, cc.terminal_currents, 1e-18) <= 1e-13
+
+
+@requires_rust
+def test_rust_batch_matches_ordered_scalar_evaluations(monkeypatch):
+    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
+    model, instance = _cards(1)
+    backend = NativeBsim4Backend(cache_size=0)
+    devices = [backend.create_device(model, instance, 300.15) for _ in range(16)]
+    terminals = np.asarray([
+        (0.25 + 0.02 * index, 0.5, 0.0, 0.0) for index in range(len(devices))
+    ])
+    try:
+        expected = [
+            device.evaluate(Bsim4Bias(*values)) for device, values in zip(devices, terminals)
+        ]
+        currents, conductance, charges, capacitance = backend.evaluate_batch(
+            devices, terminals)
+        np.testing.assert_array_equal(
+            currents, np.asarray([value.terminal_currents for value in expected]))
+        np.testing.assert_array_equal(
+            conductance, np.asarray([value.conductance for value in expected]))
+        np.testing.assert_array_equal(
+            charges, np.asarray([value.terminal_charges for value in expected]))
+        np.testing.assert_array_equal(
+            capacitance, np.asarray([value.capacitance for value in expected]))
+    finally:
+        for device in devices:
+            device.close()
+
+
+@requires_rust
+def test_rust_noise_batch_matches_ordered_scalar_sweeps(monkeypatch):
+    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
+    model, instance = _cards(1)
+    backend = NativeBsim4Backend(cache_size=0)
+    devices = [backend.create_device(model, instance, 300.15) for _ in range(8)]
+    terminals = np.asarray([
+        (0.3 + 0.03 * index, 0.55, 0.0, 0.0) for index in range(len(devices))
+    ])
+    frequencies = np.asarray((1e3, 1e6, 1e9))
+    try:
+        expected_total = []
+        expected_flicker = []
+        for device, values in zip(devices, terminals):
+            total_rows = []
+            flicker_rows = []
+            for frequency in frequencies:
+                result = device.evaluate(Bsim4Bias(*values), float(frequency))
+                total_rows.append(result.noise.spectral_density)
+                flicker_rows.append(result.noise.components["flicker"])
+            expected_total.append(total_rows)
+            expected_flicker.append(flicker_rows)
+
+        backend.evaluate_batch(devices, terminals)
+        total, flicker = backend.noise_batch(devices, frequencies)
+        np.testing.assert_array_equal(total, np.asarray(expected_total))
+        np.testing.assert_array_equal(flicker, np.asarray(expected_flicker))
+    finally:
+        for device in devices:
+            device.close()
+
+
+@requires_rust
+def test_rust_cache_never_evicts_active_handles(monkeypatch):
+    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
+    model, _ = _cards(1)
+    instances = [
+        Bsim4InstanceCard(parameters={"w": 1e-6 + index * 1e-8,
+                                      "l": 1e-7, "nf": 1.0})
+        for index in range(8)
+    ]
+    bias = Bsim4Bias(drain=0.6, gate=0.55, source=0.0, bulk=0.0)
+    reference = [
+        NativeBsim4Backend(cache_size=0).evaluate(model, instance, bias)
+        for instance in instances
+    ]
+    backend = NativeBsim4Backend(cache_size=2)
+    barrier = Barrier(len(instances))
+
+    def evaluate(index):
+        barrier.wait()
+        values = [backend.evaluate(model, instances[index], bias) for _ in range(16)]
+        return values
+
+    with ThreadPoolExecutor(max_workers=len(instances)) as executor:
+        results = list(executor.map(evaluate, range(len(instances))))
+    for index, values in enumerate(results):
+        for value in values:
+            np.testing.assert_array_equal(
+                value.terminal_currents, reference[index].terminal_currents)
+            np.testing.assert_array_equal(value.conductance, reference[index].conductance)
+    assert len(backend._devices) <= 2
 
 
 def test_unknown_backend_is_rejected(monkeypatch):

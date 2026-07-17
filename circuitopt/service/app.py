@@ -86,6 +86,7 @@ class McJobRequest(BaseModel):
     n: Optional[int] = Field(None, description="Number of MC samples")
     seed: Optional[int] = Field(None, description="RNG seed")
     corner: Optional[str] = Field(None, description="Base process corner (typical/slow/fast)")
+    workers: Optional[int] = Field(None, ge=1, description="Parallel MC sample workers")
 
 
 # ── capabilities assembly ─────────────────────────────────────────────────────
@@ -257,6 +258,8 @@ def create_app(job_workers: int = 1) -> FastAPI:
             params["seed"] = req.seed
         if req.corner is not None:
             params["corner"] = req.corner
+        if req.workers is not None:
+            params["workers"] = req.workers
         return _submit("mc", params, response)
 
     @app.get("/api/v1/jobs")

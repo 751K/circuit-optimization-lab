@@ -24,6 +24,10 @@ if TYPE_CHECKING:
     from .device_factory import CircuitBinding
 
 
+class _AcResult(dict):
+    """Dictionary-compatible AC result with private in-process solver state."""
+
+
 def bw_from_gain(freqs, gains):
     """-3 dB bandwidth from a gain-vs-frequency curve.
 
@@ -144,9 +148,47 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                 detail=f"{name} four-terminal DC currents unavailable; using Ids")
             return None
 
+    native_batch_handles = None
+    native_batch_leases = None
+    terminal_currents_batch = None
+    rust_dc_problem = None
+    if _dev_inst and all(
+        callable(getattr(dev, "create_native_solver_handle", None))
+        for dev in _dev_inst.values()
+    ):
+        from .compact_models.bsim4 import NativeBsim4Backend
+
+        device_names = tuple(name for name, *_ in topo.devices)
+        if all(callable(getattr(_dev_inst[name], "lease_native_solver_handle", None))
+               for name in device_names):
+            native_batch_leases = [
+                _dev_inst[name].lease_native_solver_handle() for name in device_names
+            ]
+            native_batch_handles = [lease.device for lease in native_batch_leases]
+        else:
+            native_batch_handles = [
+                _dev_inst[name].create_native_solver_handle() for name in device_names
+            ]
+
+        def terminal_currents_batch(points):
+            terminals = np.asarray([
+                (vd, vg, vs, float(getattr(_dev_inst[name], "vb", 0.0)))
+                for name, (vs, vd, vg) in zip(device_names, points)
+            ], dtype=float)
+            return NativeBsim4Backend.evaluate_batch(
+                native_batch_handles, terminals)[0]
+
+        if (current_engine() == "rust" and
+                all(handle._backend == "rust" for handle in native_batch_handles)):
+            from .compact_models.bsim4.rust_transient import build_bsim4_problem
+
+            rust_dc_problem = build_bsim4_problem(
+                plan, _dev_inst, native_batch_handles)
+
     # ── 1. DC solve (residuals built from the topology) ──
     residuals = lambda x: plan.dc_residuals(
-        x, Id, gmin, terminal_current_fun=terminal_currents)
+        x, Id, gmin, terminal_current_fun=terminal_currents,
+        terminal_current_batch_fun=terminal_currents_batch)
     per_dev = is_per_device_corner(corner)
     symmetric_fast = (x0_guess is None and not per_dev
                       and is_pairwise_symmetric_afe(sizes, nf, topo))
@@ -183,8 +225,25 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     if native_terminal_dc:
         if not guesses:
             guesses.extend(topo.dc_guess_vectors(bias))
-        sol = bounded_least_squares_dc(
-            residuals, guesses, topo, bias, tol=dc_tol)
+        sol = None
+        if rust_dc_problem is not None:
+            rail_span = max((abs(float(value)) for value in bias.values()), default=1.0)
+            for guess in guesses:
+                converged, candidate, _, _ = rust_dc_problem.solve_dc(
+                    np.ascontiguousarray(guess, dtype=float),
+                    np.empty(0, dtype=float),
+                    max_iterations=100,
+                    voltage_tolerance=min(float(dc_tol), 1e-10),
+                    step_limit=max(0.25, rail_span / 4.0),
+                    gmin=gmin,
+                )
+                candidate = np.asarray(candidate, dtype=float)
+                if converged and dc_residual_ok(residuals, candidate, tol=dc_tol):
+                    sol = candidate
+                    break
+        if sol is None:
+            sol = bounded_least_squares_dc(
+                residuals, guesses, topo, bias, tol=dc_tol)
         if sol is not None:
             nv = topo.node_vals(sol)
             if topo.n_branches:
@@ -211,7 +270,8 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                 try:
                     step_plan = plan if bias_d is bias else CompiledTopology(topo, bias_d)
                     rfun = lambda z: step_plan.dc_residuals(
-                        z, Id, gm, terminal_current_fun=terminal_currents)
+                        z, Id, gm, terminal_current_fun=terminal_currents,
+                        terminal_current_batch_fun=terminal_currents_batch)
                     s, _, ier, _ = fsolve(rfun, x0, full_output=True, xtol=1e-12,
                                           maxfev=4000)
                     return s if (dc_residual_ok(rfun, s, tol=dc_tol) or
@@ -408,7 +468,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     bw_Hz = bw_from_gain(freqs, gains)
 
     dc_op = topo.dc_op_with_aliases(nv)
-    return {
+    result = _AcResult({
         "Av_dc_dB": Av_dc_dB,
         "peak_dB": 20 * np.log10(max(peak, 1e-9)),
         "bw_Hz": bw_Hz,
@@ -420,7 +480,11 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
         "ss": ss,
         "corner": corner,
         "rust_lti_solver": current_engine() == "rust",
-    }
+    })
+    # Avoid a non-serializable public dictionary key while allowing an immediate
+    # noise analysis to reuse already-elaborated foundry model cards.
+    result._devices = _dev_inst
+    return result
 
 
 # ── Test with best design from sweep ──

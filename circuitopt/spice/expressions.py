@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Mapping, Protocol
@@ -385,17 +386,27 @@ class EvaluationScope(SymbolResolver):
         self._function_defs: dict[str, tuple[tuple[str, ...], str]] = {}
         self._values = {str(name).lower(): float(value) for name, value in (values or {}).items()}
         self._functions = {str(name).lower(): function for name, function in (functions or {}).items()}
-        self._resolving: list[str] = []
+        self._value_lock = threading.Lock()
+        self._thread_state = threading.local()
+
+    def _resolving_stack(self) -> list[str]:
+        resolving = getattr(self._thread_state, "resolving", None)
+        if resolving is None:
+            resolving = []
+            self._thread_state.resolving = resolving
+        return resolving
 
     def define(self, name: str, expression: str) -> None:
         key = name.lower()
-        self._expressions[key] = expression
-        self._values.pop(key, None)
+        with self._value_lock:
+            self._expressions[key] = expression
+            self._values.pop(key, None)
 
     def set_value(self, name: str, value: float) -> None:
         key = name.lower()
-        self._values[key] = float(value)
-        self._expressions.pop(key, None)
+        with self._value_lock:
+            self._values[key] = float(value)
+            self._expressions.pop(key, None)
 
     def define_function(
         self,
@@ -410,10 +421,14 @@ class EvaluationScope(SymbolResolver):
 
     def resolve_symbol(self, name: str) -> float:
         key = name.lower()
-        if key in self._values:
-            return self._values[key]
-        if key in self._expressions:
-            if key in self._resolving:
+        with self._value_lock:
+            cached = self._values.get(key)
+            expression = self._expressions.get(key)
+        if cached is not None:
+            return cached
+        if expression is not None:
+            resolving = self._resolving_stack()
+            if key in resolving:
                 # SPICE instance/model overrides commonly use ``w=w`` or
                 # ``param=param+delta``: the RHS refers to the enclosing scope.
                 # Fall back lexically before declaring a real local cycle.
@@ -422,25 +437,28 @@ class EvaluationScope(SymbolResolver):
                         return self.parent.resolve_symbol(name)
                     except UnknownSymbolError:
                         pass
-                first = self._resolving.index(key)
-                cycle = self._resolving[first:] + [key]
+                first = resolving.index(key)
+                cycle = resolving[first:] + [key]
                 raise ParameterCycleError(
                     "parameter dependency cycle: " + " -> ".join(cycle))
-            self._resolving.append(key)
+            resolving.append(key)
             try:
-                value = compile_expression(self._expressions[key]).evaluate(self)
+                value = compile_expression(expression).evaluate(self)
             except SpiceExpressionError:
                 raise
             except (ArithmeticError, ValueError, OverflowError) as exc:
                 raise SpiceExpressionError(
                     f"failed to evaluate parameter {name!r}: {exc}") from exc
             finally:
-                self._resolving.pop()
+                resolving.pop()
             if not math.isfinite(value):
                 raise SpiceExpressionError(
                     f"parameter {name!r} evaluated to non-finite value {value}")
-            self._values[key] = float(value)
-            return float(value)
+            value = float(value)
+            with self._value_lock:
+                # Duplicate evaluation by independent threads is harmless; the
+                # first completed deterministic value becomes the shared cache.
+                return self._values.setdefault(key, value)
         if self.parent is not None:
             return self.parent.resolve_symbol(name)
         constants = {"pi": math.pi, "e": math.e, "true": 1.0, "false": 0.0}
@@ -480,6 +498,9 @@ class EvaluationScope(SymbolResolver):
         return value
 
     def evaluate_all(self) -> dict[str, float]:
-        for name in tuple(self._expressions):
+        with self._value_lock:
+            names = tuple(self._expressions)
+        for name in names:
             self.resolve_symbol(name)
-        return dict(self._values)
+        with self._value_lock:
+            return dict(self._values)
