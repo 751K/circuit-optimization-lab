@@ -3,6 +3,7 @@
 # Layout:
 #   crates/co-core   — device, MNA, LTI, and transient solver kernels
 #   crates/co-bsim4  — Berkeley BSIM4.5 host
+#   crates/co-spice  — HSPICE parameter expression engine (lexer/parser/evaluator)
 #   crates/co-py     — PyO3 extension `circuitopt_core` joining both to Python
 #
 # The version lives ONLY here, under [workspace.package]; every member inherits
@@ -11,7 +12,7 @@
 [workspace]
 # resolver "3" is the edition-2024 default; a workspace must state it explicitly.
 resolver = "3"
-members = ["crates/co-bsim4", "crates/co-core", "crates/co-py"]
+members = ["crates/co-bsim4", "crates/co-core", "crates/co-spice", "crates/co-py"]
 
 [workspace.package]
 version = "1.4.0"

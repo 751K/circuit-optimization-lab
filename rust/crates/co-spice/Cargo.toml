@@ -1,0 +1,19 @@
+# co-spice — HSPICE parameter expression engine.
+#
+# A 1:1 Rust port of `circuitopt/spice/expressions.py` (the frozen Python
+# reference): SPICE-number lexer, Pratt parser, immutable AST, deterministic
+# evaluator, and a case-insensitive lazy parameter scope with user-defined
+# functions. Pure std + libm (the `f64` intrinsic methods) — no third-party
+# dependencies, no fast-math, source operation order preserved so results match
+# the Python reference bit-for-bit (or within rel <= 1e-14 for libm `pow`).
+[package]
+name = "co-spice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HSPICE parameter expression engine (lexer, Pratt parser, evaluator, lazy scope) for CircuitOpt."
+
+[lib]
+doctest = false
+
+[dependencies]
