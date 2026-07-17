@@ -1,11 +1,13 @@
 //! Error type mirroring the Python exception hierarchy.
 //!
-//! The Python reference raises three exception classes, all `ValueError`
+//! The Python reference raises five exception classes, all `ValueError`
 //! subclasses:
 //!
-//! * `SpiceExpressionError` — base parse/evaluation failure.
+//! * `SpiceExpressionError` — base parse/evaluation failure (expressions).
 //! * `UnknownSymbolError`   — a symbol or function is absent from scope.
 //! * `ParameterCycleError`  — a lazy-parameter dependency cycle.
+//! * `SpiceSyntaxError`     — malformed structural SPICE syntax (deck parser).
+//! * `SpiceElaborationError`— a structurally valid library cannot elaborate.
 //!
 //! We carry the same distinction in [`ErrorKind`] so the `co-py` boundary can
 //! map each variant to the matching Python class by exact name.
@@ -22,6 +24,10 @@ pub enum ErrorKind {
     UnknownSymbol,
     /// Maps to `ParameterCycleError` (a `SpiceExpressionError` subclass).
     ParameterCycle,
+    /// Maps to `SpiceSyntaxError` (a direct `ValueError` subclass).
+    Syntax,
+    /// Maps to `SpiceElaborationError` (a direct `ValueError` subclass).
+    Elaboration,
 }
 
 /// A parse/evaluation failure carrying its target Python exception class.
@@ -49,6 +55,20 @@ impl SpiceError {
     pub fn cycle(message: impl Into<String>) -> Self {
         Self {
             kind: ErrorKind::ParameterCycle,
+            message: message.into(),
+        }
+    }
+
+    pub fn syntax(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::Syntax,
+            message: message.into(),
+        }
+    }
+
+    pub fn elaboration(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::Elaboration,
             message: message.into(),
         }
     }

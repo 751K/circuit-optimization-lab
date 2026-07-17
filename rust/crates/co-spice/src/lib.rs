@@ -21,12 +21,22 @@
 //! within Rust; the Python expression path stays in production for now.
 
 mod ast;
+mod deck;
+mod elaborate;
 mod error;
 mod lexer;
 mod parser;
 mod scope;
 
 pub use ast::{BinaryOp, Expr, UnaryOp};
+pub use deck::{
+    LibrarySection, OrderedMap, ParameterAssignment, SourceLocation, SpiceModelLibrary, Statement,
+    Subcircuit, logical_lines, parse_assignments, parse_spice_library_text, parse_spice_number,
+};
+pub use elaborate::{
+    ElaboratedLibrary, NumericModel, ParamValue, SectionSelection, SubcircuitInstance,
+    apply_assignments, elaborate_library, select_library_sections,
+};
 pub use error::{ErrorKind, SpiceError, SpiceResult};
 pub use lexer::{Token, TokenKind, spice_number_value, tokenize};
 pub use parser::compile_expression;
