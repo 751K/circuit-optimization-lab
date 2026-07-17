@@ -135,3 +135,11 @@ OTFT numba 路径慢 ~200×（107 ms vs 0.55 ms），~85% 耗在 Python↔ctypes
 下一杠杆是**编译版电路级 DC Newton**（类似瞬态 stamp 核）——只有需要 10 万级
 硅 dataset 时才值得动,且涉及共享 DC 路径,须 silicon-only 门控以保 byte-gate。
 Rust 已无必要性论据（仅剩多核无 GIL 批量与免预热部署两个场景,均非当前需求）。
+
+> **2026-07-17 立场更新**：上一段"Rust 已无必要性论据"的结论在其性能语境内
+> 仍然成立,但已被 Rust 核心重写决策（v2.0 方向）取代——驱动不是内核速度,
+> 而是：①维护面统一（消灭 numba 执行路径及其约束集）；②"多核无 GIL 批量"
+> 与"免预热/免运行时编译器部署"两个场景已成为需求；③vendor BSIM4 C 的
+> file-scope 可变全局在线程池下是潜在数据竞争,Rust FFI 层是自然的修复位置。
+> 方案与分期见 `docs/rust_core_rewrite_plan.md`。本文其余基线数字仍是 numba
+> 引擎的有效参照,R6 翻转后追加 Rust 引擎新基线。
