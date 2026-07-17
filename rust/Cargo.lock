@@ -104,9 +104,14 @@ version = "1.4.0"
 dependencies = [
  "co-bsim4",
  "co-core",
+ "co-spice",
  "numpy",
  "pyo3",
 ]
+
+[[package]]
+name = "co-spice"
+version = "1.4.0"
 
 [[package]]
 name = "crossbeam-deque"

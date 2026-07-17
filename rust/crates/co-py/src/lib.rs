@@ -23,21 +23,35 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::missing_safety_doc)]
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int, c_uint, c_void};
 use std::panic::catch_unwind;
+use std::sync::Arc;
 
 use numpy::ndarray::{Array1, Array2, Array3};
 use numpy::{
     Complex64, IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2,
     PyReadonlyArray3, PyReadonlyArray4,
 };
+use pyo3::create_exception;
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use co_bsim4::CoBsim4;
 use co_core::{bsim_transient, lti, mna, otft, periodic, transient};
+use co_spice::{ErrorKind as SpiceErrorKind, EvalCtx, ScopeInner, SpiceError};
+
+// SPICE expression engine exceptions. The hierarchy mirrors the Python
+// reference exactly (all are `ValueError` subclasses), so the parity harness
+// can match on `type(exc).__name__`:
+//   SpiceExpressionError < ValueError
+//   UnknownSymbolError   < SpiceExpressionError
+//   ParameterCycleError  < SpiceExpressionError
+create_exception!(circuitopt_core, SpiceExpressionError, PyValueError);
+create_exception!(circuitopt_core, UnknownSymbolError, SpiceExpressionError);
+create_exception!(circuitopt_core, ParameterCycleError, SpiceExpressionError);
 
 const OK: c_int = 0;
 /// Vague internal error (ngspice `E_PANIC`); also what we return if a Rust panic
@@ -2252,6 +2266,113 @@ fn reshape4(flat: &[f64; 16]) -> Vec<Vec<f64>> {
     (0..4).map(|r| flat[r * 4..r * 4 + 4].to_vec()).collect()
 }
 
+// ---------------------------------------------------------------------------
+// SPICE expression engine (co-spice) — parity surface.
+//
+// A thin PyO3 wrapper over `co_spice::ScopeInner`, exposed for differential
+// verification against `circuitopt.spice.EvaluationScope`. This is not wired
+// into production (the Python expression path stays live); downstream `co-pdk`
+// will consume the Rust evaluator directly.
+// ---------------------------------------------------------------------------
+
+/// Map a `co-spice` error onto the matching Python exception class by kind.
+fn spice_error_to_py(error: SpiceError) -> PyErr {
+    match error.kind {
+        SpiceErrorKind::Expression => SpiceExpressionError::new_err(error.message),
+        SpiceErrorKind::UnknownSymbol => UnknownSymbolError::new_err(error.message),
+        SpiceErrorKind::ParameterCycle => ParameterCycleError::new_err(error.message),
+    }
+}
+
+/// Lower-case the keys of an optional seed map, mirroring the Python
+/// `EvaluationScope` constructor (`{str(name).lower(): float(value)}`).
+fn lower_keys(values: Option<HashMap<String, f64>>) -> HashMap<String, f64> {
+    values
+        .map(|map| {
+            map.into_iter()
+                .map(|(name, value)| (name.to_lowercase(), value))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Case-insensitive lazy HSPICE parameter scope — the Rust analogue of
+/// `circuitopt.spice.EvaluationScope`.
+///
+/// Every method takes `&self` (interior mutability) and releases the GIL for
+/// the core work, so a single scope can be shared and resolved concurrently.
+#[pyclass]
+struct SpiceScope {
+    inner: Arc<ScopeInner>,
+}
+
+#[pymethods]
+impl SpiceScope {
+    #[new]
+    #[pyo3(signature = (values=None))]
+    fn new(values: Option<HashMap<String, f64>>) -> Self {
+        Self {
+            inner: ScopeInner::new_root(lower_keys(values)),
+        }
+    }
+
+    /// Bind `name` to a lazily-evaluated expression.
+    fn define(&self, name: &str, expression: &str) {
+        self.inner.define(name, expression);
+    }
+
+    /// Bind `name` to an eager numeric value.
+    fn set_value(&self, name: &str, value: f64) {
+        self.inner.set_value(name, value);
+    }
+
+    /// Register a user-defined parameter function with `formals` -> `expression`.
+    #[pyo3(signature = (name, formals, expression))]
+    fn define_function(&self, name: &str, formals: Vec<String>, expression: &str) {
+        self.inner.define_function(name, &formals, expression);
+    }
+
+    /// Resolve a symbol to its numeric value.
+    fn resolve_symbol(&self, py: Python<'_>, name: &str) -> PyResult<f64> {
+        let inner = self.inner.clone();
+        let name = name.to_string();
+        py.detach(move || {
+            let mut ctx = EvalCtx::new();
+            inner.resolve_symbol(&name, &mut ctx)
+        })
+        .map_err(spice_error_to_py)
+    }
+
+    /// Evaluate a free-standing expression in this scope.
+    fn evaluate(&self, py: Python<'_>, expression: &str) -> PyResult<f64> {
+        let inner = self.inner.clone();
+        let expression = expression.to_string();
+        py.detach(move || inner.evaluate(&expression))
+            .map_err(spice_error_to_py)
+    }
+
+    /// Resolve every lazy parameter; return a snapshot of all values.
+    fn evaluate_all(&self, py: Python<'_>) -> PyResult<HashMap<String, f64>> {
+        let inner = self.inner.clone();
+        py.detach(move || inner.evaluate_all())
+            .map_err(spice_error_to_py)
+    }
+}
+
+/// One-shot evaluation: `SpiceScope(values).evaluate(expression)`.
+#[pyfunction]
+#[pyo3(signature = (expression, values=None))]
+fn spice_eval(
+    py: Python<'_>,
+    expression: &str,
+    values: Option<HashMap<String, f64>>,
+) -> PyResult<f64> {
+    let values = lower_keys(values);
+    let expression = expression.to_string();
+    py.detach(move || co_spice::spice_eval(&expression, values))
+        .map_err(spice_error_to_py)
+}
+
 #[pymodule]
 fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -2270,5 +2391,20 @@ fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Bsim4TransientProblem>()?;
     m.add_class::<LtiProblem>()?;
     m.add_class::<PeriodicLinearizationProblem>()?;
+    // SPICE expression engine parity surface.
+    m.add(
+        "SpiceExpressionError",
+        m.py().get_type::<SpiceExpressionError>(),
+    )?;
+    m.add(
+        "UnknownSymbolError",
+        m.py().get_type::<UnknownSymbolError>(),
+    )?;
+    m.add(
+        "ParameterCycleError",
+        m.py().get_type::<ParameterCycleError>(),
+    )?;
+    m.add_class::<SpiceScope>()?;
+    m.add_function(wrap_pyfunction!(spice_eval, m)?)?;
     Ok(())
 }

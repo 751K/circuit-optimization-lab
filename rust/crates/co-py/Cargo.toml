@@ -18,9 +18,11 @@ test = false
 doctest = false
 
 [dependencies]
-# The extension links both the numerical core and the BSIM4 host.
+# The extension links the numerical core, the BSIM4 host, and the SPICE
+# expression engine.
 co-core = { path = "../co-core" }
 co-bsim4 = { path = "../co-bsim4" }
+co-spice = { path = "../co-spice" }
 # abi3-py310: one wheel works on CPython >= 3.10. The `extension-module` feature
 # is added automatically by maturin at wheel-build time (it must stay OFF here so
 # `cargo test`/`cargo clippy` can link libpython for the workspace test harness).
