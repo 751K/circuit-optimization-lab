@@ -21,6 +21,32 @@ release checklist.
 
 ### Added / 新增
 
+- **Rust BSIM4.5 native backend (R2) / Rust 原生 BSIM4.5 后端（R2）**
+
+  **English:** `co-bsim4` now compiles the *unmodified* vendored Berkeley
+  BSIM4.5 C at build time (via the `cc` crate) and reimplements the `host.c`
+  adapter layer in Rust — parameter binding, the internal-node Newton
+  reduction, the terminal I/G/Q/C extraction and the noise combination — with
+  `bindgen`-derived struct layouts for an identical ABI. `circuitopt_core`
+  exports the four-terminal `co_bsim4_*` C ABI (consumed by `native.py` via
+  `ctypes`, including the Numba `eval_vp` function pointer) plus a
+  `Bsim4Device` class. A new call-time `CIRCUIT_BSIM4_BACKEND` selector
+  (`cc` default, or `rust`) switches backends per evaluation; results match
+  the reference C bit-for-bit for currents/conductance/charges and to ~1 ULP
+  for the complex AC solve (validated against the frozen v1.4.0 golden corpus
+  at `rel <= 1e-13`). The Rust `destroy` also fixes a `host.c` leak by freeing
+  the `pSizeDependParamKnot` chain that `BSIM4v5temp` allocates.
+
+  **中文：** `co-bsim4` 现在在构建期（经 `cc` crate）编译*未修改*的 Berkeley
+  BSIM4.5 vendor C，并用 Rust 重写 `host.c` 适配层——按名设参、内部节点
+  Newton 消元、四端 I/G/Q/C 提取与噪声归并——以 `bindgen` 生成的结构体布局
+  保持 ABI 一致。`circuitopt_core` 导出四端 `co_bsim4_*` C ABI（供 `native.py`
+  经 `ctypes` 调用，含 Numba `eval_vp` 函数指针）及 `Bsim4Device` 类。新增
+  调用时读取的 `CIRCUIT_BSIM4_BACKEND` 开关（默认 `cc`，可选 `rust`）逐次
+  评估切换后端；电流/电导/电荷与参考 C 位级一致，复数 AC 解在 ~1 ULP 内
+  （对照冻结的 v1.4.0 golden 语料 `rel <= 1e-13`）。Rust 的 `destroy` 还修复了
+  `host.c` 的泄漏：释放 `BSIM4v5temp` 分配的 `pSizeDependParamKnot` 链。
+
 - **Rust core scaffolding and engine switch / Rust 核心脚手架与引擎开关**
 
   **English:** Added the `rust/` workspace — `co-core` (solver kernels, R3),

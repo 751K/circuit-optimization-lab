@@ -97,13 +97,18 @@ Use `git diff --check` before committing.
 ## Rust Core Scaffolding
 
 The `rust/` workspace hosts the in-progress compiled core: `co-core` (solver
-kernels, filled in R3), `co-bsim4` (vendored Berkeley BSIM4.5 host, filled in
-R2), and `co-py` — the `circuitopt_core` PyO3 extension. R1 ships scaffolding
-only: `circuitopt_core.engine_info()` reports build metadata, and the
-numerical path still runs through numba until R3 wires the solvers in.
+kernels, filled in R3), `co-bsim4` (Berkeley BSIM4.5 host, **live as of R2**),
+and `co-py` — the `circuitopt_core` PyO3 extension. `co-bsim4` compiles the
+*unmodified* vendored Berkeley C (the same translation units `native.py`
+builds, minus `host.c`) at build time via the `cc` crate and reimplements the
+`host.c` adapter layer in Rust (parameter binding, internal-node reduction,
+terminal I/G/Q/C extraction, noise combination); `bindgen` derives the shared
+struct layouts so the port keeps an identical ABI with the compiled C. The
+solver hot path still runs through numba until R3.
 
 Toolchain: stable Rust from rustup with the `rustfmt` and `clippy` components,
-plus `maturin` for the Python bridge.
+plus `maturin` for the Python bridge. Building `co-bsim4` also needs a C
+compiler (clang/gcc) and `libclang` for `bindgen`.
 
 ```bash
 cd rust
@@ -129,6 +134,28 @@ workspace (`cargo fmt` + `clippy`), installs `circuitopt_core` in the test
 matrix so the rust-present tests run, and the release workflow archives
 per-OS `circuitopt_core` wheels as build artifacts (attached to GitHub
 Releases only from R6).
+
+### BSIM4.5 backend selector (R2)
+
+Independently of `CIRCUIT_ENGINE`, the native BSIM4.5 compact model chooses
+its numerical backend from `CIRCUIT_BSIM4_BACKEND`, read on **every**
+evaluation (never baked at import, mirroring `ngspice_chain_enabled`):
+
+- `cc` (default) — the historical path: `native.py` compiles the vendored C
+  at runtime with the system compiler and calls it through `ctypes`;
+- `rust` — the `co-bsim4` port, reached by loading the compiled
+  `circuitopt_core` extension and binding the identical `co_bsim4_*` C ABI.
+  Requires `maturin develop` to have installed the extension; otherwise a
+  clear `Bsim4NativeError` names the build command.
+
+Both backends produce the same results (currents/conductance/charges
+bit-identical to the reference C; the complex AC solve within ~1 ULP). Build
+the extension before selecting `rust`:
+
+```bash
+maturin develop --release -m rust/crates/co-py/Cargo.toml
+CIRCUIT_BSIM4_BACKEND=rust python -m pytest tests/compact_models/bsim4
+```
 
 ## Version Management
 
