@@ -314,6 +314,21 @@ impl ElaboratedLibrary {
             parameters,
         ))
     }
+
+    /// Numericize a section-level `.model` statement in a fresh child of the
+    /// global scope (parameters applied, then `evaluate_all`). This mirrors the
+    /// reference's `SubcircuitInstance.numeric_model` path but for a top-level
+    /// model bound directly against `global_scope`.
+    pub fn numeric_model(&self, statement: &Statement) -> SpiceResult<NumericModel> {
+        let scope = ScopeInner::new_child(self.global_scope.clone(), HashMap::new());
+        apply_assignments(&scope, &statement.parameters);
+        let parameters = scope.evaluate_all()?;
+        Ok(NumericModel {
+            name: statement.name.clone().unwrap_or_default(),
+            model_type: statement.arguments.first().cloned().unwrap_or_default(),
+            parameters,
+        })
+    }
 }
 
 /// Build global parameter/model/subcircuit views for selected sections

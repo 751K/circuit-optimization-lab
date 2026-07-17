@@ -35,13 +35,18 @@ use numpy::{
     PyReadonlyArray3, PyReadonlyArray4,
 };
 use pyo3::create_exception;
-use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 use co_bsim4::CoBsim4;
 use co_core::{bsim_transient, lti, mna, otft, periodic, transient};
-use co_spice::{ErrorKind as SpiceErrorKind, EvalCtx, ScopeInner, SpiceError};
+use co_spice::{
+    ErrorKind as SpiceErrorKind, EvalCtx, LibrarySection, NumericModel, ParamValue,
+    ParameterAssignment, ScopeInner, SpiceError, SpiceModelLibrary, Statement, Subcircuit,
+    elaborate_library, logical_lines, parse_assignments, parse_spice_library_text,
+    parse_spice_number, select_library_sections,
+};
 
 // SPICE expression engine exceptions. The hierarchy mirrors the Python
 // reference exactly (all are `ValueError` subclasses), so the parity harness
@@ -52,6 +57,11 @@ use co_spice::{ErrorKind as SpiceErrorKind, EvalCtx, ScopeInner, SpiceError};
 create_exception!(circuitopt_core, SpiceExpressionError, PyValueError);
 create_exception!(circuitopt_core, UnknownSymbolError, SpiceExpressionError);
 create_exception!(circuitopt_core, ParameterCycleError, SpiceExpressionError);
+// Deck-parser / elaborator exceptions (direct `ValueError` subclasses):
+//   SpiceSyntaxError      < ValueError
+//   SpiceElaborationError < ValueError
+create_exception!(circuitopt_core, SpiceSyntaxError, PyValueError);
+create_exception!(circuitopt_core, SpiceElaborationError, PyValueError);
 
 const OK: c_int = 0;
 /// Vague internal error (ngspice `E_PANIC`); also what we return if a Rust panic
@@ -2281,6 +2291,8 @@ fn spice_error_to_py(error: SpiceError) -> PyErr {
         SpiceErrorKind::Expression => SpiceExpressionError::new_err(error.message),
         SpiceErrorKind::UnknownSymbol => UnknownSymbolError::new_err(error.message),
         SpiceErrorKind::ParameterCycle => ParameterCycleError::new_err(error.message),
+        SpiceErrorKind::Syntax => SpiceSyntaxError::new_err(error.message),
+        SpiceErrorKind::Elaboration => SpiceElaborationError::new_err(error.message),
     }
 }
 
@@ -2373,6 +2385,325 @@ fn spice_eval(
         .map_err(spice_error_to_py)
 }
 
+// ---------------------------------------------------------------------------
+// SPICE deck parser + elaborator (co-spice) — parity surface.
+//
+// A thin PyO3 wrapper over the co-spice deck parser and elaborator, exposed for
+// differential verification against `circuitopt.spice`. Not wired into
+// production; downstream `co-pdk` consumes the Rust deck/elaborator directly.
+// Canonical trees mirror the Python dataclass field names 1:1
+// (kind/location/text/name/arguments/parameters/terminals/statements/
+// subcircuits/sections/top_level/path); `location` is `(path, first, last)`.
+// ---------------------------------------------------------------------------
+
+/// Read a SPICE library file as the reference does (`encoding="ascii"`,
+/// `errors="strict"`): reject any non-ASCII byte.
+fn read_ascii_file(path: &str) -> PyResult<String> {
+    let bytes = std::fs::read(path).map_err(|e| PyOSError::new_err(format!("{path}: {e}")))?;
+    if let Some(offset) = bytes.iter().position(|b| *b >= 0x80) {
+        return Err(PyValueError::new_err(format!(
+            "'ascii' codec can't decode byte in {path} at position {offset}"
+        )));
+    }
+    Ok(String::from_utf8(bytes).expect("ascii bytes are valid utf-8"))
+}
+
+fn assignment_to_py<'py>(
+    py: Python<'py>,
+    assignment: &ParameterAssignment,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("name", &assignment.name)?;
+    dict.set_item("expression", &assignment.expression)?;
+    dict.set_item("formal_parameters", assignment.formal_parameters.clone())?;
+    Ok(dict)
+}
+
+fn statement_to_py<'py>(py: Python<'py>, statement: &Statement) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("kind", &statement.kind)?;
+    dict.set_item(
+        "location",
+        (
+            statement.location.path.as_str(),
+            statement.location.first_line,
+            statement.location.last_line,
+        ),
+    )?;
+    dict.set_item("text", &statement.text)?;
+    dict.set_item("name", statement.name.clone())?;
+    dict.set_item("arguments", statement.arguments.clone())?;
+    let parameters = statement
+        .parameters
+        .iter()
+        .map(|a| assignment_to_py(py, a))
+        .collect::<PyResult<Vec<_>>>()?;
+    dict.set_item("parameters", PyList::new(py, parameters)?)?;
+    Ok(dict)
+}
+
+fn subcircuit_to_py<'py>(py: Python<'py>, sub: &Subcircuit) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("name", &sub.name)?;
+    dict.set_item(
+        "location",
+        (
+            sub.location.path.as_str(),
+            sub.location.first_line,
+            sub.location.last_line,
+        ),
+    )?;
+    dict.set_item("terminals", sub.terminals.clone())?;
+    let parameters = sub
+        .parameters
+        .iter()
+        .map(|a| assignment_to_py(py, a))
+        .collect::<PyResult<Vec<_>>>()?;
+    dict.set_item("parameters", PyList::new(py, parameters)?)?;
+    let statements = sub
+        .statements
+        .iter()
+        .map(|s| statement_to_py(py, s))
+        .collect::<PyResult<Vec<_>>>()?;
+    dict.set_item("statements", PyList::new(py, statements)?)?;
+    Ok(dict)
+}
+
+fn section_to_py<'py>(py: Python<'py>, section: &LibrarySection) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("name", &section.name)?;
+    dict.set_item(
+        "location",
+        (
+            section.location.path.as_str(),
+            section.location.first_line,
+            section.location.last_line,
+        ),
+    )?;
+    let statements = section
+        .statements
+        .iter()
+        .map(|s| statement_to_py(py, s))
+        .collect::<PyResult<Vec<_>>>()?;
+    dict.set_item("statements", PyList::new(py, statements)?)?;
+    let subcircuits = PyDict::new(py);
+    for (key, sub) in section.subcircuits.iter() {
+        subcircuits.set_item(key, subcircuit_to_py(py, sub)?)?;
+    }
+    dict.set_item("subcircuits", subcircuits)?;
+    Ok(dict)
+}
+
+fn library_to_py<'py>(
+    py: Python<'py>,
+    library: &SpiceModelLibrary,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("path", &library.path)?;
+    dict.set_item("top_level", section_to_py(py, &library.top_level)?)?;
+    let sections = PyDict::new(py);
+    for (key, section) in library.sections.iter() {
+        sections.set_item(key, section_to_py(py, section)?)?;
+    }
+    dict.set_item("sections", sections)?;
+    Ok(dict)
+}
+
+fn numeric_model_to_py<'py>(py: Python<'py>, model: &NumericModel) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("name", &model.name)?;
+    dict.set_item("model_type", &model.model_type)?;
+    let parameters = PyDict::new(py);
+    for (key, value) in &model.parameters {
+        parameters.set_item(key, *value)?;
+    }
+    dict.set_item("parameters", parameters)?;
+    Ok(dict)
+}
+
+/// `parse_spice_number(text)` — a SPICE numeric literal to `f64`.
+#[pyfunction]
+fn spice_parse_number(py: Python<'_>, text: String) -> PyResult<f64> {
+    py.detach(move || parse_spice_number(&text))
+        .map_err(spice_error_to_py)
+}
+
+/// One logical line: its joined text plus a `(path, first_line, last_line)` tuple.
+type LogicalLine = (String, (String, usize, usize));
+
+/// `logical_lines(text, path)` -> `[(text, (path, first, last)), ...]`.
+#[pyfunction]
+#[pyo3(signature = (text, path=String::from("<string>")))]
+fn spice_logical_lines(py: Python<'_>, text: String, path: String) -> PyResult<Vec<LogicalLine>> {
+    let lines = py
+        .detach(move || logical_lines(&text, &path))
+        .map_err(spice_error_to_py)?;
+    Ok(lines
+        .into_iter()
+        .map(|(text, loc)| (text, (loc.path, loc.first_line, loc.last_line)))
+        .collect())
+}
+
+/// `parse_assignments(text)` -> `[{name, expression, formal_parameters}, ...]`.
+#[pyfunction]
+fn spice_parse_assignments(py: Python<'_>, text: String) -> PyResult<Bound<'_, PyList>> {
+    let parsed = py
+        .detach(move || parse_assignments(&text))
+        .map_err(spice_error_to_py)?;
+    let items = parsed
+        .iter()
+        .map(|a| assignment_to_py(py, a))
+        .collect::<PyResult<Vec<_>>>()?;
+    PyList::new(py, items)
+}
+
+/// `parse_spice_library(path)` -> canonical library tree.
+#[pyfunction]
+fn spice_parse_library(py: Python<'_>, path: String) -> PyResult<Bound<'_, PyDict>> {
+    let text = read_ascii_file(&path)?;
+    let library = py
+        .detach(move || parse_spice_library_text(&text, &path))
+        .map_err(spice_error_to_py)?;
+    library_to_py(py, &library)
+}
+
+/// `parse_spice_library_text(text, path)` -> canonical library tree.
+#[pyfunction]
+#[pyo3(signature = (text, path=String::from("<string>")))]
+fn spice_parse_library_text(
+    py: Python<'_>,
+    text: String,
+    path: String,
+) -> PyResult<Bound<'_, PyDict>> {
+    let library = py
+        .detach(move || parse_spice_library_text(&text, &path))
+        .map_err(spice_error_to_py)?;
+    library_to_py(py, &library)
+}
+
+/// `select_library_sections(path, sections)` -> ordered, de-duplicated names.
+#[pyfunction]
+fn spice_select_sections(
+    py: Python<'_>,
+    path: String,
+    sections: Vec<String>,
+) -> PyResult<Vec<String>> {
+    let text = read_ascii_file(&path)?;
+    py.detach(move || -> Result<Vec<String>, SpiceError> {
+        let library = parse_spice_library_text(&text, &path)?;
+        let selection = select_library_sections(&library, &sections, true)?;
+        Ok(selection.names)
+    })
+    .map_err(spice_error_to_py)
+}
+
+/// `elaborate(path, sections, overrides)` -> `{model_name: {name, model_type,
+/// parameters}}` for the section-level `.model` statements.
+#[pyfunction]
+#[pyo3(signature = (path, sections, overrides=None))]
+fn spice_elaborate(
+    py: Python<'_>,
+    path: String,
+    sections: Vec<String>,
+    overrides: Option<HashMap<String, f64>>,
+) -> PyResult<Bound<'_, PyDict>> {
+    let text = read_ascii_file(&path)?;
+    let initial = lower_keys(overrides);
+    let models = py
+        .detach(move || -> Result<Vec<(String, NumericModel)>, SpiceError> {
+            let library = parse_spice_library_text(&text, &path)?;
+            let elaborated = elaborate_library(&library, &sections, initial, true)?;
+            let mut out = Vec::new();
+            for (key, statement) in elaborated.models.iter() {
+                out.push((key.clone(), elaborated.numeric_model(statement)?));
+            }
+            Ok(out)
+        })
+        .map_err(spice_error_to_py)?;
+    let dict = PyDict::new(py);
+    for (key, model) in &models {
+        dict.set_item(key, numeric_model_to_py(py, model)?)?;
+    }
+    Ok(dict)
+}
+
+/// Extract a `Mapping[str, float | str]` into ordered `(name, ParamValue)` pairs.
+fn extract_param_values(params: Option<&Bound<'_, PyDict>>) -> PyResult<Vec<(String, ParamValue)>> {
+    let mut out = Vec::new();
+    if let Some(dict) = params {
+        for (key, value) in dict.iter() {
+            let name: String = key.extract()?;
+            let value = if let Ok(number) = value.extract::<f64>() {
+                ParamValue::Num(number)
+            } else {
+                ParamValue::Str(value.extract::<String>()?)
+            };
+            out.push((name, value));
+        }
+    }
+    Ok(out)
+}
+
+/// `elaborate_instance(path, sections, subckt, params, overrides)` -> the
+/// numericized `.model` statements and elements of one subcircuit instance.
+#[pyfunction]
+#[pyo3(signature = (path, sections, subckt, params=None, overrides=None))]
+fn spice_elaborate_instance<'py>(
+    py: Python<'py>,
+    path: String,
+    sections: Vec<String>,
+    subckt: String,
+    params: Option<Bound<'_, PyDict>>,
+    overrides: Option<HashMap<String, f64>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let text = read_ascii_file(&path)?;
+    let initial = lower_keys(overrides);
+    let param_values = extract_param_values(params.as_ref())?;
+    // (kind, name, numeric parameters) for one numericized element statement.
+    type ElementNumeric = (String, String, HashMap<String, f64>);
+    let (models, elements): (Vec<NumericModel>, Vec<ElementNumeric>) = py
+        .detach(move || -> Result<_, SpiceError> {
+            let library = parse_spice_library_text(&text, &path)?;
+            let elaborated = elaborate_library(&library, &sections, initial, true)?;
+            let instance = elaborated.instantiate(&subckt, &param_values)?;
+            let mut model_out = Vec::new();
+            for statement in instance.model_statements() {
+                model_out.push(instance.numeric_model(statement, None)?);
+            }
+            let mut element_out = Vec::new();
+            for statement in instance.elements() {
+                let parameters = instance.numeric_parameters(statement, None)?;
+                element_out.push((
+                    statement.kind.clone(),
+                    statement.name.clone().unwrap_or_default(),
+                    parameters,
+                ));
+            }
+            Ok((model_out, element_out))
+        })
+        .map_err(spice_error_to_py)?;
+    let dict = PyDict::new(py);
+    let model_items = models
+        .iter()
+        .map(|m| numeric_model_to_py(py, m))
+        .collect::<PyResult<Vec<_>>>()?;
+    dict.set_item("models", PyList::new(py, model_items)?)?;
+    let mut element_items = Vec::new();
+    for (kind, name, parameters) in &elements {
+        let element = PyDict::new(py);
+        element.set_item("kind", kind)?;
+        element.set_item("name", name)?;
+        let params = PyDict::new(py);
+        for (key, value) in parameters {
+            params.set_item(key, *value)?;
+        }
+        element.set_item("parameters", params)?;
+        element_items.push(element);
+    }
+    dict.set_item("elements", PyList::new(py, element_items)?)?;
+    Ok(dict)
+}
+
 #[pymodule]
 fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -2404,7 +2735,21 @@ fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "ParameterCycleError",
         m.py().get_type::<ParameterCycleError>(),
     )?;
+    m.add("SpiceSyntaxError", m.py().get_type::<SpiceSyntaxError>())?;
+    m.add(
+        "SpiceElaborationError",
+        m.py().get_type::<SpiceElaborationError>(),
+    )?;
     m.add_class::<SpiceScope>()?;
     m.add_function(wrap_pyfunction!(spice_eval, m)?)?;
+    // SPICE deck parser + elaborator parity surface.
+    m.add_function(wrap_pyfunction!(spice_parse_number, m)?)?;
+    m.add_function(wrap_pyfunction!(spice_logical_lines, m)?)?;
+    m.add_function(wrap_pyfunction!(spice_parse_assignments, m)?)?;
+    m.add_function(wrap_pyfunction!(spice_parse_library, m)?)?;
+    m.add_function(wrap_pyfunction!(spice_parse_library_text, m)?)?;
+    m.add_function(wrap_pyfunction!(spice_select_sections, m)?)?;
+    m.add_function(wrap_pyfunction!(spice_elaborate, m)?)?;
+    m.add_function(wrap_pyfunction!(spice_elaborate_instance, m)?)?;
     Ok(())
 }
