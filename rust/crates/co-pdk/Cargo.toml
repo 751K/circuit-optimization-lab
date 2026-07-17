@@ -1,0 +1,21 @@
+# co-pdk — PDK compilers for FreePDK45 / SKY130 / TSMC28.
+#
+# Corner/temperature/polarity normalization, geometry bin selection, and the
+# nf/mult/mismatch instance rules for three PDKs, producing numeric BSIM4 cards
+# that co-bsim4 can consume. Reuses co-spice for all deck parsing, elaboration,
+# and expression evaluation — no second parser or evaluator. Pure std (a
+# hand-written flat-JSON reader and a Python `%g` formatter), no third-party
+# dependency, no fast-math, source operation order preserved so results match
+# the frozen Python PDK adapters bit-for-bit (or within rel <= 1e-14).
+[package]
+name = "co-pdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FreePDK45 / SKY130 / TSMC28 PDK compilers producing numeric BSIM4 cards for CircuitOpt."
+
+[lib]
+doctest = false
+
+[dependencies]
+co-spice = { path = "../co-spice" }

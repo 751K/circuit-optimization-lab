@@ -99,6 +99,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "co-pdk"
+version = "1.4.0"
+dependencies = [
+ "co-spice",
+]
+
+[[package]]
 name = "co-py"
 version = "1.4.0"
 dependencies = [
