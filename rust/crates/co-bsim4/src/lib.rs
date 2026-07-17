@@ -626,15 +626,17 @@ fn solve_real(
             let factor = work[row][pivot] / work[pivot][pivot];
             work[row][pivot] = 0.0;
             for col in (pivot + 1)..size {
-                work[row][col] -= factor * work[pivot][col];
+                // host.c `work[row][col] -= factor * work[pivot][col]`; clang
+                // (-ffp-contract=on) fuses this to an FMA — match it exactly.
+                work[row][col] = (-factor).mul_add(work[pivot][col], work[row][col]);
             }
-            values[row] -= factor * values[pivot];
+            values[row] = (-factor).mul_add(values[pivot], values[row]);
         }
     }
     for row in (0..size).rev() {
         let mut value = values[row];
         for col in (row + 1)..size {
-            value -= work[row][col] * solution[col];
+            value = (-work[row][col]).mul_add(solution[col], value);
         }
         solution[row] = value / work[row][row];
     }
@@ -847,9 +849,8 @@ unsafe fn dc_inner(
         for row in 0..internal_count {
             right[row] = (*device).rhs[internal[row] as usize];
             for j in 0..CO_TERMINALS {
-                right[row] -= (*device).matrix.value[internal[row] as usize][external[j] as usize]
-                    [0]
-                    * term[j];
+                let m = (*device).matrix.value[internal[row] as usize][external[j] as usize][0];
+                right[row] = (-m).mul_add(term[j], right[row]);
             }
             for col in 0..internal_count {
                 system[row][col] =
@@ -886,11 +887,12 @@ unsafe fn dc_inner(
         let r = external[row] as usize;
         let mut residual = -(*device).rhs[r];
         for col in 0..CO_TERMINALS {
-            residual += (*device).matrix.value[r][external[col] as usize][0] * term[col];
+            let m = (*device).matrix.value[r][external[col] as usize][0];
+            residual = m.mul_add(term[col], residual);
         }
         for col in 0..internal_count {
-            residual += (*device).matrix.value[r][internal[col] as usize][0]
-                * (*device).rhs_old[internal[col] as usize];
+            let m = (*device).matrix.value[r][internal[col] as usize][0];
+            residual = m.mul_add((*device).rhs_old[internal[col] as usize], residual);
         }
         *currents.add(row) = residual;
     }
@@ -916,9 +918,8 @@ unsafe fn dc_inner(
                     return status;
                 }
                 for i in 0..internal_count {
-                    reduced -= (*device).matrix.value[external[row] as usize][internal[i] as usize]
-                        [0]
-                        * solution[i];
+                    let m = (*device).matrix.value[external[row] as usize][internal[i] as usize][0];
+                    reduced = (-m).mul_add(solution[i], reduced);
                 }
             }
             *conductance.add(row * CO_TERMINALS + col) = reduced;
