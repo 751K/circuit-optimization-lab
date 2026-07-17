@@ -117,7 +117,11 @@ def _source_digest(compiler: str) -> str:
     return digest.hexdigest()[:20]
 
 
+_build_failure: "Bsim4NativeError | None" = None
+
+
 def _build_library() -> Path:
+    global _build_failure
     compiler = _compiler()
     digest = _source_digest(compiler)
     cache = Path(native_model_cache_dir())
@@ -129,12 +133,25 @@ def _build_library() -> Path:
     with _build_lock:
         if output.is_file():
             return output
+        # A failed build is deterministic for this process (same sources,
+        # same compiler): retrying it for every device/test repeats the
+        # full compile just to fail again — a CI run once burned 2.5 h on
+        # ~100 such retries. Fail fast after the first attempt.
+        if _build_failure is not None:
+            raise Bsim4NativeError(
+                "native BSIM4.5 build already failed in this process "
+                f"(not retrying): {_build_failure}") from _build_failure
         temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
         command = [
             compiler,
             "-O2",
             "-std=c99",
             "-fPIC",
+            # clang 16+ promotes implicit-function-declaration to an error in
+            # C99 mode; the vendored Berkeley sources rely on implicit libc
+            # declarations (e.g. strcmp in b4v5set.c). Keep it a warning so
+            # the unmodified vendor tree builds on current Linux toolchains.
+            "-Wno-error=implicit-function-declaration",
             "-I",
             str(_INCLUDE_DIR),
             "-I",
@@ -155,12 +172,15 @@ def _build_library() -> Path:
                 timeout=180,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise Bsim4NativeError(f"failed to run native BSIM4 compiler: {exc}") from exc
+            _build_failure = Bsim4NativeError(
+                f"failed to run native BSIM4 compiler: {exc}")
+            raise _build_failure from exc
         if result.returncode != 0:
             temporary.unlink(missing_ok=True)
             detail = (result.stderr or result.stdout).strip()
-            raise Bsim4NativeError(
+            _build_failure = Bsim4NativeError(
                 f"native BSIM4.5 build failed with {compiler}:\n{detail}")
+            raise _build_failure
         os.replace(temporary, output)
     return output
 

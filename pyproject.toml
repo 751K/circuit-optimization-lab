@@ -129,11 +129,16 @@ packages = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-m 'not ngspice_oracle'"
+addopts = "-m 'not ngspice_oracle and not heavy_e2e'"
 markers = [
     "cadence_regression: tests that compare against archived Cadence/Spectre references",
     "ngspice_oracle: optional tests that launch ngspice or validate its oracle-only workflows",
     "slow_regression: slower regression tests that still run by default",
+    # heavy_e2e: complete SAR/ADC conversions on the native silicon backend
+    # (minutes each on a machine with PDK cards; they made the default suite
+    # take ~22 min). Run explicitly: pytest -m heavy_e2e. Assigned centrally
+    # in tests/conftest.py.
+    "heavy_e2e: heavyweight end-to-end silicon conversion regressions, excluded from the default run",
 ]
 
 [tool.ruff]
