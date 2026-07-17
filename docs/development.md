@@ -75,6 +75,16 @@ That marker includes ngspice and OpenVAF/OSDI comparison workflows and may
 require local PDK payloads. It is intentionally outside the routine test gate
 because full-circuit subprocess campaigns are much slower than native tests.
 
+The default run also excludes `heavy_e2e`: complete SAR/ADC conversions on the
+native silicon backend (minutes per test on a machine with FreePDK45 cards —
+they made the default suite take ~22 min instead of ~2 min). The inventory
+lives in `tests/conftest.py`. Run them explicitly when touching the SAR/ADC
+workflow, the transient solver, or the native BSIM4 backend:
+
+```bash
+pytest -q -m heavy_e2e
+```
+
 Documentation:
 
 ```bash
