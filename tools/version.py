@@ -73,12 +73,39 @@ def _cargo_with_version(text: str, version: str) -> str:
     return updated
 
 
+def _cargo_workspace_with_version(text: str, version: str) -> str:
+    """Rewrite the ``[workspace.package]`` version of a workspace Cargo.toml.
+
+    The rust/ workspace keeps its version in exactly one place: every member
+    crate (co-core, co-bsim4, co-py) declares ``version.workspace = true`` and
+    inherits this line, so synchronizing the workspace manifest is sufficient —
+    the member Cargo.tomls never carry a literal version. (``version.workspace``
+    cannot match ``^version\\s*=`` because of the ``.workspace`` suffix, so the
+    pattern below can only hit the real assignment.)
+    """
+    pattern = re.compile(
+        r'(?ms)(^\[workspace\.package\]\s*.*?^version\s*=\s*")[^"]+(")')
+    updated, count = pattern.subn(
+        lambda match: match.group(1) + version + match.group(2),
+        text,
+        count=1,
+    )
+    if count != 1:
+        raise ValueError(
+            "could not locate [workspace.package].version in Cargo.toml")
+    return updated
+
+
 def synchronized_content(root: Path, version: str) -> dict[Path, str]:
     version = validate_version(version)
     package_json = root / "frontend/package.json"
     package_lock = root / "frontend/package-lock.json"
     cargo_toml = root / "frontend/src-tauri/Cargo.toml"
     tauri_json = root / "frontend/src-tauri/tauri.conf.json"
+    # The Rust core workspace: one [workspace.package] version line that all
+    # member crates inherit (version.workspace = true), so this single file is
+    # the only rust/ manifest that needs synchronizing.
+    rust_workspace_toml = root / "rust/Cargo.toml"
     return {
         package_json: _json_with_version(
             package_json.read_text(encoding="utf-8"),
@@ -95,6 +122,10 @@ def synchronized_content(root: Path, version: str) -> dict[Path, str]:
         ),
         tauri_json: _json_with_version(
             tauri_json.read_text(encoding="utf-8"),
+            version,
+        ),
+        rust_workspace_toml: _cargo_workspace_with_version(
+            rust_workspace_toml.read_text(encoding="utf-8"),
             version,
         ),
     }

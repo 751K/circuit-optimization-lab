@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.14,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "circuitopt-core"
+# Version is read from Cargo (which inherits [workspace.package].version), so it
+# stays single-sourced through tools/version.py — never hand-edit it here.
+dynamic = ["version"]
+requires-python = ">=3.10"
+description = "Compiled Rust core for CircuitOpt (engine=rust)."
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+# The Python module name comes from [lib].name in Cargo.toml (circuitopt_core).
+# maturin auto-enables pyo3/extension-module for the wheel build.

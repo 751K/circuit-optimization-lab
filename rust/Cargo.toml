@@ -1,0 +1,19 @@
+# CircuitOpt Rust core workspace (R1 scaffold).
+#
+# Layout:
+#   crates/co-core   — solver kernels (R3 target; placeholder today)
+#   crates/co-bsim4  — Berkeley BSIM4.5 host (R2 target; placeholder today)
+#   crates/co-py     — PyO3 extension `circuitopt_core` glueing the two to Python
+#
+# The version lives ONLY here, under [workspace.package]; every member inherits
+# it via `version.workspace = true`. tools/version.py rewrites this single line
+# from the canonical pyproject.toml value (see _cargo_workspace_with_version).
+[workspace]
+# resolver "3" is the edition-2024 default; a workspace must state it explicitly.
+resolver = "3"
+members = ["crates/co-bsim4", "crates/co-core", "crates/co-py"]
+
+[workspace.package]
+version = "1.4.0"
+edition = "2024"
+license = "MIT"

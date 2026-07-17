@@ -1,0 +1,8 @@
+[package]
+name = "co-bsim4"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust host for the Berkeley BSIM4.5 compact model (R1 scaffold)."
+
+[dependencies]

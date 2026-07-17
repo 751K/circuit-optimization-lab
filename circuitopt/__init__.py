@@ -9,20 +9,27 @@ Quick start::
 Or from the command line::
 
     python -m circuitopt examples/periodic_rc.json
+
+Compute engine: the numerical hot paths run on one of three engines —
+``"numba"`` (default), ``"python"`` (pure-Python fallback), or ``"rust"`` (the
+compiled ``circuitopt_core`` core). Select with ``--engine`` / ``CIRCUIT_ENGINE``
+(precedence argv > env > default); ``--no-numba`` is shorthand for
+``--engine python``. ``current_engine()`` reports the active one. See
+``circuitopt/_engine.py``.
 """
 
-# ── Numba flag pre-scan (MUST run before any solver import below) ──────────────
-# circuitopt.numba_kernels reads CIRCUIT_USE_NUMBA and bakes USE_NUMBA/NUMBA_AVAILABLE
-# at *import time*. Under `python -m circuitopt …`, this package __init__ runs (and its
-# solver imports below pull numba_kernels in transitively) *before* __main__.py's
-# code executes — so a `_cmd_*` handler that sets the env var, or even a pre-scan
-# in __main__.py, would be too late and `--no-numba` would silently no-op. Scan
-# argv here, at the earliest possible point, so the flag actually takes effect.
-import os as _os
-import sys as _sys
+# ── Engine selection pre-scan (MUST run before any solver import below) ────────
+# circuitopt.numba_kernels reads CIRCUIT_USE_NUMBA and bakes USE_NUMBA/
+# NUMBA_AVAILABLE at *import time*. Under `python -m circuitopt …` this package
+# __init__ runs (and its solver imports below pull numba_kernels in transitively)
+# *before* __main__.py's code executes — so a later env tweak would be too late
+# and `--no-numba` / `--engine` would silently no-op. apply_engine_env() scans
+# argv here, at the earliest possible point, resolving the active engine
+# (rust | numba | python) with precedence argv > CIRCUIT_ENGINE env > "numba"
+# and setting CIRCUIT_USE_NUMBA=0 for the pure-Python engine. See _engine.py.
+from ._engine import apply_engine_env, current_engine
 
-if "--no-numba" in _sys.argv:
-    _os.environ["CIRCUIT_USE_NUMBA"] = "0"
+apply_engine_env()
 
 # Single-source version: the number lives only in pyproject.toml. When installed
 # (pip / wheel) importlib.metadata reads it back; a bare repo checkout with no
@@ -69,6 +76,8 @@ from .sar_explore import (apply_sar_variables, evaluate_sar,
 __all__ = [
     # package metadata
     "__version__",
+    # compute-engine switch (rust | numba | python)
+    "current_engine",
     # device model abstraction
     "TransistorModel",
     "NumbaParams",
