@@ -63,45 +63,67 @@ def test_archive_changelog_moves_unreleased_content_to_new_release() -> None:
     ) in updated
 
 
-def test_release_updates_every_manifest(tmp_path: Path) -> None:
+def _write_fake_repo(tmp_path: Path, version: str) -> None:
+    """Create the minimal manifest tree that ``synchronized_content`` reads."""
     frontend = tmp_path / "frontend"
     tauri = frontend / "src-tauri"
+    rust = tmp_path / "rust"
     tauri.mkdir(parents=True)
+    rust.mkdir(parents=True)
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "example"\nversion = "1.3.0"\n',
+        f'[project]\nname = "example"\nversion = "{version}"\n',
         encoding="utf-8",
     )
     (frontend / "package.json").write_text(
-        '{"name": "example", "version": "1.3.0"}\n',
+        f'{{"name": "example", "version": "{version}"}}\n',
         encoding="utf-8",
     )
     (frontend / "package-lock.json").write_text(
-        '{"name": "example", "version": "1.3.0", '
-        '"packages": {"": {"version": "1.3.0"}}}\n',
+        f'{{"name": "example", "version": "{version}", '
+        f'"packages": {{"": {{"version": "{version}"}}}}}}\n',
         encoding="utf-8",
     )
     (tauri / "Cargo.toml").write_text(
-        '[package]\nname = "example"\nversion = "1.3.0"\n',
+        f'[package]\nname = "example"\nversion = "{version}"\n',
         encoding="utf-8",
     )
     (tauri / "tauri.conf.json").write_text(
-        '{"productName": "Example", "version": "1.3.0"}\n',
+        f'{{"productName": "Example", "version": "{version}"}}\n',
+        encoding="utf-8",
+    )
+    # Mirrors rust/Cargo.toml: the version lives in [workspace.package] only
+    # (member crates use `version.workspace = true`, which must NOT be matched).
+    (rust / "Cargo.toml").write_text(
+        "[workspace]\n"
+        'resolver = "3"\n'
+        'members = ["crates/example"]\n'
+        "\n"
+        "[workspace.package]\n"
+        f'version = "{version}"\n'
+        'edition = "2024"\n'
+        'license = "MIT"\n',
         encoding="utf-8",
     )
     (tmp_path / "CHANGELOG.md").write_text(
-        """# Changelog
+        f"""# Changelog
 
 ## [Unreleased] / 未发布
 
 - A new feature.
 
-## [1.3.0] - 2026-07-17
+## [{version}] - 2026-07-17
 
-[Unreleased]: https://example.test/compare/v1.3.0...HEAD
-[1.3.0]: https://example.test/releases/v1.3.0
+[Unreleased]: https://example.test/compare/v{version}...HEAD
+[{version}]: https://example.test/releases/v{version}
 """,
         encoding="utf-8",
     )
+
+
+def test_release_updates_every_manifest(tmp_path: Path) -> None:
+    _write_fake_repo(tmp_path, "1.3.0")
+    frontend = tmp_path / "frontend"
+    tauri = frontend / "src-tauri"
 
     release("1.4.0", "2026-07-18", tmp_path)
 
@@ -125,3 +147,24 @@ def test_release_updates_every_manifest(tmp_path: Path) -> None:
         '"version": "1.4.0"'
         in (tauri / "tauri.conf.json").read_text(encoding="utf-8")
     )
+    rust_cargo = (tmp_path / "rust/Cargo.toml").read_text(encoding="utf-8")
+    assert 'version = "1.4.0"' in rust_cargo
+    # Only the [workspace.package] assignment may be rewritten; the rest of the
+    # manifest (members list, edition, license) must round-trip untouched.
+    assert 'members = ["crates/example"]' in rust_cargo
+    assert 'edition = "2024"' in rust_cargo
+
+
+def test_check_catches_rust_workspace_drift(tmp_path: Path) -> None:
+    _write_fake_repo(tmp_path, "1.4.0")
+    rust_cargo = tmp_path / "rust/Cargo.toml"
+    rust_cargo.write_text(
+        rust_cargo.read_text(encoding="utf-8").replace(
+            'version = "1.4.0"', 'version = "1.3.0"'
+        ),
+        encoding="utf-8",
+    )
+
+    errors = check(tmp_path)
+
+    assert any("rust/Cargo.toml" in error for error in errors)
