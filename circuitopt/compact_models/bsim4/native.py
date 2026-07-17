@@ -73,6 +73,8 @@ _EVAL_VP_T = C.CFUNCTYPE(
 )
 _build_lock = threading.RLock()
 _library = None
+_rust_library = None
+_DEFAULT_BACKEND = "cc"
 
 
 def _compiler() -> str:
@@ -185,6 +187,71 @@ def _build_library() -> Path:
     return output
 
 
+def _bind_abi(library) -> None:
+    """Bind the four-terminal BSIM4 C ABI onto a loaded ``ctypes`` library.
+
+    Both backends export the identical ABI (host.c for ``cc``; the compiled
+    ``circuitopt_core`` cdylib for ``rust``), so the binding is shared. This
+    does not affect numerical results — it only declares the argument/return
+    marshalling and installs the Numba runtime function pointer.
+    """
+    double_pointer = C.POINTER(C.c_double)
+    library.co_bsim4_create.argtypes = (C.c_int, C.c_double)
+    library.co_bsim4_create.restype = C.c_void_p
+    library.co_bsim4_destroy.argtypes = (C.c_void_p,)
+    library.co_bsim4_destroy.restype = None
+    library.co_bsim4_set_model.argtypes = (
+        C.c_void_p,
+        C.c_char_p,
+        C.c_double,
+    )
+    library.co_bsim4_set_model.restype = C.c_int
+    library.co_bsim4_set_instance.argtypes = (
+        C.c_void_p,
+        C.c_char_p,
+        C.c_double,
+    )
+    library.co_bsim4_set_instance.restype = C.c_int
+    library.co_bsim4_setup.argtypes = (C.c_void_p,)
+    library.co_bsim4_setup.restype = C.c_int
+    library.co_bsim4_dc.argtypes = (
+        C.c_void_p,
+        double_pointer,
+        double_pointer,
+        double_pointer,
+        double_pointer,
+        double_pointer,
+        double_pointer,
+    )
+    library.co_bsim4_dc.restype = C.c_int
+    library.co_bsim4_eval.argtypes = library.co_bsim4_dc.argtypes
+    library.co_bsim4_eval.restype = C.c_int
+    library.co_bsim4_eval_vp.argtypes = (C.c_void_p,) * 6
+    library.co_bsim4_eval_vp.restype = C.c_int
+    library.co_bsim4_eval_batch.argtypes = (
+        C.POINTER(C.c_void_p),
+        C.c_size_t,
+        double_pointer,
+        double_pointer,
+        double_pointer,
+        double_pointer,
+        double_pointer,
+        C.POINTER(C.c_int),
+    )
+    library.co_bsim4_eval_batch.restype = C.c_int
+    library.co_bsim4_noise.argtypes = (
+        C.c_void_p,
+        C.c_double,
+        double_pointer,
+        double_pointer,
+        double_pointer,
+        double_pointer,
+    )
+    library.co_bsim4_noise.restype = C.c_int
+    library._co_bsim4_eval_vp = _EVAL_VP_T(
+        ("co_bsim4_eval_vp", library))
+
+
 def _bind_library():
     global _library
     if _library is not None:
@@ -194,69 +261,98 @@ def _bind_library():
             return _library
         path = _build_library()
         library = C.CDLL(str(path))
-        double_pointer = C.POINTER(C.c_double)
         library.co_bsim4_abi_version.argtypes = ()
         library.co_bsim4_abi_version.restype = C.c_uint
         abi_version = int(library.co_bsim4_abi_version())
         if abi_version != _ABI_VERSION:
             raise Bsim4NativeError(
                 f"native BSIM4 ABI version {abi_version} != expected {_ABI_VERSION}")
-        library.co_bsim4_create.argtypes = (C.c_int, C.c_double)
-        library.co_bsim4_create.restype = C.c_void_p
-        library.co_bsim4_destroy.argtypes = (C.c_void_p,)
-        library.co_bsim4_destroy.restype = None
-        library.co_bsim4_set_model.argtypes = (
-            C.c_void_p,
-            C.c_char_p,
-            C.c_double,
-        )
-        library.co_bsim4_set_model.restype = C.c_int
-        library.co_bsim4_set_instance.argtypes = (
-            C.c_void_p,
-            C.c_char_p,
-            C.c_double,
-        )
-        library.co_bsim4_set_instance.restype = C.c_int
-        library.co_bsim4_setup.argtypes = (C.c_void_p,)
-        library.co_bsim4_setup.restype = C.c_int
-        library.co_bsim4_dc.argtypes = (
-            C.c_void_p,
-            double_pointer,
-            double_pointer,
-            double_pointer,
-            double_pointer,
-            double_pointer,
-            double_pointer,
-        )
-        library.co_bsim4_dc.restype = C.c_int
-        library.co_bsim4_eval.argtypes = library.co_bsim4_dc.argtypes
-        library.co_bsim4_eval.restype = C.c_int
-        library.co_bsim4_eval_vp.argtypes = (C.c_void_p,) * 6
-        library.co_bsim4_eval_vp.restype = C.c_int
-        library.co_bsim4_eval_batch.argtypes = (
-            C.POINTER(C.c_void_p),
-            C.c_size_t,
-            double_pointer,
-            double_pointer,
-            double_pointer,
-            double_pointer,
-            double_pointer,
-            C.POINTER(C.c_int),
-        )
-        library.co_bsim4_eval_batch.restype = C.c_int
-        library.co_bsim4_noise.argtypes = (
-            C.c_void_p,
-            C.c_double,
-            double_pointer,
-            double_pointer,
-            double_pointer,
-            double_pointer,
-        )
-        library.co_bsim4_noise.restype = C.c_int
-        library._co_bsim4_eval_vp = _EVAL_VP_T(
-            ("co_bsim4_eval_vp", library))
+        _bind_abi(library)
         _library = library
     return _library
+
+
+def _import_circuitopt_core():
+    """Import the compiled Rust core. Isolated for testability."""
+    import circuitopt_core
+
+    return circuitopt_core
+
+
+def _rust_extension_path(module) -> str | None:
+    """Resolve the on-disk shared object backing ``circuitopt_core``.
+
+    ``maturin develop`` installs an editable *package* whose ``__file__`` is the
+    ``__init__.py``; the compiled object is a submodule (``.abi3.so``). A plain
+    wheel install exposes the bare extension directly. Handle both, plus a
+    directory scan as a last resort.
+    """
+    suffixes = (".so", ".dylib", ".pyd")
+    direct = getattr(module, "__file__", None)
+    if direct and direct.endswith(suffixes):
+        return direct
+    submodule = getattr(module, "circuitopt_core", None)
+    submodule_file = getattr(submodule, "__file__", None)
+    if submodule_file and submodule_file.endswith(suffixes):
+        return submodule_file
+    for directory in getattr(module, "__path__", None) or ():
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            if name.endswith(suffixes):
+                return os.path.join(directory, name)
+    return None
+
+
+def _bind_rust_library():
+    global _rust_library
+    if _rust_library is not None:
+        return _rust_library
+    with _build_lock:
+        if _rust_library is not None:
+            return _rust_library
+        try:
+            module = _import_circuitopt_core()
+        except ImportError as exc:
+            raise Bsim4NativeError(
+                "CIRCUIT_BSIM4_BACKEND=rust requires the compiled circuitopt_core "
+                "extension, which is not importable; build it with "
+                "`maturin develop --release -m rust/crates/co-py/Cargo.toml`"
+            ) from exc
+        path = _rust_extension_path(module)
+        if not path:
+            raise Bsim4NativeError(
+                "could not locate the compiled circuitopt_core shared object "
+                f"(module {getattr(module, '__file__', module)!r})")
+        library = C.CDLL(path)
+        library.co_bsim4_abi_version.argtypes = ()
+        library.co_bsim4_abi_version.restype = C.c_uint
+        abi_version = int(library.co_bsim4_abi_version())
+        if abi_version != _ABI_VERSION:
+            raise Bsim4NativeError(
+                f"rust BSIM4 ABI version {abi_version} != expected {_ABI_VERSION}")
+        _bind_abi(library)
+        _rust_library = library
+    return _rust_library
+
+
+def _backend_choice() -> str:
+    """Read the backend selector at call time (never baked at import).
+
+    Mirrors ``ngspice_char.ngspice_chain_enabled``: the environment variable
+    wins on every call, so a process can switch backends between evaluations.
+    """
+    value = os.environ.get("CIRCUIT_BSIM4_BACKEND", _DEFAULT_BACKEND).strip().lower()
+    if value not in ("cc", "rust"):
+        raise Bsim4NativeError(
+            f"CIRCUIT_BSIM4_BACKEND must be 'cc' or 'rust', got {value!r}")
+    return value
+
+
+def _select_library(backend: str):
+    return _bind_rust_library() if backend == "rust" else _bind_library()
 
 
 def _raise_status(status: int, action: str, parameter: str | None = None) -> None:
@@ -273,8 +369,11 @@ class _NativeDevice:
         model: Bsim4ModelCard,
         instance: Bsim4InstanceCard,
         temperature_k: float,
+        *,
+        backend: str = "cc",
     ):
-        self._library = _bind_library()
+        self._backend = backend
+        self._library = _select_library(backend)
         self._pointer = self._library.co_bsim4_create(
             model.polarity, float(temperature_k))
         if not self._pointer:
@@ -446,8 +545,10 @@ class NativeBsim4Backend:
         model: Bsim4ModelCard,
         instance: Bsim4InstanceCard,
         temperature_k: float,
+        backend: str,
     ) -> tuple:
         return (
+            backend,
             model.polarity,
             model.version,
             tuple(sorted(model.parameters.items())),
@@ -460,16 +561,17 @@ class NativeBsim4Backend:
         model: Bsim4ModelCard,
         instance: Bsim4InstanceCard,
         temperature_k: float,
+        backend: str,
     ) -> _NativeDevice:
         if self._cache_size == 0:
-            return _NativeDevice(model, instance, temperature_k)
-        key = self._key(model, instance, temperature_k)
+            return _NativeDevice(model, instance, temperature_k, backend=backend)
+        key = self._key(model, instance, temperature_k, backend)
         with self._lock:
             device = self._devices.get(key)
             if device is not None:
                 self._devices.move_to_end(key)
                 return device
-            device = _NativeDevice(model, instance, temperature_k)
+            device = _NativeDevice(model, instance, temperature_k, backend=backend)
             self._devices[key] = device
             while len(self._devices) > self._cache_size:
                 _, evicted = self._devices.popitem(last=False)
@@ -484,7 +586,9 @@ class NativeBsim4Backend:
         *,
         frequency_hz: float | None = None,
     ) -> Bsim4Evaluation:
-        device = self._device(model, instance, bias.temperature_k)
+        # Backend is chosen per call (CIRCUIT_BSIM4_BACKEND), never at import.
+        backend = _backend_choice()
+        device = self._device(model, instance, bias.temperature_k, backend)
         try:
             return device.evaluate(bias, frequency_hz)
         finally:
@@ -503,7 +607,8 @@ class NativeBsim4Backend:
         must close it. A dedicated handle avoids sharing mutable BSIM state
         between concurrent transient simulations.
         """
-        return _NativeDevice(model, instance, float(temperature_k))
+        return _NativeDevice(
+            model, instance, float(temperature_k), backend=_backend_choice())
 
     @staticmethod
     def evaluate_batch(
