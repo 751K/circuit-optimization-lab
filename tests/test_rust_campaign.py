@@ -400,3 +400,302 @@ def test_device_count_mismatch_raises():
     camp = _campaign()
     with pytest.raises(ValueError):
         camp.evaluate_batch([{"devices": [[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]]}])
+
+
+# ===========================================================================
+# Group 2: silicon (BSIM4) campaign — freepdk45 / sky130 / tsmc28 5T OTA.
+#
+# Reference = the frozen Python scalar path itself (`ac_solve` +
+# `noise_analysis` under the rust engine — the bench_sweep
+# evaluate_ac/evaluate_ac_noise semantics). Unlike the AFE OTFT there is no
+# warm/cold split: the BSIM4 evaluation is a pure function of (card, bias), so
+# a single seeded gate at rel <= 1e-12 covers both of the AFE-style dual gates.
+#
+# sky130 candidates use bundled card stems with extract_w == W (the co-pdk
+# surface has no reference-width parameter — flagged in PARITY.md), and the
+# Python reference passes device_kwargs without extract_w, exercising the
+# frozen loader's own reference_width=None (== width) branch.
+# ===========================================================================
+
+from circuitopt.circuit_loader import load_circuit_json  # noqa: E402
+
+_SI_FREQS = np.logspace(1, 8, 71)
+_SI_BAND = (1e3, 1e6)
+_SI_EXAMPLES = {
+    "freepdk45": ("examples/freepdk45_5t_ota.json", ("nom", "ss", "ff")),
+    "sky130": ("examples/sky130_5t_ota.json", ("tt", "ss")),
+    "tsmc28": ("examples/tsmc28hpcp_5t_ota.json", ("tt", "ss")),
+}
+_SI_PAIRS = (("M1", "M2"), ("M3", "M4"))
+
+
+def _silicon_ready(pdk):
+    """Payload availability, mirroring tests/test_rust_pdk_parity.py."""
+    if pdk == "freepdk45":
+        from circuitopt.toolchain import pdk_root
+
+        root = pdk_root()
+        if not os.path.isfile(
+            os.path.join(root, "freepdk45", "models_nom", "NMOS_VTG.inc")
+        ):
+            return "FreePDK45 cards not present"
+    elif pdk == "tsmc28":
+        from circuitopt.toolchain import tsmc28_model_dir
+
+        if not os.path.isdir(tsmc28_model_dir()):
+            return "licensed TSMC28HPC+ model is not installed"
+    return None
+
+
+def _si_load(pdk):
+    reason = _silicon_ready(pdk)
+    if reason:
+        pytest.skip(reason)
+    path, corners = _SI_EXAMPLES[pdk]
+    spec = load_circuit_json(path)
+    from circuitopt._rust_campaign import SiliconCampaign
+
+    camp = SiliconCampaign(spec, _SI_FREQS, band=_SI_BAND)
+    return spec, corners, camp
+
+
+def _si_reference_kwargs(spec):
+    """Frozen-path kwargs with extract_w dropped (reference_width = width)."""
+    binding = spec.binding()
+    device_kwargs = {
+        name: {k: v for k, v in kw.items() if k != "extract_w"}
+        for name, kw in (binding.device_kwargs or {}).items()
+    }
+    return dict(topo=spec.topology, nf=spec.nf,
+                model_types=binding.model_types, device_kwargs=device_kwargs)
+
+
+def _si_geometries(pdk, spec, camp):
+    """Per-PDK candidate geometry matrices (paired devices stay matched)."""
+    base = dict(spec.sizes)
+
+    def scaled(factors):
+        paired = {name: pair[0] for pair in _SI_PAIRS for name in pair}
+        out = {}
+        for name, (w, l) in base.items():
+            f = factors.get(paired.get(name, name), 1.0)
+            out[name] = (w * f, l * f)
+        return out
+
+    if pdk == "sky130":
+        # Bundled stems only (extract_w == W, exact stem match on both sides).
+        variants = [base]
+        for m12, m34, m5 in ((18.7239, 12.0, 58.3602), (40.0, 12.0, 24.0)):
+            variants.append({"M1": (m12, 0.5), "M2": (m12, 0.5),
+                             "M3": (m34, 0.5), "M4": (m34, 0.5),
+                             "M5": (m5, 0.5)})
+        return variants
+    if pdk == "freepdk45":
+        # Continuous geometry (one flat card per corner).
+        return [base,
+                scaled({"M1": 0.85, "M3": 0.9, "M5": 1.1}),
+                scaled({"M1": 1.2, "M3": 1.15, "M5": 0.9})]
+    # tsmc28: W-only perturbations stay inside the delivery's geometry bins.
+    def w_only(factors):
+        paired = {name: pair[0] for pair in _SI_PAIRS for name in pair}
+        return {name: (w * factors.get(paired.get(name, name), 1.0), l)
+                for name, (w, l) in base.items()}
+
+    return [base,
+            w_only({"M1": 0.9, "M3": 1.1, "M5": 1.05}),
+            w_only({"M1": 1.15, "M3": 0.95, "M5": 0.9})]
+
+
+def _si_probe(camp, sizes, corner):
+    """True when every device's numeric card resolves for this candidate.
+
+    Mirrors the campaign's own card requests (same nf/mult per device), so a
+    False here means *both* sides reject the geometry (e.g. outside a TSMC28
+    bin) and the (candidate, corner) pair is skipped consistently.
+    """
+    from circuitopt._rust_campaign import silicon_pdk_root
+    from circuitopt.device_factory import dev_nf
+    import circuitopt_core
+
+    try:
+        pdk = circuitopt_core.CompiledPdk(camp.pdk, silicon_pdk_root(camp.pdk))
+        for name in camp.device_names:
+            w, l = sizes[name]
+            model = camp.model_types[name].split(".", 1)[1]
+            temp_c = 27.0 if camp.pdk == "tsmc28" else 25.0
+            pdk.numeric_card(model, corner, temp_c, w_um=float(w), l_um=float(l),
+                             nf=int(dev_nf(camp.nf, name)),
+                             mult=int(camp._mult[name]), mismatch=0.0)
+        return True
+    except ValueError:
+        return False
+
+
+@pytest.mark.parametrize("pdk", sorted(_SI_EXAMPLES))
+def test_silicon_parity_seeded_bit_for_bit(pdk):
+    spec, corners, camp = _si_load(pdk)
+    kwargs = _si_reference_kwargs(spec)
+    count = 0
+    worst = {"gain_peak_dB": 0.0, "bw_Hz": 0.0, "irn_uV": 0.0}
+    worst_dc = 0.0
+    from circuitopt.noise_solver import noise_analysis
+
+    for sizes in _si_geometries(pdk, spec, camp):
+        for corner in corners:
+            if not _si_probe(camp, sizes, corner):
+                continue  # geometry outside this corner's bins — both sides
+            ac = ac_solve(sizes, spec.bias, _SI_FREQS, corner=corner, **kwargs)
+            assert ac is not None, f"{pdk} {corner}: python AC failed"
+            nz = noise_analysis(sizes, spec.bias, _SI_FREQS, corner=corner,
+                                x0_guess=ac["dc_op"], **kwargs)
+            irn_ref = band_rms(_SI_FREQS, nz["irn_psd"], *_SI_BAND) * 1e6
+            seed = camp.seed_vector(ac["dc_op"])
+            trust = camp.evaluate_batch(
+                [camp.candidate(sizes, corner, seed=seed, trust_seed_as_op=True)]
+            )[0]
+            newton = camp.evaluate_batch(
+                [camp.candidate(sizes, corner, seed=seed, trust_seed_as_op=False)]
+            )[0]
+            assert trust["ok"], (pdk, corner, trust)
+            assert newton["ok"], (pdk, corner, newton)
+            for key, ref in (("gain_peak_dB", float(ac["peak_dB"])),
+                             ("bw_Hz", float(ac["bw_Hz"])),
+                             ("irn_uV", float(irn_ref))):
+                for res in (trust, newton):
+                    r = _rel(ref, res[key])
+                    worst[key] = max(worst[key], r)
+                    assert r <= 1e-12, f"{pdk} {corner} {key} rel={r:.3e}"
+            # Same-seed rust DC reproduces the Python operating point.
+            py_op = [float(ac["dc_op"][n]) for n in camp.solved]
+            worst_dc = max(worst_dc, max(
+                _rel(a, b) for a, b in zip(py_op, newton["dc_op"])))
+            assert newton["dc_from_seed"]
+            count += 1
+    assert count >= 4, f"{pdk}: only {count} (candidate, corner) cases ran"
+    print(f"\n[group2:{pdk}] {count} cases, worst_rel gain={worst['gain_peak_dB']:.2e} "
+          f"bw={worst['bw_Hz']:.2e} irn={worst['irn_uV']:.2e} dc={worst_dc:.2e}")
+    assert worst_dc <= 1e-12
+
+
+def test_silicon_determinism_across_worker_counts():
+    spec, _corners, camp = _si_load("sky130")
+    kwargs = _si_reference_kwargs(spec)
+    cands = []
+    for sizes in _si_geometries("sky130", spec, camp):
+        ac = ac_solve(sizes, spec.bias, _SI_FREQS, corner="tt", **kwargs)
+        assert ac is not None
+        cands.append(camp.candidate(sizes, "tt", seed=camp.seed_vector(ac["dc_op"]),
+                                    trust_seed_as_op=False))
+    cands = cands * 3  # 9 candidates
+    baseline = camp.evaluate_batch(cands, workers=1)
+    for workers in (1, 2, 8):
+        got = camp.evaluate_batch(cands, workers=workers)
+        for i, (a, b) in enumerate(zip(baseline, got)):
+            assert a["ok"] and b["ok"]
+            for key in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
+                assert a[key] == b[key], f"workers={workers} candidate={i} {key}"
+            assert a["dc_op"] == b["dc_op"], f"workers={workers} candidate={i} dc_op"
+
+
+def test_silicon_no_python_callback_during_batch(monkeypatch):
+    spec, _corners, camp = _si_load("sky130")
+    kwargs = _si_reference_kwargs(spec)
+    ac = ac_solve(dict(spec.sizes), spec.bias, _SI_FREQS, corner="tt", **kwargs)
+    cand = camp.candidate(dict(spec.sizes), "tt", seed=camp.seed_vector(ac["dc_op"]),
+                          trust_seed_as_op=False)
+
+    from circuitopt.compact_models.bsim4 import NativeBsim4Backend
+    import circuitopt.ac_solver as acmod
+    import circuitopt.noise_solver as nzmod
+
+    calls = {"n": 0}
+
+    def count(*_a, **_k):
+        calls["n"] += 1
+        raise AssertionError("python BSIM4 backend used during compiled batch")
+
+    monkeypatch.setattr(NativeBsim4Backend, "evaluate", count)
+    monkeypatch.setattr(NativeBsim4Backend, "evaluate_batch", staticmethod(count))
+    monkeypatch.setattr(NativeBsim4Backend, "noise_batch", staticmethod(count))
+    monkeypatch.setattr(acmod, "ac_solve", count)
+    monkeypatch.setattr(nzmod, "noise_analysis", count)
+
+    out = camp.evaluate_batch([cand] * 4, workers=2)
+    assert all(r["ok"] for r in out)
+    assert calls["n"] == 0
+
+
+def test_silicon_gil_released_speedup():
+    spec, _corners, camp = _si_load("sky130")
+    kwargs = _si_reference_kwargs(spec)
+    ac = ac_solve(dict(spec.sizes), spec.bias, _SI_FREQS, corner="tt", **kwargs)
+    seed = camp.seed_vector(ac["dc_op"])
+    cands = [camp.candidate(dict(spec.sizes), "tt", seed=seed,
+                            trust_seed_as_op=False) for _ in range(48)]
+
+    def timed(workers):
+        best = float("inf")
+        for _ in range(2):
+            t0 = time.perf_counter()
+            camp.evaluate_batch(cands, workers=workers)
+            best = min(best, time.perf_counter() - t0)
+        return best
+
+    t1 = timed(1)
+    t8 = timed(8)
+    speedup = t1 / t8
+    print(f"\n[speedup:silicon] workers=1 {t1*1e3:.1f}ms  workers=8 {t8*1e3:.1f}ms  "
+          f"speedup={speedup:.2f}x")
+    assert speedup > 1.3
+
+
+def test_silicon_bad_candidate_is_flagged_without_sinking_batch():
+    spec, _corners, camp = _si_load("sky130")
+    kwargs = _si_reference_kwargs(spec)
+    ac = ac_solve(dict(spec.sizes), spec.bias, _SI_FREQS, corner="tt", **kwargs)
+    good = camp.candidate(dict(spec.sizes), "tt", seed=camp.seed_vector(ac["dc_op"]),
+                          trust_seed_as_op=True)
+    bad_sizes = {name: (1e9, wl[1]) for name, wl in spec.sizes.items()}
+    bad = camp.candidate(bad_sizes, "tt")
+    out = camp.evaluate_batch([good, bad, good], workers=2)
+    assert out[0]["ok"] and out[2]["ok"]
+    assert not out[1]["ok"] and "error" in out[1]
+    assert _rel(float(ac["peak_dB"]), out[0]["gain_peak_dB"]) <= 1e-12
+
+
+def test_silicon_mismatch_delvto_matches_reference():
+    spec, _corners, camp = _si_load("sky130")
+    binding = spec.binding()
+    rng = np.random.default_rng(3)
+    from circuitopt.noise_solver import noise_analysis
+
+    worst = 0.0
+    n_ok = 0
+    for _ in range(3):
+        delvto = {name: float(rng.normal(0.0, 2e-3)) for name in camp.device_names}
+        device_kwargs = {
+            name: {**{k: v for k, v in (binding.device_kwargs or {})
+                      .get(name, {}).items() if k != "extract_w"},
+                   "delvto": delvto[name]}
+            for name in camp.device_names
+        }
+        kwargs = dict(topo=spec.topology, nf=spec.nf,
+                      model_types=binding.model_types, device_kwargs=device_kwargs)
+        ac = ac_solve(dict(spec.sizes), spec.bias, _SI_FREQS, corner="tt", **kwargs)
+        if ac is None:
+            continue
+        nz = noise_analysis(dict(spec.sizes), spec.bias, _SI_FREQS, corner="tt",
+                            x0_guess=ac["dc_op"], **kwargs)
+        irn_ref = band_rms(_SI_FREQS, nz["irn_psd"], *_SI_BAND) * 1e6
+        cand = camp.candidate(dict(spec.sizes), "tt", mismatch=delvto,
+                              seed=camp.seed_vector(ac["dc_op"]),
+                              trust_seed_as_op=True)
+        res = camp.evaluate_batch([cand])[0]
+        assert res["ok"], res
+        for key, ref in (("gain_peak_dB", float(ac["peak_dB"])),
+                         ("bw_Hz", float(ac["bw_Hz"])), ("irn_uV", irn_ref)):
+            worst = max(worst, _rel(ref, res[key]))
+        n_ok += 1
+    assert n_ok == 3
+    print(f"\n[group2:sky130 delvto] {n_ok} samples, worst_rel={worst:.2e}")
+    assert worst <= 1e-12
