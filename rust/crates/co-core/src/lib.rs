@@ -10,6 +10,7 @@ pub mod error;
 pub mod lti;
 pub mod mna;
 pub mod otft;
+pub mod otft_campaign;
 pub mod periodic;
 pub mod transient;
 

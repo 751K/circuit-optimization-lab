@@ -550,14 +550,20 @@ impl System {
         solve_complex(&mut matrix, &mut rhs, self.size).then_some(rhs)
     }
 
-    fn solve_frequencies_serial(&self, frequencies: &[f64]) -> Option<Vec<Vec<Complex>>> {
+    pub(crate) fn solve_frequencies_serial(
+        &self,
+        frequencies: &[f64],
+    ) -> Option<Vec<Vec<Complex>>> {
         frequencies
             .iter()
             .map(|frequency| self.solve_frequency(*frequency))
             .collect()
     }
 
-    fn solve_frequencies_parallel(&self, frequencies: &[f64]) -> Option<Vec<Vec<Complex>>> {
+    pub(crate) fn solve_frequencies_parallel(
+        &self,
+        frequencies: &[f64],
+    ) -> Option<Vec<Vec<Complex>>> {
         frequencies
             .par_iter()
             .map(|frequency| self.solve_frequency(*frequency))
@@ -601,7 +607,7 @@ impl System {
         solve_complex(&mut matrix, &mut rhs, self.size).then_some(rhs)
     }
 
-    fn solve_transpose_serial(
+    pub(crate) fn solve_transpose_serial(
         &self,
         frequencies: &[f64],
         sense: &[f64],
@@ -612,7 +618,7 @@ impl System {
             .collect()
     }
 
-    fn solve_transpose_parallel(
+    pub(crate) fn solve_transpose_parallel(
         &self,
         frequencies: &[f64],
         sense: &[f64],

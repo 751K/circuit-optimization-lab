@@ -396,6 +396,63 @@ pub fn capacitances(p: &Params, vs: f64, vd: f64, vg: f64, vs1: f64, vd1: f64) -
     ]
 }
 
+/// Channel transconductance from `_eval_channel['gm']` (analytic), used only by
+/// the drain-current noise PSD. Order-preserving port of
+/// `PMOS_TFT._eval_channel` (`circuitopt/pmos_tft_model.py`).
+pub fn channel_gm(p: &Params, vs: f64, vd: f64, vg: f64, vs1: f64, vd1: f64) -> f64 {
+    let _ = (vs, vs1);
+    let v_d = if vd1 > vd { vd } else { vd1 };
+    let v_d1 = if vd1 > vd { vd1 } else { vd };
+    let arg_d1 = (v_d1 - vg + p.vfb) / p.vss;
+    let arg_d = (v_d - vg + p.vfb) / p.vss;
+    let vods = p.vss * softplus(arg_d1);
+    let vodd = p.vss * softplus(arg_d);
+    let chmod = 1.0 + p.lambda * (v_d1 - v_d);
+    p.current_scale
+        * p.exponent
+        * (vods.powf(p.exponent - 1.0) * sigmoid(arg_d1)
+            - vodd.powf(p.exponent - 1.0) * sigmoid(arg_d))
+        * chmod
+}
+
+/// Drain-current noise PSD split `(S_thermal, S_flicker_at(frequency))` in
+/// A^2/Hz. Order-preserving port of `PMOS_TFT.get_noise_psd`. The physical
+/// constants match the device model's own truncated values (`q = 1.6e-19`,
+/// `Kb = 1.38064e-23`), which differ from the resistor-noise Boltzmann constant.
+/// `ci`, `w_m = W*1e-6`, `l_m = L*1e-6` and `temperature` come from the same
+/// geometry/corner build that produced `p`. Call with `frequency = 1.0` to get
+/// the 1 Hz flicker coefficient (`device_psd` then scales it by `1/f`).
+#[allow(clippy::too_many_arguments)]
+pub fn noise_psd(
+    p: &Params,
+    vs: f64,
+    vd: f64,
+    vg: f64,
+    vs1: f64,
+    vd1: f64,
+    temperature: f64,
+    ci: f64,
+    w_m: f64,
+    l_m: f64,
+    frequency: f64,
+) -> (f64, f64) {
+    const Q: f64 = 1.6e-19;
+    const KB: f64 = 1.38064e-23;
+    let currents = eval_currents(p, vs, vd, vg, vs1, vd1);
+    let ich = currents[3];
+    let ioff = currents[4];
+    let gm = channel_gm(p, vs, vd, vg, vs1, vd1);
+    let s_th1 = 2.0 * Q * (ich + ioff);
+    let s_th2 = 4.0 * KB * temperature * gm * 2.0 / 3.0;
+    let s_thermal = s_th1 + s_th2;
+    let hooge = 0.05;
+    // `_va_sorted_nodes` v_d1 = max(Vd1, Vd).
+    let v_d1 = if vd1 > vd { vd1 } else { vd };
+    let denom = w_m * l_m * ci * 1e4 * (v_d1 - vg + p.vfb);
+    let s_flicker_1hz = (hooge * Q * ich * ich) / denom.abs();
+    (s_thermal, s_flicker_1hz / frequency)
+}
+
 #[inline]
 fn atan_cap_integral(y: f64, scale: f64, two_over_pi: f64) -> f64 {
     let ay = scale * y;
