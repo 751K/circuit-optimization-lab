@@ -460,12 +460,13 @@ def _si_load(pdk):
 
 
 def _si_reference_kwargs(spec):
-    """Frozen-path kwargs with extract_w dropped (reference_width = width)."""
+    """Frozen-path kwargs, keeping ``extract_w`` so the reference bins the card on
+    the same reference width the campaign now marshals (R5-D). Before the campaign
+    honoured ``extract_w`` this dropped it (reference_width = actual width); now the
+    faithful comparison keeps it, so the sky130 explore geometries (extract_w != W)
+    are a genuine, discriminating parity case rather than a coincidental match."""
     binding = spec.binding()
-    device_kwargs = {
-        name: {k: v for k, v in kw.items() if k != "extract_w"}
-        for name, kw in (binding.device_kwargs or {}).items()
-    }
+    device_kwargs = {name: dict(kw) for name, kw in (binding.device_kwargs or {}).items()}
     return dict(topo=spec.topology, nf=spec.nf,
                 model_types=binding.model_types, device_kwargs=device_kwargs)
 
