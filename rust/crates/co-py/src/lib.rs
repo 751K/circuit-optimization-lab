@@ -2794,9 +2794,10 @@ impl PyCompiledPdk {
         })
     }
 
-    /// Compile one numeric BSIM4 card.
+    /// Compile one numeric BSIM4 card. `reference_width_um` is the SKY130
+    /// `extract_w` card-bin width (`None` bins on the actual `w_um`).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (polarity, corner, temp_c, w_um=None, l_um=None, nf=1, mult=1, mismatch=None))]
+    #[pyo3(signature = (polarity, corner, temp_c, w_um=None, l_um=None, nf=1, mult=1, mismatch=None, reference_width_um=None))]
     fn numeric_card<'py>(
         &self,
         py: Python<'py>,
@@ -2808,11 +2809,22 @@ impl PyCompiledPdk {
         nf: i64,
         mult: i64,
         mismatch: Option<f64>,
+        reference_width_um: Option<f64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let inner = self.inner.clone();
         let card = py
             .detach(move || {
-                inner.numeric_card(&polarity, &corner, temp_c, w_um, l_um, nf, mult, mismatch)
+                inner.numeric_card(
+                    &polarity,
+                    &corner,
+                    temp_c,
+                    w_um,
+                    l_um,
+                    nf,
+                    mult,
+                    mismatch,
+                    reference_width_um,
+                )
             })
             .map_err(pdk_error_to_py)?;
         numeric_card_to_py(py, &card)

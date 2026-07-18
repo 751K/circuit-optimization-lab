@@ -655,7 +655,12 @@ def test_silicon_bad_candidate_is_flagged_without_sinking_batch():
     ac = ac_solve(dict(spec.sizes), spec.bias, _SI_FREQS, corner="tt", **kwargs)
     good = camp.candidate(dict(spec.sizes), "tt", seed=camp.seed_vector(ac["dc_op"]),
                           trust_seed_as_op=True)
-    bad_sizes = {name: (1e9, wl[1]) for name, wl in spec.sizes.items()}
+    # The sky130 example pins ``extract_w``, so the card bins on the reference
+    # width (not the actual W) — an absurd *width* now correctly selects the
+    # reference card and solves. Bin on an absurd *length* instead: the card
+    # filename ``W{ref}_L{1e9}`` does not exist, so both the campaign and the
+    # frozen loader reject it (error parity), which is the genuinely-bad case.
+    bad_sizes = {name: (wl[0], 1e9) for name, wl in spec.sizes.items()}
     bad = camp.candidate(bad_sizes, "tt")
     out = camp.evaluate_batch([good, bad, good], workers=2)
     assert out[0]["ok"] and out[2]["ok"]

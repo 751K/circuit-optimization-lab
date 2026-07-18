@@ -70,11 +70,17 @@ class circuitopt_core.CompiledPdk:
         #       sky130    -> resolved card directory (holds *.json)
         #       tsmc28    -> HSPICE model directory (holds the .l delivery)
     def numeric_card(self, polarity, corner, temp_c,
-                     w_um=None, l_um=None, nf=1, mult=1, mismatch=None) -> dict
+                     w_um=None, l_um=None, nf=1, mult=1, mismatch=None,
+                     reference_width_um=None) -> dict
 ```
 
 `temp_c` is used only by TSMC28; `w_um`/`l_um` are required (positive µm);
 `mismatch` is `None` (no offset) or a `delvto` volts value.
+`reference_width_um` is the SKY130 `extract_w` card-bin width — `None` bins the
+card on the actual `w_um` (`load_sky130_card`'s `None` branch); a positive value
+bins the card filename on that reference while the instance `w` keeps `w_um`
+(the sky130 explore path, `extract_w != W`). FreePDK45/TSMC28 bin on corner and
+ignore it.
 
 Returned dict:
 
@@ -192,7 +198,8 @@ circuit JSON; marshalled once):
   "circuit": OtftTransientProblem(passive_problem_spec(plan)),  # passive MNA circuit
   "n_aug": int,
   "dc_devices": [ ([d, g, s, (2, 0, vb)], [di, gi, si, -1]), ... ],  # solve_dc records
-  "devices": [ (polarity, vb, temperature_k, temp_c, ac_d, ac_g, ac_s), ... ],
+  "devices": [ (polarity, vb, temperature_k, temp_c, ac_d, ac_g, ac_s,
+                reference_width_um | None), ... ],   # extract_w card-bin width
   "ac_caps"/"ac_resistors"/"ac_vccs"/"ac_vsources"/"ac_vcvs"/"ac_cccs"/"ac_ccvs":
       LtiProblem-shaped element records (drives applied),
   "resistor_noise": [ (a_term, b_term, R_ohms), ... ],          # 4kT/R at 300.15 K
@@ -241,14 +248,17 @@ BSIM4-backend/solver callbacks during the batch.
 
 ### Silicon documented deviations
 
-- **SKY130 reference width (`extract_w`) is outside the surface.** The frozen
-  loader accepts `reference_width_um` (the device wrapper always passes
-  `extract_w` / its class default), letting the instance `w` differ from the
-  card-stem width. `CompiledPdk::numeric_card` has no reference-width
-  parameter (reference = actual width, the loader's `None` branch), so the
-  campaign covers `extract_w == W` geometries — bundled card stems. Circuits
-  that pin `extract_w != W` (the sky130 explore path) need an R5-B surface
-  extension before R5-D can route them through the campaign.
+- **SKY130 reference width (`extract_w`) — supported (R5-D).** The frozen loader
+  accepts `reference_width_um` (the device wrapper passes `extract_w` / its class
+  default), letting the instance `w` differ from the card-stem width.
+  `CompiledPdk::numeric_card` now takes a matching `reference_width_um`
+  (`None` = the loader's actual-width branch), and the silicon campaign marshals
+  each device's effective reference width into the template device record, so
+  `extract_w != W` geometries (the sky130 explore path) route through the
+  campaign. Parity is pinned bit-for-bit against `load_sky130_card` over every
+  bundled geometry × two off-reference actual widths
+  (`test_sky130_extract_w_reference_width_parity`), and the instance `w` is
+  asserted to carry the actual width, not the reference.
 - **TSMC28 `mulu0` delivery values.** The exercised core-library bins/corners
   all carry `mulu0 = 1.0`, so end-to-end tsmc28 parity exercises the
   (load-bearing) *pop* arm — an un-popped `mulu0` would fail `set_instance` —

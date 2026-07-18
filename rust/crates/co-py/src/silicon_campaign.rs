@@ -58,6 +58,10 @@ pub struct DeviceStatic {
     pub temperature_k: f64,
     /// Card-selection temperature in Celsius (TSMC28; ignored elsewhere).
     pub temp_c: f64,
+    /// SKY130 `extract_w` card-bin width in µm (`None` = bin on the actual width).
+    /// Candidate-invariant: it is the device's `extract_w` kwarg / class default,
+    /// not a swept geometry. `None` for FreePDK45/TSMC28 (they bin on corner).
+    pub reference_width_um: Option<f64>,
     /// AC terminals (d, g, s) — bulk is a fixed `("v", 0.0)` fourth terminal.
     pub ac_d: mna::Term,
     pub ac_g: mna::Term,
@@ -184,6 +188,7 @@ fn build_handle(
             geom.nf,
             geom.mult,
             Some(geom.delvto),
+            stat.reference_width_um,
         )
         .map_err(|error| format!("numeric card failed: {}", error.message))?;
     let mut model = normalize_model(&card.model_parameters)?;
@@ -511,7 +516,8 @@ type SilDeviceRecord = (
     f64,    // temp_c (card selection)
     TermRecord,
     TermRecord,
-    TermRecord, // ac d, g, s
+    TermRecord,  // ac d, g, s
+    Option<f64>, // reference_width_um (SKY130 extract_w; None elsewhere)
 );
 type SilDcDeviceRecord = (Vec<TermRecord>, Vec<i64>);
 type SilResNoiseRecord = (TermRecord, TermRecord, f64);
@@ -571,6 +577,12 @@ pub(crate) fn build_silicon_template(
         let ac_d = term(record.4);
         let ac_g = term(record.5);
         let ac_s = term(record.6);
+        let reference_width_um = record.7;
+        if reference_width_um.is_some_and(|width| !(width.is_finite() && width > 0.0)) {
+            return Err(PyValueError::new_err(
+                "reference_width_um must be a positive finite width or None",
+            ));
+        }
         let node_of = |value: mna::Term| (value.kind == 0).then_some(value.reference);
         devices.push(DeviceStatic {
             polarity,
@@ -578,6 +590,7 @@ pub(crate) fn build_silicon_template(
             vb: record.1,
             temperature_k: record.2,
             temp_c: record.3,
+            reference_width_um,
             ac_d,
             ac_g,
             ac_s,

@@ -92,12 +92,16 @@ pub fn numeric_card(
     nf: i64,
     mult: i64,
     mismatch: Option<f64>,
+    reference_width_um: Option<f64>,
 ) -> PdkResult<NumericCard> {
     let polarity = normalize_polarity(polarity)?;
     let corner = normalize_corner(corner)?;
     let (width_um, length_um) = require_geometry(w_um, l_um)?;
-    // reference_width defaults to width; card filename bins on the reference width.
-    let reference_width_um = width_um;
+    // `reference_width_um` mirrors `load_sky130_card`: `None` bins the card on the
+    // actual width; a pinned reference (the `extract_w` / class-default path) bins
+    // the card filename on that reference while the instance `w` keeps the actual
+    // geometry — the sky130 explore path where `extract_w != W`.
+    let reference_width_um = reference_width_um.unwrap_or(width_um);
     if width_um <= 0.0 || length_um <= 0.0 || reference_width_um <= 0.0 {
         return Err(PdkError::model(
             "SKY130 widths and lengths must be positive",

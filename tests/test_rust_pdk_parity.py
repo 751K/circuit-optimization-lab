@@ -156,6 +156,49 @@ def test_sky130_numeric_card_parity():
     assert worst <= _TOL
 
 
+def test_sky130_extract_w_reference_width_parity():
+    """`reference_width_um` (the `extract_w` path): the card bins on the reference
+    width while the instance `w` keeps the *actual* width. Bit-for-bit vs the
+    frozen `load_sky130_card(reference_width_um=...)`; the actual width is chosen
+    to differ from the card-stem width so an accidental fall-through to the
+    actual-width bin would either mis-select the card or corrupt instance `w`."""
+    from circuitopt.pdk.sky130.library import _BUNDLED_CARD_DIR, load_sky130_card
+
+    card_dir = str(_BUNDLED_CARD_DIR)
+    if not os.path.isdir(card_dir):
+        pytest.skip("SKY130 bundled cards not present")
+
+    pdk = cc.CompiledPdk("sky130", card_dir)
+    getters = {"model_name": lambda c: c.path.stem, "source_version": lambda c: c.source_version}
+    worst = 0.0
+    count = 0
+    for (polarity, corner, ref_w_um, l_um) in _sky130_geometries(card_dir):
+        # Actual width deliberately off the card-stem (reference) width.
+        for actual_w in (ref_w_um * 2.5, ref_w_um * 0.4 + 0.123):
+            for (nf, mult) in ((1, 1), (2, 2)):
+                for mismatch in (0.0, 0.01):
+                    where = (f"sky130.extract_w[{polarity},{corner},ref{ref_w_um},"
+                             f"w{actual_w:.4g},{l_um},nf{nf},m{mult}]")
+                    rust = _run(lambda p=polarity, c=corner, w=actual_w, rw=ref_w_um,
+                                l=l_um, n=nf, m=mult, mm=mismatch:
+                                pdk.numeric_card(p, c, 27.0, w, l, n, m, mm or None,
+                                                 reference_width_um=rw))
+                    ref = _run(lambda p=polarity, c=corner, w=actual_w, rw=ref_w_um,
+                               l=l_um, n=nf, m=mult, mm=mismatch:
+                               load_sky130_card(p, width_um=w, length_um=l, nf=n, mult=m,
+                                                corner=c, reference_width_um=rw,
+                                                mismatch_v=mm))
+                    result = _assert_card_parity(rust, ref, getters, where)
+                    if result is not None:
+                        worst = max(worst, result)
+                        count += 1
+                        # The instance width must be the ACTUAL width, not the
+                        # reference the card was binned on.
+                        assert rust[0]["instance_parameters"]["w"] == actual_w * 1e-6, where
+    assert count > 100  # every bundled geometry, both off-reference widths
+    assert worst <= _TOL
+
+
 # --------------------------------------------------------------------------
 # TSMC28 (geometry grid + bin-boundary points)
 # --------------------------------------------------------------------------

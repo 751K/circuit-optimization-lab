@@ -161,7 +161,9 @@ impl CompiledPdk {
 
     /// Compile one numeric card. `temp_c` is used only by TSMC28; `w_um`/`l_um`
     /// are required by every PDK (a positive geometry). `mismatch` is `None` for
-    /// no threshold offset.
+    /// no threshold offset. `reference_width_um` is the SKY130 `extract_w` card-bin
+    /// width (`None` = bin on the actual width); FreePDK45/TSMC28 bin on corner and
+    /// ignore it.
     #[allow(clippy::too_many_arguments)]
     pub fn numeric_card(
         &self,
@@ -173,14 +175,23 @@ impl CompiledPdk {
         nf: i64,
         mult: i64,
         mismatch: Option<f64>,
+        reference_width_um: Option<f64>,
     ) -> PdkResult<NumericCard> {
         match self.kind {
             PdkKind::Freepdk45 => {
                 freepdk45::numeric_card(self, polarity, corner, w_um, l_um, nf, mult, mismatch)
             }
-            PdkKind::Sky130 => {
-                sky130::numeric_card(self, polarity, corner, w_um, l_um, nf, mult, mismatch)
-            }
+            PdkKind::Sky130 => sky130::numeric_card(
+                self,
+                polarity,
+                corner,
+                w_um,
+                l_um,
+                nf,
+                mult,
+                mismatch,
+                reference_width_um,
+            ),
             PdkKind::Tsmc28 => tsmc28::numeric_card(
                 self, polarity, corner, temp_c, w_um, l_um, nf, mult, mismatch,
             ),

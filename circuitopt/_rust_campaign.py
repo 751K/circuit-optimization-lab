@@ -42,6 +42,20 @@ def _ac_term(token) -> tuple[int, int, float]:
     return (2, 0, float(payload))
 
 
+def _reference_width_um(dev) -> float | None:
+    """The device's SKY130 ``extract_w`` card-bin width, or ``None``.
+
+    Mirrors the sky130 device wrapper exactly (``extract_w`` kwarg, else the class
+    ``EXTRACT_W`` default): the card is binned on this width while the instance
+    ``w`` keeps the actual geometry. ``None`` for FreePDK45/TSMC28 (no reference-
+    width binning), so the Rust silicon pipeline bins on the actual width there.
+    """
+    ref = getattr(dev, "extract_w", None)
+    if ref is None:
+        ref = getattr(type(dev), "EXTRACT_W", None)
+    return None if ref is None else float(ref)
+
+
 def _vin_norm(input_drives: Mapping[str, float], ac_drives: Mapping[str, float]) -> float:
     """Reproduce the gain normalization in ``ac_solver.ac_solve``."""
     norm_vals = list(ac_drives.values()) if ac_drives else list(input_drives.values())
@@ -236,6 +250,7 @@ class SiliconCampaign:
                 str(dev.POLARITY), float(dev.vb), float(dev.temperature),
                 float(dev.temperature) - 273.15,
                 _ac_term(acd), _ac_term(acg), _ac_term(acs),
+                _reference_width_um(dev),
             ))
 
         dc_tol = float(getattr(topo, "dc_tol", None) or DC_FALLBACK_TOL)
