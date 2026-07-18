@@ -5,6 +5,7 @@
 //! complex LTI solves, and the BSIM4 fixed-grid orchestration used by `co-py`.
 
 pub mod bsim_transient;
+pub mod campaign;
 pub mod error;
 pub mod lti;
 pub mod mna;
