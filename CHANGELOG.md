@@ -195,6 +195,62 @@ release checklist.
   `CompiledPdk` 面内，硅 campaign 现阶段覆盖 `extract_w == W` 几何，待
   R5-B 面扩展补齐。
 
+- **Compiled campaign wired into the design-space sweep (R5-D) / 编译式 campaign 接入设计空间扫描（R5-D）**
+
+  **English:** The compiled campaign is now the batch executor for the
+  design-space sweep (`benchmarks.bench_sweep`, the `--workers` design-space
+  path) under the rust engine, via a new `circuitopt._campaign_sweep` dispatch
+  layer (family detection + the cold-DC safety policy; returns to the frozen
+  scalar reference when the engine is not rust or the circuit is not
+  campaign-able). The whole candidate matrix runs under one Rayon pool with no
+  per-candidate Python callback — proven two ways (a monkeypatch trap and a
+  `sys.setprofile` frame counter both read zero PDK/device frames). Throughput
+  (candidates/s, 8 vs 1 worker): FreePDK45 ~5.4×, TSMC28 ~2.2× (both ≥2×);
+  index-ordered results are byte-identical across workers {1,2,8}.
+  Prerequisites: `CompiledPdk::numeric_card` gained SKY130 `reference_width_um`
+  (the `extract_w != W` explore path), pinned bit-for-bit vs `load_sky130_card`
+  over every bundled geometry. A cold-DC behaviour gate
+  (`tests/test_campaign_cold_dc.py`) proves the campaign's cold circuit Newton
+  reaches the same physical branch as scipy `fsolve` on the monostable silicon
+  OTAs (worst node dV freepdk45 1.3e-8 V / sky130 1.3e-9 V / tsmc28 4.5e-6 V,
+  << the 1e-3 V calibration DC tol), with identical convergence rate; a 0-bin
+  geometry is rejected identically by both engines and never sinks its batch.
+  **Flagged / out of scope:** the AFE OTFT is multistable — a cold circuit
+  Newton can pick a different branch than `fsolve` (~tens of volts), and even
+  seeded from the nominal op it does not reproduce `fsolve`'s basin selection on
+  bifurcation-edge (latch-prone) designs, so it under-reports `latch_rate`. The
+  AFE latch/metric workflows (`corners.corner_table` / `mismatch_mc` /
+  `latch_screen`, and the `mc` service job that calls them) therefore stay on
+  the frozen scalar reference (both engines) and keep their R5-A worker pool —
+  no silent root substitution. SAR mismatch MC is a closed-loop transient (not a
+  DC→AC→noise campaign) and its native-backend conversions rebuild each bit's
+  problem in Python, so its 8-thread scaling stays GIL-bound (~0.13 efficiency
+  on this ngspice-less host); this is a pre-existing SAR/transient-architecture
+  limit, untouched here, and the byte-identity worker contract still holds.
+
+  **中文：** 编译式 campaign 现作为设计空间扫描（`benchmarks.bench_sweep` 的
+  `--workers` 路径）在 rust 引擎下的批处理执行器，经新增的
+  `circuitopt._campaign_sweep` 分派层接入（器件族识别 + 冷 DC 安全策略；非
+  rust 引擎或电路不可编译时回退到冻结的 Python 标量参考）。整个候选矩阵在
+  单个 Rayon 池内跑完、零 per-candidate Python 回调——双重证明（monkeypatch
+  陷阱 + `sys.setprofile` 帧计数器均读到零 PDK/device 帧）。吞吐（候选/秒，
+  8 vs 1 线程）：FreePDK45 ~5.4×、TSMC28 ~2.2×（均 ≥2×）；按索引有序的结果在
+  workers {1,2,8} 下逐字节相同。前置：`CompiledPdk::numeric_card` 新增 SKY130
+  `reference_width_um`（`extract_w != W` 的 explore 路径），对 `load_sky130_card`
+  在全部 bundled 几何上逐位钉死。冷 DC 行为门（`tests/test_campaign_cold_dc.py`）
+  证明 campaign 冷启动电路 Newton 在单稳的硅 OTA 上与 scipy `fsolve` 落在同一
+  物理分支（最差节点 dV：freepdk45 1.3e-8 V / sky130 1.3e-9 V / tsmc28
+  4.5e-6 V，远小于 1e-3 V 校准 DC 容差），收敛率一致；0-bin 几何两引擎同报错
+  且不拖累同批。**诚实标注/超出范围：** AFE OTFT 多稳——冷启动电路 Newton
+  可选到与 `fsolve` 不同的分支（~几十伏），即便从标称工作点 seed 也无法在
+  分岔边缘（易 latch）设计上复现 `fsolve` 的盆地选择，故会低报 `latch_rate`。
+  因此 AFE 的 latch/metric 工作流（`corners.corner_table` / `mismatch_mc` /
+  `latch_screen`，及调用它们的 `mc` service job）仍走冻结的标量参考（两引擎）
+  并保留 R5-A 线程池——不做静默换根。SAR mismatch MC 是闭环 transient（非
+  DC→AC→noise campaign），其原生后端逐 bit 在 Python 重建问题，故 8 线程扩展
+  仍受 GIL 限制（本无 ngspice 机器上 ~0.13 效率）；这是既有 SAR/transient
+  架构限制，本期未动，逐位一致的 worker 契约仍成立。
+
 ### Changed / 变更
 
 - **Removed the OSDI/OpenVAF compatibility path / 删除 OSDI/OpenVAF 兼容路径**
