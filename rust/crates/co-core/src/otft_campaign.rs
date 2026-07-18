@@ -345,6 +345,9 @@ fn ss_params(
 pub struct OtftEvaluator<'a> {
     pub template: &'a OtftTemplate,
     pub candidates: &'a [OtftCandidate],
+    /// When false, the noise (transpose) stage is skipped and `irn_uv` is NaN —
+    /// the AC-only prefilter path.
+    pub compute_noise: bool,
 }
 
 impl<'a> OtftEvaluator<'a> {
@@ -562,56 +565,61 @@ impl CandidateEvaluator for OtftEvaluator<'_> {
         let gain_peak_db = 20.0 * peak.max(1e-9).log10();
         let bw_hz = bw_from_gain(&t.freqs, &gains);
 
-        // 5. Noise: transposed LTI solve reused from the same system.
-        let tvec = if inner_parallel {
-            system.solve_transpose_parallel(&t.freqs, &t.sense)
-        } else {
-            system.solve_transpose_serial(&t.freqs, &t.sense)
-        }
-        .ok_or_else(|| format!("candidate {index}: noise transpose solve singular"))?;
-
-        let nfreq = t.freqs.len();
-        let mut out_psd = vec![0.0; nfreq];
-        for ((dev, bd), (vs, vd, vg, vs1, vd1)) in
-            t.devices.iter().zip(&built).zip(internal.iter().copied())
-        {
-            // Drain-current noise PSD split at 1 Hz, then 1/f scaled.
-            let (s_th, s_fl1) = otft::noise_psd(
-                &bd.params,
-                vs,
-                vd,
-                vg,
-                vs1,
-                vd1,
-                bd.temperature,
-                bd.ci,
-                bd.w_m,
-                bd.l_m,
-                1.0,
-            );
-            for (fi, &f) in t.freqs.iter().enumerate() {
-                let s = s_th + s_fl1 / f;
-                // Transimpedance Z = tvec[:,d] - tvec[:,s] (node terminals only).
-                let mut zre = 0.0;
-                let mut zim = 0.0;
-                if let Some(di) = dev.noise_d {
-                    zre += tvec[fi][di].re;
-                    zim += tvec[fi][di].im;
-                }
-                if let Some(si) = dev.noise_s {
-                    zre -= tvec[fi][si].re;
-                    zim -= tvec[fi][si].im;
-                }
-                let zabs = zre.hypot(zim);
-                out_psd[fi] += zabs * zabs * s;
+        // 5. Noise: transposed LTI solve reused from the same system. Skipped on
+        // the AC-only prefilter path (irn_uV = NaN).
+        let irn_uv = if self.compute_noise {
+            let tvec = if inner_parallel {
+                system.solve_transpose_parallel(&t.freqs, &t.sense)
+            } else {
+                system.solve_transpose_serial(&t.freqs, &t.sense)
             }
-        }
-        let mut irn_psd = vec![0.0; nfreq];
-        for fi in 0..nfreq {
-            let h2 = (gains[fi] * gains[fi]).max(1e-300);
-            irn_psd[fi] = out_psd[fi] / h2;
-        }
-        let irn_uv = band_rms(&t.freqs, &irn_psd, t.band_lo, t.band_hi) * 1e6;
+            .ok_or_else(|| format!("candidate {index}: noise transpose solve singular"))?;
+
+            let nfreq = t.freqs.len();
+            let mut out_psd = vec![0.0; nfreq];
+            for ((dev, bd), (vs, vd, vg, vs1, vd1)) in
+                t.devices.iter().zip(&built).zip(internal.iter().copied())
+            {
+                // Drain-current noise PSD split at 1 Hz, then 1/f scaled.
+                let (s_th, s_fl1) = otft::noise_psd(
+                    &bd.params,
+                    vs,
+                    vd,
+                    vg,
+                    vs1,
+                    vd1,
+                    bd.temperature,
+                    bd.ci,
+                    bd.w_m,
+                    bd.l_m,
+                    1.0,
+                );
+                for (fi, &f) in t.freqs.iter().enumerate() {
+                    let s = s_th + s_fl1 / f;
+                    // Transimpedance Z = tvec[:,d] - tvec[:,s] (node terminals only).
+                    let mut zre = 0.0;
+                    let mut zim = 0.0;
+                    if let Some(di) = dev.noise_d {
+                        zre += tvec[fi][di].re;
+                        zim += tvec[fi][di].im;
+                    }
+                    if let Some(si) = dev.noise_s {
+                        zre -= tvec[fi][si].re;
+                        zim -= tvec[fi][si].im;
+                    }
+                    let zabs = zre.hypot(zim);
+                    out_psd[fi] += zabs * zabs * s;
+                }
+            }
+            let mut irn_psd = vec![0.0; nfreq];
+            for fi in 0..nfreq {
+                let h2 = (gains[fi] * gains[fi]).max(1e-300);
+                irn_psd[fi] = out_psd[fi] / h2;
+            }
+            band_rms(&t.freqs, &irn_psd, t.band_lo, t.band_hi) * 1e6
+        } else {
+            f64::NAN
+        };
 
         // 6. Latch metric.
         let latch_dv = match t.latch_nodes {
@@ -739,6 +747,7 @@ mod tests {
         let evaluator = OtftEvaluator {
             template: &template,
             candidates: &candidates,
+            compute_noise: true,
         };
         let baseline = evaluate_batch(
             &evaluator,

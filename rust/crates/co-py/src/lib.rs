@@ -40,7 +40,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use co_bsim4::CoBsim4;
-use co_core::{bsim_transient, lti, mna, otft, periodic, transient};
+use co_core::{bsim_transient, campaign, lti, mna, otft, otft_campaign, periodic, transient};
 use co_pdk::{CompiledPdk as PdkCompiled, NumericCard, PdkError};
 use co_spice::{
     ErrorKind as SpiceErrorKind, EvalCtx, LibrarySection, NumericModel, ParamValue,
@@ -2817,6 +2817,257 @@ impl PyCompiledPdk {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Compiled campaign / candidate executor (co-core `campaign` + `otft_campaign`).
+//
+// `CompiledCampaign` holds an immutable circuit template + analysis plan
+// (marshalled once from `CompiledTopology(AFE_TOPO, bias)`) and evaluates a
+// candidate matrix through device-build -> DC -> AC -> noise entirely under one
+// `py.detach`, with no per-candidate Python callback. Only the AFE OTFT family
+// is wired in this step (R5-C); silicon families follow in R5-D. Not connected
+// to any production workflow — the Python analysis paths stay live.
+// ---------------------------------------------------------------------------
+
+// `(kind, reference, value)` triple: kind 0 = solved-node index, 2 = fixed
+// rail/AC value. Shared by DC bias tokens and AC (`mna::Term`) tokens.
+type CampDeviceRecord = (
+    TermRecord,
+    TermRecord,
+    TermRecord,
+    i64,
+    i64,
+    TermRecord,
+    TermRecord,
+    TermRecord,
+);
+type CampCapRecord = (TermRecord, TermRecord, f64);
+
+fn bias_term(record: TermRecord) -> otft_campaign::BiasTerm {
+    if record.0 == 0 {
+        otft_campaign::BiasTerm::Solved(record.1)
+    } else {
+        otft_campaign::BiasTerm::Rail(record.2)
+    }
+}
+
+fn noise_index(record: TermRecord) -> Option<usize> {
+    (record.0 == 0).then_some(record.1)
+}
+
+fn optional_field<'py, T>(spec: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<T>>
+where
+    T: FromPyObjectOwned<'py>,
+{
+    match spec.get_item(key)? {
+        Some(value) if !value.is_none() => Ok(Some(value.extract::<T>().map_err(Into::into)?)),
+        _ => Ok(None),
+    }
+}
+
+fn build_otft_template(spec: &Bound<'_, PyDict>) -> PyResult<otft_campaign::OtftTemplate> {
+    let n_aug: usize = required(spec, "n_aug")?;
+    let n_nodes: usize = required(spec, "n_nodes")?;
+    let consts: Vec<f64> = required(spec, "consts")?;
+    if consts.len() != 11 {
+        return Err(PyValueError::new_err(
+            "consts must be [vt, ci, roff, reg, c1, c2, c3, c4, kv, kh, temperature]",
+        ));
+    }
+    let consts = otft_campaign::OtftConstants {
+        vt: consts[0],
+        ci: consts[1],
+        roff: consts[2],
+        reg: consts[3],
+        c1: consts[4],
+        c2: consts[5],
+        c3: consts[6],
+        c4: consts[7],
+        kv: consts[8],
+        kh: consts[9],
+        temperature: consts[10],
+    };
+
+    let device_records: Vec<CampDeviceRecord> = required(spec, "devices")?;
+    let mut devices = Vec::with_capacity(device_records.len());
+    for record in device_records {
+        devices.push(otft_campaign::DeviceTemplate {
+            dc_d: bias_term(record.0),
+            dc_g: bias_term(record.1),
+            dc_s: bias_term(record.2),
+            di: optional_index(record.3)?,
+            si: optional_index(record.4)?,
+            ac_d: term(record.5),
+            ac_g: term(record.6),
+            ac_s: term(record.7),
+            noise_d: noise_index(record.5),
+            noise_s: noise_index(record.7),
+        });
+    }
+
+    let cap_records: Vec<CampCapRecord> = required(spec, "ac_caps")?;
+    let ac_caps = cap_records
+        .into_iter()
+        .map(|(a, b, value)| (term(a), term(b), value))
+        .collect();
+
+    let band: Vec<f64> = required(spec, "band")?;
+    if band.len() != 2 {
+        return Err(PyValueError::new_err("band must be [f_lo, f_hi]"));
+    }
+
+    Ok(otft_campaign::OtftTemplate {
+        n_aug,
+        n_nodes,
+        consts,
+        devices,
+        ac_caps,
+        output_weights: required(spec, "output_weights")?,
+        sense: required(spec, "sense")?,
+        vin_norm: required(spec, "vin_norm")?,
+        freqs: required(spec, "freqs")?,
+        band_lo: band[0],
+        band_hi: band[1],
+        gmin: required(spec, "gmin")?,
+        dc_tol: required(spec, "dc_tol")?,
+        dc_guesses: required(spec, "dc_guesses")?,
+        latch_nodes: optional_field(spec, "latch_nodes")?,
+    })
+}
+
+fn parse_candidate(item: &Bound<'_, PyAny>) -> PyResult<otft_campaign::OtftCandidate> {
+    let dict = item.cast::<PyDict>()?;
+    let geoms: Vec<Vec<f64>> = required(dict, "devices")?;
+    let mut devices = Vec::with_capacity(geoms.len());
+    for g in geoms {
+        if g.len() != 7 {
+            return Err(PyValueError::new_err(
+                "each candidate device must be [w, l, nf, pvt0, mvt0, pbeta0, mbeta0]",
+            ));
+        }
+        devices.push(otft_campaign::DeviceGeom {
+            w: g[0],
+            l: g[1],
+            nf: g[2],
+            pvt0: g[3],
+            mvt0: g[4],
+            pbeta0: g[5],
+            mbeta0: g[6],
+        });
+    }
+    let seed: Option<Vec<f64>> = optional_field(dict, "seed")?;
+    let trust_seed_as_op: bool = optional_field(dict, "trust_seed_as_op")?.unwrap_or(false);
+    Ok(otft_campaign::OtftCandidate {
+        devices,
+        seed,
+        trust_seed_as_op,
+    })
+}
+
+/// An immutable compiled campaign over one circuit template + analysis plan.
+#[pyclass(name = "CompiledCampaign")]
+struct PyCompiledCampaign {
+    template: Arc<otft_campaign::OtftTemplate>,
+    family: String,
+}
+
+#[pymethods]
+impl PyCompiledCampaign {
+    #[new]
+    fn new(spec: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let family: String = required(spec, "family")?;
+        if family != "afe_otft" {
+            return Err(PyValueError::new_err(format!(
+                "unsupported campaign family {family:?} (R5-C ships 'afe_otft' only)"
+            )));
+        }
+        let template_obj = spec
+            .get_item("template")?
+            .ok_or_else(|| PyKeyError::new_err("template"))?;
+        let template = build_otft_template(template_obj.cast::<PyDict>()?)?;
+        Ok(Self {
+            template: Arc::new(template),
+            family,
+        })
+    }
+
+    #[getter]
+    fn family(&self) -> &str {
+        &self.family
+    }
+
+    /// Evaluate a candidate matrix in one GIL-free batch. `candidates` is a list
+    /// of `{devices, seed?, trust_seed_as_op?}` dicts; results come back in
+    /// candidate-index order as `{ok, gain_peak_dB, bw_Hz, irn_uV, latch_dV,
+    /// dc_op, dc_iterations, dc_from_seed}` (or `{ok: False, error}`).
+    #[pyo3(signature = (candidates, workers=1, analyses=None))]
+    fn evaluate_batch<'py>(
+        &self,
+        py: Python<'py>,
+        candidates: &Bound<'py, PyList>,
+        workers: usize,
+        analyses: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut parsed = Vec::with_capacity(candidates.len());
+        for item in candidates.iter() {
+            parsed.push(parse_candidate(&item)?);
+        }
+        let ndev = self.template.devices.len();
+        for (index, candidate) in parsed.iter().enumerate() {
+            if candidate.devices.len() != ndev {
+                return Err(PyValueError::new_err(format!(
+                    "candidate {index} has {} devices, template has {ndev}",
+                    candidate.devices.len()
+                )));
+            }
+        }
+        let compute_noise = analyses
+            .as_ref()
+            .map(|names| names.iter().any(|name| name == "noise"))
+            .unwrap_or(true);
+        let template = self.template.clone();
+        let workers = workers.max(1);
+        let n = parsed.len();
+
+        let results = py.detach(move || {
+            let evaluator = otft_campaign::OtftEvaluator {
+                template: &template,
+                candidates: &parsed,
+                compute_noise,
+            };
+            let progress = campaign::BatchProgress::new();
+            let config = campaign::BatchConfig::new(workers);
+            campaign::evaluate_batch(&evaluator, n, config, &progress)
+        });
+
+        let mut items = Vec::with_capacity(results.len());
+        for slot in results {
+            let dict = PyDict::new(py);
+            match slot {
+                None => {
+                    dict.set_item("ok", false)?;
+                    dict.set_item("cancelled", true)?;
+                }
+                Some(Ok(metrics)) => {
+                    dict.set_item("ok", true)?;
+                    dict.set_item("gain_peak_dB", metrics.gain_peak_db)?;
+                    dict.set_item("bw_Hz", metrics.bw_hz)?;
+                    dict.set_item("irn_uV", metrics.irn_uv)?;
+                    dict.set_item("latch_dV", metrics.latch_dv)?;
+                    dict.set_item("dc_op", metrics.dc_op)?;
+                    dict.set_item("dc_iterations", metrics.dc_iterations)?;
+                    dict.set_item("dc_from_seed", metrics.dc_from_seed)?;
+                }
+                Some(Err(message)) => {
+                    dict.set_item("ok", false)?;
+                    dict.set_item("error", message)?;
+                }
+            }
+            items.push(dict);
+        }
+        PyList::new(py, items)
+    }
+}
+
 #[pymodule]
 fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -2866,5 +3117,6 @@ fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spice_elaborate_instance, m)?)?;
     // PDK compilers parity surface.
     m.add_class::<PyCompiledPdk>()?;
+    m.add_class::<PyCompiledCampaign>()?;
     Ok(())
 }
