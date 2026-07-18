@@ -118,14 +118,15 @@ entirely under one `py.detach`, with **no per-candidate Python callback**. The
 generic batch machinery lives in `co_core::campaign` (single Rayon pool,
 adaptive candidate-vs-frequency axis, candidate-index-ordered write-back, atomic
 progress + cooperative cancel that never feed a reduction, and the
-`bw_from_gain` / `band_rms` metric reductions). The AFE OTFT evaluator lives in
-`co_core::otft_campaign`. Silicon PDK families are **not** wired in this step
-(that is R5-D). Not connected to any production workflow.
+`bw_from_gain` / `band_rms` metric reductions). Two device families are wired:
+the AFE OTFT evaluator (`co_core::otft_campaign`) and the silicon BSIM4
+evaluator (`co-py/src/silicon_campaign.rs`, families freepdk45 / sky130 /
+tsmc28). Not connected to any production workflow (that is R5-D).
 
 ```python
 class circuitopt_core.CompiledCampaign:
     def __init__(self, spec: dict): ...
-        # spec = {"family": "afe_otft", "template": <template dict>}
+        # spec = {"family": "afe_otft" | "silicon_bsim4", "template": <template dict>}
     @property
     def family(self) -> str: ...
     def evaluate_batch(self, candidates: list[dict], workers: int = 1,
@@ -178,6 +179,85 @@ the Python side in candidate/device order (same rule as
 `corners.mismatch_corner`) and baked into the candidate, so the detached batch
 carries no RNG. `analyses` gates the noise stage (drop `"noise"` for the
 AC-only prefilter — `irn_uV` becomes NaN).
+
+### Silicon family (`"silicon_bsim4"`, freepdk45 / sky130 / tsmc28)
+
+Template (built by `circuitopt._rust_campaign.SiliconCampaign` from a loaded
+circuit JSON; marshalled once):
+
+```
+{
+  "pdk": "freepdk45" | "sky130" | "tsmc28",
+  "root": <CompiledPdk root, see the PDK table above>,
+  "circuit": OtftTransientProblem(passive_problem_spec(plan)),  # passive MNA circuit
+  "n_aug": int,
+  "dc_devices": [ ([d, g, s, (2, 0, vb)], [di, gi, si, -1]), ... ],  # solve_dc records
+  "devices": [ (polarity, vb, temperature_k, temp_c, ac_d, ac_g, ac_s), ... ],
+  "ac_caps"/"ac_resistors"/"ac_vccs"/"ac_vsources"/"ac_vcvs"/"ac_cccs"/"ac_ccvs":
+      LtiProblem-shaped element records (drives applied),
+  "resistor_noise": [ (a_term, b_term, R_ohms), ... ],          # 4kT/R at 300.15 K
+  "output_weights", "sense", "vin_norm", "freqs", "band",
+  "dc_guesses": [[floats length n_aug], ...],
+  "dc_options": [max_iterations, voltage_tolerance, step_limit, gmin],
+      # ac_solver values: [100, min(dc_tol, 1e-10), max(0.25, rail_span/4), 1e-12]
+  "latch_nodes": (idx0, idx1) | None,
+}
+```
+
+Candidate: `{"devices": [[w_um, l_um, nf, mult, delvto], ...], "corner": str,
+"seed"?: [...], "trust_seed_as_op"?: bool}` — the process corner is
+per-candidate (the `apply_silicon_corner` semantics: one name stamped on every
+device), `delvto` is the per-device mismatch volts (`0.0` mirrors the Python
+`mismatch_v=0.0` default).
+
+Per-candidate pipeline (each step 1:1 with the frozen path):
+`CompiledPdk::numeric_card` → `Bsim4ModelCard`-equivalent normalization
+(lower-cased keys, `level`/`version` dropped) → **TSMC28 only:**
+`co_pdk::apply_mulu0_fold` (the `to_bsim4_cards()` fold: always pop `mulu0`
+from the instance card; multiply the model `u0` when non-unity; error if `u0`
+is absent) → `co_bsim4` `create(polarity, temp_K)` / `set_model*` /
+`set_instance*` / `setup` (the `_NativeDevice.__init__` sequence; fresh handles
+per candidate, freed on drop) → `bsim_transient::solve_dc` (the exact kernel
+Python's rust engine calls through `Bsim4TransientProblem.solve_dc`) → one
+`eval_vp` per device at the op (the raw 4×4 G/C are
+`get_terminal_linearization`, and the eval biases the handle for the noise
+call — the evaluate-then-noise order `noise_solver` requires) → dense-device
+LTI AC + transposed noise solve, per-device `max(Re(z·S·z*), 0)` with the 4×4
+total spectral density, resistor `4kT/R`, then `bw_from_gain` / `band_rms`.
+
+### Silicon differential gate
+
+Reference = the frozen Python scalar path itself (`ac_solve` +
+`noise_analysis` under the rust engine — the `bench_sweep`
+`evaluate_ac`/`evaluate_ac_noise` semantics). BSIM4 evaluation is a pure
+function of (card, bias) — there is **no** OTFT-style warm/cold split — so one
+seeded gate covers parity directly. Observed on the three 5T OTA examples
+(geometry × corner matrices, 21 (candidate, corner) cases): gain worst rel
+~4e-16, bandwidth ~2e-15, IRN ~1.7e-16 (the `band_rms` summation ULP), and the
+same-seed Rust DC Newton reproduces the Python operating point **bit-for-bit**
+(1 iteration from a converged seed). Seeded `delvto` mismatch matches to
+~1.4e-16. Byte-identical across workers {1, 2, 8}; zero Python
+BSIM4-backend/solver callbacks during the batch.
+
+### Silicon documented deviations
+
+- **SKY130 reference width (`extract_w`) is outside the surface.** The frozen
+  loader accepts `reference_width_um` (the device wrapper always passes
+  `extract_w` / its class default), letting the instance `w` differ from the
+  card-stem width. `CompiledPdk::numeric_card` has no reference-width
+  parameter (reference = actual width, the loader's `None` branch), so the
+  campaign covers `extract_w == W` geometries — bundled card stems. Circuits
+  that pin `extract_w != W` (the sky130 explore path) need an R5-B surface
+  extension before R5-D can route them through the campaign.
+- **TSMC28 `mulu0` delivery values.** The exercised core-library bins/corners
+  all carry `mulu0 = 1.0`, so end-to-end tsmc28 parity exercises the
+  (load-bearing) *pop* arm — an un-popped `mulu0` would fail `set_instance` —
+  while the multiply and missing-`u0` arms are pinned by direct `co-pdk` unit
+  tests (`apply_mulu0_fold`, exact IEEE product).
+- **TSMC28 nmos ff/sf/fs bins.** Some OTA geometries select zero bins in the
+  ff/sf/fs sections of this delivery; both sides reject them identically
+  (`ValueError` ↔ per-candidate `{ok: False}`), and the parity matrices use
+  tt/ss where all bins resolve.
 
 ### Result dicts (candidate-index ordered)
 

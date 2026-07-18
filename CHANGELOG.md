@@ -140,21 +140,34 @@ release checklist.
   never oversubscribed), candidate-index-ordered write-back, and atomic
   progress + cooperative cancellation kept out of every numeric reduction; the
   `bw_from_gain` / `band_rms` metric reductions are ported from the frozen
-  Python path. An AFE OTFT evaluator (`otft_campaign`) composes the native
-  `otft` device kernels, dense `mna` solver, and complex `lti` MNA into a
-  per-candidate device-build → DC → AC → noise pipeline, exposed through
-  `circuitopt_core.CompiledCampaign` (`evaluate_batch` runs the whole batch
-  under one `py.detach` with zero per-candidate Python callback). Verification
-  only — no production workflow is wired to it yet (that is R5-D). Parity
-  against a cold-consistent Python reference (fresh `PMOS_TFT` small-signal
-  params → the same `LtiProblem` → the same reductions) is bit-for-bit:
-  gain/bandwidth worst rel ~1e-15, IRN ~2e-16 (the `band_rms` naive-sum ULP),
-  DC operating point bit-for-bit; results are byte-identical across worker
-  counts {1,2,8}. Flagged deviation: the AFE OTFT internal 2-node Newton stops
-  at `tol=1e-12`, so its operating point is seed-path-dependent — the frozen
-  warm-cache `corners.metrics` path and a cold evaluation of the same model
-  disagree by up to ~6e-8 in `gm`/`gds`; the campaign is cold-seed-consistent
-  and therefore matches the warm path only to that inherent floor.
+  Python path. Two device families are wired. The AFE OTFT evaluator
+  (`otft_campaign`) composes the native `otft` device kernels, dense `mna`
+  solver, and complex `lti` MNA; the silicon BSIM4 evaluator (freepdk45 /
+  sky130 / tsmc28) composes `co-pdk` numeric cards — with the TSMC28
+  `to_bsim4_cards` `mulu0 → u0` mobility fold, factored into
+  `co_pdk::apply_mulu0_fold` and unit-tested — into `co-bsim4` handles,
+  `bsim_transient::solve_dc`, dense 4×4 terminal linearizations, and the
+  per-device BSIM4 noise matrices with the evaluate-then-noise call order the
+  backend requires. Both run the whole batch under one `py.detach` through
+  `circuitopt_core.CompiledCampaign` with zero per-candidate Python callback.
+  Verification only — no production workflow is wired to it yet (that is
+  R5-D). AFE parity against a cold-consistent Python reference (fresh
+  `PMOS_TFT` small-signal params → the same `LtiProblem` → the same
+  reductions) is bit-for-bit: gain/bandwidth worst rel ~1e-15, IRN ~2e-16
+  (the `band_rms` naive-sum ULP), DC operating point bit-for-bit. Silicon
+  parity is measured against the frozen `ac_solve`/`noise_analysis` path
+  directly (BSIM4 evaluation is a pure function — no warm/cold split): across
+  the three 5T OTA geometry×corner matrices, gain worst rel ~4e-16, bandwidth
+  ~2e-15, IRN ~1.7e-16, and the same-seed Rust DC Newton reproduces the
+  Python operating point bit-for-bit. Results are byte-identical across
+  worker counts {1,2,8}. Flagged deviations: the AFE OTFT internal 2-node
+  Newton stops at `tol=1e-12`, so its operating point is seed-path-dependent —
+  the frozen warm-cache `corners.metrics` path and a cold evaluation of the
+  same model disagree by up to ~6e-8 in `gm`/`gds`; the campaign is
+  cold-seed-consistent and therefore matches the warm path only to that
+  inherent floor. The SKY130 reference-width pin (`extract_w != W`) is outside
+  the `CompiledPdk` surface, so silicon campaigns cover `extract_w == W`
+  geometries until an R5-B surface extension lands.
 
   **中文：** `co-core` 新增器件无关的批处理执行器（`campaign`）：单个 Rayon
   池、候选级/频点级自适应并行轴（互斥不嵌套，单池永不过订阅）、按候选索引有序
@@ -163,14 +176,24 @@ release checklist.
   `otft` 器件核、稠密 `mna` 求解与复数 `lti` MNA 组合成逐候选
   器件构建 → DC → AC → noise 流水线，经 `circuitopt_core.CompiledCampaign`
   暴露（`evaluate_batch` 在单个 `py.detach` 内跑完整 batch，零 per-candidate
-  Python 回调）。仅供验证——尚未接入任何生产工作流（那是 R5-D）。对
-  cold-consistent Python 参考（新建 `PMOS_TFT` 小信号参数 → 同一 `LtiProblem`
-  → 同一归约）逐位一致：增益/带宽最差 rel ~1e-15、IRN ~2e-16（`band_rms`
-  朴素求和 ULP）、DC 工作点逐位相同；结果在 workers ∈ {1,2,8} 下逐字节相同。
+  Python 回调）。硅 BSIM4 evaluator（freepdk45 / sky130 / tsmc28）同批接入：
+  把 `co-pdk` numeric card——含 TSMC28 `to_bsim4_cards` 的 `mulu0 → u0`
+  迁移率折叠（提取为 `co_pdk::apply_mulu0_fold` 并单测）——组合进
+  `co-bsim4` handle、`bsim_transient::solve_dc`、4×4 端子线性化与逐器件
+  BSIM4 噪声矩阵（遵守后端要求的 evaluate-then-noise 调用序）。仅供验证——
+  尚未接入任何生产工作流（那是 R5-D）。AFE 对 cold-consistent Python 参考
+  （新建 `PMOS_TFT` 小信号参数 → 同一 `LtiProblem` → 同一归约）逐位一致：
+  增益/带宽最差 rel ~1e-15、IRN ~2e-16（`band_rms` 朴素求和 ULP）、DC
+  工作点逐位相同。硅侧直接对冻结的 `ac_solve`/`noise_analysis` 路径
+  （BSIM4 求值为纯函数，无 warm/cold 之分）：三家 5T OTA 几何×corner
+  矩阵上增益最差 rel ~4e-16、带宽 ~2e-15、IRN ~1.7e-16，同 seed 的 Rust DC
+  Newton 逐位复现 Python 工作点。结果在 workers ∈ {1,2,8} 下逐字节相同。
   诚实标注：AFE OTFT 内部 2 节点 Newton 停在 `tol=1e-12`，工作点随 seed 路径
   漂移——冻结的 warm-cache `corners.metrics` 路径与同模型 cold 求值在
   `gm`/`gds` 上可差 ~6e-8；campaign 走 cold-seed-consistent，故与 warm 路径
-  仅一致到该固有地板。
+  仅一致到该固有地板。SKY130 的参考宽钉扎（`extract_w != W`）不在
+  `CompiledPdk` 面内，硅 campaign 现阶段覆盖 `extract_w == W` 几何，待
+  R5-B 面扩展补齐。
 
 ### Changed / 变更
 
