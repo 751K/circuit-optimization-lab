@@ -189,17 +189,7 @@ fn build_handle(
     let mut model = normalize_model(&card.model_parameters)?;
     let mut instance = normalize_instance(&card.instance_parameters)?;
     if template.fold_mulu0 {
-        let mobility_multiplier = instance.remove("mulu0").unwrap_or(1.0);
-        if mobility_multiplier != 1.0 {
-            match model.get_mut("u0") {
-                Some(u0) => *u0 *= mobility_multiplier,
-                None => {
-                    return Err(
-                        "mulu0 is non-unity but the selected BSIM4 card has no u0".to_string()
-                    );
-                }
-            }
-        }
+        co_pdk::apply_mulu0_fold(&mut model, &mut instance).map_err(|error| error.message)?;
     }
 
     let handle = unsafe { co_bsim4::create(stat.polarity_sign, stat.temperature_k) };

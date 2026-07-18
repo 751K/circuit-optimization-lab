@@ -231,3 +231,66 @@ pub(crate) fn expanduser(path: &str) -> String {
     }
     path.to_string()
 }
+
+/// The TSMC28 `to_bsim4_cards()` `mulu0 -> u0` mobility fold
+/// (`circuitopt/pdk/tsmc28/library.py`): HSPICE's instance-only `mulu0`
+/// extension is always removed from the instance parameters; when it is
+/// non-unity the selected model's `u0` is multiplied by it (an error when the
+/// card carries no `u0`). Exposed for the compiled-campaign device build.
+pub fn apply_mulu0_fold(
+    model_parameters: &mut HashMap<String, f64>,
+    instance_parameters: &mut HashMap<String, f64>,
+) -> PdkResult<()> {
+    let mobility_multiplier = instance_parameters.remove("mulu0").unwrap_or(1.0);
+    if mobility_multiplier != 1.0 {
+        match model_parameters.get_mut("u0") {
+            Some(u0) => *u0 *= mobility_multiplier,
+            None => {
+                return Err(PdkError::model(
+                    "mulu0 is non-unity but the selected BSIM4 card has no u0",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod mulu0_tests {
+    use super::*;
+
+    #[test]
+    fn non_unity_mulu0_multiplies_u0_exactly() {
+        let mut model = HashMap::from([("u0".to_string(), 0.018202628)]);
+        let mut instance = HashMap::from([("mulu0".to_string(), 1.07), ("w".to_string(), 3e-6)]);
+        apply_mulu0_fold(&mut model, &mut instance).unwrap();
+        assert_eq!(model["u0"], 0.018202628 * 1.07); // exact IEEE product
+        assert!(!instance.contains_key("mulu0"));
+        assert_eq!(instance["w"], 3e-6);
+    }
+
+    #[test]
+    fn unity_mulu0_is_popped_but_u0_untouched() {
+        let mut model = HashMap::from([("u0".to_string(), 0.03)]);
+        let mut instance = HashMap::from([("mulu0".to_string(), 1.0)]);
+        apply_mulu0_fold(&mut model, &mut instance).unwrap();
+        assert_eq!(model["u0"], 0.03);
+        assert!(!instance.contains_key("mulu0"));
+    }
+
+    #[test]
+    fn absent_mulu0_is_a_no_op() {
+        let mut model = HashMap::from([("u0".to_string(), 0.03)]);
+        let mut instance = HashMap::from([("w".to_string(), 1e-6)]);
+        apply_mulu0_fold(&mut model, &mut instance).unwrap();
+        assert_eq!(model["u0"], 0.03);
+    }
+
+    #[test]
+    fn non_unity_mulu0_without_u0_errors() {
+        let mut model = HashMap::new();
+        let mut instance = HashMap::from([("mulu0".to_string(), 1.2)]);
+        let error = apply_mulu0_fold(&mut model, &mut instance).unwrap_err();
+        assert!(error.message.contains("mulu0"));
+    }
+}
