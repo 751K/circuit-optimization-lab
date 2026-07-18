@@ -105,6 +105,33 @@ release checklist.
   样本，依赖 Rust 引擎释放 GIL；结果与串行路径逐位一致。BSIM4 Rust 后端引入
   per-handle 并发模型（逐 handle 锁、一次性前端初始化、thread-local 噪声回调）。
 
+- **Rust SPICE/PDK compilers (R5-B) / Rust SPICE/PDK 编译器（R5-B）**
+
+  **English:** `co-spice` now also carries 1:1 ports of the HSPICE expression
+  engine, the deck parser (logical lines, assignments, `.lib`/`.subckt`
+  structure) and the elaborator (section selection, scope filling, model
+  numericization). A new `co-pdk` crate compiles FreePDK45 / SKY130 / TSMC28
+  cards — corner/polarity normalization, geometry-bin selection, `nf`/`mult`/
+  mismatch instance rules — into an immutable, thread-safe `CompiledPdk`
+  (cache keyed by canonical path + mtime/size + section + options; D12: no
+  licensed content in tests, goldens or logs). Exposed through
+  `circuitopt_core` for differential verification only — production stays on
+  the frozen Python reference until the compiled-campaign flip. Differential
+  parity against the Python reference is bit-exact across the full real-PDK
+  corpora (parser canonical trees byte-identical; elaborator and all three
+  PDK numeric cards worst rel 0.0).
+
+  **中文：** `co-spice` 现同时承载 HSPICE 表达式引擎、deck 解析器（逻辑行、
+  赋值、`.lib`/`.subckt` 结构）与 elaborator（section 选择、作用域填充、
+  model 数值化）的 1:1 移植。新增 `co-pdk` crate 把 FreePDK45 / SKY130 /
+  TSMC28 卡编译为 immutable、线程安全的 `CompiledPdk`——corner/极性归一、
+  几何 bin 选择、`nf`/`mult`/mismatch 实例规则；缓存键 = 规范路径 +
+  mtime/size + section + 选项（D12：授权内容不入测试/golden/日志）。经
+  `circuitopt_core` 暴露仅供差分验证——生产在 compiled-campaign 翻转前仍走
+  冻结的 Python 参考。对 Python 参考的差分 parity 在全量真实 PDK 语料上
+  逐位一致（parser canonical 树逐字节相同；elaborator 与三 PDK numeric
+  card 最差 rel 0.0）。
+
 ### Changed / 变更
 
 - **Removed the OSDI/OpenVAF compatibility path / 删除 OSDI/OpenVAF 兼容路径**
