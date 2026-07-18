@@ -109,3 +109,125 @@ elaborated section set + temperature. No card content is persisted.
 - TSMC28 `numeric_card` returns the **raw** card parameters (matching
   `Tsmc28CoreCard.model_parameters` / `.instance_parameters`). The `to_bsim4_cards`
   `mulu0 → u0` mobility fold is a downstream co-bsim4 step, not applied here.
+
+## Compiled campaign / candidate executor (R5-C)
+
+`CompiledCampaign` holds an immutable circuit template + analysis plan and
+evaluates a candidate matrix through a device-build → DC → AC → noise pipeline
+entirely under one `py.detach`, with **no per-candidate Python callback**. The
+generic batch machinery lives in `co_core::campaign` (single Rayon pool,
+adaptive candidate-vs-frequency axis, candidate-index-ordered write-back, atomic
+progress + cooperative cancel that never feed a reduction, and the
+`bw_from_gain` / `band_rms` metric reductions). The AFE OTFT evaluator lives in
+`co_core::otft_campaign`. Silicon PDK families are **not** wired in this step
+(that is R5-D). Not connected to any production workflow.
+
+```python
+class circuitopt_core.CompiledCampaign:
+    def __init__(self, spec: dict): ...
+        # spec = {"family": "afe_otft", "template": <template dict>}
+    @property
+    def family(self) -> str: ...
+    def evaluate_batch(self, candidates: list[dict], workers: int = 1,
+                       analyses: list[str] = ("dc", "ac", "noise")) -> list[dict]
+```
+
+### Template dict (candidate-invariant; marshalled once from `CompiledTopology`)
+
+Built by `circuitopt._rust_campaign.AfeOtftCampaign` from
+`CompiledTopology(AFE_TOPO, bias)` + the analysis plan. All terminal tokens are
+`(kind, ref, value)` triples: **kind 0** = solved-node index (`ref`), **kind 2**
+= fixed rail/AC value (`value`).
+
+```
+{
+  "family": "afe_otft",
+  "template": {
+    "n_aug": int, "n_nodes": int,
+    "consts": [vt, ci, roff, reg, c1, c2, c3, c4, kv, kh, temperature],  # 11 AT4000TG defaults
+    "devices": [ (dc_d, dc_g, dc_s, di, si, ac_d, ac_g, ac_s), ... ],    # 8-tuples per device
+    #   dc_* / ac_* are (kind, ref, value) tuples; di/si are int KCL rows (-1 = none)
+    "ac_caps": [ (a_term, b_term, value), ... ],
+    "output_weights": [ (node_index, weight), ... ],   # e.g. (0, 1.0), (1, -1.0)
+    "sense": [floats length n_aug],
+    "vin_norm": float,
+    "freqs": [floats],
+    "band": [f_lo, f_hi],
+    "gmin": float, "dc_tol": float,
+    "dc_guesses": [[floats length n_aug], ...],         # topo.dc_guess_vectors(bias)
+    "latch_nodes": (idx0, idx1) | None,
+  },
+}
+```
+
+### Candidate dict
+
+```
+{
+  "devices": [ [w, l, nf, pvt0, mvt0, pbeta0, mbeta0], ... ],  # one row per template device
+  "seed": [floats length n_aug] | absent,                      # optional DC operating-point seed
+  "trust_seed_as_op": bool,                                    # default False
+}
+```
+
+`trust_seed_as_op=True` uses `seed` verbatim as the DC operating point (no
+re-solve) — the mode that isolates bit-exact AC/noise parity from DC-root
+behaviour. `False` refines the seed (or the template guesses, cold) with the
+Rust circuit Newton. Random mismatch (`mvt0`/`mbeta0`) is drawn **up front** on
+the Python side in candidate/device order (same rule as
+`corners.mismatch_corner`) and baked into the candidate, so the detached batch
+carries no RNG. `analyses` gates the noise stage (drop `"noise"` for the
+AC-only prefilter — `irn_uV` becomes NaN).
+
+### Result dicts (candidate-index ordered)
+
+```
+{"ok": True, "gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV",
+ "dc_op": [floats length n_aug], "dc_iterations": int, "dc_from_seed": bool}
+# or, for a candidate that could not be evaluated:
+{"ok": False, "error": str}          # a bad candidate never sinks the batch
+```
+
+### Differential gate (parity vs the frozen Python scalar path)
+
+The semantically-correct reference is a **cold-consistent** Python evaluation:
+fresh (cold) `PMOS_TFT` small-signal params at the shared DC op → the same
+`circuitopt_core.LtiProblem` → the same `bw_from_gain` / `band_rms` reductions
+(under the rust device engine, which dispatches to the identical `otft` kernels
+the campaign uses). Against it the campaign is **bit-for-bit**: gain/bandwidth
+worst rel ~1e-15 across sizes × {typical, slow, fast}, IRN ~2e-16 (the
+`band_rms` naive-sum-vs-numpy-`np.sum` ULP), DC operating point bit-for-bit when
+seeded, and byte-identical across worker counts {1, 2, 8}. Seeded mismatch
+samples match the same reference to ~1e-15.
+
+Cache/threads: one Rayon pool per `evaluate_batch`, sized to `workers`; the
+frequency-level `lti` par-iter runs on that same pool (no nesting, no second
+pool). No PDK/device text or numeric values cross the boundary beyond the
+marshalled template the caller already owns (D12).
+
+### Documented deviations
+
+- **`band_rms` summation.** The trapezoid integral accumulates sequentially;
+  NumPy's `np.trapezoid` reduces through `np.sum` (8-way unrolled + pairwise).
+  The two agree to a relative error well inside `1e-12` (observed ~2e-16 on the
+  IRN), not bit-for-bit.
+- **AFE OTFT internal-node operating point is seed-path-dependent (flagged).**
+  The device's internal 2-node Newton (`PMOS_TFT._solve_internal`) stops at
+  `tol=1e-12`, so its `(Vs1, Vd1)` — and the `gm`/`gds` derived from it — depend
+  on the Newton seed. The frozen `ac_solver`/`corners.metrics` path warm-starts
+  this solve from a per-instance cache; a cold evaluation of the *same* model
+  (e.g. `noise_solver.device_psd`, or a fresh instance) lands on an equally
+  valid but different point. Python's own warm-vs-cold `gm`/`gds` disagree by up
+  to ~6e-8 for the locked AFE design. The campaign is deterministically
+  **cold-seed-consistent**, so it reproduces the cold reference bit-for-bit but
+  agrees with the warm `corners.metrics` path only to that inherent ~1e-8 floor.
+  This is a property of the frozen model, not a port error; wiring `metrics` to
+  the campaign (R5-D) would standardise the whole stack on the cold path.
+- **Circuit-level DC root.** The campaign's Rust circuit Newton (numeric
+  Jacobian + backtracking) is not a bit-for-bit reproduction of the scipy
+  `fsolve` (MINPACK hybrd) guard cascade in `ac_solver`. When seeded from a
+  converged Python DC op it reproduces that op bit-for-bit (0 iterations); the
+  cold multi-guess path can select a different physical branch on multistable
+  points and is not exercised by the parity gate (which seeds from the Python
+  reference). No silent root substitution occurs — a non-converging candidate is
+  flagged `{"ok": False}`.

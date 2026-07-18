@@ -132,6 +132,46 @@ release checklist.
   逐位一致（parser canonical 树逐字节相同；elaborator 与三 PDK numeric
   card 最差 rel 0.0）。
 
+- **Compiled campaign / candidate executor (R5-C) / 编译式 campaign（R5-C）**
+
+  **English:** A new device-agnostic batch executor in `co-core`
+  (`campaign`) runs a candidate matrix through one Rayon pool with an adaptive
+  candidate-vs-frequency parallel axis (never nested, so the single pool is
+  never oversubscribed), candidate-index-ordered write-back, and atomic
+  progress + cooperative cancellation kept out of every numeric reduction; the
+  `bw_from_gain` / `band_rms` metric reductions are ported from the frozen
+  Python path. An AFE OTFT evaluator (`otft_campaign`) composes the native
+  `otft` device kernels, dense `mna` solver, and complex `lti` MNA into a
+  per-candidate device-build → DC → AC → noise pipeline, exposed through
+  `circuitopt_core.CompiledCampaign` (`evaluate_batch` runs the whole batch
+  under one `py.detach` with zero per-candidate Python callback). Verification
+  only — no production workflow is wired to it yet (that is R5-D). Parity
+  against a cold-consistent Python reference (fresh `PMOS_TFT` small-signal
+  params → the same `LtiProblem` → the same reductions) is bit-for-bit:
+  gain/bandwidth worst rel ~1e-15, IRN ~2e-16 (the `band_rms` naive-sum ULP),
+  DC operating point bit-for-bit; results are byte-identical across worker
+  counts {1,2,8}. Flagged deviation: the AFE OTFT internal 2-node Newton stops
+  at `tol=1e-12`, so its operating point is seed-path-dependent — the frozen
+  warm-cache `corners.metrics` path and a cold evaluation of the same model
+  disagree by up to ~6e-8 in `gm`/`gds`; the campaign is cold-seed-consistent
+  and therefore matches the warm path only to that inherent floor.
+
+  **中文：** `co-core` 新增器件无关的批处理执行器（`campaign`）：单个 Rayon
+  池、候选级/频点级自适应并行轴（互斥不嵌套，单池永不过订阅）、按候选索引有序
+  写回、原子进度 + 协作取消且不入任何数值归约；`bw_from_gain` / `band_rms`
+  归约按冻结 Python 路径 1:1 移植。AFE OTFT evaluator（`otft_campaign`）把原生
+  `otft` 器件核、稠密 `mna` 求解与复数 `lti` MNA 组合成逐候选
+  器件构建 → DC → AC → noise 流水线，经 `circuitopt_core.CompiledCampaign`
+  暴露（`evaluate_batch` 在单个 `py.detach` 内跑完整 batch，零 per-candidate
+  Python 回调）。仅供验证——尚未接入任何生产工作流（那是 R5-D）。对
+  cold-consistent Python 参考（新建 `PMOS_TFT` 小信号参数 → 同一 `LtiProblem`
+  → 同一归约）逐位一致：增益/带宽最差 rel ~1e-15、IRN ~2e-16（`band_rms`
+  朴素求和 ULP）、DC 工作点逐位相同；结果在 workers ∈ {1,2,8} 下逐字节相同。
+  诚实标注：AFE OTFT 内部 2 节点 Newton 停在 `tol=1e-12`，工作点随 seed 路径
+  漂移——冻结的 warm-cache `corners.metrics` 路径与同模型 cold 求值在
+  `gm`/`gds` 上可差 ~6e-8；campaign 走 cold-seed-consistent，故与 warm 路径
+  仅一致到该固有地板。
+
 ### Changed / 变更
 
 - **Removed the OSDI/OpenVAF compatibility path / 删除 OSDI/OpenVAF 兼容路径**
