@@ -141,3 +141,175 @@ class AfeOtftCampaign:
                        analyses: Sequence[str] = ("dc", "ac", "noise")) -> list[dict]:
         """Run the compiled batch; results are candidate-index ordered."""
         return self.core.evaluate_batch(list(candidates), workers, list(analyses))
+
+
+def _silicon_pdk_of(model_types: Mapping[str, str]) -> str:
+    """The single silicon PDK family a circuit's model types belong to."""
+    families = {str(m).split(".", 1)[0] for m in model_types.values()}
+    if len(families) != 1:
+        raise ValueError(f"expected one silicon PDK family, got {sorted(families)}")
+    family = families.pop()
+    # Device-registry name -> CompiledPdk name.
+    return {"tsmc28hpcp": "tsmc28"}.get(family, family)
+
+
+def silicon_pdk_root(pdk: str) -> str:
+    """Card root for :class:`circuitopt_core.CompiledPdk`, per PARITY.md."""
+    if pdk == "freepdk45":
+        from .toolchain import pdk_root
+
+        return pdk_root()
+    if pdk == "sky130":
+        from .pdk.sky130.library import _BUNDLED_CARD_DIR
+
+        return str(_BUNDLED_CARD_DIR)
+    if pdk == "tsmc28":
+        from .toolchain import tsmc28_model_dir
+
+        return tsmc28_model_dir()
+    raise ValueError(f"unknown silicon pdk {pdk!r}")
+
+
+class SiliconCampaign:
+    """Compiled silicon (BSIM4) campaign over one circuit spec + analysis plan.
+
+    ``spec`` is a loaded circuit (:func:`circuit_loader.load_circuit_json`).
+    The template captures everything candidate-invariant — passive circuit,
+    per-device polarity/vb/temperature, LTI element records, analysis plan —
+    while candidates carry geometry (+ per-candidate process corner and
+    optional ``delvto`` mismatch volts).
+    """
+
+    def __init__(self, spec, freqs: Sequence[float],
+                 band: tuple[float, float] = (1e3, 1e6)):
+        import circuitopt_core
+
+        from ._rust_transient import passive_problem_spec
+        from .device_factory import build_devices
+        from .dc_solver import DC_FALLBACK_TOL
+
+        topo = spec.topology
+        bias = dict(spec.bias)
+        binding = spec.binding()
+        self.topo = topo
+        self.bias = bias
+        self.model_types = dict(binding.model_types or {})
+        self.device_kwargs = {name: dict(kw)
+                              for name, kw in (binding.device_kwargs or {}).items()}
+        self.base_sizes = dict(spec.sizes)
+        self.nf = spec.nf
+        self.pdk = _silicon_pdk_of(self.model_types)
+        self.plan = CompiledTopology(topo, bias)
+        self.solved = tuple(self.plan.solved)
+        self.freqs = [float(f) for f in np.asarray(freqs, float)]
+        self.band = (float(band[0]), float(band[1]))
+        self.default_guess = float(topo.default_guess_value(bias))
+        self.device_names = tuple(name for name, *_ in topo.devices)
+
+        # Built once only to extract candidate-invariant statics (vb,
+        # temperature, polarity, mult); cards themselves are compiled in Rust.
+        built = build_devices(self.base_sizes, nf=self.nf, corner=None, topo=topo,
+                              model_types=self.model_types,
+                              device_kwargs=self.device_kwargs)
+        self._mult = {name: int(getattr(built[name], "mult", 1))
+                      for name in self.device_names}
+
+        drive = getattr(topo, "input_drives", {}) or {}
+        node_drives = getattr(topo, "ac_drives", {}) or {}
+        ac_devs = {name: (d, g, s)
+                   for name, d, g, s in self.plan.ac_devices(drive=drive,
+                                                             node_drives=node_drives)}
+
+        dc_devices = []
+        devices = []
+        for dp in self.plan.devices:
+            dev = built[dp.name]
+            dc_devices.append((
+                [_dc_term(dp.d), _dc_term(dp.g), _dc_term(dp.s),
+                 (2, 0, float(dev.vb))],
+                [-1 if dp.di is None else int(dp.di),
+                 -1 if dp.gi is None else int(dp.gi),
+                 -1 if dp.si is None else int(dp.si), -1],
+            ))
+            acd, acg, acs = ac_devs[dp.name]
+            devices.append((
+                str(dev.POLARITY), float(dev.vb), float(dev.temperature),
+                float(dev.temperature) - 273.15,
+                _ac_term(acd), _ac_term(acg), _ac_term(acs),
+            ))
+
+        dc_tol = float(getattr(topo, "dc_tol", None) or DC_FALLBACK_TOL)
+        rail_span = max((abs(float(v)) for v in bias.values()), default=1.0)
+        outs = topo.outputs
+        latch_nodes = ((int(self.plan.idx[outs[0]]), int(self.plan.idx[outs[1]]))
+                       if len(outs) == 2 else None)
+
+        template = {
+            "pdk": self.pdk,
+            "root": silicon_pdk_root(self.pdk),
+            "circuit": circuitopt_core.OtftTransientProblem(
+                passive_problem_spec(self.plan)),
+            "n_aug": int(self.plan.n_aug),
+            "dc_devices": dc_devices,
+            "devices": devices,
+            "ac_caps": [(_ac_term(a), _ac_term(b), float(v))
+                        for a, b, v in self.plan.ac_capacitors(node_drives)],
+            "ac_resistors": [(_ac_term(a), _ac_term(b), float(g))
+                             for _n, a, b, _r, g in self.plan.ac_resistors(node_drives)],
+            "ac_vccs": [(_ac_term(p), _ac_term(q), _ac_term(cp), _ac_term(cn), float(gm))
+                        for p, q, cp, cn, gm in self.plan.ac_vccs(node_drives)],
+            "ac_vsources": [(_ac_term(p), _ac_term(q), int(bi),
+                             float(complex(e).real), float(complex(e).imag))
+                            for p, q, bi, e in self.plan.ac_vsources(node_drives)],
+            "ac_vcvs": [(_ac_term(p), _ac_term(q), _ac_term(cp), _ac_term(cn),
+                         int(bi), float(mu))
+                        for p, q, cp, cn, bi, mu in self.plan.ac_vcvs(node_drives)],
+            "ac_cccs": [(_ac_term(p), _ac_term(q), int(cb), float(beta))
+                        for p, q, cb, beta in self.plan.ac_cccs(node_drives)],
+            "ac_ccvs": [(_ac_term(p), _ac_term(q), int(cb), int(bi), float(gamma))
+                        for p, q, cb, bi, gamma in self.plan.ac_ccvs(node_drives)],
+            "resistor_noise": [(_ac_term(a), _ac_term(b), float(r))
+                               for _n, a, b, r, _g in self.plan.ac_resistors()],
+            "output_weights": [(int(self.plan.idx[node]), float(w))
+                               for node, w in self.plan.output_weights.items()],
+            "sense": [float(v) for v in self.plan.output_sense(dtype=float)],
+            "vin_norm": float(_vin_norm(drive, node_drives)),
+            "freqs": self.freqs,
+            "band": [self.band[0], self.band[1]],
+            "dc_guesses": [[float(v) for v in g]
+                           for g in topo.dc_guess_vectors(bias)],
+            "dc_options": [100.0, min(dc_tol, 1e-10),
+                           max(0.25, rail_span / 4.0), 1e-12],
+            "latch_nodes": latch_nodes,
+        }
+        self.core = circuitopt_core.CompiledCampaign(
+            {"family": "silicon_bsim4", "template": template})
+
+    def seed_vector(self, dc_op: Mapping[str, float]) -> list[float]:
+        """Solved-order DC seed vector from a ``{node: V}`` operating point."""
+        return [float(dc_op.get(node, self.default_guess)) for node in self.solved]
+
+    def candidate(self, sizes: Mapping[str, tuple[float, float]], corner: str,
+                  mismatch: Mapping[str, float] | None = None, nf=None,
+                  seed=None, trust_seed_as_op: bool = False) -> dict:
+        """One marshalled candidate. ``mismatch`` maps device -> delvto volts."""
+        nf = self.nf if nf is None else nf
+        mismatch = mismatch or {}
+        devices = []
+        for name in self.device_names:
+            w, l = sizes[name]
+            devices.append([
+                float(w), float(l), float(dev_nf(nf, name)),
+                float(self._mult[name]), float(mismatch.get(name, 0.0)),
+            ])
+        out = {"devices": devices, "corner": str(corner).lower(),
+               "trust_seed_as_op": bool(trust_seed_as_op)}
+        if seed is not None:
+            out["seed"] = (self.seed_vector(seed) if isinstance(seed, Mapping)
+                           else [float(v) for v in seed])
+        return out
+
+    def evaluate_batch(self, candidates: Sequence[dict], workers: int = 1,
+                       analyses: Sequence[str] = ("dc", "ac", "noise")) -> list[dict]:
+        """Run the compiled batch; results are candidate-index ordered."""
+        return self.core.evaluate_batch(list(candidates), workers, list(analyses))

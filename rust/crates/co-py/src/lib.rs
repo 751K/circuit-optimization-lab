@@ -23,6 +23,8 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::missing_safety_doc)]
 
+mod silicon_campaign;
+
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int, c_uint, c_void};
@@ -2963,10 +2965,19 @@ fn parse_candidate(item: &Bound<'_, PyAny>) -> PyResult<otft_campaign::OtftCandi
     })
 }
 
+/// Family-normalized metrics tuple shared by the campaign result marshal:
+/// `(gain_peak_dB, bw_Hz, irn_uV, latch_dV, dc_op, dc_iterations, dc_from_seed)`.
+type CampaignMetrics = (f64, f64, f64, f64, Vec<f64>, usize, bool);
+
+enum CampaignKind {
+    Otft(Arc<otft_campaign::OtftTemplate>),
+    Silicon(Arc<silicon_campaign::SiliconTemplate>),
+}
+
 /// An immutable compiled campaign over one circuit template + analysis plan.
 #[pyclass(name = "CompiledCampaign")]
 struct PyCompiledCampaign {
-    template: Arc<otft_campaign::OtftTemplate>,
+    kind: CampaignKind,
     family: String,
 }
 
@@ -2975,19 +2986,26 @@ impl PyCompiledCampaign {
     #[new]
     fn new(spec: &Bound<'_, PyDict>) -> PyResult<Self> {
         let family: String = required(spec, "family")?;
-        if family != "afe_otft" {
-            return Err(PyValueError::new_err(format!(
-                "unsupported campaign family {family:?} (R5-C ships 'afe_otft' only)"
-            )));
-        }
         let template_obj = spec
             .get_item("template")?
             .ok_or_else(|| PyKeyError::new_err("template"))?;
-        let template = build_otft_template(template_obj.cast::<PyDict>()?)?;
-        Ok(Self {
-            template: Arc::new(template),
-            family,
-        })
+        let template_dict = template_obj.cast::<PyDict>()?;
+        let kind = match family.as_str() {
+            "afe_otft" => CampaignKind::Otft(Arc::new(build_otft_template(template_dict)?)),
+            "silicon_bsim4" => {
+                let circuit = silicon_campaign::extract_circuit(template_dict)?;
+                CampaignKind::Silicon(Arc::new(silicon_campaign::build_silicon_template(
+                    template_dict,
+                    circuit,
+                )?))
+            }
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported campaign family {other:?} (expected 'afe_otft' or 'silicon_bsim4')"
+                )));
+            }
+        };
+        Ok(Self { kind, family })
     }
 
     #[getter]
@@ -2996,9 +3014,10 @@ impl PyCompiledCampaign {
     }
 
     /// Evaluate a candidate matrix in one GIL-free batch. `candidates` is a list
-    /// of `{devices, seed?, trust_seed_as_op?}` dicts; results come back in
-    /// candidate-index order as `{ok, gain_peak_dB, bw_Hz, irn_uV, latch_dV,
-    /// dc_op, dc_iterations, dc_from_seed}` (or `{ok: False, error}`).
+    /// of family-specific dicts (`{devices, seed?, trust_seed_as_op?}` for AFE;
+    /// plus `corner` for silicon); results come back in candidate-index order as
+    /// `{ok, gain_peak_dB, bw_Hz, irn_uV, latch_dV, dc_op, dc_iterations,
+    /// dc_from_seed}` (or `{ok: False, error}`).
     #[pyo3(signature = (candidates, workers=1, analyses=None))]
     fn evaluate_batch<'py>(
         &self,
@@ -3007,37 +3026,100 @@ impl PyCompiledCampaign {
         workers: usize,
         analyses: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let mut parsed = Vec::with_capacity(candidates.len());
-        for item in candidates.iter() {
-            parsed.push(parse_candidate(&item)?);
-        }
-        let ndev = self.template.devices.len();
-        for (index, candidate) in parsed.iter().enumerate() {
-            if candidate.devices.len() != ndev {
-                return Err(PyValueError::new_err(format!(
-                    "candidate {index} has {} devices, template has {ndev}",
-                    candidate.devices.len()
-                )));
-            }
-        }
         let compute_noise = analyses
             .as_ref()
             .map(|names| names.iter().any(|name| name == "noise"))
             .unwrap_or(true);
-        let template = self.template.clone();
         let workers = workers.max(1);
-        let n = parsed.len();
+        let n = candidates.len();
+        let config = campaign::BatchConfig::new(workers);
 
-        let results = py.detach(move || {
-            let evaluator = otft_campaign::OtftEvaluator {
-                template: &template,
-                candidates: &parsed,
-                compute_noise,
-            };
-            let progress = campaign::BatchProgress::new();
-            let config = campaign::BatchConfig::new(workers);
-            campaign::evaluate_batch(&evaluator, n, config, &progress)
-        });
+        let results: Vec<Option<Result<CampaignMetrics, String>>> = match &self.kind {
+            CampaignKind::Otft(template) => {
+                let mut parsed = Vec::with_capacity(n);
+                for item in candidates.iter() {
+                    parsed.push(parse_candidate(&item)?);
+                }
+                let ndev = template.devices.len();
+                for (index, candidate) in parsed.iter().enumerate() {
+                    if candidate.devices.len() != ndev {
+                        return Err(PyValueError::new_err(format!(
+                            "candidate {index} has {} devices, template has {ndev}",
+                            candidate.devices.len()
+                        )));
+                    }
+                }
+                let template = template.clone();
+                py.detach(move || {
+                    let evaluator = otft_campaign::OtftEvaluator {
+                        template: &template,
+                        candidates: &parsed,
+                        compute_noise,
+                    };
+                    let progress = campaign::BatchProgress::new();
+                    campaign::evaluate_batch(&evaluator, n, config, &progress)
+                        .into_iter()
+                        .map(|slot| {
+                            slot.map(|outcome| {
+                                outcome.map(|m| {
+                                    (
+                                        m.gain_peak_db,
+                                        m.bw_hz,
+                                        m.irn_uv,
+                                        m.latch_dv,
+                                        m.dc_op,
+                                        m.dc_iterations,
+                                        m.dc_from_seed,
+                                    )
+                                })
+                            })
+                        })
+                        .collect()
+                })
+            }
+            CampaignKind::Silicon(template) => {
+                let mut parsed = Vec::with_capacity(n);
+                for item in candidates.iter() {
+                    parsed.push(silicon_campaign::parse_silicon_candidate(&item)?);
+                }
+                let ndev = template.devices.len();
+                for (index, candidate) in parsed.iter().enumerate() {
+                    if candidate.devices.len() != ndev {
+                        return Err(PyValueError::new_err(format!(
+                            "candidate {index} has {} devices, template has {ndev}",
+                            candidate.devices.len()
+                        )));
+                    }
+                }
+                let template = template.clone();
+                py.detach(move || {
+                    let evaluator = silicon_campaign::SiliconEvaluator {
+                        template: &template,
+                        candidates: &parsed,
+                        compute_noise,
+                    };
+                    let progress = campaign::BatchProgress::new();
+                    campaign::evaluate_batch(&evaluator, n, config, &progress)
+                        .into_iter()
+                        .map(|slot| {
+                            slot.map(|outcome| {
+                                outcome.map(|m| {
+                                    (
+                                        m.gain_peak_db,
+                                        m.bw_hz,
+                                        m.irn_uv,
+                                        m.latch_dv,
+                                        m.dc_op,
+                                        m.dc_iterations,
+                                        m.dc_from_seed,
+                                    )
+                                })
+                            })
+                        })
+                        .collect()
+                })
+            }
+        };
 
         let mut items = Vec::with_capacity(results.len());
         for slot in results {
@@ -3047,15 +3129,15 @@ impl PyCompiledCampaign {
                     dict.set_item("ok", false)?;
                     dict.set_item("cancelled", true)?;
                 }
-                Some(Ok(metrics)) => {
+                Some(Ok((gain, bw, irn, latch, dc_op, iterations, from_seed))) => {
                     dict.set_item("ok", true)?;
-                    dict.set_item("gain_peak_dB", metrics.gain_peak_db)?;
-                    dict.set_item("bw_Hz", metrics.bw_hz)?;
-                    dict.set_item("irn_uV", metrics.irn_uv)?;
-                    dict.set_item("latch_dV", metrics.latch_dv)?;
-                    dict.set_item("dc_op", metrics.dc_op)?;
-                    dict.set_item("dc_iterations", metrics.dc_iterations)?;
-                    dict.set_item("dc_from_seed", metrics.dc_from_seed)?;
+                    dict.set_item("gain_peak_dB", gain)?;
+                    dict.set_item("bw_Hz", bw)?;
+                    dict.set_item("irn_uV", irn)?;
+                    dict.set_item("latch_dV", latch)?;
+                    dict.set_item("dc_op", dc_op)?;
+                    dict.set_item("dc_iterations", iterations)?;
+                    dict.set_item("dc_from_seed", from_seed)?;
                 }
                 Some(Err(message)) => {
                     dict.set_item("ok", false)?;
