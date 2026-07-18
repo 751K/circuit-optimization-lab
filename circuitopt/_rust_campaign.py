@@ -227,6 +227,10 @@ class SiliconCampaign:
                               device_kwargs=self.device_kwargs)
         self._mult = {name: int(getattr(built[name], "mult", 1))
                       for name in self.device_names}
+        # The corner a ``corner=None`` scalar build resolves to (device-class
+        # default: freepdk45 ``nom``, sky130/tsmc28 ``tt``) — what a nominal
+        # size-sweep candidate must stamp so the campaign matches the scalar path.
+        self.nominal_corner = str(getattr(built[self.device_names[0]], "corner", "tt"))
 
         drive = getattr(topo, "input_drives", {}) or {}
         node_drives = getattr(topo, "ac_drives", {}) or {}

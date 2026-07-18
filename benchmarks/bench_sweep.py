@@ -25,6 +25,8 @@ import time
 
 import numpy as np
 
+from circuitopt._campaign_sweep import make_sweep_campaign
+from circuitopt._engine import current_engine
 from circuitopt.ac_solver import ac_solve
 from circuitopt.circuit_loader import load_circuit_json
 from circuitopt.noise_solver import noise_analysis
@@ -38,6 +40,7 @@ BASE_SIZES = dict(_SPEC.sizes)
 BASE_BIAS = dict(_SPEC.bias)
 BASE_NF = _SPEC.nf
 BASE_BINDING = _SPEC.binding()
+BENCH_SPEC = _SPEC
 BENCH_CIRCUIT = str(_ROOT / "examples" / "afe_explore.json")
 
 # ── sweep parameters ───────────────────────────────────────────────────
@@ -126,6 +129,21 @@ def run_benchmarks(warm_runs, n, seed=42, workers=1):
     freqs = np.logspace(np.log10(0.1), np.log10(10e3), NFREQ)
     results = []
 
+    # ── compiled-campaign fast path (rust engine) ────────────────────
+    # The whole candidate matrix runs under one Rayon pool with no per-candidate
+    # Python callback, so ``workers`` actually scales (the ≥2× design-space sweep
+    # gate). ``None`` when the engine is not rust or the circuit is not
+    # campaign-able — then ``run_batch`` keeps the scalar reference path. AFE cold
+    # metrics are branch-divergent (the sweep only measures solver throughput and
+    # convergence, which match; see _campaign_sweep's cold-DC policy).
+    campaign = make_sweep_campaign(BENCH_SPEC, freqs, BAND)
+    cand_batch = ([campaign.candidate(sizes) for sizes in candidates]
+                  if campaign is not None else None)
+
+    def _batch_ok(analyses):
+        out = campaign.evaluate_batch(cand_batch, workers=workers, analyses=analyses)
+        return [bool(r.get("ok")) for r in out]
+
     # ── ac_only: N × AC solve ────────────────────────────────────────
     def evaluate_ac(sizes):
         return ac_solve(sizes, BASE_BIAS, freqs, topo=BASE_TOPO, nf=BASE_NF,
@@ -139,7 +157,7 @@ def run_benchmarks(warm_runs, n, seed=42, workers=1):
 
     def run_ac_only():
         t0 = time.perf_counter()
-        outcomes = run_batch(evaluate_ac)
+        outcomes = _batch_ok(["dc", "ac"]) if campaign is not None else run_batch(evaluate_ac)
         elapsed = (time.perf_counter() - t0) * 1e3
         return {"elapsed_ms": elapsed, "n_ok": sum(outcomes),
                 "n_fail": len(outcomes) - sum(outcomes)}
@@ -170,7 +188,8 @@ def run_benchmarks(warm_runs, n, seed=42, workers=1):
 
     def run_ac_noise():
         t0 = time.perf_counter()
-        outcomes = run_batch(evaluate_ac_noise)
+        outcomes = (_batch_ok(["dc", "ac", "noise"]) if campaign is not None
+                    else run_batch(evaluate_ac_noise))
         elapsed = (time.perf_counter() - t0) * 1e3
         return {"elapsed_ms": elapsed, "n_ok": sum(outcomes),
                 "n_fail": len(outcomes) - sum(outcomes)}
@@ -198,6 +217,8 @@ def run_benchmarks(warm_runs, n, seed=42, workers=1):
         "nfreq": NFREQ,
         "warm_runs": warm_runs,
         "workers": workers,
+        "engine": current_engine(),
+        "campaign": campaign.family if campaign is not None else None,
         "circuit": BENCH_CIRCUIT,
         "results": results,
     }
@@ -245,12 +266,14 @@ def main():
 
     if args.circuit is not None:
         global BASE_TOPO, BASE_SIZES, BASE_BIAS, BASE_NF, BASE_BINDING, BENCH_CIRCUIT
+        global BENCH_SPEC
         spec = load_circuit_json(args.circuit)
         BASE_TOPO = spec.topology
         BASE_SIZES = dict(spec.sizes)
         BASE_BIAS = dict(spec.bias)
         BASE_NF = spec.nf
         BASE_BINDING = spec.binding()
+        BENCH_SPEC = spec
         BENCH_CIRCUIT = str(Path(args.circuit).resolve())
 
     report = run_benchmarks(args.warm_runs, args.n_candidates, seed=args.seed,
