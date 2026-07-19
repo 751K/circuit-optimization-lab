@@ -1,6 +1,6 @@
 {
   "env": {
-    "commit": "c3d4c564828de017a47b5dd2f771e27b5f1f9838",
+    "commit": "b3ac56d0ae7f166fc96372b98970c812ce034322",
     "machine": "arm64",
     "numba": "0.66.0",
     "numpy": "2.4.6",
@@ -11,11 +11,11 @@
   },
   "files": {
     "tests/golden/engine_parity/circuits/afe_explore--ac-noise.json": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-    "tests/golden/engine_parity/circuits/freepdk45_5t_ota--ac-noise-transient.json": "00cdbb176ae5c29114d6b9998de631a9f8e52d448f1edae4bdd8e4e4a1bb8fe4",
-    "tests/golden/engine_parity/circuits/periodic_rc--ac-noise-pss-pac-pnoise.json": "be71127aa60097b683435350a4b13cc9a053d8bbcf280fffc2f33809bcee2b45",
-    "tests/golden/engine_parity/circuits/sky130_5t_ota--ac-noise.json": "01fda31480bc06595b1a01e240e6868ecbfa1009b98bacac4501131f2d39b967",
-    "tests/golden/engine_parity/circuits/tsmc28hpcp_5t_ota--ac-noise.json": "f9c0b5e3958f94c75853a417513eab275d88d478b54f6b7ebecdb8df4bbdd9e7",
-    "tests/golden/engine_parity/devices.npz": "b4cc5dc1d62775de762296cf5e76e860118d27a73a710690ac97e66cfb8a4002"
+    "tests/golden/engine_parity/circuits/freepdk45_5t_ota--ac-noise-transient.json": "cd44f87a6a62a64704fe094fd7f21e9a41880346a1c388de3c357424ecc89c9f",
+    "tests/golden/engine_parity/circuits/periodic_rc--ac-noise-pss-pac-pnoise.json": "94354f2a86c3cc37cf12e3b2ba3f9414d30647a50df5884c76d22281f661dc85",
+    "tests/golden/engine_parity/circuits/sky130_5t_ota--ac-noise.json": "a06f494507215f00e9d541fe4a804e9e9964907be538368b45d093a66fb87ec3",
+    "tests/golden/engine_parity/circuits/tsmc28hpcp_5t_ota--ac-noise.json": "52cd94fcb7f55c8f3036c98ea899c64d594a182ab8e0ffd1715c0f56e160ac89",
+    "tests/golden/engine_parity/devices.npz": "862931ad6d791d1cae83f819f93b91687741e1c01613f274ffe444744002e501"
   },
   "frozen_circuit_cases": [
     [
@@ -185,10 +185,10 @@
     "tsmc28hpcp|pmos|W2L0.1NF2|ff|T233.15: ok",
     "tsmc28hpcp|pmos|W2L0.1NF2|ff|T300.15: ok",
     "tsmc28hpcp|pmos|W2L0.1NF2|ff|T398.15: ok",
-    "circuit afe_explore.json [ac,noise]: ok (0.5s)",
-    "circuit freepdk45_5t_ota.json [ac,noise,transient]: ok (0.4s)",
-    "circuit sky130_5t_ota.json [ac,noise]: ok (0.5s)",
-    "circuit tsmc28hpcp_5t_ota.json [ac,noise]: ok (1.9s)",
-    "circuit periodic_rc.json [ac,noise,pss,pac,pnoise]: ok (0.5s)"
+    "circuit afe_explore.json [ac,noise]: ok (0.7s)",
+    "circuit freepdk45_5t_ota.json [ac,noise,transient]: ok (0.3s)",
+    "circuit sky130_5t_ota.json [ac,noise]: ok (0.3s)",
+    "circuit tsmc28hpcp_5t_ota.json [ac,noise]: ok (1.7s)",
+    "circuit periodic_rc.json [ac,noise,pss,pac,pnoise]: ok (0.3s)"
   ]
 }
