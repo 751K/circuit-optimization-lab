@@ -17,7 +17,6 @@ Usage:
 """
 import argparse
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -26,7 +25,6 @@ import numpy as np
 
 from circuitopt.chopper import pmos_chopper_pac, pmos_chopper_pnoise, pmos_chopper_pss
 from circuitopt.circuit_loader import load_circuit_json
-from circuitopt.numba_kernels import NUMBA_AVAILABLE
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -165,7 +163,6 @@ def summarize_pss(pss):
         "residual_norm": float(pss.get("residual_norm", np.nan)),
         "nfail": int(pss.get("nfail", 0)),
         "orbit_points": int(len(pss.get("t", ()))),
-        "numba_grid_solver": bool(pss.get("numba_grid_solver", False)),
         "gear2_python_retry_solver": bool(pss.get("gear2_python_retry_solver", False)),
         "adaptive": bool(pss.get("adaptive", False)),
         "adaptive_grid_frozen": bool(pss.get("adaptive_grid_frozen", False)),
@@ -214,8 +211,6 @@ def summarize_pnoise(pn):
         "pnoise_hb_dense_fallbacks": int(pn.get("pnoise_hb_dense_fallbacks", 0)),
         "pnoise_hb_iterative_fallbacks": int(
             pn.get("pnoise_hb_iterative_fallbacks", 0)),
-        "pnoise_numba_hb_used": bool(pn.get("pnoise_numba_hb_used", False)),
-        "pnoise_numba_fold_used": bool(pn.get("pnoise_numba_fold_used", False)),
         "pnoise_rust_hb_used": bool(pn.get("pnoise_rust_hb_used", False)),
         "pnoise_rust_fold_used": bool(pn.get("pnoise_rust_fold_used", False)),
         "pnoise_state_size": int(pn.get("pnoise_state_size", 0)),
@@ -266,8 +261,6 @@ def run_benchmarks(warm_runs):
     return {
         "python": sys.version.split()[0],
         "numpy": np.__version__,
-        "numba_enabled": bool(NUMBA_AVAILABLE),
-        "numba_env": os.environ.get("CIRCUIT_USE_NUMBA"),
         "circuit": "examples/afe_explore.json",
         "corner": CORNER,
         "f_chop_Hz": F_CHOP,
@@ -288,7 +281,7 @@ def print_text(report):
         return "n/a" if value is None else f"{value:.3f}"
 
     print(f"python={report['python']} numpy={report['numpy']} "
-          f"numba_enabled={report['numba_enabled']} warm_runs={report['warm_runs']}")
+          f"warm_runs={report['warm_runs']}")
     print(f"chopper: f={report['f_chop_Hz']}Hz switch="
           f"{report['switch_W_um']:.0f}/{report['switch_L_um']:.0f} "
           f"edge={report['edge_time_us']:.1f}us corner={report['corner']} "

@@ -17,7 +17,6 @@ Usage:
 """
 import argparse
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
@@ -30,7 +29,6 @@ from circuitopt._engine import current_engine
 from circuitopt.ac_solver import ac_solve
 from circuitopt.circuit_loader import load_circuit_json
 from circuitopt.noise_solver import noise_analysis
-from circuitopt.numba_kernels import NUMBA_AVAILABLE
 
 # ── fixed AFE design (locked, loaded from the canonical JSON) ─────────
 _ROOT = Path(__file__).resolve().parents[1]
@@ -210,8 +208,6 @@ def run_benchmarks(warm_runs, n, seed=42, workers=1):
     return {
         "python": sys.version.split()[0],
         "numpy": np.__version__,
-        "numba_enabled": bool(NUMBA_AVAILABLE),
-        "numba_env": os.environ.get("CIRCUIT_USE_NUMBA"),
         "n_candidates": n,
         "perturb": PERTURB,
         "nfreq": NFREQ,
@@ -229,7 +225,7 @@ def print_text(report):
         return "n/a" if value is None else f"{value:.3f}"
 
     print(f"python={report['python']} numpy={report['numpy']} "
-          f"numba_enabled={report['numba_enabled']} "
+          
           f"n={report['n_candidates']} perturb={report['perturb']} "
           f"nfreq={report['nfreq']} workers={report['workers']} "
           f"warm_runs={report['warm_runs']}")

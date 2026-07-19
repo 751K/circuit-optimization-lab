@@ -101,7 +101,10 @@ def test_native_5t_ota_periodic_noise_uses_terminal_matrix_path():
         cache_linearization=False,
     )
     assert pnoise["pnoise_terminal_noise_source_count"] == 5
-    assert pnoise["pnoise_numba_fold_used"] is False
+    # Terminal-noise sources fold in Python by design (the compiled fold takes
+    # node-index adjoints only); the retired numba fold key is gone (R7).
+    assert "pnoise_numba_fold_used" not in pnoise
+    assert pnoise["pnoise_rust_fold_used"] is False
     np.testing.assert_allclose(
         pnoise["out_psd"], noise["out_psd"], rtol=2e-6)
 

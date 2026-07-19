@@ -5,7 +5,7 @@ regions: saturation, subthreshold, and linear.  Reports cold (fresh device,
 first-call) and warm (subsequent calls on the same device) timings per
 operation. Warm timings batch repeated calls and report per-call time so
 sub-microsecond kernels are not dominated by timer quantization. Select the
-implementation with CIRCUIT_ENGINE=rust|numba|python. A Numba cold run includes
+implementation (rust is the only engine in v2.0.0). A cold run includes
 first-call JIT work.
 
 Usage:
@@ -14,13 +14,11 @@ Usage:
 """
 import argparse
 import json
-import os
 import sys
 import time
 
 import numpy as np
 
-from circuitopt.numba_kernels import NUMBA_AVAILABLE
 from circuitopt._engine import current_engine
 from circuitopt.pmos_tft_model import PMOS_TFT
 
@@ -147,9 +145,7 @@ def run_benchmarks(warm_runs, inner_loops=10_000):
     return {
         "python": sys.version.split()[0],
         "numpy": np.__version__,
-        "numba_enabled": bool(NUMBA_AVAILABLE),
         "engine": current_engine(),
-        "numba_env": os.environ.get("CIRCUIT_USE_NUMBA"),
         "device": {"W_um": DEFAULT_W, "L_um": DEFAULT_L},
         "warm_runs": warm_runs,
         "warm_inner_loops": inner_loops,
@@ -162,7 +158,7 @@ def print_text(report):
         return "n/a" if value is None else f"{value:.3f}"
 
     print(f"python={report['python']} numpy={report['numpy']} engine={report['engine']} "
-          f"numba_enabled={report['numba_enabled']} W={report['device']['W_um']} "
+          f"W={report['device']['W_um']} "
           f"L={report['device']['L_um']} warm_runs={report['warm_runs']}")
     for item in report["results"]:
         print(f"{item['case']}: cold_ms={item['cold_ms']:.3f} "

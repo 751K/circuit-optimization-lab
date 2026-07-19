@@ -1,4 +1,13 @@
-"""R3 circuit-level parity tests for the Rust OTFT transient core."""
+"""Circuit-level tests for the compiled OTFT transient core.
+
+History: these started as R3 rust-vs-numba differential tests. The Python/numba
+`_impl` drivers were removed in v2.0.0 (R7) — the golden corpus
+(``tests/golden/engine_parity``) is the frozen numerical oracle now — so the
+tests assert the compiled core directly: stamp self-consistency against a
+finite-difference Jacobian, analytic solutions where the circuit has one, and
+frozen behavioral pins (substep/rejection counts) that were originally
+established by the retired A/B comparison.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -6,20 +15,9 @@ import pytest
 
 from circuitopt import transient_solver as transient_module
 from circuitopt._rust_transient import build_otft_transient_problem
-from circuitopt.numba_kernels import (
-    _fill_prev_terms_impl,
-    _stamp_transient_system_impl,
-    _transient_solve_adaptive_gear2_impl,
-    _transient_solve_grid_gear2_impl,
-    _transient_solve_grid_impl,
-)
 from circuitopt.topology import Topology
-from circuitopt.transient_solver import (
-    _marshal_transient,
-    _numba_adaptive_gear2_kernel_args,
-    _numba_grid_kernel_args,
-    _numba_shared_kernel_arg_groups,
-)
+from circuitopt.transient_profile import PROFILE_INTERVALS
+from circuitopt.transient_solver import _marshal_transient
 
 try:
     import circuitopt_core
@@ -30,105 +28,8 @@ except ImportError:  # pragma: no cover - optional compiled wheel
 requires_rust_transient = pytest.mark.skipif(
     circuitopt_core is None
     or not hasattr(circuitopt_core, "OtftTransientProblem"),
-    reason="R3 circuitopt_core transient extension is not installed",
+    reason="circuitopt_core transient extension is not installed",
 )
-
-
-def _reference_stamp(ctx, state, previous, input_now, input_previous, h,
-                     cap_mode, bdf, previous2=None, input_previous2=None):
-    groups = _numba_shared_kernel_arg_groups(ctx)
-    (solver, device_terms, device_nodes, model_params, op_cache, passives,
-     sources, cap_clip, vsources, vcvs, cccs, ccvs) = groups
-    n, _maxit, _step_limit, _vtol, gmin, _fallback, _fallback_tol, hh = solver
-    (dev_d_kind, dev_d_ref, dev_d_val,
-     dev_g_kind, dev_g_ref, dev_g_val,
-     dev_s_kind, dev_s_ref, dev_s_val) = device_terms
-    dev_di, dev_gi, dev_si, dev_use_abs = device_nodes
-    (p_vfb, p_vss, p_lc, p_lambda, p_contact_scale, p_exponent,
-     p_current_scale, p_inv_rleak, p_two_over_pi, p_cap_cgs1,
-     p_cap_cgd1, p_cap_half_wl_ci, p_cap_cgs3_base, p_cap_cgd3_base,
-     p_k1, p_gate_leak_g) = model_params
-    op_cache_valid, op_cache_vs1, op_cache_vd1 = op_cache
-    (res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref, res_b_val,
-     res_ai, res_bi, res_g, cap_a_kind, cap_a_ref, cap_a_val,
-     cap_b_kind, cap_b_ref, cap_b_val, cap_ai, cap_bi, cap_value) = passives
-    isrc_pi, isrc_qi, isrc_value, dyn_pi, dyn_qi, dyn_input_idx = sources
-
-    count = len(dev_di)
-    prev_vs = np.empty(count)
-    prev_vd = np.empty(count)
-    prev_vg = np.empty(count)
-    prev_cgs = np.empty(count)
-    prev_cgd = np.empty(count)
-    cap_prev_dv = np.empty(len(cap_value))
-    assert _fill_prev_terms_impl(
-        previous, input_previous,
-        dev_d_kind, dev_d_ref, dev_d_val,
-        dev_g_kind, dev_g_ref, dev_g_val,
-        dev_s_kind, dev_s_ref, dev_s_val,
-        p_vfb, p_vss, p_lc, p_lambda, p_contact_scale, p_exponent,
-        p_current_scale, p_inv_rleak,
-        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
-        p_cap_cgs3_base, p_cap_cgd3_base, p_k1,
-        op_cache_valid, op_cache_vs1, op_cache_vd1,
-        cap_a_kind, cap_a_ref, cap_a_val,
-        cap_b_kind, cap_b_ref, cap_b_val, cap_mode,
-        prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd, cap_prev_dv)
-
-    if previous2 is None:
-        prev2_cgs = prev_cgs.copy()
-        prev2_cgd = prev_cgd.copy()
-        cap_prev2_dv = cap_prev_dv.copy()
-    else:
-        prev2_cgs = np.empty(count)
-        prev2_cgd = np.empty(count)
-        cap_prev2_dv = np.empty(len(cap_value))
-        scratch_vs = np.empty(count)
-        scratch_vd = np.empty(count)
-        scratch_vg = np.empty(count)
-        cache2_valid = np.zeros(count, dtype=np.bool_)
-        cache2_vs1 = np.zeros(count)
-        cache2_vd1 = np.zeros(count)
-        assert _fill_prev_terms_impl(
-            previous2,
-            input_previous if input_previous2 is None else input_previous2,
-            dev_d_kind, dev_d_ref, dev_d_val,
-            dev_g_kind, dev_g_ref, dev_g_val,
-            dev_s_kind, dev_s_ref, dev_s_val,
-            p_vfb, p_vss, p_lc, p_lambda, p_contact_scale, p_exponent,
-            p_current_scale, p_inv_rleak,
-            p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
-            p_cap_cgs3_base, p_cap_cgd3_base, p_k1,
-            cache2_valid, cache2_vs1, cache2_vd1,
-            cap_a_kind, cap_a_ref, cap_a_val,
-            cap_b_kind, cap_b_ref, cap_b_val, cap_mode,
-            scratch_vs, scratch_vd, scratch_vg, prev2_cgs, prev2_cgd,
-            cap_prev2_dv)
-
-    residual = np.empty(ctx.n_aug)
-    jacobian = np.empty((ctx.n_aug, ctx.n_aug))
-    profile_stats = np.zeros(26)
-    ok = _stamp_transient_system_impl(
-        state, previous, input_now, input_previous, h, n, gmin, hh,
-        dev_d_kind, dev_d_ref, dev_d_val,
-        dev_g_kind, dev_g_ref, dev_g_val,
-        dev_s_kind, dev_s_ref, dev_s_val,
-        dev_di, dev_gi, dev_si, dev_use_abs,
-        p_vfb, p_vss, p_lc, p_lambda, p_contact_scale, p_exponent,
-        p_current_scale, p_inv_rleak,
-        p_two_over_pi, p_cap_cgs1, p_cap_cgd1, p_cap_half_wl_ci,
-        p_cap_cgs3_base, p_cap_cgd3_base, p_k1, p_gate_leak_g,
-        op_cache_valid, op_cache_vs1, op_cache_vd1,
-        res_a_kind, res_a_ref, res_a_val, res_b_kind, res_b_ref,
-        res_b_val, res_ai, res_bi, res_g,
-        cap_a_kind, cap_a_ref, cap_a_val, cap_b_kind, cap_b_ref,
-        cap_b_val, cap_ai, cap_bi, cap_value,
-        isrc_pi, isrc_qi, isrc_value, dyn_pi, dyn_qi, dyn_input_idx,
-        cap_mode, prev_vs, prev_vd, prev_vg, prev_cgs, prev_cgd,
-        cap_prev_dv, residual, jacobian, False, profile_stats,
-        *bdf, prev2_cgs, prev2_cgd, cap_prev2_dv,
-        vsources, vcvs, cccs, ccvs)
-    return ok, residual, jacobian
 
 
 def _device_context(cap_mode):
@@ -151,10 +52,41 @@ def _device_context(cap_mode):
     return marshalled.ctx, marshalled.input_values
 
 
+def _stamp_fd_jacobian(problem, state, previous, input_now, input_previous, h,
+                       *, cap_mode=0, bdf=(1.0, -1.0, 0.0), previous2=None,
+                       input_previous2=None, step=1e-7):
+    """Central finite differences of the stamped residual w.r.t. the state."""
+    state = np.asarray(state, float)
+    n = len(state)
+    jac = np.zeros((n, n))
+    for j in range(n):
+        hi = state.copy()
+        lo = state.copy()
+        hi[j] += step
+        lo[j] -= step
+        _, r_hi, _, _, _ = problem.stamp(
+            hi, previous, input_now, input_previous, h, cap_mode=cap_mode,
+            bdf=bdf, previous2_state=previous2,
+            input_previous2=input_previous2)
+        _, r_lo, _, _, _ = problem.stamp(
+            lo, previous, input_now, input_previous, h, cap_mode=cap_mode,
+            bdf=bdf, previous2_state=previous2,
+            input_previous2=input_previous2)
+        jac[:, j] = (np.asarray(r_hi) - np.asarray(r_lo)) / (2 * step)
+    return jac
+
+
 @requires_rust_transient
 @pytest.mark.parametrize("cap_mode", [0, 1])
 @pytest.mark.parametrize("use_bdf2", [False, True])
-def test_rust_otft_stamp_matches_numba(cap_mode, use_bdf2):
+def test_rust_otft_stamp_newton_converges(cap_mode, use_bdf2):
+    """The stamped residual/Jacobian pair must drive Newton to convergence.
+
+    Replaces the retired rust-vs-`_impl` stamp comparison: the residual and
+    Jacobian are exercised together — an inconsistent pair cannot contract the
+    residual by orders of magnitude in a handful of steps. (The stamped device
+    Jacobian is an hh-smoothed terminal derivative by design, so a raw
+    finite-difference identity is not applicable to the OTFT arm.)"""
     ctx, inputs = _device_context(cap_mode)
     problem = build_otft_transient_problem(ctx)
     state = np.array([19.7])
@@ -163,21 +95,35 @@ def test_rust_otft_stamp_matches_numba(cap_mode, use_bdf2):
     bdf = (1.5, -2.0, 0.5) if use_bdf2 else (1.0, -1.0, 0.0)
     input_previous2 = inputs[:, 0] - 0.1 if use_bdf2 else None
 
-    ref_ok, ref_residual, ref_jacobian = _reference_stamp(
-        ctx, state, previous, inputs[:, 1], inputs[:, 0], 1e-6,
-        cap_mode, bdf, previous2, input_previous2)
-    got_ok, got_residual, got_jacobian, _caches, _stats = problem.stamp(
+    ok, residual, jacobian, _caches, _stats = problem.stamp(
         state, previous, inputs[:, 1], inputs[:, 0], 1e-6,
         cap_mode=cap_mode, bdf=bdf, previous2_state=previous2,
         input_previous2=input_previous2)
+    assert ok is True
+    assert np.all(np.isfinite(residual))
+    assert np.all(np.isfinite(np.asarray(jacobian)))
+    r0 = float(np.max(np.abs(residual)))
 
-    assert got_ok is ref_ok is True
-    np.testing.assert_allclose(got_residual, ref_residual, rtol=1e-12, atol=1e-18)
-    np.testing.assert_allclose(got_jacobian, ref_jacobian, rtol=1e-12, atol=1e-18)
+    x = state.copy()
+    r_last = r0
+    for _ in range(20):
+        step_ok, r, jac, _caches, _stats = problem.stamp(
+            x, previous, inputs[:, 1], inputs[:, 0], 1e-6,
+            cap_mode=cap_mode, bdf=bdf, previous2_state=previous2,
+            input_previous2=input_previous2)
+        assert step_ok is True
+        r = np.asarray(r, float)
+        r_last = float(np.max(np.abs(r)))
+        if r_last < 1e-13:
+            break
+        x = x - np.linalg.solve(np.asarray(jac, float), r)
+    assert r_last < 1e-9 and r_last < r0 * 1e-3
 
 
 @requires_rust_transient
-def test_rust_augmented_branch_stamp_matches_numba():
+def test_rust_augmented_branch_stamp_is_consistent():
+    """Controlled sources (vsource/vcvs/cccs/ccvs) stamp a linear system whose
+    Jacobian must match FD, and the residual must be affine in the state."""
     topo = Topology(
         solved=["OUT", "CTRL"], devices=[], rails={"GND": 0.0},
         resistors=[("RO", "OUT", "GND", 1e3),
@@ -198,22 +144,29 @@ def test_rust_augmented_branch_stamp_matches_numba():
     state = np.array([0.15, 0.2, 1e-4, -2e-4, 3e-4])
     previous = np.array([0.1, 0.1, 0.0, 0.0, 0.0])
 
-    ref_ok, ref_residual, ref_jacobian = _reference_stamp(
-        ctx, state, previous, marshalled.input_values[:, 1],
-        marshalled.input_values[:, 0], 1e-6, 0, (1.0, -1.0, 0.0))
-    got_ok, got_residual, got_jacobian, _caches, _stats = problem.stamp(
+    ok, residual, jacobian, _caches, _stats = problem.stamp(
         state, previous, marshalled.input_values[:, 1],
         marshalled.input_values[:, 0], 1e-6)
-
-    assert got_ok is ref_ok is True
-    np.testing.assert_allclose(got_residual, ref_residual, rtol=1e-12, atol=1e-18)
-    np.testing.assert_allclose(got_jacobian, ref_jacobian, rtol=1e-12, atol=1e-18)
+    assert ok is True
+    fd = _stamp_fd_jacobian(
+        problem, state, previous, marshalled.input_values[:, 1],
+        marshalled.input_values[:, 0], 1e-6)
+    np.testing.assert_allclose(np.asarray(jacobian), fd, rtol=1e-6, atol=1e-6)
+    # Linear system: residual(state) == residual(0) + J @ state, bitwise-tight.
+    ok0, residual0, _, _, _ = problem.stamp(
+        np.zeros_like(state), previous, marshalled.input_values[:, 1],
+        marshalled.input_values[:, 0], 1e-6)
+    assert ok0 is True
+    np.testing.assert_allclose(
+        np.asarray(residual),
+        np.asarray(residual0) + np.asarray(jacobian) @ state,
+        rtol=1e-9, atol=1e-12)
 
 
 @requires_rust_transient
 @pytest.mark.parametrize("integration_method", ["be", "gear2"])
 @pytest.mark.parametrize("max_step", [None, 4e-7])
-def test_rust_fixed_grid_matches_numba(integration_method, max_step):
+def test_rust_fixed_grid_solves_and_reports_profile(integration_method, max_step):
     topo = Topology(
         solved=["OUT"],
         devices=[("M1", "OUT", "IN", "VDD")],
@@ -234,12 +187,6 @@ def test_rust_fixed_grid_matches_numba(integration_method, max_step):
         edge_mask=edge_mask, profile=True)
     ctx = marshalled.ctx
     problem = build_otft_transient_problem(ctx)
-    args = _numba_grid_kernel_args(
-        ctx, marshalled.V0, tgrid, marshalled.input_values, edge_mask, True)
-    kernel = (_transient_solve_grid_gear2_impl
-              if integration_method == "gear2" else _transient_solve_grid_impl)
-    ref_ok, ref_states, ref_substeps, ref_failed, ref_profile, ref_indices = kernel(*args)
-
     got = problem.solve_fixed_grid(
         marshalled.V0, tgrid, marshalled.input_values, edge_mask.tolist(),
         integration_method=integration_method,
@@ -252,21 +199,29 @@ def test_rust_fixed_grid_matches_numba(integration_method, max_step):
         gmin=ctx.gmin, hh=ctx.HH, cap_mode=ctx.cap_id, profile=True)
     got_ok, got_states, got_substeps, got_failed, got_indices, got_profile = got
 
-    assert isinstance(got_states, np.ndarray)
-    assert isinstance(got_profile, np.ndarray)
-    assert got_ok is bool(ref_ok)
-    assert got_substeps == ref_substeps
-    assert got_failed == ref_failed
-    assert got_indices == [int(value) for value in ref_indices if value >= 0]
-    np.testing.assert_allclose(got_states, ref_states, rtol=1e-12, atol=1e-16)
-    np.testing.assert_allclose(
-        np.asarray(got_profile)[:16], np.asarray(ref_profile)[:16],
-        rtol=0.0, atol=0.0)
+    assert got_ok is True
+    assert got_failed == -1
+    assert got_indices == []
+    states = np.asarray(got_states)
+    assert states.shape == (len(tgrid), 1)
+    assert np.all(np.isfinite(states))
+    # max_step subdivides every interval beyond the base one-per-interval count.
+    base_substeps = len(tgrid) - 1
+    if max_step is None:
+        assert got_substeps == base_substeps
+    else:
+        assert got_substeps > base_substeps
+    profile = np.asarray(got_profile)
+    assert np.all(np.isfinite(profile))
+    assert profile[PROFILE_INTERVALS] == float(len(tgrid) - 1)
 
 
 @requires_rust_transient
-def test_rust_gear2_binary_retry_matches_numba_exactly():
-    """Exercise the path where the full Newton step fails but 8 slices recover."""
+def test_rust_gear2_binary_retry_recovers_with_slices():
+    """Behavioral pin: the full Newton step fails, and 8 binary slices recover.
+
+    The 9-substep count and the retry-profile slot were originally established
+    by the retired numba A/B comparison; they are the frozen contract now."""
     topo = Topology(
         solved=["OUT"],
         devices=[("M1", "OUT", "IN", "VDD")],
@@ -285,11 +240,6 @@ def test_rust_gear2_binary_retry_matches_numba_exactly():
         integration_method="gear2", max_retry_subdivisions=3,
         newton_maxit=3, newton_step_limit=0.05, profile=True)
     ctx = marshalled.ctx
-    args = _numba_grid_kernel_args(
-        ctx, marshalled.V0, times, marshalled.input_values,
-        np.zeros(len(times), dtype=bool), True)
-    ref = _transient_solve_grid_gear2_impl(*args)
-    ref_ok, ref_states, ref_substeps, ref_failed, ref_profile, ref_indices = ref
 
     got = build_otft_transient_problem(ctx).solve_fixed_grid(
         marshalled.V0, times, marshalled.input_values, [False] * len(times),
@@ -301,43 +251,49 @@ def test_rust_gear2_binary_retry_matches_numba_exactly():
         cap_mode=ctx.cap_id, profile=True)
     got_ok, got_states, got_substeps, got_failed, got_indices, got_profile = got
 
-    assert got_ok is bool(ref_ok) is True
-    assert got_substeps == ref_substeps == 9
-    assert got_failed == ref_failed == -1
-    assert got_indices == [int(value) for value in ref_indices if value >= 0]
-    assert got_profile[10] == ref_profile[10] == 1.0
-    np.testing.assert_allclose(got_states, ref_states, rtol=1e-12, atol=1e-16)
-    np.testing.assert_array_equal(got_profile, ref_profile)
+    assert got_ok is True
+    assert got_substeps == 9
+    assert got_failed == -1
+    assert got_indices == []
+    assert got_profile[10] == 1.0  # one interval went through the retry path
+    assert np.all(np.isfinite(np.asarray(got_states)))
 
 
 @requires_rust_transient
 @pytest.mark.parametrize("integration_method", ["be", "gear2"])
-def test_public_transient_dispatches_to_rust(monkeypatch, integration_method):
+def test_public_transient_uses_rust_grid(integration_method):
+    """The public transient always runs the compiled fixed-grid core and the
+    linear RC result matches the analytic step response."""
     topo = Topology(
         solved=["OUT"], devices=[], rails={"VDD": 1.0, "GND": 0.0},
         resistors=[("R", "OUT", "GND", 1e3)],
         capacitors=[("C", "OUT", "GND", 1e-9)],
         isources=[("I", "VDD", "OUT", 1e-3)], outputs=("OUT",))
     times = np.linspace(0.0, 10e-6, 31)
-    kwargs = dict(topo=topo, V0=np.array([0.0]),
-                  integration_method=integration_method, profile=True)
-
-    monkeypatch.setattr(transient_module, "current_engine", lambda: "numba")
-    reference = transient_module.transient({}, {}, times, **kwargs)
-    monkeypatch.setattr(transient_module, "current_engine", lambda: "rust")
-    got = transient_module.transient({}, {}, times, **kwargs)
+    got = transient_module.transient(
+        {}, {}, times, topo=topo, V0=np.array([0.0]),
+        integration_method=integration_method, profile=True)
 
     assert got["rust_grid_solver"] is True
-    assert got["numba_grid_solver"] is False
+    assert got["rust_adaptive_solver"] is False
     assert got["transient_profile"]["rust_grid_solver"] is True
-    assert got["nfail"] == reference["nfail"]
-    assert got["nsubsteps"] == reference["nsubsteps"]
-    np.testing.assert_allclose(got["output"], reference["output"],
-                               rtol=1e-12, atol=1e-16)
+    assert got["nfail"] == 0
+    assert got["nsubsteps"] == len(times) - 1
+    # Analytic: V(t) = I*R*(1 - exp(-t/RC)), tau = 1 us, endpoint ~ 1 V.
+    # BE is first order (discretization error ~ h/tau ~ 5.5e-2 on this grid);
+    # gear2/BDF2 is second order and much tighter.
+    analytic = 1e-3 * 1e3 * (1.0 - np.exp(-times / 1e-6))
+    np.testing.assert_allclose(got["output"][-1], analytic[-1], rtol=1e-3)
+    # gear2 starts with one BE step (BDF2 needs history), so its worst point
+    # is the first interval: ~3.4e-2 on this grid vs BE's ~5.4e-2.
+    atol = 7e-2 if integration_method == "be" else 4e-2
+    np.testing.assert_allclose(got["output"], analytic, atol=atol)
 
 
 @requires_rust_transient
-def test_rust_adaptive_gear2_matches_numba_behavior():
+def test_rust_adaptive_gear2_matches_analytic_rc():
+    """Adaptive gear2 on a linear RC current step: accepted grid is monotone,
+    endpoints preserved, and the trajectory matches the analytic response."""
     topo = Topology(
         solved=["OUT"], devices=[], rails={"GND": 0.0},
         resistors=[("R", "OUT", "GND", 1e3)],
@@ -351,11 +307,6 @@ def test_rust_adaptive_gear2_matches_numba_behavior():
         adaptive_reltol=1e-5, adaptive_vabstol=1e-8,
         adaptive_max_steps=5000)
     ctx = marshalled.ctx
-    args = _numba_adaptive_gear2_kernel_args(
-        ctx, marshalled.V0, times, marshalled.input_values, True)
-    ref = _transient_solve_adaptive_gear2_impl(*args)
-    (ref_ok, ref_times, ref_states, ref_inputs, ref_count, ref_substeps,
-     ref_rejected, ref_profile) = ref
 
     problem = build_otft_transient_problem(ctx)
     got = problem.solve_adaptive_gear2(
@@ -372,21 +323,29 @@ def test_rust_adaptive_gear2_matches_numba_behavior():
     (got_ok, got_times, got_states, got_inputs, got_substeps,
      got_rejected, got_profile) = got
 
+    assert got_ok is True
     assert all(isinstance(value, np.ndarray) for value in (
         got_times, got_states, got_inputs, got_profile))
-    assert got_ok is bool(ref_ok)
-    assert len(got_times) == ref_count
-    assert got_substeps == ref_substeps
-    assert got_rejected == ref_rejected
-    np.testing.assert_allclose(got_times, ref_times[:ref_count], rtol=0.0, atol=1e-18)
-    np.testing.assert_allclose(got_states, ref_states[:ref_count], rtol=1e-12, atol=1e-16)
-    np.testing.assert_allclose(got_inputs, ref_inputs[:ref_count], rtol=1e-12, atol=1e-16)
-    np.testing.assert_allclose(np.asarray(got_profile)[:6],
-                               np.asarray(ref_profile)[:6], rtol=0.0, atol=0.0)
+    t = np.asarray(got_times)
+    assert t[0] == times[0] and t[-1] == times[-1]
+    assert np.all(np.diff(t) > 0)
+    assert got_substeps >= len(t) - 1
+    assert got_rejected >= 0
+    # Analytic RC response to the 1 mA step ramped over 2.0-2.1us; use the
+    # ramp midpoint 2.05us as the effective step time.
+    v = np.asarray(got_states)[:, 0]
+    tau = 1e-6
+    late = t >= 2.1e-6
+    analytic_late = 1.0 - np.exp(-(t[late] - 2.05e-6) / tau)
+    np.testing.assert_allclose(v[t <= 2e-6], 0.0, atol=1e-12)
+    np.testing.assert_allclose(v[late], analytic_late, atol=6e-2)
 
 
 @requires_rust_transient
-def test_rust_nonlinear_adaptive_rejection_matches_numba_exactly():
+def test_rust_nonlinear_adaptive_rejection_pins():
+    """Behavioral pin for the OTFT adaptive controller: accepted-point count,
+    substeps, and the single LTE rejection. Originally established by the
+    retired numba A/B comparison; frozen as the direct rust contract."""
     topo = Topology(
         solved=["OUT"],
         devices=[("M1", "OUT", "IN", "VDD")],
@@ -406,11 +365,6 @@ def test_rust_nonlinear_adaptive_rejection_matches_numba_exactly():
         adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
         adaptive_max_steps=10000)
     ctx = marshalled.ctx
-    ref = _transient_solve_adaptive_gear2_impl(
-        *_numba_adaptive_gear2_kernel_args(
-            ctx, marshalled.V0, times, marshalled.input_values, True))
-    (ref_ok, ref_times, ref_states, ref_inputs, ref_count, ref_substeps,
-     ref_rejected, ref_profile) = ref
 
     got = build_otft_transient_problem(ctx).solve_adaptive_gear2(
         marshalled.V0, times, marshalled.input_values,
@@ -426,16 +380,12 @@ def test_rust_nonlinear_adaptive_rejection_matches_numba_exactly():
     (got_ok, got_times, got_states, got_inputs, got_substeps,
      got_rejected, got_profile) = got
 
-    assert got_ok is bool(ref_ok) is True
-    assert len(got_times) == ref_count == 14
-    assert got_substeps == ref_substeps == 42
-    assert got_rejected == ref_rejected == 1
-    np.testing.assert_array_equal(got_times, ref_times[:ref_count])
-    np.testing.assert_allclose(got_states, ref_states[:ref_count],
-                               rtol=1e-12, atol=1e-16)
-    np.testing.assert_allclose(got_inputs, ref_inputs[:ref_count],
-                               rtol=1e-12, atol=1e-16)
-    np.testing.assert_array_equal(got_profile, ref_profile)
+    assert got_ok is True
+    assert len(got_times) == 14
+    assert got_substeps == 42
+    assert got_rejected == 1
+    assert np.all(np.diff(np.asarray(got_times)) > 0)
+    assert np.all(np.isfinite(np.asarray(got_states)))
 
 
 @requires_rust_transient
@@ -482,29 +432,30 @@ def test_rust_transient_rejects_invalid_topology_and_state_lengths():
 
 
 @requires_rust_transient
-def test_public_adaptive_transient_dispatches_to_rust(monkeypatch):
+def test_public_adaptive_transient_uses_rust():
+    """The public adaptive transient runs the compiled adaptive core and the
+    linear RC result matches the analytic step response at the endpoints."""
     topo = Topology(
         solved=["OUT"], devices=[], rails={"GND": 0.0},
         resistors=[("R", "OUT", "GND", 1e3)],
         capacitors=[("C", "OUT", "GND", 1e-9)], outputs=("OUT",))
     times = np.array([0.0, 2e-6, 2.1e-6, 5e-6])
     current = np.array([0.0, 0.0, 1e-3, 1e-3])
-    kwargs = dict(
-        topo=topo, V0=np.array([0.0]), inputs={"iin": current},
-        current_inputs=[("GND", "OUT", "iin")],
+    got = transient_module.transient(
+        {}, {}, times, topo=topo, V0=np.array([0.0]),
+        inputs={"iin": current}, current_inputs=[("GND", "OUT", "iin")],
         integration_method="gear2", adaptive=True, profile=True,
         adaptive_reltol=1e-5, adaptive_vabstol=1e-8,
         adaptive_max_steps=5000)
 
-    monkeypatch.setattr(transient_module, "current_engine", lambda: "numba")
-    reference = transient_module.transient({}, {}, times, **kwargs)
-    monkeypatch.setattr(transient_module, "current_engine", lambda: "rust")
-    got = transient_module.transient({}, {}, times, **kwargs)
-
     assert got["rust_adaptive_solver"] is True
-    assert got["numba_adaptive_solver"] is False
-    assert got["adaptive_accepted_steps"] == reference["adaptive_accepted_steps"]
-    assert got["adaptive_rejected_steps"] == reference["adaptive_rejected_steps"]
-    np.testing.assert_allclose(got["t"], reference["t"], rtol=0.0, atol=1e-18)
-    np.testing.assert_allclose(got["output"], reference["output"],
-                               rtol=1e-12, atol=1e-16)
+    assert got["rust_grid_solver"] is False
+    assert got["adaptive"] is True
+    assert got["adaptive_accepted_steps"] == len(got["t"]) - 1
+    assert got["adaptive_rejected_steps"] >= 0
+    t = np.asarray(got["t"])
+    assert t[0] == times[0] and t[-1] == times[-1]
+    # Endpoint: 1 mA * 1 kOhm step ramped over 2.0-2.1us; at t=5us the RC has
+    # settled for ~2.95 tau -> V = 1 - exp(-2.95).
+    np.testing.assert_allclose(
+        got["output"][-1], 1.0 - np.exp(-(5e-6 - 2.05e-6) / 1e-6), rtol=1e-2)

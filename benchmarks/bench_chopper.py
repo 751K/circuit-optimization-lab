@@ -9,7 +9,7 @@ Measures five canonical chopper workloads at increasing complexity:
   - pmos_tran:    Hard-switched PMOS chopper transient (finite-edge clocks)
 
 All cases use f_chop=225 Hz (realistic ECG chopper frequency) and the
-default locked-design AFE sizes. Numba is enabled by default when installed,
+default locked-design AFE sizes. The compiled rust core is the only engine,
 so cold runs include any first-call JIT work unless CIRCUIT_USE_NUMBA=0.
 
 Usage:
@@ -18,7 +18,6 @@ Usage:
 """
 import argparse
 import json
-import os
 import sys
 import time
 
@@ -31,7 +30,6 @@ from circuitopt.chopper import (
     pmos_chopper_lptv_analysis,
     pmos_chopper_transient,
 )
-from circuitopt.numba_kernels import NUMBA_AVAILABLE
 
 # ── fixed AFE design (locked, from bench_afe.py) ──────────────────────
 SIZES = {
@@ -174,8 +172,6 @@ def run_benchmarks(warm_runs, skip_tran=False):
     return {
         "python": sys.version.split()[0],
         "numpy": np.__version__,
-        "numba_enabled": bool(NUMBA_AVAILABLE),
-        "numba_env": os.environ.get("CIRCUIT_USE_NUMBA"),
         "f_chop_Hz": F_CHOP,
         "switch_W_um": SWITCH_SIZE[0],
         "switch_L_um": SWITCH_SIZE[1],
@@ -191,7 +187,7 @@ def print_text(report):
         return "n/a" if value is None else f"{value:.3f}"
 
     print(f"python={report['python']} numpy={report['numpy']} "
-          f"numba_enabled={report['numba_enabled']} f_chop={report['f_chop_Hz']}Hz "
+          f"f_chop={report['f_chop_Hz']}Hz "
           f"switch={report['switch_W_um']}/{report['switch_L_um']} "
           f"edge={report['edge_time_us']}us warm_runs={report['warm_runs']}")
     for item in report["results"]:

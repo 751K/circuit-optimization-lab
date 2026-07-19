@@ -6,12 +6,11 @@ Measures the canonical local-solver workloads:
   - tran200: transient step response on 200 time points.
 
 The first run is reported as "cold"; later runs are reported as "warm". Select
-the implementation with CIRCUIT_ENGINE=rust|numba|python. A Numba cold run
+the implementation (rust is the only engine in v2.0.0). A cold run
 includes first-call JIT work.
 """
 import argparse
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -23,7 +22,6 @@ from circuitopt.ac_solver import ac_solve
 from circuitopt._engine import current_engine
 from circuitopt.circuit_loader import load_circuit_json
 from circuitopt.noise_solver import band_rms, noise_analysis
-from circuitopt.numba_kernels import NUMBA_AVAILABLE
 from circuitopt.transient_solver import transient
 
 
@@ -112,9 +110,7 @@ def run_benchmarks(warm_runs, skip_noise=False, skip_tran=False):
     return {
         "python": sys.version.split()[0],
         "numpy": np.__version__,
-        "numba_enabled": bool(NUMBA_AVAILABLE),
         "engine": current_engine(),
-        "numba_env": os.environ.get("CIRCUIT_USE_NUMBA"),
         "warm_runs": warm_runs,
         "results": results,
     }
@@ -125,7 +121,7 @@ def print_text(report):
         return "n/a" if value is None else f"{value:.3f}"
 
     print(f"python={report['python']} numpy={report['numpy']} engine={report['engine']} "
-          f"numba_enabled={report['numba_enabled']} warm_runs={report['warm_runs']}")
+          f"warm_runs={report['warm_runs']}")
     for item in report["results"]:
         print(f"{item['case']}: cold_ms={item['cold_ms']:.3f} "
               f"warm_median_ms={fmt_ms(item['warm_median_ms'])} "

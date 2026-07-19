@@ -162,10 +162,10 @@ def test_native_5t_ota_transient_without_ngspice(monkeypatch):
     )
     assert result["backend"] == "bsim4_native"
     from circuitopt._engine import current_engine
-    # v2.0.0: rust is the only engine.
+    # v2.0.0: rust is the only engine; the retired numba flags are gone (R7).
     assert current_engine() == "rust"
-    assert result["numba_grid_solver"] is False
-    assert result["bsim4_numba_transient"] is False
+    assert "numba_grid_solver" not in result
+    assert "bsim4_numba_transient" not in result
     assert result["bsim4_rust_transient"] is True
     assert result["nfail"] == 0
     assert result["nodes"]["vout"][-1] > result["nodes"]["vout"][0] + 0.2
@@ -179,17 +179,16 @@ def test_native_5t_ota_transient_without_ngspice(monkeypatch):
 # golden + devices.npz device grids) and the contract test below.
 
 
-def test_native_5t_ota_rust_grid_does_not_import_numba_transient(monkeypatch):
-    import sys
+def test_native_5t_ota_rust_grid_transient(monkeypatch):
+    """The BSIM4 transient runs the compiled (rust) grid; quiescent OTA holds.
 
-    import circuitopt.compact_models.bsim4.transient as bsim_transient
+    (R7: the numba bsim transient and the import-sabotage scaffolding that
+    guarded against silently falling back to it were removed with the engine.)
+    """
     from circuitopt.transient_solver import transient
 
     spec, _ = _spec(driven=True)
     monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
-    monkeypatch.setattr(bsim_transient, "current_engine", lambda: "rust")
-    monkeypatch.setitem(
-        sys.modules, "circuitopt.compact_models.bsim4.numba_transient", None)
     time = np.linspace(0.0, 1e-9, 6)
     result = transient(
         spec.sizes,
@@ -206,7 +205,7 @@ def test_native_5t_ota_rust_grid_does_not_import_numba_transient(monkeypatch):
     )
 
     assert result["bsim4_rust_transient"] is True
-    assert result["bsim4_numba_transient"] is False
+    assert "bsim4_numba_transient" not in result
     assert result["nfail"] == 0
 
 

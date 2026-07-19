@@ -88,7 +88,13 @@ def test_rust_lti_rejects_out_of_bounds_topology(field, record):
 
 
 @requires_rust_lti
-def test_public_ac_and_noise_dispatch_to_rust(monkeypatch):
+def test_public_ac_and_noise_run_on_rust_lti():
+    """AC and noise run the compiled LTI solver; the R-divider + C response
+    matches the closed-form transfer function and the output noise equals the
+    thermal noise of the parallel resistance shaped by the same pole.
+
+    (Formerly an engine A/B against the removed Python dense assembly; the
+    closed-form circuit is the referee now.)"""
     topo = Topology(
         solved=["OUT"], devices=[], rails={"IN": 0.0, "GND": 0.0},
         resistors=[("R1", "IN", "OUT", 1e3),
@@ -97,28 +103,32 @@ def test_public_ac_and_noise_dispatch_to_rust(monkeypatch):
         ac_drives={"IN": 1.0}, outputs=("OUT",))
     frequencies = np.logspace(0, 6, 21)
 
-    monkeypatch.setattr(ac_solver, "current_engine", lambda: "numba")
-    monkeypatch.setattr(noise_solver, "current_engine", lambda: "numba")
-    ac_reference = ac_solver.ac_solve({}, {}, frequencies, topo=topo)
-    noise_reference = noise_solver.noise_analysis(
-        {}, {}, frequencies, topo=topo, ac_result=ac_reference)
-
-    monkeypatch.setattr(ac_solver, "current_engine", lambda: "rust")
-    monkeypatch.setattr(noise_solver, "current_engine", lambda: "rust")
     ac_got = ac_solver.ac_solve({}, {}, frequencies, topo=topo)
     noise_got = noise_solver.noise_analysis(
         {}, {}, frequencies, topo=topo, ac_result=ac_got)
 
     assert ac_got["rust_lti_solver"] is True
     assert noise_got["rust_lti_solver"] is True
-    np.testing.assert_allclose(ac_got["response"], ac_reference["response"],
-                               rtol=1e-13, atol=1e-15)
-    np.testing.assert_allclose(noise_got["out_psd"], noise_reference["out_psd"],
-                               rtol=1e-13, atol=1e-30)
+
+    # H(jw) = (R2 || divider) with C: 0.5 / (1 + jw * (R1||R2) * C).
+    jw = 2j * np.pi * frequencies
+    r_par = 1e3 * 1e3 / (1e3 + 1e3)
+    expected_response = 0.5 / (1.0 + jw * r_par * 1e-9)
+    np.testing.assert_allclose(ac_got["response"], expected_response,
+                               rtol=1e-12, atol=1e-15)
+
+    # Output noise: both resistors inject 4kT/R through the same transfer
+    # shape -> S_out = 4kT * r_par / |1 + jw r_par C|^2.
+    kboltz = 1.380649e-23
+    temperature = 300.15
+    expected_psd = (4.0 * kboltz * temperature * r_par
+                    / np.abs(1.0 + jw * r_par * 1e-9) ** 2)
+    np.testing.assert_allclose(noise_got["out_psd"], expected_psd,
+                               rtol=1e-12, atol=1e-30)
 
 
 @requires_rust_lti
-def test_rust_ac_preserves_complex_source_phase(monkeypatch):
+def test_rust_ac_preserves_complex_source_phase():
     topology = Topology(
         solved=["IN", "OUT"],
         devices=[],
@@ -129,8 +139,6 @@ def test_rust_ac_preserves_complex_source_phase(monkeypatch):
         ac_drives={"V1": 1j},
         outputs=("OUT",),
     )
-    monkeypatch.setattr(ac_solver, "current_engine", lambda: "rust")
-
     result = ac_solver.ac_solve({}, {}, np.array([1.0]), topo=topology)
 
     np.testing.assert_allclose(result["response"], [0.5j], rtol=1e-13, atol=1e-15)

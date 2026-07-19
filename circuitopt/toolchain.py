@@ -84,10 +84,3 @@ def ngspice_binary() -> str | None:
                 return candidate
     return shutil.which("ngspice")
 
-
-def native_model_cache_dir() -> str:
-    """Writable cache for locally compiled compact-model numerical kernels."""
-    configured = os.environ.get("CIRCUITOPT_NATIVE_MODEL_CACHE")
-    if configured:
-        return _absolute(configured)
-    return os.path.join(_venv_roots()[0], "cache", "circuitopt", "native-models")

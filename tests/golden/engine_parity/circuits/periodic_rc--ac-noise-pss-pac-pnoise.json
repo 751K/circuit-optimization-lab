@@ -409,7 +409,7 @@
     "shooting_jacobian_reuses": 0,
     "shooting_jacobian_reuse_enabled": true,
     "shooting_jacobian_rebuild_interval": 0,
-    "topology": "<circuitopt.topology.Topology object at 0x10a0572f0>",
+    "topology": "<circuitopt.topology.Topology object at 0x10592b290>",
     "node_inputs": {
       "VIN": "vin"
     },
@@ -485,7 +485,7 @@
       "shooting_jacobian_reuses": 0,
       "shooting_jacobian_reuse_enabled": true,
       "shooting_jacobian_rebuild_interval": 0,
-      "topology": "<circuitopt.topology.Topology object at 0x10a0572f0>",
+      "topology": "<circuitopt.topology.Topology object at 0x10592b290>",
       "node_inputs": {
         "VIN": "vin"
       },
@@ -612,7 +612,7 @@
       "shooting_jacobian_reuses": 0,
       "shooting_jacobian_reuse_enabled": true,
       "shooting_jacobian_rebuild_interval": 0,
-      "topology": "<circuitopt.topology.Topology object at 0x10a0572f0>",
+      "topology": "<circuitopt.topology.Topology object at 0x10592b290>",
       "node_inputs": {
         "VIN": "vin"
       },
@@ -676,7 +676,7 @@
         "shooting_jacobian_reuses": 0,
         "shooting_jacobian_reuse_enabled": true,
         "shooting_jacobian_rebuild_interval": 0,
-        "topology": "<circuitopt.topology.Topology object at 0x10a0572f0>",
+        "topology": "<circuitopt.topology.Topology object at 0x10592b290>",
         "node_inputs": {
           "VIN": "vin"
         },

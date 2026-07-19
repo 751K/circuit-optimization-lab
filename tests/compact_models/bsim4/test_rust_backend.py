@@ -206,51 +206,29 @@ def _cards(pol: int):
 
 
 @requires_rust
-def test_rust_matches_cc_direct(monkeypatch):
-    """Same card + bias through cc and rust agree to 1e-13 (bit-exact for G/Q/C)."""
-    model, instance = _cards(1)
-    bias = Bsim4Bias(drain=0.6, gate=0.55, source=0.0, bulk=0.0)
-
-    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "cc")
-    cc = NativeBsim4Backend(cache_size=0).evaluate(model, instance, bias, frequency_hz=1e6)
-    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
-    rust = NativeBsim4Backend(cache_size=0).evaluate(model, instance, bias, frequency_hz=1e6)
-
-    # The ported real-reduction path (currents, conductance) matches the
-    # reference C bit-for-bit (clang fp-contract fused with mul_add); terminal
-    # charges are pure state reads, also bit-identical. The complex AC solve
-    # (capacitance, noise) agrees to ~1 ULP, well inside the 1e-13 gate.
-    assert np.array_equal(rust.terminal_currents, cc.terminal_currents)
-    assert np.array_equal(rust.conductance, cc.conductance)
-    assert np.array_equal(rust.terminal_charges, cc.terminal_charges)
-    assert _max_rel(rust.capacitance, cc.capacitance, 1e-24) <= 1e-13
-    assert _max_rel(
-        rust.noise.spectral_density.view(np.float64),
-        cc.noise.spectral_density.view(np.float64),
-        1e-30,
-    ) <= 1e-13
-
-
-@requires_rust
-def test_backend_switch_is_call_time(monkeypatch):
-    """The selector is read on every call; a fresh eval after switching honours it."""
+def test_backend_choice_is_call_time_and_cc_is_removed(monkeypatch):
+    """The selector is read on every call; rust is the default and the only
+    value. The retired ``cc`` runtime-compile backend errors loudly (v2.0.0
+    removal), mirroring the engine-switch removals."""
     model, instance = _cards(1)
     bias = Bsim4Bias(drain=0.5, gate=0.5, source=0.0, bulk=0.0)
     backend = NativeBsim4Backend(cache_size=0)
 
     monkeypatch.delenv("CIRCUIT_BSIM4_BACKEND", raising=False)
-    assert native._backend_choice() == "cc"
-    cc = backend.evaluate(model, instance, bias)
+    assert native._backend_choice() == "rust"
+    default_eval = backend.evaluate(model, instance, bias)
+    assert np.all(np.isfinite(default_eval.terminal_currents))
 
     monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
     assert native._backend_choice() == "rust"
     rust = backend.evaluate(model, instance, bias)
+    assert np.array_equal(rust.terminal_currents, default_eval.terminal_currents)
 
     monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "cc")
-    assert native._backend_choice() == "cc"
-
-    # Both paths compute the same device; agreement confirms the switch took.
-    assert _max_rel(rust.terminal_currents, cc.terminal_currents, 1e-18) <= 1e-13
+    with pytest.raises(Bsim4NativeError, match="removed in v2.0.0"):
+        native._backend_choice()
+    with pytest.raises(Bsim4NativeError, match="removed in v2.0.0"):
+        backend.evaluate(model, instance, bias)
 
 
 @requires_rust
@@ -347,7 +325,7 @@ def test_rust_cache_never_evicts_active_handles(monkeypatch):
 
 def test_unknown_backend_is_rejected(monkeypatch):
     monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "gpu")
-    with pytest.raises(Bsim4NativeError, match="must be 'cc' or 'rust'"):
+    with pytest.raises(Bsim4NativeError, match="must be 'rust'"):
         native._backend_choice()
 
 

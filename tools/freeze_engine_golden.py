@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Freeze the engine-parity golden corpus and performance baseline (rewrite phase R0).
 
-The Rust core rewrite (docs/rust_core_rewrite_plan.md, D10) needs a frozen
-reference of what the v1.4.0 numba engine computes, captured BEFORE any engine
-work lands, so every later phase can diff against it:
+The Rust core rewrite (docs/rust_core_rewrite_plan.md, D10) froze a reference
+of what the engine computes (originally under the v1.4.0 numba engine; re-frozen
+under the rust engine in R6 and under the rust BSIM4 backend in R7 — the corpus
+is the permanent reference oracle, docs §4-D4), so every phase diffs against it:
 
 * device-level golden grids   -> tests/golden/engine_parity/devices.npz
   I/G/Q/C (+ scalar noise PSD) over bias grids for the analytic OTFT model and
@@ -289,11 +290,6 @@ def _run_baseline(log: list[str]) -> dict:
 def _env_fingerprint() -> dict:
     import numpy
     import scipy
-    try:
-        import numba
-        numba_version = numba.__version__
-    except Exception:
-        numba_version = None
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                             capture_output=True, text=True).stdout.strip()
     return {
@@ -301,10 +297,8 @@ def _env_fingerprint() -> dict:
         "python": sys.version.split()[0],
         "numpy": numpy.__version__,
         "scipy": scipy.__version__,
-        "numba": numba_version,
         "platform": platform.platform(),
         "machine": platform.machine(),
-        "use_numba_env": os.environ.get("CIRCUIT_USE_NUMBA"),
     }
 
 

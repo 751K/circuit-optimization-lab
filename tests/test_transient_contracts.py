@@ -21,8 +21,6 @@ PUBLIC_RESULT_KEYS = {
     "nfail",
     "nretry",
     "nsubsteps",
-    "numba_grid_solver",
-    "numba_adaptive_solver",
     "rust_grid_solver",
     "rust_adaptive_solver",
     "transient_cap_mode",
@@ -67,10 +65,9 @@ def test_transient_profile_slots_are_dense_and_named():
 
 
 def test_transient_result_contract():
-    # v2.0.0: rust is the only engine. The former engine-neutral A/B (vs the
-    # removed numba/Python transient) is now a rust-only contract check: the
-    # public result/profile schema is pinned, and the retired numba flags stay
-    # present-but-False while the rust flags report True.
+    # v2.0.0 (R7): rust is the only engine and the retired numba flags are gone
+    # from the result schema entirely. The public result/profile schema is
+    # pinned and the rust flags report True.
     try:
         import circuitopt_core  # noqa: F401
     except ImportError:
@@ -78,8 +75,8 @@ def test_transient_result_contract():
 
     rust = _rc_transient_rust()
     assert PUBLIC_RESULT_KEYS <= rust.keys()
-    assert rust["numba_grid_solver"] is False
-    assert rust["numba_adaptive_solver"] is False
+    assert "numba_grid_solver" not in rust
+    assert "numba_adaptive_solver" not in rust
     assert rust["rust_grid_solver"] is True
     assert rust["nfail"] == 0
     assert np.all(np.isfinite(rust["output"]))

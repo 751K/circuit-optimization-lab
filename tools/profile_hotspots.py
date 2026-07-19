@@ -1,10 +1,9 @@
 """Lightweight profiling of representative solver workloads.
 
 Run: python tools/profile_hotspots.py
-  or: CIRCUIT_USE_NUMBA=0 python tools/profile_hotspots.py
 
-Uses cProfile for call-count + cumulative time.  Skips Numba internals
-(resolved by comparing numba-on vs numba-off profiles).
+Uses cProfile for call-count + cumulative time. Time spent inside the compiled
+rust core shows up on the PyO3 entry points (e.g. solve_adaptive_gear2).
 """
 from __future__ import annotations
 import cProfile, pstats, io, time, sys
@@ -128,7 +127,7 @@ def main():
     _mc()
     profile("Mismatch MC n=50 (warm)", _mc)
 
-    print("\nDone.  Compare numba-on vs numba-off to see numba-hidden hotspots.")
+    print("\nDone.")
     print("  CIRCUIT_USE_NUMBA=0 python tools/profile_hotspots.py")
 
 

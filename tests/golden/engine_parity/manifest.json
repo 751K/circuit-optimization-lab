@@ -1,18 +1,16 @@
 {
   "env": {
-    "commit": "ab3cb8a59eadf550fc76ba2df58a08f19cad8f95",
+    "commit": "c7b8927a7f944a823dac64d7c9559c93356efd7c",
     "machine": "arm64",
-    "numba": "0.66.0",
     "numpy": "2.4.6",
     "platform": "macOS-27.0-arm64-arm-64bit",
     "python": "3.12.9",
-    "scipy": "1.18.0",
-    "use_numba_env": null
+    "scipy": "1.18.0"
   },
   "files": {
     "tests/golden/engine_parity/circuits/afe_explore--ac-noise.json": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "tests/golden/engine_parity/circuits/freepdk45_5t_ota--ac-noise-transient.json": "89830c8f25e588c5205422245ebf2d5e0593e8f2721ecc9d3a7157f1638ae0a8",
-    "tests/golden/engine_parity/circuits/periodic_rc--ac-noise-pss-pac-pnoise.json": "b7f11e2f1ed354f8538ba376fb2a0eb9c28a93f841127cfc7eccdf834fe4a97a",
+    "tests/golden/engine_parity/circuits/periodic_rc--ac-noise-pss-pac-pnoise.json": "4228cc8a4cbf2f7e3770f69da7363a648136a1fadffac739c77abea79015b896",
     "tests/golden/engine_parity/circuits/sky130_5t_ota--ac-noise.json": "db2bad1fa65725de6cc5a869bbddcae7bc5c28e42baf0ebdd439fb1765c618f2",
     "tests/golden/engine_parity/circuits/tsmc28hpcp_5t_ota--ac-noise.json": "c439087c3687687bf759f8b28a003cc4d2440075072241a778ffda86c35aa511",
     "tests/golden/engine_parity/devices.npz": "862931ad6d791d1cae83f819f93b91687741e1c01613f274ffe444744002e501"
