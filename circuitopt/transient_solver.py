@@ -81,21 +81,13 @@ from .transient_profile import (
 )
 from .compiled_topology import CompiledTopology, index_array, term_arrays
 from . import diagnostics
-from ._engine import current_engine
 
 if TYPE_CHECKING:
     from .device_factory import CircuitBinding
 
-# Single source of the transient drivers: these `_impl` kernels are the jitted
-# functions when Numba is installed and the raw pure-Python functions otherwise
-# (never None), so the no-Numba transient path runs the *same* kernels interpreted
-# rather than a hand-mirrored OO copy.
-from .numba_kernels import (
-    _transient_solve_adaptive_gear2_impl,
-    _transient_solve_grid_gear2_impl,
-    _transient_solve_grid_impl,
-)
-
+# The transient drivers live in the compiled rust core (`circuitopt_core`,
+# built via `_rust_transient.build_otft_transient_problem`). Python owns the
+# marshalling, dispatch, and result assembly only.
 
 _CAP_MODE = os.environ.get("CIRCUIT_PMOS_TRANSIENT_CAP_MODE", "charge").lower()
 _USE_AVERAGE_CAPS = _CAP_MODE in {"average", "avg", "trapezoid", "trap"}
@@ -118,30 +110,14 @@ class _PathOutcome:
     nfail: object = None
     nretry: object = None
     nsubsteps: object = None
-    gear2_done: bool = False
-    gear2_numba_used: bool = False
-    gear2_python_retry_used: bool = False
     adaptive_used: bool = False
-    adaptive_numba_used: bool = False
-    used_grid_numba: bool = False
-    partial_grid_numba: bool = False
-    python_start_idx: object = None
     profile_wall_s: object = None
     profile_stats: object = None
-    numba_grid_error: object = None
-    numba_grid_failed_index: object = None
-    numba_grid_failed_substeps: object = None
-    numba_grid_failed_profile: object = None
-    numba_grid_failed_intervals: object = None
-
-
-@dataclass
-class _NewtonStats:
-    """Mutable diagnostic counters for the numba per-step Newton (held by the
-    otherwise-frozen :class:`_TransientCtx`; non-critical, reported in the result)."""
-    attempts: int = 0
-    success: int = 0
-    fallback: int = 0
+    grid_error: object = None
+    grid_failed_index: object = None
+    grid_failed_substeps: object = None
+    grid_failed_profile: object = None
+    grid_failed_intervals: object = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,11 +211,10 @@ class _SolverOptions:
 
 @dataclass(frozen=True, slots=True)
 class _RuntimeCaches:
-    """Per-run mutable caches/counters kept out of the immutable problem data."""
+    """Per-run mutable caches kept out of the immutable problem data."""
     op_cache_valid: np.ndarray
     op_cache_vs1: np.ndarray
     op_cache_vd1: np.ndarray
-    stats: _NewtonStats
 
 
 class _TransientCtx:
@@ -255,7 +230,7 @@ class _TransientCtx:
     reachable as ``ctx.topology`` etc.
 
     Treated as immutable: nothing rebinds a field after construction; the
-    op-cache arrays and the ``stats`` counter are mutated in place.
+    op-cache arrays are mutated in place.
     """
     _GROUPS = ("topology", "devices", "passives", "sources", "solver", "runtime")
 
@@ -282,247 +257,6 @@ class _TransientMarshal:
     Vhist: np.ndarray
     edge_mask_arr: np.ndarray
     profile: bool
-    gear2_retry_requested: bool
-
-
-_NUMBA_SHARED_ARG_GROUPS = (
-    ("solver", (
-        "n", "maxit", "step_limit", "vtol", "gmin",
-        "fallback_accept", "fallback_tol", "HH",
-    )),
-    ("device_terms", (
-        "dev_d_kind", "dev_d_ref", "dev_d_val",
-        "dev_g_kind", "dev_g_ref", "dev_g_val",
-        "dev_s_kind", "dev_s_ref", "dev_s_val",
-    )),
-    ("device_nodes", ("dev_di", "dev_gi", "dev_si", "dev_use_abs")),
-    ("model_params", (
-        "p_Vfb", "p_Vss", "p_Lc", "p_lambda", "p_contact_scale",
-        "p_exponent", "p_current_scale", "p_inv_Rleak",
-        "p_two_over_pi", "p_cap_cgs1", "p_cap_cgd1",
-        "p_cap_half_wl_ci", "p_cap_cgs3_base", "p_cap_cgd3_base",
-        "p_k1", "p_gate_leak_g",
-    )),
-    ("op_cache", ("op_cache_valid", "op_cache_vs1", "op_cache_vd1")),
-    ("passives", (
-        "res_a_kind", "res_a_ref", "res_a_val",
-        "res_b_kind", "res_b_ref", "res_b_val",
-        "res_ai", "res_bi", "res_g",
-        "cap_a_kind", "cap_a_ref", "cap_a_val",
-        "cap_b_kind", "cap_b_ref", "cap_b_val",
-        "cap_ai", "cap_bi", "cap_value",
-    )),
-    ("sources", (
-        "isrc_pi", "isrc_qi", "isrc_value",
-        "dyn_pi", "dyn_qi", "dyn_input_idx",
-    )),
-    ("cap_clip", ("cap_mode", "clip_lo", "clip_hi")),
-    ("vsources", (
-        "vs_a_kind", "vs_a_ref", "vs_a_val",
-        "vs_b_kind", "vs_b_ref", "vs_b_val",
-        "vs_pi", "vs_qi", "vs_bi", "vs_e_const", "vs_e_idx",
-    )),
-    ("vcvs", (
-        "vcvs_a_kind", "vcvs_a_ref", "vcvs_a_val",
-        "vcvs_b_kind", "vcvs_b_ref", "vcvs_b_val",
-        "vcvs_cp_kind", "vcvs_cp_ref", "vcvs_cp_val",
-        "vcvs_cn_kind", "vcvs_cn_ref", "vcvs_cn_val",
-        "vcvs_pi", "vcvs_qi", "vcvs_cpi", "vcvs_cni", "vcvs_bi", "vcvs_mu",
-    )),
-    ("cccs", ("cccs_pi", "cccs_qi", "cccs_ctrl_bi", "cccs_beta")),
-    ("ccvs", (
-        "ccvs_a_kind", "ccvs_a_ref", "ccvs_a_val",
-        "ccvs_b_kind", "ccvs_b_ref", "ccvs_b_val",
-        "ccvs_pi", "ccvs_qi", "ccvs_bi", "ccvs_ctrl_bi", "ccvs_gamma",
-    )),
-)
-_NUMBA_GRID_ARG_GROUPS = (
-    ("run", ("V0", "tgrid", "input_values", "edge_mask", "profile_enabled")),
-    ("step", ("max_step", "flat_max_step", "max_retry_subdivisions")),
-) + _NUMBA_SHARED_ARG_GROUPS
-_NUMBA_GRID_ARG_NAMES = tuple(
-    group_name for group_name, _field_names in _NUMBA_GRID_ARG_GROUPS)
-_NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS = (
-    ("run", ("V0", "tgrid_src", "input_values_src", "profile_enabled")),
-    ("step", (
-        "max_step", "adaptive_reltol", "adaptive_vabstol",
-        "adaptive_iabstol", "adaptive_max_steps", "adaptive_h0",
-    )),
-) + _NUMBA_SHARED_ARG_GROUPS
-_NUMBA_ADAPTIVE_GEAR2_ARG_NAMES = tuple(
-    group_name for group_name, _field_names in _NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS)
-
-
-def _checked_numba_args(names, args):
-    if len(args) != len(names):
-        raise AssertionError(f"numba arg packer produced {len(args)} args for {len(names)} names")
-    return args
-
-
-def _checked_numba_arg_groups(groups, args):
-    _checked_numba_args(tuple(name for name, _fields in groups), args)
-    for (name, field_names), values in zip(groups, args):
-        if len(values) != len(field_names):
-            raise AssertionError(
-                f"numba arg group {name!r} produced {len(values)} fields "
-                f"for {len(field_names)} names")
-    return args
-
-
-def _numba_shared_kernel_arg_groups(ctx):
-    """Shared grouped tail for transient Numba kernels.
-
-    Keep all Python-side kernel calls going through this function so a
-    device/source/stamp field cannot be added to only one execution path. The
-    Python/Numba boundary sees semantic groups; individual hot-path kernels may
-    still use positional scalars internally for nopython performance.
-    """
-    return (
-        (
-            int(ctx.n),
-            int(ctx.newton_maxit),
-            float(ctx.newton_step_limit),
-            float(ctx.newton_vtol),
-            float(ctx.gmin),
-            bool(ctx.fallback_full_jacobian or ctx.fallback_least_squares),
-            float(ctx.fallback_tol),
-            float(ctx.HH),
-        ),
-        (
-            ctx.dev_d_kind,
-            ctx.dev_d_ref,
-            ctx.dev_d_val,
-            ctx.dev_g_kind,
-            ctx.dev_g_ref,
-            ctx.dev_g_val,
-            ctx.dev_s_kind,
-            ctx.dev_s_ref,
-            ctx.dev_s_val,
-        ),
-        (
-            ctx.dev_di,
-            ctx.dev_gi,
-            ctx.dev_si,
-            ctx.dev_use_abs,
-        ),
-        (
-            ctx.p_Vfb,
-            ctx.p_Vss,
-            ctx.p_Lc,
-            ctx.p_lambda,
-            ctx.p_contact_scale,
-            ctx.p_exponent,
-            ctx.p_current_scale,
-            ctx.p_inv_Rleak,
-            ctx.p_two_over_pi,
-            ctx.p_cap_cgs1,
-            ctx.p_cap_cgd1,
-            ctx.p_cap_half_wl_ci,
-            ctx.p_cap_cgs3_base,
-            ctx.p_cap_cgd3_base,
-            ctx.p_k1,
-            ctx.p_gate_leak_g,
-        ),
-        (
-            ctx.op_cache_valid,
-            ctx.op_cache_vs1,
-            ctx.op_cache_vd1,
-        ),
-        (
-            ctx.res_a_kind,
-            ctx.res_a_ref,
-            ctx.res_a_val,
-            ctx.res_b_kind,
-            ctx.res_b_ref,
-            ctx.res_b_val,
-            ctx.res_ai,
-            ctx.res_bi,
-            ctx.res_g,
-            ctx.cap_a_kind,
-            ctx.cap_a_ref,
-            ctx.cap_a_val,
-            ctx.cap_b_kind,
-            ctx.cap_b_ref,
-            ctx.cap_b_val,
-            ctx.cap_ai,
-            ctx.cap_bi,
-            ctx.cap_value,
-        ),
-        (
-            ctx.isrc_pi,
-            ctx.isrc_qi,
-            ctx.isrc_value,
-            ctx.dyn_pi,
-            ctx.dyn_qi,
-            ctx.dyn_input_idx,
-        ),
-        (
-            int(ctx.cap_id),
-            float(ctx.clip_lo),
-            float(ctx.clip_hi),
-        ),
-        (
-            ctx.vs_a_kind, ctx.vs_a_ref, ctx.vs_a_val,
-            ctx.vs_b_kind, ctx.vs_b_ref, ctx.vs_b_val,
-            ctx.vs_pi, ctx.vs_qi, ctx.vs_bi, ctx.vs_e_const, ctx.vs_e_idx,
-        ),
-        (
-            ctx.vcvs_a_kind, ctx.vcvs_a_ref, ctx.vcvs_a_val,
-            ctx.vcvs_b_kind, ctx.vcvs_b_ref, ctx.vcvs_b_val,
-            ctx.vcvs_cp_kind, ctx.vcvs_cp_ref, ctx.vcvs_cp_val,
-            ctx.vcvs_cn_kind, ctx.vcvs_cn_ref, ctx.vcvs_cn_val,
-            ctx.vcvs_pi, ctx.vcvs_qi, ctx.vcvs_cpi, ctx.vcvs_cni, ctx.vcvs_bi, ctx.vcvs_mu,
-        ),
-        (ctx.cccs_pi, ctx.cccs_qi, ctx.cccs_ctrl_bi, ctx.cccs_beta),
-        (
-            ctx.ccvs_a_kind, ctx.ccvs_a_ref, ctx.ccvs_a_val,
-            ctx.ccvs_b_kind, ctx.ccvs_b_ref, ctx.ccvs_b_val,
-            ctx.ccvs_pi, ctx.ccvs_qi, ctx.ccvs_bi, ctx.ccvs_ctrl_bi, ctx.ccvs_gamma,
-        ),
-    )
-
-
-def _numba_grid_kernel_args(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
-    max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
-    flat_max_step_arg = -1.0 if ctx.flat_max_step is None else float(ctx.flat_max_step)
-    args = (
-        (
-            np.asarray(V0, float),
-            np.asarray(tgrid, float),
-            np.asarray(input_values, float),
-            edge_mask_arr,
-            bool(profile),
-        ),
-        (
-            max_step_arg,
-            flat_max_step_arg,
-            int(ctx.max_retry_subdivisions),
-        ),
-    ) + _numba_shared_kernel_arg_groups(ctx)
-    return _checked_numba_arg_groups(_NUMBA_GRID_ARG_GROUPS, args)
-
-
-def _numba_adaptive_gear2_kernel_args(ctx, V0, tgrid, input_values, profile):
-    max_step_arg = -1.0 if ctx.max_step is None else float(ctx.max_step)
-    acfg = ctx.adaptive_config
-    h0_arg = -1.0 if acfg.h0 is None else float(acfg.h0)
-    args = (
-        (
-            np.asarray(V0, float),
-            np.asarray(tgrid, float),
-            np.asarray(input_values, float),
-            bool(profile),
-        ),
-        (
-            max_step_arg,
-            float(acfg.reltol),
-            float(acfg.vabstol),
-            float(acfg.iabstol),
-            int(acfg.max_steps),
-            h0_arg,
-        ),
-    ) + _numba_shared_kernel_arg_groups(ctx)
-    return _checked_numba_arg_groups(_NUMBA_ADAPTIVE_GEAR2_ARG_GROUPS, args)
 
 
 def _cap_mode_to_id(cap_mode):
@@ -534,125 +268,8 @@ def _cap_mode_to_id(cap_mode):
     return _CAP_MODE_IDS[key]
 
 
-def _solve_fixed_gear2_numba(ctx, V0, tgrid, input_values, edge_mask_arr,
-                             profile, gear2_retry_requested):
-    out = _PathOutcome()
-    if not (not ctx.adaptive and ctx.integration_method == "gear2" and
-            ctx.n_aug >= ctx.n):
-        return out
-    try:
-        t_profile0 = time.perf_counter()
-        # The Numba reference owns periodic single-step grids and raw transient
-        # maxstep/retry subdivision when that engine is selected.
-        g2_orig_idx = None
-        g2 = _transient_solve_grid_gear2_impl(
-            *_numba_grid_kernel_args(ctx, V0, tgrid, input_values,
-                                     edge_mask_arr, profile))
-        ok_g2, Vfast, fast_substeps, fail_index, raw_profile, _rfi = g2
-        out.profile_wall_s = time.perf_counter() - t_profile0
-        if ok_g2:
-            out.Vhist = (np.ascontiguousarray(Vfast[g2_orig_idx])
-                         if g2_orig_idx is not None else Vfast)
-            out.nsubsteps = int(fast_substeps)
-            raw_profile_arr = np.asarray(raw_profile, float)
-            out.nretry = int(raw_profile_arr[PROFILE_FAILED_SUBSTEPS])
-            out.nfail = int(raw_profile_arr[PROFILE_FAILED_INTERVALS])
-            out.gear2_done = True
-            out.gear2_numba_used = True
-            out.profile_stats = raw_profile_arr
-            out.handled = True
-        elif gear2_retry_requested:
-            out.numba_grid_failed_index = int(fail_index)
-            out.numba_grid_failed_substeps = int(fast_substeps)
-            out.numba_grid_failed_profile = np.asarray(raw_profile, float)
-            out.numba_grid_failed_intervals = (
-                None if _rfi is None else np.asarray(_rfi, int))
-    except Exception as exc:
-        out.numba_grid_error = f"gear2: {type(exc).__name__}: {exc}"
-        diagnostics.note("transient.numba_grid_gear2_error", exc)
-    return out
-
-
-def _solve_adaptive_gear2_numba(ctx, V0, tgrid, input_values, profile):
-    out = _PathOutcome()
-    if not (ctx.adaptive and ctx.integration_method == "gear2" and
-            ctx.n_aug >= ctx.n):
-        return out
-    try:
-        t_profile0 = time.perf_counter()
-        ad = _transient_solve_adaptive_gear2_impl(
-            *_numba_adaptive_gear2_kernel_args(ctx, V0, tgrid,
-                                               input_values, profile))
-        ok_ad, tfast, Vfast, input_fast, naccept, fast_substeps, fast_rejects, raw_profile = ad
-        if ok_ad:
-            naccept = int(naccept)
-            out.tgrid = np.ascontiguousarray(tfast[:naccept])
-            out.Vhist = np.ascontiguousarray(Vfast[:naccept])
-            out.input_values = np.ascontiguousarray(input_fast[:naccept].T)
-            out.N = len(out.tgrid)
-            out.nsubsteps = int(fast_substeps)
-            out.nretry = int(fast_rejects)
-            out.profile_stats = np.asarray(raw_profile, float)
-            out.profile_wall_s = time.perf_counter() - t_profile0
-            out.gear2_done = True
-            out.adaptive_used = True
-            out.adaptive_numba_used = True
-            out.gear2_numba_used = True
-            out.handled = True
-    except Exception as exc:
-        out.numba_grid_error = f"adaptive_gear2: {type(exc).__name__}: {exc}"
-        diagnostics.note("transient.numba_adaptive_error", exc)
-    return out
-
-
-def _solve_be_numba(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
-    out = _PathOutcome()
-    if not ((not ctx.adaptive) and ctx.n_aug >= ctx.n):
-        return out
-    try:
-        t_profile0 = time.perf_counter()
-        grid_result = _transient_solve_grid_impl(
-            *_numba_grid_kernel_args(ctx, V0, tgrid, input_values,
-                                     edge_mask_arr, profile))
-        if len(grid_result) == 5:
-            ok_grid, Vfast, fast_substeps, fail_index, raw_profile = grid_result
-            raw_failed_intervals = None
-        else:
-            (ok_grid, Vfast, fast_substeps, fail_index, raw_profile,
-             raw_failed_intervals) = grid_result
-        out.profile_wall_s = time.perf_counter() - t_profile0
-        out.numba_grid_failed_intervals = (
-            None if raw_failed_intervals is None else np.asarray(raw_failed_intervals, int))
-        if ok_grid:
-            out.Vhist = Vfast
-            out.nsubsteps = int(fast_substeps)
-            raw_profile_arr = np.asarray(raw_profile, float)
-            out.nfail = int(raw_profile_arr[PROFILE_FAILED_INTERVALS])
-            out.nretry = out.nfail
-            ctx.stats.attempts += out.nsubsteps
-            ctx.stats.success += out.nsubsteps
-            out.used_grid_numba = True
-            out.profile_stats = raw_profile_arr
-            out.handled = True
-        else:
-            out.numba_grid_failed_index = int(fail_index)
-            out.numba_grid_failed_substeps = int(fast_substeps)
-            out.numba_grid_failed_profile = np.asarray(raw_profile, float)
-            if out.numba_grid_failed_index is not None and out.numba_grid_failed_index > 1:
-                out.Vhist = Vfast
-                out.nsubsteps = int(fast_substeps)
-                ctx.stats.attempts += out.nsubsteps
-                ctx.stats.success += out.nsubsteps
-                out.partial_grid_numba = True
-                out.python_start_idx = int(out.numba_grid_failed_index)
-    except Exception as exc:
-        out.numba_grid_error = f"{type(exc).__name__}: {exc}"
-        diagnostics.note("transient.numba_be_grid_error", exc)
-    return out
-
-
 def _solve_fixed_rust(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
-    """Run the R3 OTFT fixed-grid core without a Numba fallback."""
+    """Run the compiled OTFT fixed-grid core (sole fixed-grid driver)."""
     out = _PathOutcome()
     try:
         from ._rust_transient import build_otft_transient_problem
@@ -683,21 +300,21 @@ def _solve_fixed_rust(ctx, V0, tgrid, input_values, edge_mask_arr, profile):
         out.Vhist = np.asarray(states, float)
         out.nsubsteps = int(substeps)
         out.profile_stats = np.asarray(raw_profile, float)
-        out.numba_grid_failed_intervals = np.asarray(failed_intervals, int)
+        out.grid_failed_intervals = np.asarray(failed_intervals, int)
         out.nfail = len(failed_intervals)
         out.nretry = out.nfail
         out.handled = bool(ok)
         if not ok:
-            out.numba_grid_error = "rust fixed-grid solve did not complete"
-            out.numba_grid_failed_index = int(failed_index)
+            out.grid_error = "rust fixed-grid solve did not complete"
+            out.grid_failed_index = int(failed_index)
     except Exception as exc:
-        out.numba_grid_error = f"rust: {type(exc).__name__}: {exc}"
+        out.grid_error = f"rust: {type(exc).__name__}: {exc}"
         diagnostics.note("transient.rust_grid_error", exc)
     return out
 
 
 def _solve_adaptive_rust(ctx, V0, tgrid, input_values, profile):
-    """Run the R3 OTFT adaptive Gear2 core without a Numba fallback."""
+    """Run the compiled OTFT adaptive Gear2 core (sole adaptive driver)."""
     out = _PathOutcome()
     try:
         from ._rust_transient import build_otft_transient_problem
@@ -736,22 +353,20 @@ def _solve_adaptive_rust(ctx, V0, tgrid, input_values, profile):
         out.handled = bool(ok)
         out.adaptive_used = bool(ok)
         if not ok:
-            out.numba_grid_error = "rust adaptive Gear2 solve did not complete"
+            out.grid_error = "rust adaptive Gear2 solve did not complete"
     except Exception as exc:
-        out.numba_grid_error = f"rust adaptive: {type(exc).__name__}: {exc}"
+        out.grid_error = f"rust adaptive: {type(exc).__name__}: {exc}"
         diagnostics.note("transient.rust_adaptive_error", exc)
     return out
 
 
 def _assemble_result(ctx, tgrid, Vhist, input_values, input_keys,
                      nfail, nretry, nsubsteps,
-                     adaptive_used, adaptive_numba_used,
-                     used_grid_numba, gear2_numba_used,
-                     gear2_python_retry_used,
+                     adaptive_used,
                      profile, profile_stats, profile_wall_s,
-                     partial_grid_numba, numba_grid_error,
-                     numba_grid_failed_index, numba_grid_failed_substeps,
-                     numba_grid_failed_profile, numba_grid_failed_intervals):
+                     grid_error,
+                     grid_failed_index, grid_failed_substeps,
+                     grid_failed_profile, grid_failed_intervals):
     def pval(stats, slot, default=0.0):
         return float(stats[slot]) if stats is not None and len(stats) > slot else float(default)
 
@@ -780,14 +395,6 @@ def _assemble_result(ctx, tgrid, Vhist, input_values, input_keys,
             key: input_values[pos].copy()
             for pos, key in enumerate(input_keys)
         }
-    result["numba_grid_solver"] = bool(used_grid_numba or gear2_numba_used)
-    result["numba_adaptive_solver"] = bool(adaptive_numba_used)
-    if ctx.integration_method == "gear2":
-        result["gear2_python_retry_solver"] = bool(gear2_python_retry_used)
-    if ctx.stats.attempts:
-        result["numba_newton_attempts"] = ctx.stats.attempts
-        result["numba_newton_success"] = ctx.stats.success
-        result["numba_newton_fallback"] = ctx.stats.fallback
     if profile:
         if profile_stats is None:
             profile_stats = np.zeros(PROFILE_LEN, dtype=float)
@@ -805,31 +412,29 @@ def _assemble_result(ctx, tgrid, Vhist, input_values, input_keys,
         flat_time_est = profile_wall_s * flat_iters / iter_work if iter_work else 0.0
         result["transient_profile"] = {
             "enabled": True,
-            "numba_grid_solver": bool(used_grid_numba or gear2_numba_used),
-            "numba_grid_partial": bool(partial_grid_numba),
-            "numba_grid_error": numba_grid_error,
-            "numba_grid_failed_index": numba_grid_failed_index,
-            "numba_grid_failed_substeps": int(numba_grid_failed_substeps),
-            "numba_grid_failed_newton_iters": (
-                pint(numba_grid_failed_profile, PROFILE_NEWTON_ITERS)),
-            "numba_grid_failed_substep_failures": (
-                pint(numba_grid_failed_profile, PROFILE_FAILED_SUBSTEPS)),
-            "numba_grid_failed_interval_failures": (
-                pint(numba_grid_failed_profile, PROFILE_FAILED_INTERVALS)),
-            "numba_grid_failed_last_residual_inf": (
-                pval(numba_grid_failed_profile, PROFILE_FAILED_LAST_RESIDUAL_INF)),
-            "numba_grid_failed_max_residual_inf": (
-                pval(numba_grid_failed_profile, PROFILE_FAILED_MAX_RESIDUAL_INF)),
-            "numba_grid_failed_last_step_inf": (
-                pval(numba_grid_failed_profile, PROFILE_FAILED_LAST_STEP_INF)),
-            "numba_grid_failed_max_step_inf": (
-                pval(numba_grid_failed_profile, PROFILE_FAILED_MAX_STEP_INF)),
-            "numba_grid_failed_stamp_or_prev_count": (
-                pint(numba_grid_failed_profile, PROFILE_FAILED_STAMP_OR_PREV_COUNT)),
-            "numba_grid_failed_linear_solve_count": (
-                pint(numba_grid_failed_profile, PROFILE_FAILED_LINEAR_SOLVE_COUNT)),
-            "numba_grid_failed_maxit_count": (
-                pint(numba_grid_failed_profile, PROFILE_FAILED_MAXIT_COUNT)),
+            "grid_error": grid_error,
+            "grid_failed_index": grid_failed_index,
+            "grid_failed_substeps": int(grid_failed_substeps),
+            "grid_failed_newton_iters": (
+                pint(grid_failed_profile, PROFILE_NEWTON_ITERS)),
+            "grid_failed_substep_failures": (
+                pint(grid_failed_profile, PROFILE_FAILED_SUBSTEPS)),
+            "grid_failed_interval_failures": (
+                pint(grid_failed_profile, PROFILE_FAILED_INTERVALS)),
+            "grid_failed_last_residual_inf": (
+                pval(grid_failed_profile, PROFILE_FAILED_LAST_RESIDUAL_INF)),
+            "grid_failed_max_residual_inf": (
+                pval(grid_failed_profile, PROFILE_FAILED_MAX_RESIDUAL_INF)),
+            "grid_failed_last_step_inf": (
+                pval(grid_failed_profile, PROFILE_FAILED_LAST_STEP_INF)),
+            "grid_failed_max_step_inf": (
+                pval(grid_failed_profile, PROFILE_FAILED_MAX_STEP_INF)),
+            "grid_failed_stamp_or_prev_count": (
+                pint(grid_failed_profile, PROFILE_FAILED_STAMP_OR_PREV_COUNT)),
+            "grid_failed_linear_solve_count": (
+                pint(grid_failed_profile, PROFILE_FAILED_LINEAR_SOLVE_COUNT)),
+            "grid_failed_maxit_count": (
+                pint(grid_failed_profile, PROFILE_FAILED_MAXIT_COUNT)),
             "wall_time_s": float(profile_wall_s),
             "nsubsteps": int(nsubsteps),
             "intervals": int(profile_stats[PROFILE_INTERVALS]),
@@ -851,9 +456,9 @@ def _assemble_result(ctx, tgrid, Vhist, input_values, input_keys,
             "failed_edge_intervals": int(profile_stats[PROFILE_FAILED_EDGE_INTERVALS]),
             "failed_flat_intervals": int(profile_stats[PROFILE_FAILED_FLAT_INTERVALS]),
             "failed_interval_indices": (
-                [int(v) for v in numba_grid_failed_intervals
+                [int(v) for v in grid_failed_intervals
                  if int(v) >= 0]
-                if numba_grid_failed_intervals is not None else []
+                if grid_failed_intervals is not None else []
             ),
             "failed_last_residual_inf": (
                 pval(profile_stats, PROFILE_FAILED_LAST_RESIDUAL_INF)),
@@ -1009,7 +614,7 @@ def _marshal_transient(
     dev_si = index_array(item[7] for item in dev_meta)
     dev_use_abs = np.array([not item[1] for item in dev_meta], dtype=np.bool_)
     dev_objs = [item[0] for item in dev_meta]
-    _np_params = [d.get_numba_params() for d in dev_objs]
+    _np_params = [d.get_otft_params() for d in dev_objs]
     p_Vfb = np.array([p.Vfb for p in _np_params], dtype=float)
     p_Vss = np.array([p.Vss for p in _np_params], dtype=float)
     p_Lc = np.array([p.Lc for p in _np_params], dtype=float)
@@ -1140,13 +745,6 @@ def _marshal_transient(
     flat_max_step = None if flat_max_step is None else float(flat_max_step)
     gmin = 1e-12
     HH = 1e-3   # finite-diff step for gm/gds (matches get_ss_params)
-    gear2_retry_requested = (
-        integration_method == "gear2" and gear2_be_fallback and
-        (max_retry_subdivisions > 0 or
-         (max_step is not None and max_step > 0.0) or
-         (flat_max_step is not None and flat_max_step > 0.0))
-    )
-
     topology_ctx = _TopologyCtx(
         plan=plan, idx=idx, n=n, n_aug=n_aug, termv=termv, tft=tft,
         signed_devices=signed_devices)
@@ -1207,7 +805,7 @@ def _marshal_transient(
         adaptive=adaptive, adaptive_config=adaptive_config)
     runtime = _RuntimeCaches(
         op_cache_valid=op_cache_valid, op_cache_vs1=op_cache_vs1,
-        op_cache_vd1=op_cache_vd1, stats=_NewtonStats())
+        op_cache_vd1=op_cache_vd1)
     ctx = _TransientCtx(
         topology=topology_ctx, devices=device_ctx, passives=passive_ctx,
         sources=source_ctx, solver=solver_opts, runtime=runtime)
@@ -1215,7 +813,7 @@ def _marshal_transient(
         ctx=ctx, tgrid=tgrid, input_keys=input_keys, input_values=input_values,
         inputs=inputs, node_inputs=node_inputs, V0=V0, Vhist=Vhist,
         edge_mask_arr=edge_mask_arr, profile=bool(profile),
-        gear2_retry_requested=gear2_retry_requested)
+        )
 
 
 def ngspice_model_names(model_types):
@@ -1281,9 +879,9 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
     """Backward-Euler (default) or gear2/BDF2 transient.
 
       integration_method : "be" (backward-Euler, 1st order; the default for the
-               raw transient because its numba grid keeps substep subdivision +
+               raw transient because its compiled grid keeps substep subdivision +
                retry, which hard standalone transients rely on) or "gear2"
-               (variable-step BDF2, 2nd order, numba-accelerated, with maxstep
+               (variable-step BDF2, 2nd order, with maxstep
                subdivision/retry support and step-ratio limiting). The PSS/chopper periodic path
                defaults to gear2 (it closes the chopper PAC switch-edge error to
                <1% and its grid is well-conditioned); raw transient callers can
@@ -1455,85 +1053,51 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
     nfail = 0
     nretry = 0
     nsubsteps = 0
-    used_grid_numba = False
-    partial_grid_numba = False
     profile_wall_s = 0.0
     profile_stats = None
-    numba_grid_error = None
-    numba_grid_failed_index = None
-    numba_grid_failed_substeps = 0
-    numba_grid_failed_profile = None
-    numba_grid_failed_intervals = None
+    grid_error = None
+    grid_failed_index = None
+    grid_failed_substeps = 0
+    grid_failed_profile = None
+    grid_failed_intervals = None
     gear2_done = False
-    gear2_numba_used = False
-    gear2_python_retry_used = False
-    gear2_retry_requested = marshalled.gear2_retry_requested
     rust_grid_used = False
 
-    rust_fixed = _PathOutcome()
-    if current_engine() == "rust" and not adaptive:
+    if not adaptive:
         rust_fixed = _solve_fixed_rust(
             ctx, V0, tgrid, input_values, edge_mask_arr, profile)
         if rust_fixed.profile_wall_s is not None:
             profile_wall_s = rust_fixed.profile_wall_s
-        if rust_fixed.numba_grid_error is not None:
-            numba_grid_error = rust_fixed.numba_grid_error
-        if rust_fixed.numba_grid_failed_index is not None:
-            numba_grid_failed_index = rust_fixed.numba_grid_failed_index
-            numba_grid_failed_substeps = int(rust_fixed.nsubsteps)
-            numba_grid_failed_profile = rust_fixed.profile_stats
+        if rust_fixed.grid_error is not None:
+            grid_error = rust_fixed.grid_error
+        if rust_fixed.grid_failed_index is not None:
+            grid_failed_index = rust_fixed.grid_failed_index
+            grid_failed_substeps = int(rust_fixed.nsubsteps)
+            grid_failed_profile = rust_fixed.profile_stats
         if rust_fixed.handled:
             Vhist = rust_fixed.Vhist
             nsubsteps = int(rust_fixed.nsubsteps)
             nfail = int(rust_fixed.nfail)
             nretry = int(rust_fixed.nretry)
             profile_stats = rust_fixed.profile_stats
-            numba_grid_failed_intervals = rust_fixed.numba_grid_failed_intervals
+            grid_failed_intervals = rust_fixed.grid_failed_intervals
             rust_grid_used = True
             gear2_done = integration_method == "gear2"
         elif (rust_fixed.Vhist is not None and
-              rust_fixed.numba_grid_failed_index is not None and
-              rust_fixed.numba_grid_failed_index > 1):
+              rust_fixed.grid_failed_index is not None and
+              rust_fixed.grid_failed_index > 1):
             # Preserve the established strict-mode contract: return the partial
             # trajectory and expose the failed-grid diagnostics to the caller.
             Vhist = rust_fixed.Vhist
             nsubsteps = int(rust_fixed.nsubsteps)
             rust_grid_used = True
 
-    fixed_g2 = _PathOutcome()
-    if current_engine() != "rust":
-        fixed_g2 = _solve_fixed_gear2_numba(
-            ctx, V0, tgrid, input_values, edge_mask_arr, profile,
-            gear2_retry_requested)
-    if fixed_g2.numba_grid_error is not None:
-        numba_grid_error = fixed_g2.numba_grid_error
-    if fixed_g2.profile_wall_s is not None:
-        profile_wall_s = fixed_g2.profile_wall_s
-    if fixed_g2.numba_grid_failed_index is not None:
-        numba_grid_failed_index = fixed_g2.numba_grid_failed_index
-        numba_grid_failed_substeps = int(fixed_g2.numba_grid_failed_substeps)
-        numba_grid_failed_profile = fixed_g2.numba_grid_failed_profile
-        numba_grid_failed_intervals = fixed_g2.numba_grid_failed_intervals
-    if fixed_g2.handled:
-        Vhist = fixed_g2.Vhist
-        nsubsteps = int(fixed_g2.nsubsteps)
-        nretry = int(fixed_g2.nretry)
-        nfail = int(fixed_g2.nfail)
-        gear2_done = True
-        gear2_numba_used = True
-        profile_stats = fixed_g2.profile_stats
-
     adaptive_used = False
-    adaptive_numba_used = False
     rust_adaptive_used = False
     if adaptive and integration_method == "gear2" and not gear2_done:
-        if current_engine() == "rust":
-            adaptive_nb = _solve_adaptive_rust(ctx, V0, tgrid, input_values, profile)
-        else:
-            adaptive_nb = _solve_adaptive_gear2_numba(
-                ctx, V0, tgrid, input_values, profile)
-        if adaptive_nb.numba_grid_error is not None:
-            numba_grid_error = adaptive_nb.numba_grid_error
+        adaptive_nb = _solve_adaptive_rust(ctx, V0, tgrid, input_values, profile)
+        if adaptive_nb.grid_error is not None:
+            grid_error = adaptive_nb.grid_error
         if adaptive_nb.handled:
             tgrid = adaptive_nb.tgrid
             Vhist = adaptive_nb.Vhist
@@ -1545,11 +1109,9 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
             profile_wall_s = adaptive_nb.profile_wall_s
             gear2_done = True
             adaptive_used = True
-            adaptive_numba_used = current_engine() != "rust"
-            gear2_numba_used = current_engine() != "rust"
-            rust_adaptive_used = current_engine() == "rust"
-        elif current_engine() == "rust":
-            raise RuntimeError(numba_grid_error or "Rust adaptive transient failed")
+            rust_adaptive_used = True
+        else:
+            raise RuntimeError(grid_error or "Rust adaptive transient failed")
 
     # Graceful fallback: gear2's single-step Newton stalls on stiff transients
     # (e.g. the chopper switch edges), where it can fail a large fraction of
@@ -1576,44 +1138,16 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         return be_result
 
     if (not adaptive) and not gear2_done and not rust_grid_used:
-        if current_engine() == "rust":
-            raise RuntimeError(numba_grid_error or "Rust fixed-grid transient failed")
-        be_nb = _solve_be_numba(ctx, V0, tgrid, input_values, edge_mask_arr, profile)
-        if be_nb.numba_grid_error is not None:
-            numba_grid_error = be_nb.numba_grid_error
-            used_grid_numba = False
-        if be_nb.profile_wall_s is not None:
-            profile_wall_s = be_nb.profile_wall_s
-        if be_nb.numba_grid_failed_intervals is not None:
-            numba_grid_failed_intervals = be_nb.numba_grid_failed_intervals
-        if be_nb.handled:
-            Vhist = be_nb.Vhist
-            nsubsteps = int(be_nb.nsubsteps)
-            nfail = int(be_nb.nfail)
-            nretry = int(be_nb.nretry)
-            used_grid_numba = True
-            profile_stats = be_nb.profile_stats
-        elif be_nb.numba_grid_failed_index is not None:
-            # Numba BE could not converge an interval; accept its partial trajectory.
-            # (The Python mid-solve resume was retired with the OO transient path; it
-            # rescued ~1 in 345 solves and never a calibration/production case.)
-            numba_grid_failed_index = be_nb.numba_grid_failed_index
-            numba_grid_failed_substeps = int(be_nb.numba_grid_failed_substeps)
-            numba_grid_failed_profile = be_nb.numba_grid_failed_profile
-            if be_nb.Vhist is not None:
-                Vhist = be_nb.Vhist
-                nsubsteps = int(be_nb.nsubsteps)
+        raise RuntimeError(grid_error or "Rust fixed-grid transient failed")
 
     result = _assemble_result(
         ctx, tgrid, Vhist, input_values, input_keys,
         nfail, nretry, nsubsteps,
-        adaptive_used, adaptive_numba_used,
-        used_grid_numba, gear2_numba_used,
-        gear2_python_retry_used,
+        adaptive_used,
         profile, profile_stats, profile_wall_s,
-        partial_grid_numba, numba_grid_error,
-        numba_grid_failed_index, numba_grid_failed_substeps,
-        numba_grid_failed_profile, numba_grid_failed_intervals)
+        grid_error,
+        grid_failed_index, grid_failed_substeps,
+        grid_failed_profile, grid_failed_intervals)
     result["rust_grid_solver"] = bool(rust_grid_used)
     result["rust_adaptive_solver"] = bool(rust_adaptive_used)
     if profile and "transient_profile" in result:

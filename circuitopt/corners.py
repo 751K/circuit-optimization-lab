@@ -27,7 +27,6 @@ from .circuit_loader import circuit_from_dict
 from .device_factory import CORNERS
 from .noise_solver import band_rms, noise_analysis
 from .topology import AFE_TOPO
-from ._engine import current_engine
 from . import diagnostics
 
 # Per-device mismatch sigmas: Vth (area-scaled inside the model) and beta (flat).
@@ -43,11 +42,9 @@ def _root_sensitive_otft_reference_context(function):
     """Preserve the calibrated root choice for bifurcation-edge OTFT screens."""
     @wraps(function)
     def wrapped(*args, **kwargs):
-        if current_engine() != "rust":
-            return function(*args, **kwargs)
-        from .pmos_tft_model import rust_otft_reference_mode
+        from .pmos_tft_model import otft_reference_mode
 
-        with rust_otft_reference_mode():
+        with otft_reference_mode():
             return function(*args, **kwargs)
 
     return wrapped

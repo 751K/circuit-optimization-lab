@@ -5,11 +5,11 @@ every transistor compact model must implement.  Solvers depend on this ABC
 instead of concrete model classes, so adding a new transistor type only
 requires a new subclass + one ``register_model`` call — no solver edits.
 
-The :class:`NumbaParams` dataclass is the canonical bundle of scalar model
-parameters consumed by :file:`numba_kernels.py`.  Models expose it via
-:meth:`TransistorModel.get_numba_params` so the transient solver can extract
-every parameter in one pass and never touch the model object inside the
-timestepping loop.
+The :class:`OtftParams` dataclass is the canonical 16-scalar bundle of model
+parameters consumed by the compiled OTFT kernels (``circuitopt_core``).
+Models expose it via :meth:`TransistorModel.get_otft_params` so the transient
+solver can extract every parameter in one pass and never touch the model
+object inside the timestepping loop.
 
 Usage::
 
@@ -17,7 +17,7 @@ Usage::
 
     dev = create_device("pmos_tft", W=1000, L=20, NF=1)
     dev.get_Idc(Vs=40, Vd=0, Vg=20)
-    dev.get_numba_params()
+    dev.get_otft_params()
 """
 from __future__ import annotations
 
@@ -27,16 +27,16 @@ from dataclasses import dataclass, field
 from typing import Dict, Tuple, Type
 
 # ──────────────────────────────────────────────────────────────────────
-# 1.  Numba kernel parameter bundle
+# 1.  Compiled-kernel parameter bundle
 # ──────────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
-class NumbaParams:
-    """Frozen bundle of scalar model parameters for :file:`numba_kernels.py`.
+class OtftParams:
+    """Frozen bundle of scalar model parameters for the compiled OTFT kernels.
 
     The transient solver extracts one of these per device at construction
     time, then copies the fields into per‑device numpy arrays for the
-    numba‑accelerated inner loop.  The dataclass is frozen so extraction is
+    compiled inner loop.  The dataclass is frozen so extraction is
     a single atomic snapshot of the model instance.
 
     The current 16‑field schema matches :class:`~pmos_tft_model.PMOS_TFT`;
@@ -90,7 +90,7 @@ class TransistorModel(ABC):
         Terminal gm, gds, Cgs, Cgd, Ich at the given bias.  Default
         implementation uses central finite‑differences of
         :meth:`get_Idc` and :meth:`get_capacitances`.  Concrete models
-        may override with an optimised analytic or numba path.
+        may override with an optimised analytic or compiled path.
 
     **Capacitance** — used by transient / AC / PAC:
 
@@ -110,10 +110,10 @@ class TransistorModel(ABC):
     .. method:: get_noise_psd(Vs, Vd, Vg, frequency) -> Tuple[float, float]
         Drain‑current noise PSD ``(S_thermal, S_flicker)`` [A²/Hz].
 
-    **Numba bridge** — used by transient:
+    **Compiled-kernel bridge** — used by transient:
 
-    .. method:: get_numba_params() -> NumbaParams
-        Return the scalar parameter bundle consumed by numba kernels.
+    .. method:: get_otft_params() -> OtftParams
+        Return the scalar parameter bundle consumed by the compiled kernels.
 
     **Auxiliary** (optional, with default no‑op implementations):
 
@@ -144,7 +144,7 @@ class TransistorModel(ABC):
 
         Default: central finite‑differences of :meth:`get_Idc` plus
         :meth:`get_capacitances`.  Concrete models with an analytic or
-        numba‑accelerated path override this method.
+        compiled path override this method.
         """
         h = 1e-3
         gm = (self.get_Idc(Vs, Vd, Vg + h) - self.get_Idc(Vs, Vd, Vg - h)) / (2 * h)
@@ -186,11 +186,11 @@ class TransistorModel(ABC):
         """Drain‑current noise PSD ``(S_thermal, S_flicker)`` [A²/Hz]."""
         ...
 
-    # ── Numba bridge ──────────────────────────────────────────────────
+    # ── Compiled-kernel bridge ────────────────────────────────────────
 
     @abstractmethod
-    def get_numba_params(self) -> NumbaParams:
-        """Scalar parameter bundle for numba‑accelerated transient inner loop."""
+    def get_otft_params(self) -> OtftParams:
+        """Scalar parameter bundle for the compiled transient inner loop."""
         ...
 
     # ── Backend-capability flags ──────────────────────────────────────
@@ -206,7 +206,7 @@ class TransistorModel(ABC):
 
     TRANSIENT_BACKEND: str | None = None
     """Which specialised transient integrator this model routes to, or ``None``
-    to use the generic (OTFT numba) transient path."""
+    to use the generic (compiled OTFT) transient path."""
 
     # ── Auxiliary (optional; subclasses may override or set as attributes) ─
 

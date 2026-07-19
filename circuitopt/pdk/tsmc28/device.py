@@ -160,9 +160,9 @@ class _Tsmc28NativeCoreFet(TransistorModel):
         raise NotImplementedError(
             "native BSIM4 transient uses the four-terminal charge backend")
 
-    def get_numba_params(self):
+    def get_otft_params(self):
         raise NotImplementedError(
-            "native BSIM4 devices do not use the OTFT numba parameter bundle")
+            "native BSIM4 devices do not use the OTFT scalar parameter bundle")
 
     def get_terminal_charges(self, Vs: float, Vd: float, Vg: float) -> np.ndarray:
         return self._evaluate(Vs, Vd, Vg).terminal_charges

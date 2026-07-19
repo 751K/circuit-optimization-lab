@@ -191,5 +191,5 @@ class NgspiceDevice(TransistorModel):
     def get_capacitance_branch_terms_from_op(self, *a):
         raise NotImplementedError(self._NO_TRAN)
 
-    def get_numba_params(self):
+    def get_otft_params(self):
         raise NotImplementedError(self._NO_TRAN)

@@ -43,7 +43,7 @@ from .ac_solver import ac_solve
 from .analysis_dispatch import run_analysis_suite, run_json_analyses
 from .circuit_loader import CircuitSpec, load_circuit_json
 from .device_factory import CircuitBinding
-from .device_model import (TransistorModel, NumbaParams, PDK, create_device,
+from .device_model import (TransistorModel, OtftParams, PDK, create_device,
                            create_transistor, register_model, register_pdk,
                            get_default_model_type, get_default_pdk, get_pdk,
                            list_pdks, registered_models, transistor_type)
@@ -79,7 +79,7 @@ __all__ = [
     "current_engine",
     # device model abstraction
     "TransistorModel",
-    "NumbaParams",
+    "OtftParams",
     "PDK",
     "create_device",
     "create_transistor",

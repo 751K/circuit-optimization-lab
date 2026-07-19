@@ -1,25 +1,22 @@
 """In-process Berkeley BSIM4.5 numerical backend.
 
-The backend builds the vendored compact-model equations into a private shared
-library and calls them through a small four-terminal C ABI. It does not link
-libngspice or invoke an external circuit simulator. CircuitOpt owns parameter
-loading, internal-node reduction, and all circuit-level analyses.
+The vendored compact-model equations are compiled into the ``circuitopt_core``
+extension (the ``co-bsim4`` crate builds them at wheel-build time); this module
+binds that already-compiled library through a small four-terminal C ABI. It
+does not link libngspice, invoke an external circuit simulator, or compile
+anything at runtime (the v1.x cc/ctypes runtime-compile path was removed in
+v2.0.0). CircuitOpt owns parameter loading, internal-node reduction, and all
+circuit-level analyses.
 """
 from __future__ import annotations
 
 import ctypes as C
-import hashlib
 import os
-import platform
-import shutil
-import subprocess
 import threading
 from collections import OrderedDict
-from pathlib import Path
 
 import numpy as np
 
-from ...toolchain import native_model_cache_dir
 from .abi import (
     Bsim4Bias,
     Bsim4Evaluation,
@@ -33,27 +30,6 @@ class Bsim4NativeError(RuntimeError):
     """The native BSIM4 kernel could not be built, configured, or evaluated."""
 
 
-_SOURCE_ROOT = Path(__file__).with_name("native_src")
-_VENDOR = _SOURCE_ROOT / "vendor"
-_MODEL_DIR = _VENDOR / "bsim4v5"
-_INCLUDE_DIR = _VENDOR / "include"
-_SUPPORT_DIR = _VENDOR / "support"
-_SOURCES = (
-    _MODEL_DIR / "b4v5.c",
-    _MODEL_DIR / "b4v5par.c",
-    _MODEL_DIR / "b4v5mpar.c",
-    _MODEL_DIR / "b4v5set.c",
-    _MODEL_DIR / "b4v5temp.c",
-    _MODEL_DIR / "b4v5ld.c",
-    _MODEL_DIR / "b4v5acld.c",
-    _MODEL_DIR / "b4v5noi.c",
-    _MODEL_DIR / "b4v5geo.c",
-    _SUPPORT_DIR / "devsup.c",
-    _SOURCE_ROOT / "host.c",
-)
-_HASH_INPUTS = _SOURCES + tuple(sorted(_MODEL_DIR.glob("*.h"))) + tuple(
-    sorted((_INCLUDE_DIR / "ngspice").glob("*.h"))
-)
 _STATUS = {
     1: "internal panic or singular compact-model matrix",
     7: "unknown or unsupported BSIM4 parameter",
@@ -72,128 +48,15 @@ _EVAL_VP_T = C.CFUNCTYPE(
     C.c_void_p,
 )
 _build_lock = threading.RLock()
-_library = None
 _rust_library = None
-_DEFAULT_BACKEND = "cc"
-
-
-def _compiler() -> str:
-    configured = os.environ.get("BSIM4_CC") or os.environ.get("CC")
-    if configured:
-        candidate = os.path.abspath(os.path.expanduser(configured))
-        if os.path.sep not in configured:
-            candidate = shutil.which(configured) or ""
-        if candidate and os.access(candidate, os.X_OK):
-            return candidate
-        raise Bsim4NativeError(f"configured BSIM4 C compiler is not executable: {configured}")
-    for name in ("clang", "cc", "gcc"):
-        candidate = shutil.which(name)
-        if candidate:
-            return candidate
-    raise Bsim4NativeError(
-        "a C99 compiler is required for the native BSIM4.5 backend; "
-        "set BSIM4_CC or CC"
-    )
-
-
-def _library_suffix() -> str:
-    system = platform.system()
-    if system == "Darwin":
-        return ".dylib"
-    if system == "Linux":
-        return ".so"
-    raise Bsim4NativeError(
-        f"native BSIM4.5 currently supports macOS and Linux, not {system}")
-
-
-def _source_digest(compiler: str) -> str:
-    digest = hashlib.sha256()
-    digest.update(platform.platform().encode())
-    digest.update(platform.machine().encode())
-    digest.update(compiler.encode())
-    for path in _HASH_INPUTS:
-        if not path.is_file():
-            raise Bsim4NativeError(f"packaged BSIM4 source is missing: {path}")
-        digest.update(path.relative_to(_SOURCE_ROOT).as_posix().encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()[:20]
-
-
-_build_failure: "Bsim4NativeError | None" = None
-
-
-def _build_library() -> Path:
-    global _build_failure
-    compiler = _compiler()
-    digest = _source_digest(compiler)
-    cache = Path(native_model_cache_dir())
-    cache.mkdir(parents=True, exist_ok=True)
-    output = cache / f"libcircuitopt_bsim4v5_{digest}{_library_suffix()}"
-    if output.is_file():
-        return output
-
-    with _build_lock:
-        if output.is_file():
-            return output
-        # A failed build is deterministic for this process (same sources,
-        # same compiler): retrying it for every device/test repeats the
-        # full compile just to fail again — a CI run once burned 2.5 h on
-        # ~100 such retries. Fail fast after the first attempt.
-        if _build_failure is not None:
-            raise Bsim4NativeError(
-                "native BSIM4.5 build already failed in this process "
-                f"(not retrying): {_build_failure}") from _build_failure
-        temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
-        command = [
-            compiler,
-            "-O2",
-            "-std=c99",
-            "-fPIC",
-            # clang 16+ promotes implicit-function-declaration to an error in
-            # C99 mode; the vendored Berkeley sources rely on implicit libc
-            # declarations (e.g. strcmp in b4v5set.c). Keep it a warning so
-            # the unmodified vendor tree builds on current Linux toolchains.
-            "-Wno-error=implicit-function-declaration",
-            "-I",
-            str(_INCLUDE_DIR),
-            "-I",
-            str(_MODEL_DIR),
-        ]
-        if platform.system() == "Darwin":
-            command.append("-dynamiclib")
-        else:
-            command.append("-shared")
-        command.extend(str(path) for path in _SOURCES)
-        command.extend(("-lm", "-o", str(temporary)))
-        try:
-            result = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            _build_failure = Bsim4NativeError(
-                f"failed to run native BSIM4 compiler: {exc}")
-            raise _build_failure from exc
-        if result.returncode != 0:
-            temporary.unlink(missing_ok=True)
-            detail = (result.stderr or result.stdout).strip()
-            _build_failure = Bsim4NativeError(
-                f"native BSIM4.5 build failed with {compiler}:\n{detail}")
-            raise _build_failure
-        os.replace(temporary, output)
-    return output
 
 
 def _bind_abi(library) -> None:
     """Bind the four-terminal BSIM4 C ABI onto a loaded ``ctypes`` library.
 
-    Both backends export the identical ABI (host.c for ``cc``; the compiled
-    ``circuitopt_core`` cdylib for ``rust``), so the binding is shared. This
-    does not affect numerical results — it only declares the argument/return
-    marshalling and installs the Numba runtime function pointer.
+    The compiled ``circuitopt_core`` cdylib exports the ABI. This does not
+    affect numerical results — it only declares the argument/return
+    marshalling and installs the runtime function pointer.
     """
     double_pointer = C.POINTER(C.c_double)
     library.co_bsim4_create.argtypes = (C.c_int, C.c_double)
@@ -265,26 +128,6 @@ def _bind_abi(library) -> None:
         ("co_bsim4_eval_vp", library))
 
 
-def _bind_library():
-    global _library
-    if _library is not None:
-        return _library
-    with _build_lock:
-        if _library is not None:
-            return _library
-        path = _build_library()
-        library = C.CDLL(str(path))
-        library.co_bsim4_abi_version.argtypes = ()
-        library.co_bsim4_abi_version.restype = C.c_uint
-        abi_version = int(library.co_bsim4_abi_version())
-        if abi_version != _ABI_VERSION:
-            raise Bsim4NativeError(
-                f"native BSIM4 ABI version {abi_version} != expected {_ABI_VERSION}")
-        _bind_abi(library)
-        _library = library
-    return _library
-
-
 def _import_circuitopt_core():
     """Import the compiled Rust core. Isolated for testability."""
     import circuitopt_core
@@ -352,20 +195,27 @@ def _bind_rust_library():
 
 
 def _backend_choice() -> str:
-    """Read the backend selector at call time (never baked at import).
+    """Validate the backend selector at call time (never baked at import).
 
-    Mirrors ``ngspice_char.ngspice_chain_enabled``: the environment variable
-    wins on every call, so a process can switch backends between evaluations.
+    ``rust`` — the compiled ``circuitopt_core`` cdylib — is the only backend in
+    v2.0.0. The retired ``cc`` value (v1.x runtime compilation of the vendored
+    C with the user's compiler) errors loudly instead of being silently
+    remapped, mirroring the engine-switch removals in ``_engine.py``.
     """
-    value = os.environ.get("CIRCUIT_BSIM4_BACKEND", _DEFAULT_BACKEND).strip().lower()
-    if value not in ("cc", "rust"):
+    value = os.environ.get("CIRCUIT_BSIM4_BACKEND", "rust").strip().lower()
+    if value == "cc":
         raise Bsim4NativeError(
-            f"CIRCUIT_BSIM4_BACKEND must be 'cc' or 'rust', got {value!r}")
+            "CIRCUIT_BSIM4_BACKEND=cc was removed in v2.0.0: the runtime "
+            "cc/ctypes build of the vendored BSIM4 sources no longer exists; "
+            "rust (the compiled circuitopt_core backend) is the only value")
+    if value != "rust":
+        raise Bsim4NativeError(
+            f"CIRCUIT_BSIM4_BACKEND must be 'rust', got {value!r}")
     return value
 
 
 def _select_library(backend: str):
-    return _bind_rust_library() if backend == "rust" else _bind_library()
+    return _bind_rust_library()
 
 
 def _raise_status(status: int, action: str, parameter: str | None = None) -> None:
@@ -383,7 +233,7 @@ class _NativeDevice:
         instance: Bsim4InstanceCard,
         temperature_k: float,
         *,
-        backend: str = "cc",
+        backend: str = "rust",
     ):
         self._backend = backend
         self._library = _select_library(backend)
@@ -411,7 +261,7 @@ class _NativeDevice:
 
     @property
     def pointer(self) -> int:
-        """Process-local opaque handle used by the Numba/ctypes runtime bridge."""
+        """Process-local opaque handle used by the compiled-solver bridge."""
         if not self._pointer:
             raise Bsim4NativeError("BSIM4 native device is closed")
         return int(self._pointer)

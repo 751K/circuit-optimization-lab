@@ -5,10 +5,8 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
-from ... import diagnostics
 from ...compiled_topology import CompiledTopology, TERM_SOLVED
 from ...device_factory import build_devices
-from ..._engine import current_engine
 
 
 def _expanded_grid(tgrid, inputs, max_step):
@@ -112,7 +110,7 @@ def transient_native_bsim4(
             "native BSIM4 transient requires every transistor to use the native "
             f"backend; unsupported devices: {', '.join(sorted(unsupported))}")
 
-    n, n_aug = plan.n, plan.n_aug
+    n_aug = plan.n_aug
     if V0 is None:
         from ...ac_solver import ac_solve
 
@@ -185,313 +183,21 @@ def transient_native_bsim4(
     nnear = 0
     failed_residuals = []
     near_residuals = []
-    used_rust = current_engine() == "rust"
-    used_numba = False  # the numba engine was removed in v2.0.0 (rust is the only engine)
-    if used_rust:
-        from .rust_transient import solve_bsim4_rust
+    from .rust_transient import solve_bsim4_rust
 
-        xhist, nfail, first_fail = solve_bsim4_rust(
-            plan,
-            devices,
-            V0,
-            tgrid,
-            input_matrix,
-            dynamic_sources,
-            method=method,
-            newton_maxit=newton_maxit,
-            newton_vtol=newton_vtol,
-            newton_step_limit=newton_step_limit,
-            gmin=gmin,
-        )
-        solve_samples = ()
-    else:
-        xhist = np.zeros((len(tgrid), n_aug), dtype=float)
-        xhist[0] = V0
-        q_prev = {}
-        q_prev2 = {}
-        for item in plan.devices:
-            q_prev[item.name] = device_state(item, V0, 0)[1]
-            q_prev2[item.name] = q_prev[item.name].copy()
-        nfail = 0
-        first_fail = -1
-        solve_samples = range(1, len(tgrid))
-
-    for sample in solve_samples:
-        a0, a1, a2 = coefficients(sample)
-        x = xhist[sample - 1].copy()
-
-        def residual_jacobian(candidate):
-            residual = np.zeros(n_aug, dtype=float)
-            jacobian = np.zeros((n_aug, n_aug), dtype=float)
-            row_scale = np.zeros(n, dtype=float)
-
-            def add_scale(row, value):
-                if row is not None:
-                    row_scale[row] += abs(float(value))
-
-            for item in plan.devices:
-                currents, charges, conductance, capacitance = device_state(
-                    item, candidate, sample)
-                rows = (item.di, item.gi, item.si, None)
-                terms = (item.d, item.g, item.s, None)
-                qdot = (
-                    a0 * charges
-                    + a1 * q_prev[item.name]
-                    + a2 * q_prev2[item.name]
-                )
-                for i, row in enumerate(rows):
-                    if row is None:
-                        continue
-                    branch_current = currents[i] + qdot[i]
-                    add_scale(row, branch_current)
-                    residual[row] -= branch_current
-                    for j, term in enumerate(terms):
-                        if term is not None:
-                            add_derivative(
-                                jacobian,
-                                row,
-                                term,
-                                -(conductance[i, j] + a0 * capacitance[i, j]),
-                            )
-
-            for item in plan.resistors:
-                voltage = (
-                    term_value(item.a, candidate, sample)
-                    - term_value(item.b, candidate, sample)
-                )
-                current = voltage * item.g
-                if item.ai is not None:
-                    add_scale(item.ai, current)
-                    residual[item.ai] -= current
-                    add_derivative(jacobian, item.ai, item.a, -item.g)
-                    add_derivative(jacobian, item.ai, item.b, item.g)
-                if item.bi is not None:
-                    add_scale(item.bi, current)
-                    residual[item.bi] += current
-                    add_derivative(jacobian, item.bi, item.a, item.g)
-                    add_derivative(jacobian, item.bi, item.b, -item.g)
-
-            for item in plan.capacitors:
-                v_now = (
-                    term_value(item.a, candidate, sample)
-                    - term_value(item.b, candidate, sample)
-                )
-                v_prev = (
-                    term_value(item.a, xhist[sample - 1], sample - 1)
-                    - term_value(item.b, xhist[sample - 1], sample - 1)
-                )
-                if sample > 1:
-                    v_prev2 = (
-                        term_value(item.a, xhist[sample - 2], sample - 2)
-                        - term_value(item.b, xhist[sample - 2], sample - 2)
-                    )
-                else:
-                    v_prev2 = v_prev
-                current = item.value * (a0 * v_now + a1 * v_prev + a2 * v_prev2)
-                admittance = item.value * a0
-                if item.ai is not None:
-                    add_scale(item.ai, current)
-                    residual[item.ai] -= current
-                    add_derivative(jacobian, item.ai, item.a, -admittance)
-                    add_derivative(jacobian, item.ai, item.b, admittance)
-                if item.bi is not None:
-                    add_scale(item.bi, current)
-                    residual[item.bi] += current
-                    add_derivative(jacobian, item.bi, item.a, admittance)
-                    add_derivative(jacobian, item.bi, item.b, -admittance)
-
-            for item in plan.isources:
-                if item.pi is not None:
-                    add_scale(item.pi, item.value)
-                    residual[item.pi] -= item.value
-                if item.qi is not None:
-                    add_scale(item.qi, item.value)
-                    residual[item.qi] += item.value
-            for pi, qi, input_index in dynamic_sources:
-                value = input_matrix[input_index, sample]
-                if pi is not None:
-                    add_scale(pi, value)
-                    residual[pi] -= value
-                if qi is not None:
-                    add_scale(qi, value)
-                    residual[qi] += value
-
-            for item in plan.vccs:
-                control = (
-                    term_value(item.cp, candidate, sample)
-                    - term_value(item.cn, candidate, sample)
-                )
-                current = item.gm * control
-                if item.pi is not None:
-                    add_scale(item.pi, current)
-                    residual[item.pi] += current
-                    add_derivative(jacobian, item.pi, item.cp, item.gm)
-                    add_derivative(jacobian, item.pi, item.cn, -item.gm)
-                if item.qi is not None:
-                    add_scale(item.qi, current)
-                    residual[item.qi] -= current
-                    add_derivative(jacobian, item.qi, item.cp, -item.gm)
-                    add_derivative(jacobian, item.qi, item.cn, item.gm)
-
-            for item in plan.vsources:
-                branch_current = candidate[item.bi]
-                if item.pi is not None:
-                    add_scale(item.pi, branch_current)
-                    residual[item.pi] -= branch_current
-                    jacobian[item.pi, item.bi] -= 1.0
-                if item.qi is not None:
-                    add_scale(item.qi, branch_current)
-                    residual[item.qi] += branch_current
-                    jacobian[item.qi, item.bi] += 1.0
-                emf = (
-                    input_matrix[item.e_input_idx, sample]
-                    if item.e_input_idx >= 0
-                    else item.e_const
-                )
-                residual[item.bi] = (
-                    term_value(item.p, candidate, sample)
-                    - term_value(item.q, candidate, sample)
-                    - emf
-                )
-                add_derivative(jacobian, item.bi, item.p, 1.0)
-                add_derivative(jacobian, item.bi, item.q, -1.0)
-
-            for item in plan.vcvs:
-                branch_current = candidate[item.bi]
-                if item.pi is not None:
-                    add_scale(item.pi, branch_current)
-                    residual[item.pi] -= branch_current
-                    jacobian[item.pi, item.bi] -= 1.0
-                if item.qi is not None:
-                    add_scale(item.qi, branch_current)
-                    residual[item.qi] += branch_current
-                    jacobian[item.qi, item.bi] += 1.0
-                residual[item.bi] = (
-                    term_value(item.p, candidate, sample)
-                    - term_value(item.q, candidate, sample)
-                    - item.mu * (
-                        term_value(item.cp, candidate, sample)
-                        - term_value(item.cn, candidate, sample)
-                    )
-                )
-                add_derivative(jacobian, item.bi, item.p, 1.0)
-                add_derivative(jacobian, item.bi, item.q, -1.0)
-                add_derivative(jacobian, item.bi, item.cp, -item.mu)
-                add_derivative(jacobian, item.bi, item.cn, item.mu)
-
-            for item in plan.cccs:
-                current = item.beta * candidate[item.ctrl_bi]
-                if item.pi is not None:
-                    add_scale(item.pi, current)
-                    residual[item.pi] += current
-                    jacobian[item.pi, item.ctrl_bi] += item.beta
-                if item.qi is not None:
-                    add_scale(item.qi, current)
-                    residual[item.qi] -= current
-                    jacobian[item.qi, item.ctrl_bi] -= item.beta
-
-            for item in plan.ccvs:
-                branch_current = candidate[item.bi]
-                if item.pi is not None:
-                    add_scale(item.pi, branch_current)
-                    residual[item.pi] -= branch_current
-                    jacobian[item.pi, item.bi] -= 1.0
-                if item.qi is not None:
-                    add_scale(item.qi, branch_current)
-                    residual[item.qi] += branch_current
-                    jacobian[item.qi, item.bi] += 1.0
-                residual[item.bi] = (
-                    term_value(item.p, candidate, sample)
-                    - term_value(item.q, candidate, sample)
-                    - item.gamma * candidate[item.ctrl_bi]
-                )
-                add_derivative(jacobian, item.bi, item.p, 1.0)
-                add_derivative(jacobian, item.bi, item.q, -1.0)
-                jacobian[item.bi, item.ctrl_bi] -= item.gamma
-
-            for row in range(n):
-                add_scale(row, candidate[row] * gmin)
-                residual[row] -= candidate[row] * gmin
-                jacobian[row, row] -= gmin
-            return residual, jacobian, row_scale
-
-        def convergence_metric(residual, row_scale):
-            current_tolerance = 1e-12 + 1e-3 * row_scale
-            node_metric = (
-                float(np.max(np.abs(residual[:n]) / current_tolerance))
-                if n else 0.0
-            )
-            constraint_metric = (
-                float(np.max(np.abs(residual[n:]))) / newton_vtol
-                if n_aug > n else 0.0
-            )
-            return max(node_metric, constraint_metric)
-
-        converged = False
-        best_metric = np.inf
-        best_norm = np.inf
-        for _iteration in range(int(newton_maxit)):
-            residual, jacobian, row_scale = residual_jacobian(x)
-            norm = float(np.max(np.abs(residual)))
-            metric = convergence_metric(residual, row_scale)
-            if metric < best_metric:
-                best_metric = metric
-                best_norm = norm
-            try:
-                delta = np.linalg.solve(jacobian, -residual)
-            except np.linalg.LinAlgError:
-                delta = np.linalg.lstsq(jacobian, -residual, rcond=None)[0]
-            node_peak = float(np.max(np.abs(delta[:n]))) if n else 0.0
-            if node_peak > newton_step_limit:
-                delta *= float(newton_step_limit) / node_peak
-            if node_peak <= newton_vtol and metric <= 1.0:
-                converged = True
-                break
-            alpha = 1.0
-            accepted = False
-            while alpha >= 1.0 / 128.0:
-                trial = x + alpha * delta
-                trial_residual, _, _ = residual_jacobian(trial)
-                trial_norm = float(np.max(np.abs(trial_residual)))
-                if trial_norm < norm or alpha <= 1.0 / 128.0:
-                    x = trial
-                    accepted = True
-                    break
-                alpha *= 0.5
-            if not accepted:
-                break
-            if float(np.max(np.abs(alpha * delta[:n]))) <= newton_vtol:
-                converged = True
-                break
-        if not converged:
-            converged = best_metric <= 1.0
-        if not converged:
-            detail = (
-                f"step {sample} at t={tgrid[sample]:.6g}s; "
-                f"best residual={best_norm:.3g}, metric={best_metric:.3g}"
-            )
-            if best_metric <= 20.0:
-                nnear += 1
-                near_residuals.append(best_norm)
-                diagnostics.note(
-                    "bsim4_native_transient.near_tolerance",
-                    detail=detail,
-                )
-            else:
-                nfail += 1
-                failed_residuals.append(best_norm)
-                if first_fail < 0:
-                    first_fail = sample
-                diagnostics.note(
-                    "bsim4_native_transient.newton_fail",
-                    detail=detail,
-                )
-        xhist[sample] = x
-        for item in plan.devices:
-            charges = device_state(item, x, sample)[1]
-            q_prev2[item.name] = q_prev[item.name]
-            q_prev[item.name] = charges
-
+    xhist, nfail, first_fail = solve_bsim4_rust(
+        plan,
+        devices,
+        V0,
+        tgrid,
+        input_matrix,
+        dynamic_sources,
+        method=method,
+        newton_maxit=newton_maxit,
+        newton_vtol=newton_vtol,
+        newton_step_limit=newton_step_limit,
+        gmin=gmin,
+    )
     rail_values = topo.rail_values(bias)
     rail_currents = {
         name: np.zeros(len(tgrid), dtype=float)
@@ -650,9 +356,7 @@ def transient_native_bsim4(
         "nretry": 0,
         "nsubsteps": int(len(tgrid) - len(requested_t)),
         "bsim4_native_transient": True,
-        "numba_grid_solver": used_numba,
-        "bsim4_numba_transient": used_numba,
-        "bsim4_rust_transient": used_rust,
+        "bsim4_rust_transient": True,
         "backend": "bsim4_native",
         "integration_method": "gear2" if method in {"gear2", "bdf2"} else "be",
         "X_final": sampled[-1].copy(),

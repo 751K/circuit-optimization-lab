@@ -17,7 +17,6 @@ from .dc_solver import (DC_FALLBACK_TOL, bounded_least_squares_dc,
                         symmetric_seed)
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
-from ._engine import current_engine
 from . import diagnostics
 
 if TYPE_CHECKING:
@@ -103,11 +102,11 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     def retry_with_reference_device():
         is_otft = any(getattr(dev, "PDK", None) == "at4000tg"
                       for dev in _dev_inst.values())
-        if current_engine() != "rust" or _rust_reference_retry or not is_otft:
+        if _rust_reference_retry or not is_otft:
             return None
-        from .pmos_tft_model import rust_otft_reference_mode
+        from .pmos_tft_model import otft_reference_mode
 
-        with rust_otft_reference_mode():
+        with otft_reference_mode():
             result = ac_solve(
                 sizes,
                 bias,
@@ -178,12 +177,10 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
             return NativeBsim4Backend.evaluate_batch(
                 native_batch_handles, terminals)[0]
 
-        if (current_engine() == "rust" and
-                all(handle._backend == "rust" for handle in native_batch_handles)):
-            from .compact_models.bsim4.rust_transient import build_bsim4_problem
+        from .compact_models.bsim4.rust_transient import build_bsim4_problem
 
-            rust_dc_problem = build_bsim4_problem(
-                plan, _dev_inst, native_batch_handles)
+        rust_dc_problem = build_bsim4_problem(
+            plan, _dev_inst, native_batch_handles)
 
     # ── 1. DC solve (residuals built from the topology) ──
     residuals = lambda x: plan.dc_residuals(
@@ -390,9 +387,6 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
           for name, *_ in topo.devices}
 
     # ── 3. Build & solve the small-signal MNA (terminals from the topology) ──
-    from .ac_mna import (stamp_adm, stamp_dense_lti, stamp_mos_lti, stamp_vccs,
-                         stamp_vsource, stamp_vcvs, stamp_cccs, stamp_ccvs)
-    NN = plan.n_aug
     drive = topo.input_drives
     # Normalize the gain by the differential input magnitude. The stimulus is either
     # a per-gate drive (input_drives) or, for a front-end testbench, AC sources at
@@ -410,49 +404,12 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     ac_res = plan.ac_resistors(ac_drives)
     out_weights = plan.output_weights
 
-    if current_engine() == "rust":
-        from ._rust_lti import build_lti_problem, complex_array
+    from ._rust_lti import build_lti_problem, complex_array
 
-        lti_problem = build_lti_problem(
-            plan, devs, _dev_inst, bpts, ss, ac_caps, ac_res,
-            plan.ac_vccs(ac_drives), ac_drives)
-        V = complex_array(lti_problem.solve(np.asarray(freqs, float)))
-    else:
-        G = np.zeros((NN, NN), dtype=complex)
-        C = np.zeros((NN, NN), dtype=complex)
-        RHS_G = np.zeros(NN, dtype=complex)
-        RHS_C = np.zeros(NN, dtype=complex)
-        for name, d, g, s in devs:
-            dev = _dev_inst[name]
-            if getattr(dev, "HAS_TERMINAL_LINEARIZATION", False):
-                G4, C4 = dev.get_terminal_linearization(*bpts[name])
-                stamp_dense_lti(
-                    G, C, RHS_G, RHS_C,
-                    (d, g, s, ("v", 0.0)),
-                    G4, C4,
-                )
-            else:
-                p = ss[name]
-                stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
-                               p["gm"], p["gds"], p["Cgs"], p["Cgd"])
-        for a, b, cap in ac_caps:
-            stamp_adm(C, RHS_C, a, b, cap)
-        for _, a, b, _, gval in ac_res:
-            stamp_adm(G, RHS_G, a, b, gval)
-        for p, q, cp, cn, gm in plan.ac_vccs(ac_drives):
-            stamp_vccs(G, RHS_G, p, cp, cn, gm)
-        for p, q, bi, e_ac in plan.ac_vsources(ac_drives):
-            stamp_vsource(G, RHS_G, p, q, bi, e_ac)
-        for p, q, cp, cn, bi, mu in plan.ac_vcvs(ac_drives):
-            stamp_vcvs(G, RHS_G, p, q, cp, cn, bi, mu)
-        for p, q, ctrl_bi, beta in plan.ac_cccs(ac_drives):
-            stamp_cccs(G, RHS_G, p, q, ctrl_bi, beta)
-        for p, q, ctrl_bi, bi, gamma in plan.ac_ccvs(ac_drives):
-            stamp_ccvs(G, RHS_G, p, q, ctrl_bi, bi, gamma)
-        jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
-        Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]
-        RHS = RHS_G[None, :] + jw[:, None] * RHS_C[None, :]
-        V = np.linalg.solve(Y, RHS[..., None])[..., 0]
+    lti_problem = build_lti_problem(
+        plan, devs, _dev_inst, bpts, ss, ac_caps, ac_res,
+        plan.ac_vccs(ac_drives), ac_drives)
+    V = complex_array(lti_problem.solve(np.asarray(freqs, float)))
     out = np.zeros(len(freqs), dtype=complex)
     for node, weight in out_weights.items():
         out += weight * V[:, plan.idx[node]]
@@ -479,7 +436,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
         "branch_currents": branch_currents,
         "ss": ss,
         "corner": corner,
-        "rust_lti_solver": current_engine() == "rust",
+        "rust_lti_solver": True,
     })
     # Avoid a non-serializable public dictionary key while allowing an immediate
     # noise analysis to reuse already-elaborated foundry model cards.

@@ -30,7 +30,6 @@ from .device_factory import (
 from .adaptive_config import resolve_adaptive_config
 from .topology import AFE_TOPO
 from .transient_solver import transient
-from ._engine import current_engine
 from . import diagnostics
 
 if TYPE_CHECKING:
@@ -38,14 +37,12 @@ if TYPE_CHECKING:
 
 
 def _r3_periodic_reference_context(function):
-    """Keep pre-R4 OTFT orbit setup on the reference scalar equations."""
+    """Keep OTFT orbit setup on the compiled reference oracle (root selection)."""
     @wraps(function)
     def wrapped(*args, **kwargs):
-        if current_engine() != "rust":
-            return function(*args, **kwargs)
-        from .pmos_tft_model import rust_otft_reference_mode
+        from .pmos_tft_model import otft_reference_mode
 
-        with rust_otft_reference_mode():
+        with otft_reference_mode():
             return function(*args, **kwargs)
 
     return wrapped

@@ -4,7 +4,7 @@ from contextvars import ContextVar
 import numpy as np
 from scipy.optimize import fsolve
 
-from .device_model import TransistorModel, NumbaParams, register_pdk
+from .device_model import TransistorModel, OtftParams, register_pdk
 from . import diagnostics
 
 
@@ -12,27 +12,27 @@ from . import diagnostics
 # (``circuitopt_core.OtftModel``). Two bit-distinct modes exist: the production
 # path (``reference=False``, frozen against the golden corpus) and the
 # root-selection recovery oracle (``reference=True``) — the exact equations the
-# retired Python ``_impl`` kernels used to provide (``powf(2.0)`` Vt, the
+# retired Python ``_impl`` kernels used to provide (libm-pow ``Vt`` square, the
 # finite-difference Jacobian Newton, and the finite-difference terminal
-# derivatives). ``rust_otft_reference_mode`` selects the oracle through the
+# derivatives). ``otft_reference_mode`` selects the oracle through the
 # thread-local flag below; see ``docs/rust_core_rewrite_plan.md`` §4-D4.
-_RUST_OTFT_SCALAR_ENABLED = ContextVar("rust_otft_scalar_enabled", default=True)
+_OTFT_REFERENCE_ACTIVE = ContextVar("otft_reference_active", default=False)
 
 
 @contextmanager
-def rust_otft_reference_mode():
-    """Temporarily select the rust OTFT reference oracle for root recovery.
+def otft_reference_mode():
+    """Temporarily select the compiled OTFT reference oracle for root recovery.
 
     Inside the context, :meth:`PMOS_TFT._get_rust_model` returns
     ``OtftModel(..., reference=True)`` — the compiled reproduction of the former
     Python ``_impl`` scalar equations — so bifurcation-edge OTFT screens keep the
     calibrated root choice under the rust engine.
     """
-    token = _RUST_OTFT_SCALAR_ENABLED.set(False)
+    token = _OTFT_REFERENCE_ACTIVE.set(True)
     try:
         yield
     finally:
-        _RUST_OTFT_SCALAR_ENABLED.reset(token)
+        _OTFT_REFERENCE_ACTIVE.reset(token)
 
 class PMOS_TFT(TransistorModel):
     """
@@ -344,9 +344,9 @@ class PMOS_TFT(TransistorModel):
 
     # ── TransistorModel interface methods ────────────────────────────────
 
-    def get_numba_params(self):
-        """Return the scalar parameter bundle consumed by numba kernels."""
-        return NumbaParams(
+    def get_otft_params(self):
+        """Return the scalar parameter bundle consumed by the compiled kernels."""
+        return OtftParams(
             Vfb=self.Vfb,
             Vss=self.Vss,
             Lc=self.Lc,
@@ -368,18 +368,18 @@ class PMOS_TFT(TransistorModel):
     def _get_rust_model(self):
         """Return the compiled OTFT scalar model for the active mode.
 
-        Production (``reference=False``) unless ``rust_otft_reference_mode`` is
+        Production (``reference=False``) unless ``otft_reference_mode`` is
         active on this thread, in which case the reference recovery oracle
         (``reference=True``) is returned. Both are cached per instance. ``rust``
         is the sole engine in v2.0.0, so this always returns a model.
         """
-        reference = not _RUST_OTFT_SCALAR_ENABLED.get()
+        reference = _OTFT_REFERENCE_ACTIVE.get()
         cached = self._rust_model_ref if reference else self._rust_model
         if cached is not None:
             return cached
         import circuitopt_core
 
-        params = self.get_numba_params()
+        params = self.get_otft_params()
         values = [
             params.Vfb, params.Vss, params.Lc, params.lambda_,
             params.contact_scale, params.channel_exponent,

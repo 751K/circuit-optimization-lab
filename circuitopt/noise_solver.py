@@ -28,14 +28,11 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 from .device_model import create_device, get_default_model_type
-from .ac_mna import (stamp_adm, stamp_dense_lti, stamp_mos_lti, stamp_vccs,
-                     stamp_vsource, stamp_vcvs, stamp_cccs, stamp_ccvs)
 from .ac_solver import ac_solve
 from .device_factory import (apply_silicon_corner, build_devices, dev_corner,
                              dev_nf, resolve_binding)
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
-from ._engine import current_engine
 from . import diagnostics
 
 if TYPE_CHECKING:
@@ -109,7 +106,6 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
     ac_res = plan.ac_resistors()
     ac_vccs = plan.ac_vccs()
     inj = {name: (d, s) for name, d, g, s in devs}   # drain/source for noise injection
-    NN = plan.n_aug
 
     # per-device noise PSD
     psd = {}
@@ -135,10 +131,10 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
         dev_psd[rname] = np.zeros(len(freqs))
     res_inj = [(rname, a, b, 4.0 * _KB * _TEMP / R)
                for rname, a, b, R, _ in ac_res]  # (name, term_a, term_b, S_th)
-    sense = plan.output_sense(dtype=(float if current_engine() == "rust" else complex))
+    sense = plan.output_sense(dtype=float)
 
     native_noise = None
-    if (current_engine() == "rust" and dev_inst and all(
+    if (dev_inst and all(
         getattr(dev_inst[name], "HAS_TERMINAL_NOISE", False)
         and callable(getattr(dev_inst[name], "create_native_solver_handle", None))
         for name in bpts
@@ -167,52 +163,12 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
             for handle in native_handles:
                 handle.close()
 
-    if current_engine() == "rust":
-        from ._rust_lti import build_lti_problem, complex_array
+    from ._rust_lti import build_lti_problem, complex_array
 
-        lti_problem = build_lti_problem(
-            plan, devs, dev_inst, bpts, ss, ac_caps, ac_res, ac_vccs)
-        tvec = complex_array(lti_problem.solve_transpose(
-            np.asarray(freqs, float), sense))
-    else:
-        G = np.zeros((NN, NN), dtype=complex)
-        C = np.zeros((NN, NN), dtype=complex)
-        RHS_G = np.zeros(NN, dtype=complex)
-        RHS_C = np.zeros(NN, dtype=complex)
-        for name, d, g, s in devs:
-            dev = dev_inst[name]
-            if getattr(dev, "HAS_TERMINAL_LINEARIZATION", False):
-                G4, C4 = dev.get_terminal_linearization(*bpts[name])
-                stamp_dense_lti(
-                    G, C, RHS_G, RHS_C,
-                    (d, g, s, ("v", 0.0)),
-                    G4, C4,
-                )
-            else:
-                p = ss[name]
-                stamp_mos_lti(G, C, RHS_G, RHS_C, d, g, s,
-                               p["gm"], p["gds"], p["Cgs"], p["Cgd"])
-        for a, b, cap in ac_caps:
-            stamp_adm(C, RHS_C, a, b, cap)
-        for _, a, b, _, gval in ac_res:
-            stamp_adm(G, RHS_G, a, b, gval)
-        for p, q, cp, cn, gm in ac_vccs:
-            stamp_vccs(G, RHS_G, p, cp, cn, gm)
-        for p, q, bi, e_ac in plan.ac_vsources():
-            stamp_vsource(G, RHS_G, p, q, bi, e_ac)
-        for p, q, cp, cn, bi, mu in plan.ac_vcvs():
-            stamp_vcvs(G, RHS_G, p, q, cp, cn, bi, mu)
-        for p, q, ctrl_bi, beta in plan.ac_cccs():
-            stamp_cccs(G, RHS_G, p, q, ctrl_bi, beta)
-        for p, q, ctrl_bi, bi, gamma in plan.ac_ccvs():
-            stamp_ccvs(G, RHS_G, p, q, ctrl_bi, bi, gamma)
-
-        jw = (2j * np.pi) * np.asarray(freqs, dtype=float)
-        Y = G[None, :, :] + jw[:, None, None] * C[None, :, :]
-        tvec = np.linalg.solve(
-            np.swapaxes(Y, 1, 2),
-            np.broadcast_to(sense, (len(freqs), NN))[..., None],
-        )[..., 0]
+    lti_problem = build_lti_problem(
+        plan, devs, dev_inst, bpts, ss, ac_caps, ac_res, ac_vccs)
+    tvec = complex_array(lti_problem.solve_transpose(
+        np.asarray(freqs, float), sense))
 
     def transimpedance(term_d, term_s):
         Z = np.zeros(len(freqs), dtype=complex)
@@ -295,7 +251,7 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
         "irn_psd": out_psd / np.maximum(Hmag ** 2, 1e-300),
         "psd_split": psd_split,
         "dc": dc,
-        "rust_lti_solver": current_engine() == "rust",
+        "rust_lti_solver": True,
     }
 
 

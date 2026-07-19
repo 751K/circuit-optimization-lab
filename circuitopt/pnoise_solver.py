@@ -33,17 +33,13 @@ from .device_factory import (
     resolve_binding,
 )
 from .noise_solver import band_rms, noise_analysis
-from .numba_kernels import (_pnoise_hb_blocks_impl, pnoise_fold_psd_numba,
-                            pnoise_hb_blocks_numba, py_impl)
-from ._engine import current_engine
 from .pac_solver import (
-    _reference_pac_linearization,
     _conversion_charge_caps,
     _freeze_kwargs,
     _freeze_nf,
     _freeze_sizes,
     _is_constant_wave,
-    _try_rust_pac_linearization,
+    _rust_pac_linearization,
     pac_solve,
 )
 from . import diagnostics
@@ -218,32 +214,16 @@ def _try_lti_noise_fast_path(sizes, bias, freqs, *, pss_result, nf, corner,
         "pnoise_hb_size": 0,
         "pnoise_hb_solve_count": 0,
         "pnoise_noise_source_count": len(noise.get("dev_psd", {})),
-        "pnoise_numba_hb_used": False,
-        "pnoise_numba_fold_used": False,
         "pnoise_rust_hb_used": False,
         "pnoise_rust_fold_used": False,
     }
 
 
 def _hb_blocks(Gf, Cf, K, N, n, fundamental, *, charge_caps=False):
-    """Dense HB conversion blocks. Single-sourced onto ``_pnoise_hb_blocks_impl``
-    (jitted for large systems, interpreted `.py_func` below the JIT-worthwhile
-    size)."""
-    if current_engine() == "rust":
-        from ._rust_periodic import hb_blocks
+    """Dense HB conversion blocks (compiled kernel)."""
+    from ._rust_periodic import hb_blocks
 
-        Y_base, C_block = hb_blocks(Gf, Cf, K, fundamental, charge_caps)
-        return Y_base, C_block, False, True
-    use_numba = (
-        pnoise_hb_blocks_numba is not None and
-        (2 * int(K) + 1) * int(n) >= 16
-    )
-    kernel = _pnoise_hb_blocks_impl if use_numba else py_impl(_pnoise_hb_blocks_impl)
-    Y_base, C_block = kernel(
-        np.asarray(Gf, dtype=np.complex128),
-        np.asarray(Cf, dtype=np.complex128),
-        int(K), float(fundamental), bool(charge_caps))
-    return Y_base, C_block, use_numba, False
+    return hb_blocks(Gf, Cf, K, fundamental, charge_caps)
 
 
 def _hb_blocks_sparse(Gf, Cf, K, N, n, fundamental, drop_tol=0.0,
@@ -744,23 +724,13 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         dev_inst = build_devices(all_sizes, nf=all_nf, corner=corner, topo=topo,
                                  model_types=model_types,
                                  device_kwargs=device_kwargs)
-        rust_lin = _try_rust_pac_linearization(
+        Gt, Ct, _gdrive, _cdrive, n_gate1 = _rust_pac_linearization(
             all_sizes, all_nf, corner, topo, tbias, t_uniform,
             node_wave, input_wave, node_inputs, (),
             charge_caps=charge_caps,
             internal_gate_states=internal_gate_states,
             dev_inst=dev_inst,
         )
-        if rust_lin is not None:
-            Gt, Ct, _gdrive, _cdrive, n_gate1 = rust_lin
-        else:
-            Gt, Ct, _gdrive, _cdrive, n_gate1 = _reference_pac_linearization(
-                all_sizes, all_nf, corner, topo, tbias, t_uniform,
-                node_wave, input_wave, node_inputs, (), np.empty(0, dtype=complex),
-                charge_caps=charge_caps,
-                internal_gate_states=internal_gate_states,
-                dev_inst=dev_inst,
-            )
         n_state = Gt.shape[1]
         Sth = np.zeros((len(devices), N))
         Sfl = np.zeros((len(devices), N))
@@ -941,7 +911,6 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
     C_block = None
     Y_sparse = None
     C_sparse = None
-    hb_numba_used = False
     hb_rust_used = False
     if hb_cache_hit:
         hb = cache[hb_key]
@@ -949,7 +918,6 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         C_block = hb.get("C_block")
         Y_sparse = hb.get("Y_base_sparse")
         C_sparse = hb.get("C_block_sparse")
-        hb_numba_used = bool(hb.get("numba_used", False))
         hb_rust_used = bool(hb.get("rust_used", False))
     else:
         hb = {}
@@ -980,12 +948,12 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         hb_sparse_min_size, hb_sparse_max_density)
     need_dense = solver_used == "dense" or Y_sparse is None or C_sparse is None
     if need_dense and (Y_base is None or C_block is None):
-        Y_base, C_block, hb_numba_used, hb_rust_used = _hb_blocks(
+        Y_base, C_block = _hb_blocks(
             Gf, Cf, K, N, n_state, fundamental, charge_caps=charge_caps)
+        hb_rust_used = True
         hb["Y_base"] = Y_base
         hb["C_block"] = C_block
-        hb["numba_used"] = bool(hb_numba_used)
-        hb["rust_used"] = bool(hb_rust_used)
+        hb["rust_used"] = True
         if prefer_sparse and (Y_sparse is None or C_sparse is None) and hb_sparse_drop_tol == 0.0:
             try:
                 Y_sparse, C_sparse = _to_sparse_hb(Y_base, C_block)
@@ -1156,26 +1124,15 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         adjs[fi] = adj
     hb_solve_time_s = time.perf_counter() - t_solve0
 
-    fold_work = len(freqs) * max(1, len(source_grids)) * nb * nb
-    # The numba fold accepts explicit source indices into the adjoint vector;
-    # bordered (vsource) adjoints are wider, so fold those in Python.
     has_terminal_noise = any(
         source[-2] == "terminal" for source in source_grids)
-    use_rust_fold = (
-        current_engine() == "rust"
-        and nbr == 0
-        and not has_terminal_noise
-    )
-    use_numba_fold = (
-        pnoise_fold_psd_numba is not None
-        and fold_work >= 1000
-        and nbr == 0
-        and not has_terminal_noise
-        and not use_rust_fold
-    )
+    # The compiled fold accepts node-index adjoints only; bordered (vsource)
+    # adjoints are wider and terminal-noise sources need the general path, so
+    # those fold in Python below.
+    use_rust_fold = nbr == 0 and not has_terminal_noise
     source_names = [name for name, *_ in source_grids]
     t_fold0 = time.perf_counter()
-    if use_numba_fold or use_rust_fold:
+    if use_rust_fold:
         ns = len(source_grids)
         p_indices = np.full((ns, nb), -1, dtype=np.int64)
         q_indices = np.full((ns, nb), -1, dtype=np.int64)
@@ -1195,12 +1152,9 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
             np.asarray(freqs, dtype=np.float64), int(K), float(fundamental),
             p_indices, q_indices, sth_stack, mfl_stack,
         )
-        if use_rust_fold:
-            from ._rust_periodic import fold_psd
+        from ._rust_periodic import fold_psd
 
-            out_psd, dev_stack = fold_psd(*args)
-        else:
-            out_psd, dev_stack = pnoise_fold_psd_numba(*args)
+        out_psd, dev_stack = fold_psd(*args)
         dev_psd = {
             name: np.asarray(dev_stack[si], dtype=float)
             for si, name in enumerate(source_names)
@@ -1292,8 +1246,6 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         "pnoise_noise_source_count": int(len(noise_sources)),
         "pnoise_terminal_noise_source_count": int(sum(
             source[-2] == "terminal" for source in source_grids)),
-        "pnoise_numba_hb_used": bool(hb_numba_used),
-        "pnoise_numba_fold_used": bool(use_numba_fold),
         "pnoise_rust_hb_used": bool(hb_rust_used),
         "pnoise_rust_fold_used": bool(use_rust_fold),
         "pnoise_time_domain_used": bool(pnoise_time_domain_used),
