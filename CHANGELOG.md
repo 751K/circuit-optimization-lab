@@ -19,6 +19,48 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Changed (breaking, v2.0.0) / 破坏性变更（v2.0.0）
+
+- **Rust is the only compute engine / Rust 成为唯一计算引擎**
+
+  **English:** The compiled Rust core (`circuitopt_core`, `CIRCUIT_ENGINE=rust`)
+  is now the sole engine. The `--engine` flag and `CIRCUIT_ENGINE` env var are
+  retained (compatibility contract) but accept only `rust`; the former `numba`
+  (JIT) and `python` (pure-Python) engine values now raise a clear error that
+  points here. The main package (`circuit-optimization`) hard-depends on and
+  **pins `circuitopt-core` exactly to its own version** — the two distributions
+  are built and released together, kept in lockstep by `tools/version.py` (a
+  `version.py check` failure blocks drift).
+
+  **中文：** 编译 Rust 核（`circuitopt_core`，`CIRCUIT_ENGINE=rust`）现为唯一
+  引擎。`--engine`/`CIRCUIT_ENGINE` 保留（契约）但仅接受 `rust`；旧的 `numba`
+  与 `python` 引擎值会明确报错并指向本处。主包 `circuit-optimization` 硬依赖并
+  **精确 pin `circuitopt-core` 到同一版本**——两个发行版一起构建发布，由
+  `tools/version.py` 锁死（`version.py check` 拒绝漂移）。
+
+### Removed (breaking, v2.0.0) / 移除（破坏性，v2.0.0）
+
+- **numba engine and dependency / numba 引擎与依赖**
+
+  **English:** The optional numba JIT engine and the `numba` runtime dependency
+  were removed. `--no-numba` and `CIRCUIT_USE_NUMBA` (and `--engine numba` /
+  `--engine python`) are now hard errors, not silent no-ops. The pure-Python
+  `_impl` scalar kernels in `numba_kernels.py` are **retained** — not as a
+  selectable engine, but as the differential **reference oracle** (the OTFT
+  root-selection recovery the rust engine invokes on sensitive circuits, and the
+  source mirrored by the frozen golden device grids). `numba_transient.py` and
+  the numba BSIM4 transient arm were deleted. The frozen golden corpus
+  (`tests/golden/engine_parity`, re-frozen under rust) is now the reference
+  oracle for engine parity.
+
+  **中文：** 移除可选 numba JIT 引擎与 `numba` 运行时依赖。`--no-numba`、
+  `CIRCUIT_USE_NUMBA`（以及 `--engine numba`/`--engine python`）现为明确报错，
+  不再静默无操作。`numba_kernels.py` 的纯 Python `_impl` 标量内核**保留**——不作
+  为可选引擎，而作为差分**参考 oracle**（rust 引擎在敏感电路上调用的 OTFT 选根
+  恢复路径，以及冻结 golden 器件网格的镜像来源）。删除 `numba_transient.py` 与
+  numba BSIM4 瞬态臂。冻结 golden 语料（`tests/golden/engine_parity`，已在 rust
+  下重冻结）成为引擎 parity 的参考 oracle。
+
 ### Added / 新增
 
 - **Rust BSIM4.5 native backend (R2) / Rust 原生 BSIM4.5 后端（R2）**

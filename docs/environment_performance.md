@@ -1,10 +1,18 @@
 # 运行环境与性能基准
 
+> **v2.0.0 基线变更（新）：numba 引擎已移除，编译 Rust 核（`circuitopt_core`，
+> `CIRCUIT_ENGINE=rust`）成为唯一计算引擎。** 因此下文所有以 Numba 为前提的性能
+> 指引与“确认 Numba 在跑”的步骤均为**历史记录（v1.x）**，已被 Rust 核取代：现在
+> 跑性能的前提是**装好编译核**（`maturin develop --release -m rust/crates/co-py/
+> Cargo.toml`，或 `pip install circuitopt-core`）。`numba_kernels.py` 的 `_impl`
+> 仅作差分参考 oracle，不再是性能路径。新基线随 Rust 核演进，见
+> `results/engine_baseline_v140.json` 与基准脚本 `benchmarks/`。
+
 > **文档状态：带日期的性能快照。** 本页记录特定机器、Python/Numba 版本和缓存状态
 > 下的历史测量，用于定位性能数量级，不是当前版本的固定 SLA。功能和命令以维护中
 > 文档及实际基准脚本为准。
 
-> 一句话：**跑性能一定要用装了 Numba 的项目虚拟环境**。不含 Numba 的解释器
+> 一句话（历史 v1.x）：**跑性能一定要用装了 Numba 的项目虚拟环境**。不含 Numba 的解释器
 > 会静默回落到解释版内核，chopper 慢约 **28×**（7.5s → 221s），容易误判为“变慢了”。
 
 ## 为什么环境会决定快慢

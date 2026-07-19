@@ -419,8 +419,11 @@ Array form: `["V1", "IN", "GND", 2.0]`. At least one of `p`, `q` must be a solve
   reports the source currents under `branch_currents` (sign: `p → q` through the source).
 - **AC / Noise** treat a DC source as a short (AC ground); the ideal source carries no
   thermal noise. If the source name appears in `ac_drives`, it acts as an AC stimulus.
-- **Transient** supports constant or waveform‑keyed `E(t)`. Circuits containing a voltage
-  source run on the pure‑Python `n_aug` path (the numba kernels are fixed at `n` nodes).
+- **Transient** supports constant or waveform‑keyed `E(t)`. The compiled rust fixed‑grid
+  kernels operate on `n` nodes, so circuits containing a voltage source fall to the
+  pure‑Python `_impl` reference path over the augmented `n_aug` system (as of v2.0.0 the
+  numba engine is gone; both `rust_grid_solver` and the retired `numba_grid_solver`
+  report `False` for this path).
 - **PSS / PAC / PNoise** are supported too: the shooting monodromy and the harmonic‑balance
   matrices are bordered with the branch‑current unknowns (PNoise forces its dense path when
   a source is present).

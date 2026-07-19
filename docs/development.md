@@ -103,10 +103,11 @@ and `co-py` — the `circuitopt_core` PyO3 extension. `co-bsim4` compiles the
 builds, minus `host.c`) at build time via the `cc` crate and reimplements the
 `host.c` adapter layer in Rust (parameter binding, internal-node reduction,
 terminal I/G/Q/C extraction, noise combination); `bindgen` derives the shared
-struct layouts so the port keeps an identical ABI with the compiled C. With
-`CIRCUIT_ENGINE=rust`, OTFT/BSIM4 transient and AC/noise MNA run through this
-core. Periodic HB/PAC/PNoise assembly remains Python-owned until R4; transient
-period solves already dispatch to Rust.
+struct layouts so the port keeps an identical ABI with the compiled C. As of
+v2.0.0 this core is the sole engine: OTFT/BSIM4 transient, AC/noise MNA, the
+periodic HB/PAC/PNoise assembly, and the no-GIL design-space campaign all run
+through it. SciPy sparse/FFT orchestration and the DC basin/root-selection
+control plane remain in Python.
 
 The coarse PyO3 entry points accept read-only, C-contiguous NumPy arrays for
 frequency grids, source waveforms, states, and device grids. Rust borrows those
@@ -130,20 +131,24 @@ cargo test --workspace
 maturin develop --release -m crates/co-py/Cargo.toml
 ```
 
-Engine selection: the solvers run on one of three engines, chosen by the CLI
-`--engine` flag or the `CIRCUIT_ENGINE` environment variable (precedence
-argv > env > default):
+Engine selection: **as of v2.0.0 `rust` is the only compute engine.** The
+`--engine` flag and `CIRCUIT_ENGINE` environment variable are retained (§7
+compatibility contract) but accept only `rust`; the former `numba` (JIT) and
+`python` (pure-Python) engines — and the `--no-numba` / `CIRCUIT_USE_NUMBA`
+switches — were removed and now raise a clear error that points at the
+CHANGELOG. `circuitopt.current_engine()` reports the active engine (always
+`rust`).
 
-- `numba` (default) — the JIT kernels;
-- `python` — the pure-Python fallback, same switch as `--no-numba`;
-- `rust` — requires `circuitopt_core`; when it is not installed the run warns
-  once and falls back to `numba`.
+The pure-Python `_impl` kernels in `numba_kernels.py` are **not** a selectable
+engine anymore; they survive as the differential *reference oracle* (D4) —
+the OTFT scalar equations used by the rust engine's root-selection recovery
+(`pmos_tft_model.rust_otft_reference_mode`) and mirrored by the frozen golden
+device grids.
 
-`circuitopt.current_engine()` reports the resolved engine. CI lints the
-workspace (`cargo fmt` + `clippy`), installs `circuitopt_core` in the test
-matrix so the rust-present tests run, and the release workflow archives
-per-OS `circuitopt_core` wheels as build artifacts (attached to GitHub
-Releases only from R6).
+CI lints the workspace (`cargo fmt` + `clippy`), installs `circuitopt_core` in
+the test matrix so the solvers can run, and the release workflow builds and
+publishes both distributions together (the `circuit-optimization` sdist/wheel
+and per-OS `circuitopt_core` wheels).
 
 ### BSIM4.5 backend selector (R2)
 
@@ -230,6 +235,12 @@ Check every backend capability path touched by the change:
 - native FreePDK45 BSIM4;
 - native TSMC28 BSIM4;
 - explicit ngspice oracle helpers.
+- **Rust core (`co-core`/`co-bsim4`).** The production numerics live in Rust
+  (engine=rust). A change to a solver kernel's math must be made in *both* the
+  Rust port and the pure-Python `_impl` reference in `numba_kernels.py` (the
+  differential oracle, D4), and re-validated against the frozen golden corpus:
+  `python tools/freeze_engine_golden.py verify`. Rebuild the core after Rust
+  edits: `maturin develop --release -m rust/crates/co-py/Cargo.toml`.
 
 A solver optimization must preserve numerical behavior within an explicit
 tolerance. Do not use benchmark speed as a substitute for a regression check.

@@ -39,7 +39,8 @@ circuitopt/
   device_factory.py    器件构建/解析层（build_devices、get_ss_params）+ corner 路由（OTFT CORNERS、
                         硅工艺 apply_silicon_corner）。leaf 模块：只依赖 device_model。
   pmos_tft_model.py    AT4000TG PMOS-OTFT 紧凑模型实现。
-  numba_kernels.py     可选 Numba 加速标量内核。
+  numba_kernels.py     纯 Python `_impl` 标量参考内核（v2.0.0 起移除 numba
+                        JIT/依赖；编译 Rust 核为唯一引擎，这些 `_impl` 是其差分参考 oracle）。
   ac_mna.py            MNA stamp 原语。
   ac_solver.py         纯 AC 小信号求解器：DC 工作点 + AC 响应（ac_solve）。
   dc_solver.py         DC 求解 fallback（有界最小二乘）+ AFE 专用对称 DC seeding/续流启发式。
@@ -86,7 +87,7 @@ circuitopt/
 topology.py          <- 无内部依赖
 compiled_topology.py <- 无内部依赖；运行时消费 Topology 风格对象
 circuit_loader.py    <- topology
-numba_kernels.py     <- 无内部依赖；运行时可选 numba
+numba_kernels.py     <- 无内部依赖；纯 Python `_impl` 参考（v2.0.0 起无 numba）
 device_model.py      <- 无内部依赖（仅 abc、dataclasses）
 device_factory.py    <- 仅 device_model（leaf 器件层；不 import 任何 solver/workflow 模块）
 pmos_tft_model.py    <- 可选 numba_kernels、device_model

@@ -47,7 +47,9 @@ circuitopt/
                         (OTFT CORNERS, silicon apply_silicon_corner). Leaf module: depends
                         only on device_model.
   pmos_tft_model.py    AT4000TG PMOS-OTFT compact-model implementation.
-  numba_kernels.py     Optional Numba-accelerated scalar kernels.
+  numba_kernels.py     Pure-Python `_impl` scalar reference kernels (v2.0.0: numba
+                        JIT/dependency removed; the compiled Rust core is the sole
+                        engine, these `_impl` are its differential reference oracle).
   ac_mna.py            MNA stamping primitives.
   ac_solver.py         Pure AC small-signal solver: DC operating point + AC response (ac_solve).
   dc_solver.py         DC solve fallback (bounded least squares) + AFE-specific symmetric DC
@@ -95,7 +97,7 @@ circuitopt/
 topology.py          <- no internal dependency
 compiled_topology.py <- no internal dependency; consumes Topology-like objects at runtime
 circuit_loader.py    <- topology
-numba_kernels.py     <- no internal dependency; optional numba at runtime
+numba_kernels.py     <- no internal dependency; pure-Python `_impl` reference (no numba as of v2.0.0)
 device_model.py      <- no internal dependency (abc, dataclasses only)
 device_factory.py    <- device_model only (leaf device layer; no solver/workflow imports)
 pmos_tft_model.py    <- optional numba_kernels, device_model

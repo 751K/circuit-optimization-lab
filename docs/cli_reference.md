@@ -62,7 +62,8 @@ circuit-opt run examples/tsmc28hpcp_5t_ota.json \
 | `--corner` | 覆盖工艺角；AT4000TG 为 `typical/slow/fast`，硅工艺使用各自支持的 corner |
 | `--noise-band LO HI` | CLI 汇总中的噪声积分带宽，默认 `0.05 100.0` Hz |
 | `-o`, `--output` | 把结果写成 JSON |
-| `--no-numba` | 在进程首次导入内核前禁用 Numba |
+| `--engine {rust}` | 计算引擎；v2.0.0 起仅 `rust`（省略即默认 `rust`） |
+| `--no-numba` | **已在 v2.0.0 移除（会报错）**：numba 引擎不再存在，改用 `--engine rust` |
 | `--quiet` | 关闭进度和摘要输出 |
 
 `run` 的具体数值选项来自 JSON 顶层 `analyses` 块。字段见
@@ -92,7 +93,7 @@ circuit-opt explore examples/tsmc28hpcp_5t_ota.json -n 200 --corner ff
 | `--corner` | 无覆盖 | 求解时使用的工艺角 |
 | `-o`, `--out`, `--output` | 无 | 输出前缀，写 `<prefix>.csv` 和 `<prefix>.jsonl` |
 | `--quiet` | 关闭 | 不打印逐候选进度 |
-| `--no-numba` | 关闭 | 禁用 Numba |
+| `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
 
 可探索变量、约束和目标见 JSON 文档的 `explore` 字段。
 
@@ -121,7 +122,7 @@ circuit-opt corners examples/afe_explore.json \
 | `--freqs-num` | `121` | 对数频率点数 |
 | `--noise-band LO HI` | `0.05 100.0` | IRN 积分带宽 |
 | `-o`, `--output` | 无 | CSV 输出 |
-| `--no-numba` | 关闭 | 禁用 Numba |
+| `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
 | `--quiet` | 关闭 | 关闭逐 corner 输出 |
 
 ## `mc`
@@ -148,7 +149,7 @@ circuit-opt mc examples/afe_explore.json \
 | `--freqs-start/stop/num` | `0.01/10000/121` | AC/noise 网格 |
 | `--noise-band LO HI` | `0.05 100.0` | IRN 积分带宽 |
 | `-o`, `--output` | 无 | JSON 汇总 |
-| `--no-numba` | 关闭 | 禁用 Numba |
+| `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
 | `--quiet` | 关闭 | 关闭进度输出 |
 
 SAR ADC 有独立的 `adc --mc` 流程，其失配语义来自 JSON `adc.mismatch`。
@@ -293,7 +294,7 @@ circuit-opt dataset examples/sky130_chopper.json \
 | `--no-npz` | 关闭 | 不写 dense NPZ |
 | `--parquet` | 关闭 | 额外写 Parquet，需要 `parquet` extra |
 | `--quiet` | 关闭 | 关闭进度 |
-| `--no-numba` | 关闭 | 禁用 Numba |
+| `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
 
 ## Surrogate 与优化
 
