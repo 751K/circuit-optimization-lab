@@ -119,3 +119,8 @@ __all__ = [
     "load_sar_explore_json",
     "sar_explore_from_dict",
 ]
+
+# v1.x compatibility alias (plan §7): OtftParams was named NumbaParams
+# before the v2.0.0 numba teardown; deep-path importers keep working.
+NumbaParams = OtftParams
+__all__.append("NumbaParams")
