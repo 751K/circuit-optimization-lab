@@ -4,8 +4,9 @@
 > `CIRCUIT_ENGINE=rust`）成为唯一计算引擎。** 因此下文所有以 Numba 为前提的性能
 > 指引与“确认 Numba 在跑”的步骤均为**历史记录（v1.x）**，已被 Rust 核取代：现在
 > 跑性能的前提是**装好编译核**（`maturin develop --release -m rust/crates/co-py/
-> Cargo.toml`，或 `pip install circuitopt-core`）。`numba_kernels.py` 的 `_impl`
-> 仅作差分参考 oracle，不再是性能路径。新基线随 Rust 核演进，见
+> Cargo.toml`，或 `pip install circuitopt-core`）。`numba_kernels.py` 已于 R7
+> 整体移除（其 OTFT 选根恢复 oracle 移植进 `circuitopt_core` 的
+> `OtftModel(reference=True)`）。新基线随 Rust 核演进，见
 > `results/engine_baseline_v140.json` 与基准脚本 `benchmarks/`。
 
 > **文档状态：带日期的性能快照。** 本页记录特定机器、Python/Numba 版本和缓存状态
@@ -24,13 +25,14 @@
 - 推荐先 `source .venv/bin/activate`；路径不写死，Numba/NumPy/Python 的实际版本以
   当前环境为准。
 
-### 确认 Numba 真的在跑
+### 确认 Numba 真的在跑（历史 v1.x；该模块已随 numba 引擎移除）
 
 ```bash
-CIRCUIT_USE_NUMBA=1 python -c "
-import circuitopt.numba_kernels as nk
-k = nk._transient_solve_adaptive_gear2_impl
-print('jitted:', hasattr(k, 'py_func'), type(k).__name__)"
+# v1.x 历史命令（numba_kernels.py 已删除，仅存档）：
+# CIRCUIT_USE_NUMBA=1 python -c "
+# import circuitopt.numba_kernels as nk
+# k = nk._transient_solve_adaptive_gear2_impl
+# print('jitted:', hasattr(k, 'py_func'), type(k).__name__)"
 # 期望: jitted: True CPUDispatcher   ← 已启用
 # 若为   jitted: False function      ← 走的是解释版，慢 28×
 ```

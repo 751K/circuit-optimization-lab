@@ -42,14 +42,11 @@ circuitopt/
   topology.py          Circuit topology source of truth.
   compiled_topology.py Runtime-compiled topology/index/stamp metadata.
   circuit_loader.py    JSON circuit description loader.
-  device_model.py      TransistorModel ABC + NumbaParams + model factory/registry + PDK/polarity layer.
+  device_model.py      TransistorModel ABC + OtftParams + model factory/registry + PDK/polarity layer.
   device_factory.py    Device build/resolve layer (build_devices, get_ss_params) + corner routing
                         (OTFT CORNERS, silicon apply_silicon_corner). Leaf module: depends
                         only on device_model.
   pmos_tft_model.py    AT4000TG PMOS-OTFT compact-model implementation.
-  numba_kernels.py     Pure-Python `_impl` scalar reference kernels (v2.0.0: numba
-                        JIT/dependency removed; the compiled Rust core is the sole
-                        engine, these `_impl` are its differential reference oracle).
   ac_mna.py            MNA stamping primitives.
   ac_solver.py         Pure AC small-signal solver: DC operating point + AC response (ac_solve).
   dc_solver.py         DC solve fallback (bounded least squares) + AFE-specific symmetric DC
@@ -97,19 +94,18 @@ circuitopt/
 topology.py          <- no internal dependency
 compiled_topology.py <- no internal dependency; consumes Topology-like objects at runtime
 circuit_loader.py    <- topology
-numba_kernels.py     <- no internal dependency; pure-Python `_impl` reference (no numba as of v2.0.0)
 device_model.py      <- no internal dependency (abc, dataclasses only)
 device_factory.py    <- device_model only (leaf device layer; no solver/workflow imports)
-pmos_tft_model.py    <- optional numba_kernels, device_model
+pmos_tft_model.py    <- device_model (equations in circuitopt_core.OtftModel)
 ac_mna.py            <- no internal dependency
 ac_solver.py         <- device_factory, dc_solver, topology, compiled_topology, diagnostics
 dc_solver.py         <- device_factory, topology, diagnostics
 noise_solver.py      <- device_model, ac_mna, ac_solver, device_factory, topology, compiled_topology, diagnostics
-transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, numba_kernels, diagnostics
+transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, diagnostics
 transient_profile.py <- no internal dependency (counter slot constants)
 pss_solver.py        <- ac_mna, ac_solver, device_factory, adaptive_config, topology, transient_solver, diagnostics
-pac_solver.py        <- ac_mna, ac_solver, device_factory, numba_kernels, topology, transient_solver, diagnostics
-pnoise_solver.py     <- ac_mna, device_factory, noise_solver, numba_kernels, pac_solver, diagnostics
+pac_solver.py        <- ac_mna, ac_solver, device_factory, topology, transient_solver, diagnostics
+pnoise_solver.py     <- ac_mna, device_factory, noise_solver, pac_solver, diagnostics
 adaptive_config.py   <- no internal dependency (dataclass only)
 analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader, analysis_options
 analysis_options.py  <- no internal dependency (registry)
@@ -154,14 +150,13 @@ Implements the AT4000TG PMOS-OTFT compact model in Python. It provides:
 - Geometry area calculation through `g_area`.
 - Process and mismatch parameters such as `pvt0`, `mvt0`, `pbeta0`, and `mbeta0`.
 - A warm-started internal-node operating point solve.
-- Automatic Numba acceleration for hot scalar kernels when Numba is installed
-  (`CIRCUIT_USE_NUMBA=0` disables it; `CIRCUIT_NUMBA_CACHE=0` disables the
-  default on-disk JIT cache).
+- Compiled scalar kernels: the device equations evaluate in
+  `circuitopt_core.OtftModel` (the sole engine as of v2.0.0).
 
 For AC and noise analysis, the solver extracts terminal `gm` and `gds` by finite-differencing `get_Idc`, matching the terminal behavior used by the circuit solver.
 
 `PMOS_TFT` inherits from :class:`~device_model.TransistorModel`, the abstract
-base class consumed by all solvers. It also provides `get_numba_params()` for the
+base class consumed by all solvers. It also provides `get_otft_params()` for the
 transient solver’s compiled inner loop and a Numba-accelerated `get_ss_params()`
 override.
 
@@ -169,8 +164,8 @@ override.
 
 Defines the abstract device‑model interface that decouples solvers from concrete transistor implementations:
 
-- **`TransistorModel` (ABC)** — seven abstract methods (`get_Idc`, `get_op`, `get_capacitances`, `get_capacitance_charges_from_op`, `get_capacitance_branch_terms_from_op`, `get_noise_psd`, `get_numba_params`); `get_ss_params` provides a finite‑difference default that subclasses can override.
-- **`NumbaParams` (frozen dataclass)** — the 16 scalar parameters extracted once per device and passed to numba‑accelerated transient kernels.
+- **`TransistorModel` (ABC)** — seven abstract methods (`get_Idc`, `get_op`, `get_capacitances`, `get_capacitance_charges_from_op`, `get_capacitance_branch_terms_from_op`, `get_noise_psd`, `get_otft_params`); `get_ss_params` provides a finite‑difference default that subclasses can override.
+- **`OtftParams` (frozen dataclass)** — the 16 scalar parameters extracted once per device and passed to the compiled transient kernels.
 - **Backend-capability class attributes** — generic solvers dispatch on *capabilities*, never on a concrete backend type. `HAS_TERMINAL_LINEARIZATION` (default `False`) advertises the full quasi-static 4×4 terminal `(G, C)` stamp used by AC/PAC/PNoise; native BSIM devices set it to `True`. `TRANSIENT_BACKEND` (default `None`, meaning the selected engine's generic OTFT transient path) names a specialised integrator such as `"bsim4_native"` or an explicit external oracle backend.
 - **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. `get_model_class(model_type)` is a public read-only registry accessor so solvers can inspect a model's capability flags without importing a concrete backend class. `registered_models()` returns a read-only `{model_type: "module.QualName"}` snapshot of the whole registry (insertion order) for a caller that needs to *enumerate* rather than look up one entry — the service layer's `GET /api/v1/capabilities` uses it to list every selectable model key. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged. `register_model()` still *replaces* an existing entry on re-registration (intentional swap-in, e.g. a test stub, keeps working silently), but a genuine collision — a different class (by `__module__.__qualname__`) taking over an already-occupied name, e.g. two PDK modules racing for the same alias — now emits a `RuntimeWarning` before overwriting; a repeat import or `importlib.reload` of the *same* class stays silent.
 
@@ -243,48 +238,15 @@ Loads JSON circuit descriptions and returns a `CircuitSpec` containing:
 
 This lets new circuits be added through JSON files such as `examples/single_stage.json` without editing solver source code. `CircuitSpec.binding()` bundles the spec's `topology`, `model_types`, `device_kwargs`, `nf`, and default DC seed (its first dict `dc_guess`) into a `CircuitBinding` (see `device_factory.py`), so a workflow can pass `binding=` to the solvers instead of threading the whole cluster.
 
-### `numba_kernels.py`
+### `numba_kernels.py` (removed in v2.0.0/R7)
 
-Provides optional Numba kernels for pure scalar hot paths. The module is safe to
-import without Numba installed. When Numba is installed, kernels are enabled by
-default; force the pure-Python path with:
-
-```bash
-CIRCUIT_USE_NUMBA=0
-```
-
-Compiled Numba kernels are cached on disk by default, so later Python processes
-can reuse the generated code instead of paying the full cold JIT cost again.
-Disable only the cache with:
-
-```bash
-CIRCUIT_NUMBA_CACHE=0
-```
-
-The solver path uses Numba automatically whenever it is available; no module
-sets `CIRCUIT_USE_NUMBA=1` at import time (set `CIRCUIT_USE_NUMBA=0` to opt out).
-
-The flag is **baked at import time**: `USE_NUMBA`/`NUMBA_AVAILABLE` are fixed
-constants computed once when `numba_kernels` is first imported, so setting the
-env var afterwards is a silent no-op. `circuitopt/__init__.py` pre-scans `sys.argv`
-for `--no-numba` and sets `CIRCUIT_USE_NUMBA=0` *before* its solver imports pull
-in `numba_kernels` transitively — under `python -m circuitopt …` this `__init__` runs
-before `__main__.py`, so the CLI flag takes effect. Each `__main__.py`
-subcommand handler then calls `_assert_numba_flag(args)`, which raises
-`SystemExit` if `--no-numba` was requested but `numba_kernels.USE_NUMBA` is
-still `True` — turning a defeated pre-scan (e.g. calling `main()` programmatically
-after something already imported a solver module) into a loud failure instead
-of a silently-ignored flag. Disabling Numba from Python code (not the CLI) must
-set `CIRCUIT_USE_NUMBA=0` **before** `import circuitopt`.
-
-At present, the accelerated paths are PMOS current evaluation, internal-node
-Newton iterations, bias-dependent capacitance evaluation, AC/PNoise
-terminal-derivative small-signal parameters, PNoise HB block assembly/noise fold,
-and the transient Newton inner loop: topology token lookup, PMOS state solve,
-residual/Jacobian stamping, and the small dense Newton solve. The dense Newton
-solve uses an in-place `A*x = -R` path to avoid avoidable per-iteration copies.
-If the compiled path cannot handle a step, `transient_solver.py` falls back to
-the original Python Newton / full-Jacobian / least-squares path.
+Historical: this module carried the pure-Python/numba `_impl` scalar and
+transient kernels. The numba JIT went away in R6; in R7 the whole module was
+deleted after its load-bearing part — the OTFT root-selection recovery oracle —
+was ported bit-exactly into the compiled core as
+`circuitopt_core.OtftModel(..., reference=True)` (selected by
+`pmos_tft_model.otft_reference_mode`). The frozen golden corpus
+(`tests/golden/engine_parity`) is the numerical reference oracle.
 
 ### `analysis_options.py` / `analysis_dispatch.py`
 
@@ -954,11 +916,9 @@ Five benchmarks live under `benchmarks/`:
 ```bash
 # Full-AFE benchmark (ac121 / noise121 / tran200)
 python3 -m benchmarks.bench_afe --warm-runs 3
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_afe --warm-runs 3
 
 # Single-device PMOS_TFT micro-benchmark (7 hot-path ops × 3 bias regions)
 python3 -m benchmarks.bench_model --warm-runs 3
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_model --warm-runs 3
 
 # Chopper analysis benchmark (harmonics / ideal / pmos_static / pmos_lptv / pmos_tran)
 python3 -m benchmarks.bench_chopper --warm-runs 3

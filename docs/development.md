@@ -139,11 +139,11 @@ switches — were removed and now raise a clear error that points at the
 CHANGELOG. `circuitopt.current_engine()` reports the active engine (always
 `rust`).
 
-The pure-Python `_impl` kernels in `numba_kernels.py` are **not** a selectable
-engine anymore; they survive as the differential *reference oracle* (D4) —
-the OTFT scalar equations used by the rust engine's root-selection recovery
-(`pmos_tft_model.rust_otft_reference_mode`) and mirrored by the frozen golden
-device grids.
+The pure-Python `_impl` kernels (`numba_kernels.py`) were removed in R7. The
+OTFT root-selection recovery they powered lives in the compiled core as
+`OtftModel(..., reference=True)`, selected by
+`pmos_tft_model.otft_reference_mode`; the frozen golden corpus
+(`tests/golden/engine_parity`) is the reference oracle (D4).
 
 CI lints the workspace (`cargo fmt` + `clippy`), installs `circuitopt_core` in
 the test matrix so the solvers can run, and the release workflow builds and
@@ -236,9 +236,10 @@ Check every backend capability path touched by the change:
 - native TSMC28 BSIM4;
 - explicit ngspice oracle helpers.
 - **Rust core (`co-core`/`co-bsim4`).** The production numerics live in Rust
-  (engine=rust). A change to a solver kernel's math must be made in *both* the
-  Rust port and the pure-Python `_impl` reference in `numba_kernels.py` (the
-  differential oracle, D4), and re-validated against the frozen golden corpus:
+  (engine=rust). A change to the OTFT scalar equations must keep the production
+  and reference modes of `co-core::otft` consistent (the reference mode is the
+  root-selection recovery oracle, D4), and every kernel change must be
+  re-validated against the frozen golden corpus:
   `python tools/freeze_engine_golden.py verify`. Rebuild the core after Rust
   edits: `maturin develop --release -m rust/crates/co-py/Cargo.toml`.
 

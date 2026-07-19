@@ -44,22 +44,79 @@ release checklist.
 
   **English:** The optional numba JIT engine and the `numba` runtime dependency
   were removed. `--no-numba` and `CIRCUIT_USE_NUMBA` (and `--engine numba` /
-  `--engine python`) are now hard errors, not silent no-ops. The pure-Python
-  `_impl` scalar kernels in `numba_kernels.py` are **retained** — not as a
-  selectable engine, but as the differential **reference oracle** (the OTFT
-  root-selection recovery the rust engine invokes on sensitive circuits, and the
-  source mirrored by the frozen golden device grids). `numba_transient.py` and
-  the numba BSIM4 transient arm were deleted. The frozen golden corpus
-  (`tests/golden/engine_parity`, re-frozen under rust) is now the reference
-  oracle for engine parity.
+  `--engine python`) are now hard errors, not silent no-ops. `numba_transient.py`
+  and the numba BSIM4 transient arm were deleted. The frozen golden corpus
+  (`tests/golden/engine_parity`) is the reference oracle for engine parity.
 
   **中文：** 移除可选 numba JIT 引擎与 `numba` 运行时依赖。`--no-numba`、
   `CIRCUIT_USE_NUMBA`（以及 `--engine numba`/`--engine python`）现为明确报错，
-  不再静默无操作。`numba_kernels.py` 的纯 Python `_impl` 标量内核**保留**——不作
-  为可选引擎，而作为差分**参考 oracle**（rust 引擎在敏感电路上调用的 OTFT 选根
-  恢复路径，以及冻结 golden 器件网格的镜像来源）。删除 `numba_transient.py` 与
-  numba BSIM4 瞬态臂。冻结 golden 语料（`tests/golden/engine_parity`，已在 rust
-  下重冻结）成为引擎 parity 的参考 oracle。
+  不再静默无操作。删除 `numba_transient.py` 与 numba BSIM4 瞬态臂。冻结 golden
+  语料（`tests/golden/engine_parity`）是引擎 parity 的参考 oracle。
+
+- **Python `_impl` reference kernels removed; OTFT root-selection recovery
+  ported to the compiled core (R7) / Python `_impl` 参考内核移除；OTFT 选根恢复
+  移植进编译核（R7）**
+
+  **English:** `numba_kernels.py` (the interpreted `_impl` scalar/driver
+  kernels) was deleted **whole**. Its load-bearing part — the OTFT
+  root-selection recovery oracle the rust engine invokes on bifurcation-edge
+  circuits (sc_lpf adaptive-gear2 orbit setup, AFE latch/mismatch screens, the
+  AC extreme-point retry) — was first ported into `circuitopt_core` as
+  `OtftModel(..., reference=True)`: the system-libm `pow` `Vt` square
+  (bit-exact to CPython's `x ** 2`), the finite-difference-Jacobian internal
+  Newton, the finite-difference terminal derivatives, and the standalone
+  capacitance equation, verified **bit-exact (0 ULP)** against the retired
+  `_impl` across 112,815 points × 5 geometries before deletion. The trigger is
+  now `pmos_tft_model.otft_reference_mode` (renamed from
+  `rust_otft_reference_mode`). Every dead non-rust dispatch arm went with it:
+  the Python transient drivers and their ~700-line argument marshal, the
+  Python dense AC/noise MNA assembly, `_reference_pac_linearization` and the
+  numba PAC/PNoise linearization arms, and the BSIM4 per-step Python Newton.
+  Result keys that could only ever be `False` were dropped
+  (`numba_grid_solver`, `numba_adaptive_solver`, `gear2_python_retry_solver`,
+  `pac_numba_*`, `pnoise_numba_*`, `bsim4_numba_transient`,
+  `numba_newton_*`). `NumbaParams`/`get_numba_params` were renamed to
+  `OtftParams`/`get_otft_params`.
+
+  **中文：** **整文件删除** `numba_kernels.py`（解释执行的 `_impl` 标量/驱动
+  内核）。其承重部分——rust 引擎在分岔边缘电路上调用的 OTFT 选根恢复 oracle
+  （sc_lpf 自适应 gear2 轨道初值、AFE latch/mismatch 筛查、AC 极端点重试）——
+  已先移植进 `circuitopt_core`：`OtftModel(..., reference=True)` 提供系统 libm
+  `pow` 的 `Vt` 平方（与 CPython `x ** 2` 位级一致）、有限差分 Jacobian 内部
+  Newton、有限差分端子导数与独立电容方程，删除前经 112,815 点 × 5 几何对照
+  验证与 `_impl` **逐位一致（0 ULP）**。触发器更名为
+  `pmos_tft_model.otft_reference_mode`（原 `rust_otft_reference_mode`）。全部
+  死的非 rust 分派臂一并删除：Python 瞬态驱动及其约 700 行参数编组、Python
+  稠密 AC/noise MNA 装配、`_reference_pac_linearization` 与 numba PAC/PNoise
+  线性化臂、BSIM4 逐步 Python Newton。恒为 `False` 的结果键移除
+  （`numba_grid_solver`、`numba_adaptive_solver`、`gear2_python_retry_solver`、
+  `pac_numba_*`、`pnoise_numba_*`、`bsim4_numba_transient`、`numba_newton_*`）。
+  `NumbaParams`/`get_numba_params` 更名为 `OtftParams`/`get_otft_params`。
+
+- **BSIM4 cc runtime-compile backend removed (R7) / BSIM4 cc 运行时编译后端
+  移除（R7）**
+
+  **English:** `native.py` no longer compiles the vendored Berkeley C at
+  runtime with the user's compiler. `CIRCUIT_BSIM4_BACKEND` defaults to and
+  only accepts `rust` (the compiled `circuitopt_core` cdylib); `=cc` raises a
+  loud removal error, mirroring the engine-switch removals. The vendored C
+  sources are untouched — `co-bsim4` compiles them at wheel-build time. The
+  engine-parity golden corpus was re-frozen under the rust backend; the shift
+  was attributed A/B: the R7 code itself is **bit-identical** to base+`rust`
+  env (0.0 over 809 leaves), and the backend flip moves the silicon DC ops by
+  at most 2.0e-6 rel (tsmc28 `vout` +0.91 µV — both roots converge below
+  `DC_FALLBACK_TOL=1e-10`; iteration-path divergence from ULP-level backend
+  deltas, not an equation change). All 406 golden BSIM device grids and the
+  OTFT circuit case remain bit-exact.
+
+  **中文：** `native.py` 不再于运行时用用户编译器编译 vendor Berkeley C。
+  `CIRCUIT_BSIM4_BACKEND` 默认且仅接受 `rust`（编译的 `circuitopt_core`
+  cdylib）；`=cc` 明确报错（对齐引擎开关移除模式）。vendor C 源码不动——由
+  `co-bsim4` 在 wheel 构建期编译。engine-parity golden 已在 rust 后端下重冻结；
+  位移经 A/B 归因：R7 代码本身与基点+`rust` 环境**位级一致**（809 叶子 0.0），
+  后端翻转使硅 DC 工作点至多移动 2.0e-6 相对（tsmc28 `vout` +0.91 µV——新旧根
+  都收敛于 `DC_FALLBACK_TOL=1e-10` 之下；ULP 级后端差经迭代路径发散，非方程
+  变更）。全部 406 个 golden BSIM 器件网格与 OTFT 电路 case 保持逐位一致。
 
 ### Added / 新增
 
@@ -72,8 +129,9 @@ release checklist.
   `bindgen`-derived struct layouts for an identical ABI. `circuitopt_core`
   exports the four-terminal `co_bsim4_*` C ABI (consumed by `native.py` via
   `ctypes`, including the Numba `eval_vp` function pointer) plus a
-  `Bsim4Device` class. A new call-time `CIRCUIT_BSIM4_BACKEND` selector
-  (`cc` default, or `rust`) switches backends per evaluation; results match
+  `Bsim4Device` class. A call-time `CIRCUIT_BSIM4_BACKEND` selector switched
+  backends per evaluation (R7 made `rust` the default and only value; the
+  runtime `cc` build was removed); results match
   the reference C bit-for-bit for currents/conductance/charges and to ~1 ULP
   for the complex AC solve (validated against the frozen v1.4.0 golden corpus
   at `rel <= 1e-13`). The Rust `destroy` also fixes a `host.c` leak by freeing
@@ -83,9 +141,9 @@ release checklist.
   BSIM4.5 vendor C，并用 Rust 重写 `host.c` 适配层——按名设参、内部节点
   Newton 消元、四端 I/G/Q/C 提取与噪声归并——以 `bindgen` 生成的结构体布局
   保持 ABI 一致。`circuitopt_core` 导出四端 `co_bsim4_*` C ABI（供 `native.py`
-  经 `ctypes` 调用，含 Numba `eval_vp` 函数指针）及 `Bsim4Device` 类。新增
-  调用时读取的 `CIRCUIT_BSIM4_BACKEND` 开关（默认 `cc`，可选 `rust`）逐次
-  评估切换后端；电流/电导/电荷与参考 C 位级一致，复数 AC 解在 ~1 ULP 内
+  经 `ctypes` 调用，含 `eval_vp` 函数指针）及 `Bsim4Device` 类。调用时读取的
+  `CIRCUIT_BSIM4_BACKEND` 开关逐次评估切换后端（R7 起 `rust` 为默认且唯一值，
+  运行时 `cc` 编译已移除）；电流/电导/电荷与参考 C 位级一致，复数 AC 解在 ~1 ULP 内
   （对照冻结的 v1.4.0 golden 语料 `rel <= 1e-13`）。Rust 的 `destroy` 还修复了
   `host.c` 的泄漏：释放 `BSIM4v5temp` 分配的 `pSizeDependParamKnot` 链。
 

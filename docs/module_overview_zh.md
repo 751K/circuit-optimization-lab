@@ -35,12 +35,10 @@ circuitopt/
   topology.py          电路拓扑单一事实来源。
   compiled_topology.py 运行态拓扑/index/stamp 元数据编译层。
   circuit_loader.py    JSON 电路描述加载器。
-  device_model.py      TransistorModel ABC + NumbaParams + 模型工厂/注册表 + PDK/极性分层。
+  device_model.py      TransistorModel ABC + OtftParams + 模型工厂/注册表 + PDK/极性分层。
   device_factory.py    器件构建/解析层（build_devices、get_ss_params）+ corner 路由（OTFT CORNERS、
                         硅工艺 apply_silicon_corner）。leaf 模块：只依赖 device_model。
   pmos_tft_model.py    AT4000TG PMOS-OTFT 紧凑模型实现。
-  numba_kernels.py     纯 Python `_impl` 标量参考内核（v2.0.0 起移除 numba
-                        JIT/依赖；编译 Rust 核为唯一引擎，这些 `_impl` 是其差分参考 oracle）。
   ac_mna.py            MNA stamp 原语。
   ac_solver.py         纯 AC 小信号求解器：DC 工作点 + AC 响应（ac_solve）。
   dc_solver.py         DC 求解 fallback（有界最小二乘）+ AFE 专用对称 DC seeding/续流启发式。
@@ -87,19 +85,18 @@ circuitopt/
 topology.py          <- 无内部依赖
 compiled_topology.py <- 无内部依赖；运行时消费 Topology 风格对象
 circuit_loader.py    <- topology
-numba_kernels.py     <- 无内部依赖；纯 Python `_impl` 参考（v2.0.0 起无 numba）
 device_model.py      <- 无内部依赖（仅 abc、dataclasses）
 device_factory.py    <- 仅 device_model（leaf 器件层；不 import 任何 solver/workflow 模块）
-pmos_tft_model.py    <- 可选 numba_kernels、device_model
+pmos_tft_model.py    <- device_model（方程在 circuitopt_core.OtftModel）
 ac_mna.py            <- 无内部依赖
 ac_solver.py         <- device_factory, dc_solver, topology, compiled_topology, diagnostics
 dc_solver.py         <- device_factory, topology, diagnostics
 noise_solver.py      <- device_model, ac_mna, ac_solver, device_factory, topology, compiled_topology, diagnostics
-transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, numba_kernels, diagnostics
+transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, diagnostics
 transient_profile.py <- 无内部依赖（计数器槽位常量）
 pss_solver.py        <- ac_mna, ac_solver, device_factory, adaptive_config, topology, transient_solver, diagnostics
-pac_solver.py        <- ac_mna, ac_solver, device_factory, numba_kernels, topology, transient_solver, diagnostics
-pnoise_solver.py     <- ac_mna, device_factory, noise_solver, numba_kernels, pac_solver, diagnostics
+pac_solver.py        <- ac_mna, ac_solver, device_factory, topology, transient_solver, diagnostics
+pnoise_solver.py     <- ac_mna, device_factory, noise_solver, pac_solver, diagnostics
 adaptive_config.py   <- 无内部依赖（仅 dataclass）
 analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader, analysis_options
 analysis_options.py  <- 无内部依赖（注册表）
@@ -143,21 +140,21 @@ service/cli.py       <- service/app（延迟导入）；运行期可选 uvicorn
 - 通过 `g_area` 计算几何面积。
 - 工艺和 mismatch 参数，如 `pvt0`、`mvt0`、`pbeta0` 和 `mbeta0`。
 - 带热启动的内部节点工作点求解。
-- 安装 Numba 时自动对热点标量内核启用加速；设置 `CIRCUIT_USE_NUMBA=0`
-  可强制关闭；设置 `CIRCUIT_NUMBA_CACHE=0` 可关闭默认启用的磁盘 JIT 缓存。
+- 标量内核为编译执行：器件方程在 `circuitopt_core.OtftModel` 中求值
+  （v2.0.0 起为唯一引擎）。
 
 AC 和噪声分析时，求解器通过有限差分 `get_Idc` 提取端 `gm` 和 `gds`，与电路求解器使用的端行为保持一致。
 
 `PMOS_TFT` 继承 :class:`~device_model.TransistorModel`，即所有求解器消费的抽象基类。
-它还提供 `get_numba_params()` 供瞬态求解器编译内循环使用，
+它还提供 `get_otft_params()` 供瞬态求解器编译内循环使用，
 以及 Numba 加速的 `get_ss_params()` 覆盖方法。
 
 ### `device_model.py`
 
 定义抽象器件模型接口，将求解器与具体晶体管实现解耦：
 
-- **`TransistorModel` (ABC)** — 七个抽象方法（`get_Idc`、`get_op`、`get_capacitances`、`get_capacitance_charges_from_op`、`get_capacitance_branch_terms_from_op`、`get_noise_psd`、`get_numba_params`）；`get_ss_params` 提供有限差分默认实现，子类可覆盖。
-- **`NumbaParams` (frozen dataclass)** — 16 个标量参数，瞬态求解器每个器件提取一次，传入 Numba 加速内核。
+- **`TransistorModel` (ABC)** — 七个抽象方法（`get_Idc`、`get_op`、`get_capacitances`、`get_capacitance_charges_from_op`、`get_capacitance_branch_terms_from_op`、`get_noise_psd`、`get_otft_params`）；`get_ss_params` 提供有限差分默认实现，子类可覆盖。
+- **`OtftParams` (frozen dataclass)** — 16 个标量参数，瞬态求解器每个器件提取一次，传入编译内核。
 - **后端能力类属性** — 通用求解器按*能力*分派，而非具体后端类型。
   `HAS_TERMINAL_LINEARIZATION`（默认 `False`）标记该模型是否暴露 AC/PAC/PNoise 使用的完整
   quasi-static 4×4 terminal `(G, C)` stamp；原生 BSIM 器件设为 `True`。
@@ -230,41 +227,13 @@ leaf 器件构建层：只依赖 `device_model`（不 import 任何 solver 或 w
 
 这使得可以通过 JSON 文件（如 `examples/single_stage.json`）添加新电路，而无需修改求解器源码。`CircuitSpec.binding()` 把 spec 的 `topology`、`model_types`、`device_kwargs`、`nf` 以及默认 DC 初值（其第一个 dict 型 `dc_guess`）打包成一个 `CircuitBinding`（见 `device_factory.py`），这样工作流可以向求解器传 `binding=`，而不必逐个穿透这一整簇参数。
 
-### `numba_kernels.py`
+### `numba_kernels.py`（已于 v2.0.0/R7 移除）
 
-为纯标量热点路径提供可选 Numba 内核。该模块可在未安装 Numba 时安全导入。安装
-Numba 时默认自动启用；如需强制走纯 Python 路径，设置：
-
-```bash
-CIRCUIT_USE_NUMBA=0
-```
-
-Numba 编译结果默认会写入磁盘缓存，因此后续新的 Python 进程可以复用已编译内核，
-避免再次支付完整冷启动 JIT 开销。如只想关闭缓存，设置：
-
-```bash
-CIRCUIT_NUMBA_CACHE=0
-```
-
-solver 路径在 Numba 可用时会自动使用加速内核；不再有任何模块在 import 时设置
-`CIRCUIT_USE_NUMBA=1`（想关掉设 `CIRCUIT_USE_NUMBA=0`）。
-
-该开关**在 import 时烙死**：`USE_NUMBA`/`NUMBA_AVAILABLE` 是 `numba_kernels`
-首次被 import 时一次性算好的常量，事后再设环境变量是静默 no-op。`circuitopt/__init__.py`
-在其求解器 import（会连带把 `numba_kernels` 传递 import 进来）之前，先对 `sys.argv`
-预扫 `--no-numba` 并设 `CIRCUIT_USE_NUMBA=0`——在 `python -m circuitopt …` 下这个
-`__init__` 先于 `__main__.py` 执行，故 CLI flag 能生效。`__main__.py` 每个子命令
-handler 随后都调用 `_assert_numba_flag(args)`：若请求了 `--no-numba` 但
-`numba_kernels.USE_NUMBA` 仍为 `True`（例如某处已先 import 了求解器模块，绕过了
-预扫），则抛 `SystemExit`，把"预扫被绕过"从静默无效变成响亮报错。从 Python 代码
-（非 CLI）里禁用 Numba，必须在 `import circuitopt` **之前**设 `CIRCUIT_USE_NUMBA=0`。
-
-目前加速路径包括 PMOS 电流计算、内部节点 Newton 迭代、偏置相关电容计算、
-AC/PNoise 小信号参数端导数、PNoise HB block 组装和噪声折叠，
-以及 transient Newton 内循环：拓扑 token 查值、PMOS 工作点求解、residual/Jacobian
-stamp 和小规模稠密 Newton 线性求解。稠密 Newton 求解使用原地 `A*x = -R`
-路径，避免每次迭代里不必要的数组拷贝。如果 compiled 路径处理不了某一步，
-`transient_solver.py` 会回退到原 Python Newton / full-Jacobian / least-squares 路径。
+历史模块：曾承载纯 Python/numba 的 `_impl` 标量与瞬态内核。R6 移除 numba JIT；
+R7 在把其承重部分——OTFT 选根恢复 oracle——逐位移植进编译核
+（`circuitopt_core.OtftModel(..., reference=True)`，由
+`pmos_tft_model.otft_reference_mode` 选择）之后整文件删除。冻结 golden 语料
+（`tests/golden/engine_parity`）是数值参考 oracle。
 
 ### `analysis_options.py` / `analysis_dispatch.py`
 
@@ -802,11 +771,9 @@ tran = transient(spec.sizes, spec.bias, t, topo=spec.topology,
 ```bash
 # 全 AFE 基准（ac121 / noise121 / tran200）
 python3 -m benchmarks.bench_afe --warm-runs 3
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_afe --warm-runs 3
 
 # 单管 PMOS_TFT 微基准（7 个热路径操作 × 3 个偏置工作区）
 python3 -m benchmarks.bench_model --warm-runs 3
-CIRCUIT_USE_NUMBA=0 python3 -m benchmarks.bench_model --warm-runs 3
 
 # Chopper 分析基准（harmonics / ideal / pmos_static / pmos_lptv / pmos_tran）
 python3 -m benchmarks.bench_chopper --warm-runs 3
