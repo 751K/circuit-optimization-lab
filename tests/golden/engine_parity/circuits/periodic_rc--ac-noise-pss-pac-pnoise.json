@@ -373,9 +373,6 @@
     },
     "transient_cap_mode": "charge",
     "transient_cap_mode_id": 0,
-    "numba_grid_solver": false,
-    "numba_adaptive_solver": false,
-    "gear2_python_retry_solver": false,
     "rust_grid_solver": true,
     "rust_adaptive_solver": false,
     "inputs": {
@@ -412,7 +409,7 @@
     "shooting_jacobian_reuses": 0,
     "shooting_jacobian_reuse_enabled": true,
     "shooting_jacobian_rebuild_interval": 0,
-    "topology": "<circuitopt.topology.Topology object at 0x1051ef200>",
+    "topology": "<circuitopt.topology.Topology object at 0x10a0572f0>",
     "node_inputs": {
       "VIN": "vin"
     },
@@ -458,9 +455,6 @@
       },
       "transient_cap_mode": "charge",
       "transient_cap_mode_id": 0,
-      "numba_grid_solver": false,
-      "numba_adaptive_solver": false,
-      "gear2_python_retry_solver": false,
       "rust_grid_solver": true,
       "rust_adaptive_solver": false,
       "inputs": {
@@ -491,7 +485,7 @@
       "shooting_jacobian_reuses": 0,
       "shooting_jacobian_reuse_enabled": true,
       "shooting_jacobian_rebuild_interval": 0,
-      "topology": "<circuitopt.topology.Topology object at 0x1051ef200>",
+      "topology": "<circuitopt.topology.Topology object at 0x10a0572f0>",
       "node_inputs": {
         "VIN": "vin"
       },
@@ -588,9 +582,6 @@
       },
       "transient_cap_mode": "charge",
       "transient_cap_mode_id": 0,
-      "numba_grid_solver": false,
-      "numba_adaptive_solver": false,
-      "gear2_python_retry_solver": false,
       "rust_grid_solver": true,
       "rust_adaptive_solver": false,
       "inputs": {
@@ -621,7 +612,7 @@
       "shooting_jacobian_reuses": 0,
       "shooting_jacobian_reuse_enabled": true,
       "shooting_jacobian_rebuild_interval": 0,
-      "topology": "<circuitopt.topology.Topology object at 0x1051ef200>",
+      "topology": "<circuitopt.topology.Topology object at 0x10a0572f0>",
       "node_inputs": {
         "VIN": "vin"
       },
@@ -655,9 +646,6 @@
         },
         "transient_cap_mode": "charge",
         "transient_cap_mode_id": 0,
-        "numba_grid_solver": false,
-        "numba_adaptive_solver": false,
-        "gear2_python_retry_solver": false,
         "rust_grid_solver": true,
         "rust_adaptive_solver": false,
         "inputs": {
@@ -688,7 +676,7 @@
         "shooting_jacobian_reuses": 0,
         "shooting_jacobian_reuse_enabled": true,
         "shooting_jacobian_rebuild_interval": 0,
-        "topology": "<circuitopt.topology.Topology object at 0x1051ef200>",
+        "topology": "<circuitopt.topology.Topology object at 0x10a0572f0>",
         "node_inputs": {
           "VIN": "vin"
         },
@@ -757,8 +745,6 @@
     "pnoise_hb_size": 0,
     "pnoise_hb_solve_count": 0,
     "pnoise_noise_source_count": 1,
-    "pnoise_numba_hb_used": false,
-    "pnoise_numba_fold_used": false,
     "pnoise_rust_hb_used": false,
     "pnoise_rust_fold_used": false
   }
