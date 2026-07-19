@@ -8,8 +8,10 @@ import pytest
 from tools.version import (
     archive_changelog,
     check,
+    core_pin_version,
     project_version,
     release,
+    set_version,
     validate_version,
 )
 
@@ -71,7 +73,8 @@ def _write_fake_repo(tmp_path: Path, version: str) -> None:
     tauri.mkdir(parents=True)
     rust.mkdir(parents=True)
     (tmp_path / "pyproject.toml").write_text(
-        f'[project]\nname = "example"\nversion = "{version}"\n',
+        f'[project]\nname = "example"\nversion = "{version}"\n'
+        f'dependencies = ["numpy>=2.0", "circuitopt-core=={version}"]\n',
         encoding="utf-8",
     )
     (frontend / "package.json").write_text(
@@ -168,3 +171,33 @@ def test_check_catches_rust_workspace_drift(tmp_path: Path) -> None:
     errors = check(tmp_path)
 
     assert any("rust/Cargo.toml" in error for error in errors)
+
+
+def test_repository_pins_circuitopt_core_to_project_version() -> None:
+    # D9: the real pyproject pins the compiled Rust core exactly to the project.
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert core_pin_version(text) == project_version(ROOT)
+
+
+def test_check_catches_core_pin_drift(tmp_path: Path) -> None:
+    _write_fake_repo(tmp_path, "1.4.0")
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            "circuitopt-core==1.4.0", "circuitopt-core==1.3.0"
+        ),
+        encoding="utf-8",
+    )
+
+    errors = check(tmp_path)
+
+    assert any("circuitopt-core pin" in error for error in errors)
+
+
+def test_set_version_bumps_core_pin(tmp_path: Path) -> None:
+    _write_fake_repo(tmp_path, "1.4.0")
+    set_version("2.0.0-rc1", tmp_path)
+
+    text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert core_pin_version(text) == "2.0.0-rc1"
+    assert check(tmp_path) == []

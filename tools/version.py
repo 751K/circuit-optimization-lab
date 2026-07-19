@@ -96,6 +96,30 @@ def _cargo_workspace_with_version(text: str, version: str) -> str:
     return updated
 
 
+# The main package pins the compiled Rust core distribution exactly to its own
+# version (D9): ``circuitopt-core==X.Y.Z`` in [project].dependencies. Both are
+# built and released from this repo, so tools/version.py keeps the pin in
+# lockstep with the canonical [project].version.
+_CORE_PIN = re.compile(r'(circuitopt-core==)([^"\s]+)')
+
+
+def core_pin_version(text: str) -> str:
+    match = _CORE_PIN.search(text)
+    if not match:
+        raise ValueError(
+            "could not locate the circuitopt-core== pin in pyproject.toml")
+    return validate_version(match.group(2))
+
+
+def _replace_core_pin(text: str, version: str) -> str:
+    updated, count = _CORE_PIN.subn(
+        lambda match: match.group(1) + version, text, count=1)
+    if count != 1:
+        raise ValueError(
+            "could not locate the circuitopt-core== pin in pyproject.toml")
+    return updated
+
+
 def synchronized_content(root: Path, version: str) -> dict[Path, str]:
     version = validate_version(version)
     package_json = root / "frontend/package.json"
@@ -146,6 +170,7 @@ def set_version(version: str, root: Path = ROOT) -> list[Path]:
     pyproject = root / "pyproject.toml"
     current = pyproject.read_text(encoding="utf-8")
     updated = _replace_project_version(current, version)
+    updated = _replace_core_pin(updated, version)  # D9: keep the core pin in sync
     changed = []
     if current != updated:
         pyproject.write_text(updated, encoding="utf-8")
@@ -207,6 +232,11 @@ def release(version: str, date: str, root: Path = ROOT) -> list[Path]:
 def check(root: Path = ROOT, tag: str | None = None) -> list[str]:
     version = project_version(root)
     errors = []
+    # D9: the circuitopt-core== pin in pyproject.toml must match the project.
+    pin = core_pin_version((root / "pyproject.toml").read_text(encoding="utf-8"))
+    if pin != version:
+        errors.append(
+            f"pyproject.toml circuitopt-core pin is {pin}, expected {version}")
     for path, expected in synchronized_content(root, version).items():
         if path.read_text(encoding="utf-8") != expected:
             errors.append(f"{path.relative_to(root)} is not synchronized to {version}")

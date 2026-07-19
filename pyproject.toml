@@ -28,9 +28,15 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "numpy>=2.0",        # upper bound left to numba's metadata (0.66 → numpy<2.5)
+    "numpy>=2.0",
     "scipy>=1.10",
-    "numba>=0.66",       # required: solver hot paths are JIT kernels; 0.66 supports numpy 2.4
+    # The compiled Rust core is the sole compute engine as of v2.0.0. It is a
+    # separate distribution (rust/crates/co-py, import name circuitopt_core),
+    # pinned EXACTLY to this package's version and kept in lockstep by
+    # tools/version.py (see docs/rust_core_rewrite_plan.md D9). Both wheels are
+    # built and released together from this repo. Do not hand-edit the pin — run
+    # `python tools/version.py set <version>`.
+    "circuitopt-core==1.4.0",
     # NOTE: flask is NOT a core dependency — the solver/CLI import zero flask.
     # Only demo/server.py uses it, so it lives in the [demo] extra below.
 ]
