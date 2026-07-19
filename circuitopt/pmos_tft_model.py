@@ -3,32 +3,31 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import numpy as np
 from scipy.optimize import fsolve
-try:
-    from .numba_kernels import terminal_derivatives_numba
-except Exception:  # pragma: no cover - optional acceleration only
-    terminal_derivatives_numba = None
-
-# The `_impl` kernels remain the Python/Numba reference equations. Under the Rust
-# engine the OO methods dispatch to `circuitopt_core.OtftModel`; root-sensitive
-# recovery paths can temporarily select this reference through the ContextVar below.
-from .numba_kernels import (
-    _capacitance_charges_impl,
-    _capacitances_impl,
-    _eval_currents_impl,
-    _newton_internal_impl,
-)
 
 from .device_model import TransistorModel, NumbaParams, register_pdk
-from ._engine import current_engine
 from . import diagnostics
 
 
+# The OTFT scalar device equations live in the compiled rust core
+# (``circuitopt_core.OtftModel``). Two bit-distinct modes exist: the production
+# path (``reference=False``, frozen against the golden corpus) and the
+# root-selection recovery oracle (``reference=True``) — the exact equations the
+# retired Python ``_impl`` kernels used to provide (``powf(2.0)`` Vt, the
+# finite-difference Jacobian Newton, and the finite-difference terminal
+# derivatives). ``rust_otft_reference_mode`` selects the oracle through the
+# thread-local flag below; see ``docs/rust_core_rewrite_plan.md`` §4-D4.
 _RUST_OTFT_SCALAR_ENABLED = ContextVar("rust_otft_scalar_enabled", default=True)
 
 
 @contextmanager
 def rust_otft_reference_mode():
-    """Temporarily use the Python/Numba OTFT oracle for root-selection recovery."""
+    """Temporarily select the rust OTFT reference oracle for root recovery.
+
+    Inside the context, :meth:`PMOS_TFT._get_rust_model` returns
+    ``OtftModel(..., reference=True)`` — the compiled reproduction of the former
+    Python ``_impl`` scalar equations — so bifurcation-edge OTFT screens keep the
+    calibrated root choice under the rust engine.
+    """
     token = _RUST_OTFT_SCALAR_ENABLED.set(False)
     try:
         yield
@@ -99,7 +98,8 @@ class PMOS_TFT(TransistorModel):
         # a 1-2 step solve, and the exact-key memo skips duplicate center solves.
         self._op_cache = None     # last converged (Vs1, Vd1)
         self._op_key = None       # (Vs, Vd, Vg) it was solved at
-        self._rust_model = None
+        self._rust_model = None       # production OtftModel (reference=False)
+        self._rust_model_ref = None   # recovery oracle OtftModel (reference=True)
 
         self._precompute_constants()
 
@@ -241,15 +241,9 @@ class PMOS_TFT(TransistorModel):
     def _eval_currents(self, Vs, Vd, Vg, Vs1, Vd1):
         """Evaluate the DC branch currents given external and internal nodes.
 
-        Uses the Rust scalar model under the Rust engine and the `_impl` reference
-        equation under the Python/Numba engines."""
-        rust_model = self._get_rust_model()
-        if rust_model is not None:
-            return tuple(rust_model.eval_currents(Vs, Vd, Vg, Vs1, Vd1))
-        return _eval_currents_impl(
-            Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self.Vss, self.Lc, self.lambda_,
-            self._contact_scale, self._channel_exponent, self._current_scale,
-            self._inv_Rleak)
+        Delegates to the compiled OTFT scalar model — production or the
+        reference recovery oracle, per :meth:`_get_rust_model`."""
+        return tuple(self._get_rust_model().eval_currents(Vs, Vd, Vg, Vs1, Vd1))
 
     def _eval_ich(self, Vs, Vd, Vg, Vs1, Vd1):
         """Evaluate the Verilog-A Ich expression without branch sign or leakage."""
@@ -268,20 +262,14 @@ class PMOS_TFT(TransistorModel):
     def _newton_internal(self, Vs, Vd, Vg, x0, tol=1e-12, maxit=40):
         """Damped 2x2 Newton on the internal-node KCL, seeded from x0.
 
-        Analytic 2x2 inverse + warm start: a seed within ~HH of the root converges
-        in 1-2 iterations with no scipy overhead. Returns (Vs1, Vd1) on success, or
-        None to let the robust cold fsolve path take over. Single-sourced onto
-        ``_newton_internal_impl``."""
+        A seed within ~HH of the root converges in 1-2 iterations with no scipy
+        overhead. Returns (Vs1, Vd1) on success, or None to let the robust cold
+        fsolve path take over. The compiled model picks the analytic-Jacobian
+        Newton in production and the finite-difference Jacobian Newton
+        (``_newton_internal_impl``) in the reference recovery oracle."""
         x0 = np.asarray(x0, float)
-        rust_model = self._get_rust_model()
-        if rust_model is not None:
-            ok, Vs1, Vd1 = rust_model.newton_internal(
-                Vs, Vd, Vg, x0[0], x0[1], tol, maxit)
-        else:
-            ok, Vs1, Vd1 = _newton_internal_impl(
-                Vs, Vd, Vg, x0[0], x0[1], tol, maxit, self.Vfb, self.Vss, self.Lc,
-                self.lambda_, self._contact_scale, self._channel_exponent,
-                self._current_scale, self._inv_Rleak)
+        ok, Vs1, Vd1 = self._get_rust_model().newton_internal(
+            Vs, Vd, Vg, x0[0], x0[1], tol, maxit)
         return np.array([Vs1, Vd1]) if ok else None
 
     def _robust_op(self, Vs, Vd, Vg):
@@ -378,29 +366,43 @@ class PMOS_TFT(TransistorModel):
         )
 
     def _get_rust_model(self):
-        if current_engine() != "rust" or not _RUST_OTFT_SCALAR_ENABLED.get():
-            return None
-        if self._rust_model is None:
-            import circuitopt_core
+        """Return the compiled OTFT scalar model for the active mode.
 
-            params = self.get_numba_params()
-            values = [
-                params.Vfb, params.Vss, params.Lc, params.lambda_,
-                params.contact_scale, params.channel_exponent,
-                params.current_scale, params.inv_Rleak, params.two_over_pi,
-                params.cap_cgs1, params.cap_cgd1, params.cap_half_wl_ci,
-                params.cap_cgs3_base, params.cap_cgd3_base, params.k1,
-                params.gate_leak_g,
-            ]
-            self._rust_model = circuitopt_core.OtftModel(values)
-        return self._rust_model
+        Production (``reference=False``) unless ``rust_otft_reference_mode`` is
+        active on this thread, in which case the reference recovery oracle
+        (``reference=True``) is returned. Both are cached per instance. ``rust``
+        is the sole engine in v2.0.0, so this always returns a model.
+        """
+        reference = not _RUST_OTFT_SCALAR_ENABLED.get()
+        cached = self._rust_model_ref if reference else self._rust_model
+        if cached is not None:
+            return cached
+        import circuitopt_core
+
+        params = self.get_numba_params()
+        values = [
+            params.Vfb, params.Vss, params.Lc, params.lambda_,
+            params.contact_scale, params.channel_exponent,
+            params.current_scale, params.inv_Rleak, params.two_over_pi,
+            params.cap_cgs1, params.cap_cgd1, params.cap_half_wl_ci,
+            params.cap_cgs3_base, params.cap_cgd3_base, params.k1,
+            params.gate_leak_g,
+        ]
+        model = circuitopt_core.OtftModel(values, reference=reference)
+        if reference:
+            self._rust_model_ref = model
+        else:
+            self._rust_model = model
+        return model
 
     def get_ss_params(self, Vs, Vd, Vg):
         """Terminal small-signal parameters at the given bias.
 
-        Overrides the base-class finite-difference default with an
-        optimised path that uses :func:`terminal_derivatives_numba` for
-        gm/gds and reuses the internal OP solve for capacitances.
+        Overrides the base-class finite-difference default with an optimised path
+        that uses the compiled model's ``terminal_derivatives`` for gm/gds and
+        reuses the internal OP solve for capacitances. Production uses the
+        analytic-Jacobian terminal derivatives; the reference recovery oracle uses
+        the finite-difference-from-base derivatives (former ``_terminal_derivatives_impl``).
         """
         h = 1e-3
         rust_model = self._get_rust_model()
@@ -427,28 +429,6 @@ class PMOS_TFT(TransistorModel):
                 }
             except Exception as exc:
                 diagnostics.note("model.ss_params_rust_fallback", exc)
-        elif terminal_derivatives_numba is not None:
-            try:
-                s1, d1 = self.get_op(Vs, Vd, Vg)
-                _, _, I_d1_d, _, _ = self._eval_currents(Vs, Vd, Vg, s1, d1)
-                Idc0 = -I_d1_d
-                if abs(Idc0) < 1e-10:
-                    raise RuntimeError("small-current finite-difference fallback")
-                ok, gm_neg, gds_neg = terminal_derivatives_numba(
-                    Vs, Vd, Vg, s1, d1, True, True, False, h, 1e-6,
-                    self.Vfb, self.Vss, self.Lc, self.lambda_,
-                    self._contact_scale, self._channel_exponent,
-                    self._current_scale, self._inv_Rleak)
-                if ok and np.isfinite(gm_neg) and np.isfinite(gds_neg):
-                    gm = -gm_neg
-                    gds = -gds_neg
-                else:
-                    raise RuntimeError("terminal derivative fallback")
-                Cgss, Cgdd = self._capacitances_from_op(Vs, Vd, Vg, s1, d1)
-                Ich = self._eval_channel(Vs, Vd, Vg, s1, d1)["Ich"]
-                return {"gm": gm, "gds": gds, "Cgs": Cgss, "Cgd": Cgdd, "Ich": Ich}
-            except Exception as exc:
-                diagnostics.note("model.ss_params_numba_fallback", exc)
 
         # Finite-difference fallback (pure Python)
         try:
@@ -468,17 +448,12 @@ class PMOS_TFT(TransistorModel):
     # ── Private helpers ──────────────────────────────────────────────────
 
     def _capacitances_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
-        """Capacitance equations from an already-solved internal OP.
+        """Return (Cgss, Cgdd) from an already-solved internal OP.
 
-        Single-sourced onto ``_capacitances_impl``."""
-        rust_model = self._get_rust_model()
-        if rust_model is not None:
-            values = rust_model.capacitance_charges(Vs, Vd, Vg, Vs1, Vd1)
-            return values[2], values[3]
-        return _capacitances_impl(
-            Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
-            self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
-            self._cap_cgs3_base, self._cap_cgd3_base, self.k1)
+        Production reads them off ``capacitance_charges``; the reference recovery
+        oracle uses the standalone ``capacitances`` equation (former
+        ``_capacitances_impl``)."""
+        return self._get_rust_model().capacitances_pair(Vs, Vd, Vg, Vs1, Vd1)
 
     @staticmethod
     def _atan_cap_integral(y, scale, two_over_pi):
@@ -495,16 +470,8 @@ class PMOS_TFT(TransistorModel):
         are kept for diagnostics and charge-oriented experiments; production
         transient uses a step-integrated displacement-current companion based on
         the same local Cgss/Cgdd equations.
-
-        Single-sourced onto ``_capacitance_charges_impl``.
         """
-        rust_model = self._get_rust_model()
-        if rust_model is not None:
-            return tuple(rust_model.capacitance_charges(Vs, Vd, Vg, Vs1, Vd1))
-        return _capacitance_charges_impl(
-            Vs, Vd, Vg, Vs1, Vd1, self.Vfb, self._two_over_pi,
-            self._cap_cgs1, self._cap_cgd1, self._cap_half_wl_ci,
-            self._cap_cgs3_base, self._cap_cgd3_base, self.k1)
+        return tuple(self._get_rust_model().capacitance_charges(Vs, Vd, Vg, Vs1, Vd1))
 
     def _capacitance_branch_terms_from_op(self, Vs, Vd, Vg, Vs1, Vd1):
         """Branch self-charge terms for step-integrated C(V)*dV experiments.

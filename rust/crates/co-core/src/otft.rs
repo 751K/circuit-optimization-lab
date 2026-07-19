@@ -6,6 +6,14 @@
 //! be established before the solver is moved.
 
 /// Canonical 16-scalar parameter ABI shared with Python's `NumbaParams`.
+///
+/// `reference` is an out-of-band mode flag (not part of the 16-scalar ABI). When
+/// `true`, the scalar threshold `Vt` is squared with `powf(2.0)` (libm `pow`,
+/// matching the retired Python `_impl` reference oracle's `x ** 2`) instead of the
+/// production `powi(2)` (`x * x`). This 1-ULP `Vt` difference is the root-selection
+/// recovery lever the rust engine relies on for bifurcation-edge OTFT screens
+/// (`pmos_tft_model.rust_otft_reference_mode`); see `docs/rust_core_rewrite_plan.md`
+/// §4-D4. Production (`reference == false`) is bit-frozen against the golden corpus.
 #[derive(Clone, Copy, Debug)]
 pub struct Params {
     pub vfb: f64,
@@ -24,6 +32,7 @@ pub struct Params {
     pub cap_cgd3_base: f64,
     pub k1: f64,
     pub gate_leak_g: f64,
+    pub reference: bool,
 }
 
 impl Params {
@@ -50,7 +59,31 @@ impl Params {
             cap_cgd3_base: values[13],
             k1: values[14],
             gate_leak_g: values[15],
+            reference: false,
         })
+    }
+}
+
+unsafe extern "C" {
+    /// System libm `pow`. CPython's `float ** float` calls this exact symbol, so
+    /// routing the reference square through it reproduces `x ** 2` bit-for-bit.
+    /// `f64::powf(2.0)` cannot be used here: LLVM constant-folds a literal `2.0`
+    /// exponent to `x * x`, which is identical to the production `powi(2)` and
+    /// would erase the 1-ULP reference divergence.
+    safe fn pow(base: f64, exp: f64) -> f64;
+}
+
+/// Square the contact-threshold argument. Production uses `powi(2)` (`x * x`); the
+/// reference recovery path uses the system libm `pow(x, 2.0)` to reproduce the
+/// Python `_impl` oracle's `x ** 2` bit-for-bit. The exponent is hidden behind
+/// `black_box` so LLVM's libcall simplifier cannot prove it is `2.0` and fold the
+/// call back into `x * x` (which would erase the reference divergence).
+#[inline]
+fn dv_squared(p: &Params, dv: f64) -> f64 {
+    if p.reference {
+        pow(dv, std::hint::black_box(2.0))
+    } else {
+        dv.powi(2)
     }
 }
 
@@ -90,7 +123,7 @@ pub fn eval_currents(p: &Params, vs: f64, vd: f64, vg: f64, vs1: f64, vd1: f64) 
     let v_d = if vd1 > vd { vd } else { vd1 };
     let v_d1 = if vd1 > vd { vd1 } else { vd };
 
-    let vt = -(0.0045 * (v_s - vg).powi(2) + 0.7125 * (v_s - vg) + 0.9625);
+    let vt = -(0.0045 * dv_squared(p, v_s - vg) + 0.7125 * (v_s - vg) + 0.9625);
     let vods1 = p.vss * softplus((v_s - vg + vt) / p.vss);
     let vodd1 = p.vss * softplus((v_s1 - vg + vt) / p.vss);
 
@@ -158,7 +191,7 @@ pub fn residual_pair_jac_internal(
         let v_s = vs;
         let v_s1 = vs1;
         let dv = v_s - vg;
-        let vt = -(0.0045 * dv.powi(2) + 0.7125 * dv + 0.9625);
+        let vt = -(0.0045 * dv_squared(p, dv) + 0.7125 * dv + 0.9625);
         let arg_a = (v_s - vg + vt) / p.vss;
         let arg_b = (v_s1 - vg + vt) / p.vss;
         let a = p.vss * softplus(arg_a);
@@ -177,7 +210,7 @@ pub fn residual_pair_jac_internal(
         let v_s = vs1;
         let v_s1 = vs;
         let dv = v_s - vg;
-        let vt = -(0.0045 * dv.powi(2) + 0.7125 * dv + 0.9625);
+        let vt = -(0.0045 * dv_squared(p, dv) + 0.7125 * dv + 0.9625);
         let dvt = -(0.009 * dv + 0.7125);
         let arg_a = (v_s - vg + vt) / p.vss;
         let arg_b = (v_s1 - vg + vt) / p.vss;
@@ -662,7 +695,7 @@ fn contact_diss_dvg(p: &Params, vs: f64, vg: f64, vs1: f64) -> f64 {
         (vs1, vs, -1.0)
     };
     let dv = v_s - vg;
-    let vt = -(0.0045 * dv.powi(2) + 0.7125 * dv + 0.9625);
+    let vt = -(0.0045 * dv_squared(p, dv) + 0.7125 * dv + 0.9625);
     let dvt = 0.009 * dv + 0.7125;
     let arg_a = (v_s - vg + vt) / p.vss;
     let arg_b = (v_s1 - vg + vt) / p.vss;
@@ -840,7 +873,31 @@ mod tests {
             cap_cgd3_base: 5e-8,
             k1: 1.0,
             gate_leak_g: 1e-12,
+            reference: false,
         }
+    }
+
+    #[test]
+    fn reference_flips_vt_square_but_not_channel() {
+        // Production squares Vt with powi(2)=x*x; reference with powf(2.0)=pow.
+        // eval_currents differs only where Vt matters (contact branch I_s_s1);
+        // the channel current Ich (no Vt) stays bit-identical between the modes.
+        let mut pp = params();
+        pp.reference = false;
+        let mut pr = params();
+        pr.reference = true;
+        let (vs, vd, vg, vs1, vd1) = (5.783, 4.348, 43.975, 6.766, 4.117);
+        let prod = eval_currents(&pp, vs, vd, vg, vs1, vd1);
+        let refr = eval_currents(&pr, vs, vd, vg, vs1, vd1);
+        assert_eq!(
+            prod[3], refr[3],
+            "Ich must not depend on the Vt square mode"
+        );
+        // Caps carry no Vt term -> identical in both modes.
+        assert_eq!(
+            capacitance_charges(&pp, vs, vd, vg, vs1, vd1),
+            capacitance_charges(&pr, vs, vd, vg, vs1, vd1)
+        );
     }
 
     #[test]

@@ -245,6 +245,7 @@ fn build_device(geom: &DeviceGeom, c: &OtftConstants) -> BuiltDevice {
         cap_cgd3_base,
         k1,
         gate_leak_g,
+        reference: false,
     };
     BuiltDevice {
         params,

@@ -346,19 +346,31 @@ fn otft_params(values: Vec<f64>) -> PyResult<otft::Params> {
     otft_params_slice(&values)
 }
 
-/// Low-overhead production wrapper for scalar OTFT model operations.
+/// Low-overhead wrapper for scalar OTFT model operations.
+///
+/// `reference=False` (default) is the production path: `powi(2)` `Vt`, the
+/// analytic-Jacobian fast Newton, the analytic terminal derivatives, and
+/// `capacitance_charges` — bit-frozen against the golden corpus. `reference=True`
+/// selects the root-selection recovery oracle that the retired Python `_impl`
+/// kernels used to provide: `powf(2.0)` `Vt`, the finite-difference Jacobian
+/// Newton, the finite-difference-from-base terminal derivatives, and the
+/// `capacitances` variant — reproducing `_impl` bit-for-bit. The mode is chosen
+/// by `pmos_tft_model.rust_otft_reference_mode`; see
+/// `docs/rust_core_rewrite_plan.md` §4-D4.
 #[pyclass(frozen)]
 struct OtftModel {
     params: otft::Params,
+    reference: bool,
 }
 
 #[pymethods]
 impl OtftModel {
     #[new]
-    fn new(params: Vec<f64>) -> PyResult<Self> {
-        Ok(Self {
-            params: otft_params(params)?,
-        })
+    #[pyo3(signature = (params, reference=false))]
+    fn new(params: Vec<f64>, reference: bool) -> PyResult<Self> {
+        let mut params = otft_params(params)?;
+        params.reference = reference;
+        Ok(Self { params, reference })
     }
 
     fn eval_currents(&self, vs: f64, vd: f64, vg: f64, vs1: f64, vd1: f64) -> Vec<f64> {
@@ -377,12 +389,31 @@ impl OtftModel {
         tol: f64,
         maxit: usize,
     ) -> (bool, f64, f64) {
-        let result = otft::newton_internal_fast(&self.params, vs, vd, vg, x0s, x0d, tol, maxit);
+        // Production uses the analytic-Jacobian fast Newton; the reference oracle
+        // uses the finite-difference-Jacobian Newton (`_newton_internal_impl`).
+        let result = if self.reference {
+            otft::newton_internal(&self.params, vs, vd, vg, x0s, x0d, tol, maxit)
+        } else {
+            otft::newton_internal_fast(&self.params, vs, vd, vg, x0s, x0d, tol, maxit)
+        };
         (result.converged, result.vs1, result.vd1)
     }
 
     fn capacitance_charges(&self, vs: f64, vd: f64, vg: f64, vs1: f64, vd1: f64) -> Vec<f64> {
         otft::capacitance_charges(&self.params, vs, vd, vg, vs1, vd1).to_vec()
+    }
+
+    /// Return `(Cgss, Cgdd)`. Production reads them off `capacitance_charges`; the
+    /// reference oracle uses the standalone `capacitances` equation
+    /// (`_capacitances_impl`), whose intermediate association differs by up to 1 ULP.
+    fn capacitances_pair(&self, vs: f64, vd: f64, vg: f64, vs1: f64, vd1: f64) -> (f64, f64) {
+        if self.reference {
+            let c = otft::capacitances(&self.params, vs, vd, vg, vs1, vd1);
+            (c[0], c[1])
+        } else {
+            let c = otft::capacitance_charges(&self.params, vs, vd, vg, vs1, vd1);
+            (c[2], c[3])
+        }
     }
 
     #[pyo3(signature = (vs, vd, vg, vs1, vd1, need_gm=true, need_gds=true, use_abs=false, hh=1e-3))]
@@ -399,24 +430,42 @@ impl OtftModel {
         use_abs: bool,
         hh: f64,
     ) -> (bool, f64, f64) {
-        let jac = otft::residual_pair_jac_internal(&self.params, vs, vd, vg, vs1, vd1);
-        let idc0 = jac[1] - (vs1 - vd1) / 0.1;
-        otft::terminal_derivatives_from_jac(
-            &self.params,
-            vs,
-            vd,
-            vg,
-            vs1,
-            vd1,
-            jac[0],
-            jac[1],
-            idc0,
-            [jac[2], jac[3], jac[4], jac[5]],
-            need_gm,
-            need_gds,
-            use_abs,
-            hh,
-        )
+        if self.reference {
+            // Reference oracle: finite-difference-from-base terminal derivatives
+            // (`_terminal_derivatives_impl`), inner Jacobian step `hx = 1e-6`.
+            otft::terminal_derivatives(
+                &self.params,
+                vs,
+                vd,
+                vg,
+                vs1,
+                vd1,
+                need_gm,
+                need_gds,
+                use_abs,
+                hh,
+                1e-6,
+            )
+        } else {
+            let jac = otft::residual_pair_jac_internal(&self.params, vs, vd, vg, vs1, vd1);
+            let idc0 = jac[1] - (vs1 - vd1) / 0.1;
+            otft::terminal_derivatives_from_jac(
+                &self.params,
+                vs,
+                vd,
+                vg,
+                vs1,
+                vd1,
+                jac[0],
+                jac[1],
+                idc0,
+                [jac[2], jac[3], jac[4], jac[5]],
+                need_gm,
+                need_gds,
+                use_abs,
+                hh,
+            )
+        }
     }
 }
 
