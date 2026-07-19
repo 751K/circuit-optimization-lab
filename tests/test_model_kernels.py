@@ -5,19 +5,9 @@ from circuitopt.numba_kernels import (
     _capacitance_charges_impl,
     _capacitances_impl,
     _eval_currents_impl,
-    _newton_internal_impl,
-    _pnoise_fold_psd_impl,
-    _pnoise_hb_blocks_impl,
     _residual_pair_jac_internal_impl,
     _terminal_derivatives_from_jac_impl,
     _terminal_derivatives_impl,
-    capacitance_charges_numba,
-    capacitances_numba,
-    eval_currents_numba,
-    newton_internal_numba,
-    pnoise_fold_psd_numba,
-    pnoise_hb_blocks_numba,
-    terminal_derivatives_numba,
 )
 import circuitopt.pmos_tft_model as pmos_tft_model
 from circuitopt.pmos_tft_model import PMOS_TFT
@@ -43,18 +33,6 @@ def test_eval_currents_kernel_matches_model():
         got = np.array(t._eval_currents(Vs, Vd, Vg, Vs1, Vd1), float)
         ref = np.array(_eval_currents_impl(*_kernel_args(t, Vs, Vd, Vg, Vs1, Vd1)), float)
         np.testing.assert_allclose(got, ref, rtol=1e-14, atol=1e-24)
-
-
-def test_numba_kernel_matches_python_impl_when_enabled():
-    if eval_currents_numba is None:
-        return
-    t = PMOS_TFT(W=1000, L=20)
-    Vs, Vd, Vg = 40.0, 0.0, 20.0
-    Vs1, Vd1 = t.get_op(Vs, Vd, Vg)
-    args = _kernel_args(t, Vs, Vd, Vg, Vs1, Vd1)
-    got = np.array(eval_currents_numba(*args), float)
-    ref = np.array(_eval_currents_impl(*args), float)
-    np.testing.assert_allclose(got, ref, rtol=1e-14, atol=1e-24)
 
 
 def test_capacitance_kernel_matches_model_formula():
@@ -122,80 +100,13 @@ def test_capacitance_components_and_channel_charge_are_pdk_scaled():
     assert t.estimate_channel_charge(Vs, Vd, Vg) > 0.0
 
 
-def test_additional_numba_kernels_match_python_impl_when_enabled():
-    if newton_internal_numba is None:
-        return
-    t = PMOS_TFT(W=1000, L=20)
-    Vs, Vd, Vg = 40.0, 0.0, 20.0
-    x0 = (Vs - 0.01 * (Vs - Vd), Vd + 0.01 * (Vs - Vd))
-    args = (
-        Vs, Vd, Vg, x0[0], x0[1], 1e-12, 40, t.Vfb, t.Vss, t.Lc,
-        t.lambda_, t._contact_scale, t._channel_exponent, t._current_scale,
-        t._inv_Rleak,
-    )
-    got = newton_internal_numba(*args)
-    ref = _newton_internal_impl(*args)
-    assert got[0] == ref[0]
-    np.testing.assert_allclose(got[1:], ref[1:], rtol=1e-14, atol=1e-12)
-
-    Vs1, Vd1 = got[1], got[2]
-    cap_args = (
-        Vs, Vd, Vg, Vs1, Vd1, t.Vfb, t._two_over_pi, t._cap_cgs1,
-        t._cap_cgd1, t._cap_half_wl_ci, t._cap_cgs3_base,
-        t._cap_cgd3_base, t.k1,
-    )
-    np.testing.assert_allclose(
-        capacitances_numba(*cap_args), _capacitances_impl(*cap_args),
-        rtol=1e-14, atol=1e-24)
-    np.testing.assert_allclose(
-        capacitance_charges_numba(*cap_args), _capacitance_charges_impl(*cap_args),
-        rtol=1e-14, atol=1e-24)
-
-    td_args = (
-        Vs, Vd, Vg, Vs1, Vd1, True, True, True, 1e-3, 1e-6, t.Vfb, t.Vss,
-        t.Lc, t.lambda_, t._contact_scale, t._channel_exponent,
-        t._current_scale, t._inv_Rleak,
-    )
-    got_td = terminal_derivatives_numba(*td_args)
-    ref_td = _terminal_derivatives_impl(*td_args)
-    assert got_td[0] == ref_td[0]
-    np.testing.assert_allclose(got_td[1:], ref_td[1:], rtol=1e-14, atol=1e-18)
-
-
-def test_pnoise_numba_kernels_match_reference_when_enabled():
-    if pnoise_hb_blocks_numba is None:
-        return
-
-    rng = np.random.default_rng(4)
-    N = 8
-    n = 2
-    K = 2
-    Gf = rng.normal(size=(N, n, n)) + 1j * rng.normal(size=(N, n, n))
-    Cf = rng.normal(size=(N, n, n)) + 1j * rng.normal(size=(N, n, n))
-
-    for charge_caps in (False, True):
-        got_y, got_c = pnoise_hb_blocks_numba(Gf, Cf, K, 225.0, charge_caps)
-        ref_y, ref_c = _pnoise_hb_blocks_impl.py_func(Gf, Cf, K, 225.0, charge_caps)
-        np.testing.assert_allclose(got_y, ref_y, rtol=1e-14, atol=1e-14)
-        np.testing.assert_allclose(got_c, ref_c, rtol=1e-14, atol=1e-14)
-
-    nfreq = 3
-    nb = 2 * K + 1
-    adjs = rng.normal(size=(nfreq, nb * n)) + 1j * rng.normal(size=(nfreq, nb * n))
-    freqs = np.array([0.1, 10.0, 100.0])
-    p_indices = np.array([[0, 2, 4, 6, 8], [-1, -1, -1, -1, -1]], dtype=np.int64)
-    q_indices = np.array([[1, 3, 5, 7, 9], [0, 2, 4, 6, 8]], dtype=np.int64)
-    sth = rng.normal(size=(2, nb, nb)) + 1j * rng.normal(size=(2, nb, nb))
-    # flicker is now the sqrt(PWR) modulation harmonics M_{-2K..2K} (length 4K+1),
-    # not an nb x nb matrix; the fold builds S_kl=sum_a M_{k-a}M*_{l-a}/nu_a from it.
-    mfl = rng.normal(size=(2, 4 * K + 1)) + 1j * rng.normal(size=(2, 4 * K + 1))
-
-    got_out, got_dev = pnoise_fold_psd_numba(
-        adjs, freqs, K, 225.0, p_indices, q_indices, sth, mfl)
-    ref_out, ref_dev = _pnoise_fold_psd_impl.py_func(
-        adjs, freqs, K, 225.0, p_indices, q_indices, sth, mfl)
-    np.testing.assert_allclose(got_out, ref_out, rtol=1e-14, atol=1e-12)
-    np.testing.assert_allclose(got_dev, ref_dev, rtol=1e-14, atol=1e-12)
+# (v2.0.0) test_numba_kernel_matches_python_impl_when_enabled,
+# test_additional_numba_kernels_match_python_impl_when_enabled and
+# test_pnoise_numba_kernels_match_reference_when_enabled were removed: they
+# checked the numba-jitted kernel against its own ``.py_func``. The numba JIT was
+# removed, so the ``*_numba`` handles now *are* the interpreted ``_impl`` kernels
+# (the comparison is a tautology). The ``_impl`` kernels are still validated
+# against the OO model formulas (below) and against the rust core (test_rust_core_*).
 
 
 def test_get_ss_params_numba_fast_path_matches_finite_difference(monkeypatch):

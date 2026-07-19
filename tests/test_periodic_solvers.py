@@ -1,9 +1,7 @@
 import numpy as np
 import pytest
 
-from circuitopt.numba_kernels import pac_hb_blocks_numba, pac_linearize_orbit_numba
 from circuitopt.adaptive_config import AdaptiveConfig, adaptive_lte_wrms, adaptive_next_h
-import circuitopt.numba_kernels as nk
 from circuitopt.pac_solver import pac_solve
 from circuitopt._engine import current_engine
 from circuitopt.pnoise_solver import (
@@ -96,13 +94,10 @@ def test_generic_analytic_pac_matches_rc_transfer():
     assert pac["method"] == "pss_analytic_adjoint"
     assert pac["pac_period_runs"] == 0
     assert pac["pac_condition_computed"] is False
-    if current_engine() == "rust":
-        assert pac["pac_rust_linearization_used"] is True
-        assert pac["pac_rust_hb_used"] is True
-    elif pac_linearize_orbit_numba is not None:
-        assert pac["pac_numba_linearization_used"] is True
-    if current_engine() != "rust" and pac_hb_blocks_numba is not None:
-        assert pac["pac_numba_hb_used"] is True
+    # v2.0.0: rust is the only engine, so the rust linearization/HB path always runs.
+    assert current_engine() == "rust"
+    assert pac["pac_rust_linearization_used"] is True
+    assert pac["pac_rust_hb_used"] is True
     np.testing.assert_allclose(pac["response"], expected, rtol=1e-6)
 
     with_condition = pac_solve(
@@ -474,17 +469,16 @@ def test_transient_rejects_removed_cap_modes():
             transient({}, {"VIN": 0.0}, t, cap_mode_id=mode_id, **common)
 
 
-def test_adaptive_step_policy_matches_numba_helpers():
+def test_adaptive_step_policy_sanity():
+    # The numba `_impl` twins of these helpers were removed in v2.0.0;
+    # circuitopt.adaptive_config is the single source. Lock the formula shape.
     v_half = np.array([1.0, -2.0, 3.0])
     v_full = np.array([1.0002, -1.9997, 2.9995])
-    err_py = adaptive_lte_wrms(v_half, v_full, 2, 1e-4, 1e-6, 1e-12)
-    err_nb = nk._adaptive_error_impl(v_half, v_full, 2, 1e-4, 1e-6, 1e-12)
-    assert err_py == pytest.approx(err_nb)
-    for err in (0.0, 1e-12, 0.2, 1.0, 7.0, np.inf):
-        assert adaptive_next_h(1e-6, err) == pytest.approx(
-            nk._adaptive_next_h_impl(1e-6, err))
-    assert adaptive_next_h(1e-6, 0.0) > 1e-6
-    assert adaptive_next_h(1e-6, np.inf) < 1e-6
+    err = adaptive_lte_wrms(v_half, v_full, 2, 1e-4, 1e-6, 1e-12)
+    assert np.isfinite(err) and err > 0.0
+    assert adaptive_next_h(1e-6, 0.0) > 1e-6          # tiny error -> grow (capped)
+    assert adaptive_next_h(1e-6, np.inf) < 1e-6       # huge error -> shrink
+    assert adaptive_next_h(1e-6, 7.0) < adaptive_next_h(1e-6, 0.2)  # monotone
 
 
 def test_adaptive_pss_inputs_match_orbit_grid():

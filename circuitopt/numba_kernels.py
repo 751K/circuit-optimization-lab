@@ -1,12 +1,16 @@
-"""Optional numba-accelerated scalar kernels.
+"""Pure-Python scalar reference kernels (the ``_impl`` device/solver oracle).
 
-This module must remain importable without numba installed. When numba is
-available the kernels are enabled by default; set CIRCUIT_USE_NUMBA=0/false/off
-to force the pure-Python path for debugging. Numba's on-disk cache is enabled
-by default; set CIRCUIT_NUMBA_CACHE=0/false/off to disable it.
+Every kernel is a single ``_impl`` function. As of v2.0.0 these run interpreted:
+the optional numba JIT engine (and the numba dependency) were removed, and the
+compiled Rust core is the production engine. The ``_impl`` kernels survive as the
+differential *reference oracle* (docs/rust_core_rewrite_plan.md §4-D4) — notably
+the OTFT scalar equations used by the rust engine's root-selection recovery
+(``pmos_tft_model.rust_otft_reference_mode``, exercised by the AFE/chopper/
+corner robustness paths) and mirrored by the golden-corpus device grids. The
+retired ``*_numba`` names remain as ``None`` sentinels so the solver dispatch
+keeps falling back to these interpreted ``_impl`` kernels.
 """
 import math
-import os
 
 import numpy as np
 
@@ -55,32 +59,12 @@ from .adaptive_config import (
 )
 
 
-_FALSE_ENV_VALUES = {"0", "false", "no", "off"}
-_USE_NUMBA_FLAG = os.environ.get("CIRCUIT_USE_NUMBA")
-USE_NUMBA = (_USE_NUMBA_FLAG is None or
-             _USE_NUMBA_FLAG.lower() in {"1", "true", "yes", "on"})
-if _USE_NUMBA_FLAG is not None and _USE_NUMBA_FLAG.lower() in _FALSE_ENV_VALUES:
-    USE_NUMBA = False
-
-_NUMBA_CACHE_FLAG = os.environ.get("CIRCUIT_NUMBA_CACHE")
-NUMBA_CACHE = (_NUMBA_CACHE_FLAG is None or
-               _NUMBA_CACHE_FLAG.lower() not in _FALSE_ENV_VALUES)
-try:
-    from numba import njit
-except Exception:  # pragma: no cover - depends on optional dependency
-    njit = None
-
-
-NUMBA_AVAILABLE = USE_NUMBA and njit is not None
-
-
 def py_impl(kernel):
-    """Pure-Python entry of a single-sourced ``_impl`` kernel.
+    """Return the interpreted entry of a single-sourced ``_impl`` kernel.
 
-    Returns the jitted function's ``.py_func`` when Numba is active, or the raw
-    function itself when it is not. Lets a caller run the *one* source interpreted
-    (small problems where JIT dispatch is not worth it, no-Numba installs, or
-    debugging) without keeping a second hand-written Python copy.
+    A passthrough (identity) now that numba is gone and every ``_impl`` is plain
+    Python. Retained so the solver dispatch and the reference tests can keep
+    asking for "the interpreted kernel" without special-casing.
     """
     return getattr(kernel, "py_func", kernel)
 
@@ -3132,83 +3116,24 @@ def _pnoise_fold_psd_impl(adjs, freqs, K, fundamental,
     return out_psd, dev_psd
 
 
-if NUMBA_AVAILABLE:
-    # Enable disk cache so new Python processes can reuse compiled kernels.
-    # Set CIRCUIT_NUMBA_CACHE=0 if stale cache debugging is needed.
-    _softplus_py = njit(cache=NUMBA_CACHE)(_softplus_py)
-    _eval_currents_impl = njit(cache=NUMBA_CACHE)(_eval_currents_impl)
-    _residual_pair_impl = njit(cache=NUMBA_CACHE)(_residual_pair_impl)
-    _sigmoid_impl = njit(cache=NUMBA_CACHE)(_sigmoid_impl)
-    _residual_pair_fd_jac_impl = njit(cache=NUMBA_CACHE)(_residual_pair_fd_jac_impl)
-    _residual_pair_jac_internal_impl = njit(cache=NUMBA_CACHE)(_residual_pair_jac_internal_impl)
-    _newton_internal_impl = njit(cache=NUMBA_CACHE)(_newton_internal_impl)
-    _newton_internal_fast_impl = njit(cache=NUMBA_CACHE)(_newton_internal_fast_impl)
-    _capacitances_impl = njit(cache=NUMBA_CACHE)(_capacitances_impl)
-    _atan_cap_integral_impl = njit(cache=NUMBA_CACHE)(_atan_cap_integral_impl)
-    _capacitance_charges_impl = njit(cache=NUMBA_CACHE)(_capacitance_charges_impl)
-    _eval_at_impl = njit(cache=NUMBA_CACHE)(_eval_at_impl)
-    _terminal_deriv_one_impl = njit(cache=NUMBA_CACHE)(_terminal_deriv_one_impl)
-    _terminal_derivatives_from_base_impl = njit(cache=NUMBA_CACHE)(_terminal_derivatives_from_base_impl)
-    _terminal_derivatives_from_jac_fdterm_impl = njit(cache=NUMBA_CACHE)(_terminal_derivatives_from_jac_fdterm_impl)
-    _contact_diss_dvg_impl = njit(cache=NUMBA_CACHE)(_contact_diss_dvg_impl)
-    _channel_partials_impl = njit(cache=NUMBA_CACHE)(_channel_partials_impl)
-    _terminal_deriv_from_partials_impl = njit(cache=NUMBA_CACHE)(_terminal_deriv_from_partials_impl)
-    _terminal_derivatives_from_jac_impl = njit(cache=NUMBA_CACHE)(_terminal_derivatives_from_jac_impl)
-    _terminal_derivatives_impl = njit(cache=NUMBA_CACHE)(_terminal_derivatives_impl)
-    _term_value_impl = njit(cache=NUMBA_CACHE)(_term_value_impl)
-    _solve_internal_with_guesses_impl = njit(cache=NUMBA_CACHE)(_solve_internal_with_guesses_impl)
-    _fill_prev_terms_impl = njit(cache=NUMBA_CACHE)(_fill_prev_terms_impl)
-    _solve_dense_neg_rhs_inplace_impl = njit(cache=NUMBA_CACHE)(_solve_dense_neg_rhs_inplace_impl)
-    _stamp_transient_elements_impl = njit(cache=NUMBA_CACHE)(_stamp_transient_elements_impl)
-    _bsim4_dev_eval_impl = njit(cache=NUMBA_CACHE)(_bsim4_dev_eval_impl)
-    _bsim4_transient_grid_impl = njit(cache=NUMBA_CACHE)(
-        _bsim4_transient_grid_impl)
-    _stamp_transient_system_impl = njit(cache=NUMBA_CACHE)(_stamp_transient_system_impl)
-    _transient_newton_impl = njit(cache=NUMBA_CACHE)(_transient_newton_impl)
-    _transient_newton_reuse_impl = njit(cache=NUMBA_CACHE)(_transient_newton_reuse_impl)
-    _transient_solve_grid_impl = njit(cache=NUMBA_CACHE)(_transient_solve_grid_impl)
-    _gear2_substep_newton_reuse_impl = njit(cache=NUMBA_CACHE)(_gear2_substep_newton_reuse_impl)
-    _interp_inputs_at_time_impl = njit(cache=NUMBA_CACHE)(_interp_inputs_at_time_impl)
-    _adaptive_error_impl = njit(cache=NUMBA_CACHE)(_adaptive_error_impl)
-    _adaptive_next_h_impl = njit(cache=NUMBA_CACHE)(_adaptive_next_h_impl)
-    _transient_solve_adaptive_gear2_impl = njit(cache=NUMBA_CACHE)(_transient_solve_adaptive_gear2_impl)
-    _transient_solve_grid_gear2_impl = njit(cache=NUMBA_CACHE)(_transient_solve_grid_gear2_impl)
-    _pnoise_hb_blocks_impl = njit(cache=NUMBA_CACHE)(_pnoise_hb_blocks_impl)
-    _pac_term_value_impl = njit(cache=NUMBA_CACHE)(_pac_term_value_impl)
-    _pac_stamp_coeff_impl = njit(cache=NUMBA_CACHE)(_pac_stamp_coeff_impl)
-    _pac_stamp_adm_impl = njit(cache=NUMBA_CACHE)(_pac_stamp_adm_impl)
-    _pac_stamp_vccs_impl = njit(cache=NUMBA_CACHE)(_pac_stamp_vccs_impl)
-    _pac_idc_solved_impl = njit(cache=NUMBA_CACHE)(_pac_idc_solved_impl)
-    _pac_linearize_orbit_impl = njit(cache=NUMBA_CACHE)(_pac_linearize_orbit_impl)
-    _pac_term_deriv_impl = njit(cache=NUMBA_CACHE)(_pac_term_deriv_impl)
-    _pac_linearize_orbit_gate1_impl = njit(cache=NUMBA_CACHE)(_pac_linearize_orbit_gate1_impl)
-    _pnoise_fold_psd_impl = njit(cache=NUMBA_CACHE)(_pnoise_fold_psd_impl)
-    eval_currents_numba = _eval_currents_impl
-    newton_internal_numba = _newton_internal_impl
-    capacitances_numba = _capacitances_impl
-    capacitance_charges_numba = _capacitance_charges_impl
-    terminal_derivatives_numba = _terminal_derivatives_impl
-    transient_newton_numba = _transient_newton_impl
-    transient_solve_grid_numba = _transient_solve_grid_impl
-    transient_solve_grid_gear2_numba = _transient_solve_grid_gear2_impl
-    transient_solve_adaptive_gear2_numba = _transient_solve_adaptive_gear2_impl
-    pnoise_hb_blocks_numba = _pnoise_hb_blocks_impl
-    pac_hb_blocks_numba = _pnoise_hb_blocks_impl
-    pac_linearize_orbit_numba = _pac_linearize_orbit_impl
-    pac_linearize_orbit_gate1_numba = _pac_linearize_orbit_gate1_impl
-    pnoise_fold_psd_numba = _pnoise_fold_psd_impl
-else:
-    eval_currents_numba = None
-    newton_internal_numba = None
-    capacitances_numba = None
-    capacitance_charges_numba = None
-    terminal_derivatives_numba = None
-    transient_newton_numba = None
-    transient_solve_grid_numba = None
-    transient_solve_grid_gear2_numba = None
-    transient_solve_adaptive_gear2_numba = None
-    pnoise_hb_blocks_numba = None
-    pac_hb_blocks_numba = None
-    pac_linearize_orbit_numba = None
-    pac_linearize_orbit_gate1_numba = None
-    pnoise_fold_psd_numba = None
+# ── Kernel handles (v2.0.0: numba JIT removed) ────────────────────────────────
+# These ``*_numba`` names are the historical handles the non-rust solver
+# dispatch probes with ``is not None``. The numba JIT and its @njit registration
+# were removed, so they now bind directly to the interpreted ``_impl`` kernels
+# above — same source, same IEEE ops, just no JIT. Kept non-None so the reference
+# dispatch (e.g. the OTFT root-selection recovery) evaluates the analytic ``_impl``
+# equations rather than dropping to a coarser finite-difference fallback.
+eval_currents_numba = _eval_currents_impl
+newton_internal_numba = _newton_internal_impl
+capacitances_numba = _capacitances_impl
+capacitance_charges_numba = _capacitance_charges_impl
+terminal_derivatives_numba = _terminal_derivatives_impl
+transient_newton_numba = _transient_newton_impl
+transient_solve_grid_numba = _transient_solve_grid_impl
+transient_solve_grid_gear2_numba = _transient_solve_grid_gear2_impl
+transient_solve_adaptive_gear2_numba = _transient_solve_adaptive_gear2_impl
+pnoise_hb_blocks_numba = _pnoise_hb_blocks_impl
+pac_hb_blocks_numba = _pnoise_hb_blocks_impl
+pac_linearize_orbit_numba = _pac_linearize_orbit_impl
+pac_linearize_orbit_gate1_numba = _pac_linearize_orbit_gate1_impl
+pnoise_fold_psd_numba = _pnoise_fold_psd_impl

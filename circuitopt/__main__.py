@@ -30,15 +30,10 @@ import sys
 
 import numpy as np
 
-# ── Numba flag pre-scan backstop ──────────────────────────────────────────────
-# The authoritative `--no-numba` pre-scan lives in circuitopt/__init__.py, which runs
-# (and bakes numba_kernels' USE_NUMBA flag via its transitive solver imports)
-# *before* this module executes under `python -m circuitopt`. This repeat here is a
-# cheap backstop for any path that reaches __main__ without that having run; it
-# must still precede the solver imports below. If both are somehow bypassed,
-# _assert_numba_flag() turns the silent no-op into a loud SystemExit.
-if "--no-numba" in sys.argv:
-    os.environ["CIRCUIT_USE_NUMBA"] = "0"
+# Engine resolution (and rejection of the retired numba switches) happens in
+# circuitopt/__init__.py via circuitopt._engine.apply_engine_env, which runs
+# before this module under `python -m circuitopt`. Nothing engine-related needs
+# to happen here anymore — rust is the only engine (v2.0.0).
 
 from .analysis_dispatch import run_analysis_suite
 from .chopper import (chopper_analysis, pmos_chopper_analysis,
@@ -63,33 +58,6 @@ _CHOPPER_LEVELS = ["ideal", "pmos", "lptv", "pss", "pac", "pnoise", "transient"]
 
 
 # ── shared helpers ───────────────────────────────────────────────────────────
-
-def _assert_numba_flag(args):
-    """Fail loudly if the pure-Python engine was requested but Numba is still active.
-
-    Both ``--no-numba`` and ``--engine python`` select the pure-Python engine. The
-    real work is done by the argv pre-scan in ``circuitopt/__init__.py``
-    (``_engine.apply_engine_env`` sets CIRCUIT_USE_NUMBA=0 before
-    ``circuitopt.numba_kernels`` is imported and bakes its flags). This guard is a
-    tripwire: if someone reorders the imports, imports a solver module before
-    ``circuitopt``'s pre-scan runs, or otherwise defeats it, the request would
-    silently no-op again. Checking the *baked* value here converts that silent
-    failure into a loud one instead of a wrong-but-quiet run.
-    """
-    wants_python = (getattr(args, "no_numba", False)
-                    or getattr(args, "engine", None) == "python")
-    if not wants_python:
-        return
-    from . import numba_kernels
-    if numba_kernels.USE_NUMBA:
-        raise SystemExit(
-            "the pure-Python engine was requested (--no-numba or --engine python) "
-            "but Numba is already active (circuitopt.numba_kernels.USE_NUMBA is True). "
-            "The CIRCUIT_USE_NUMBA flag is baked when numba_kernels is first imported; "
-            "a solver module was imported before the argv pre-scan in "
-            "circuitopt/__init__.py could set it."
-        )
-
 
 def _load_spec(path):
     """Load a CircuitSpec from a JSON path, or raise SystemExit."""
@@ -179,16 +147,17 @@ def _add_output_arg(parser):
 
 
 def _add_engine_arg(parser):
-    """Add ``--engine`` to a subcommand that also offers ``--no-numba``.
+    """Add ``--engine`` to a subcommand that also carries the retired ``--no-numba``.
 
-    The flag only appears in ``--help`` and gets argparse validation here; its
-    *effect* comes from the argv pre-scan (``circuitopt._engine.apply_engine_env``
-    via ``circuitopt/__init__.py``), which runs before this parser is built.
+    The flag only appears in ``--help`` and is validated by the argv pre-scan
+    (``circuitopt._engine.apply_engine_env`` via ``circuitopt/__init__.py``),
+    which runs before this parser is built. As of v2.0.0 ``rust`` is the only
+    accepted value; ``--engine python``/``numba`` (and ``--no-numba`` /
+    ``CIRCUIT_USE_NUMBA``) are hard errors that point at the CHANGELOG.
     """
-    parser.add_argument("--engine", choices=("rust", "numba", "python"), default=None,
-                        help="Compute engine (default: numba). 'python' == --no-numba; "
-                             "'rust' uses circuitopt_core when installed, else warns and "
-                             "falls back to numba. See circuitopt._engine.")
+    parser.add_argument("--engine", choices=("rust",), default=None,
+                        help="Compute engine (only 'rust'; the 'python' and 'numba' "
+                             "engines were removed in v2.0.0). See circuitopt._engine.")
 
 
 # ── subcommand: run (analysis dispatch, default) ──────────────────────────────
@@ -213,14 +182,14 @@ def _add_run_parser(subparsers):
     _add_output_arg(p)
     p.add_argument("--workers", type=int, default=1,
                    help="Parallel corner workers (default: 1)")
-    p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
+    p.add_argument("--no-numba", action="store_true",
+                   help="Removed in v2.0.0 (errors): the numba engine no longer exists")
     _add_engine_arg(p)
     p.add_argument("--quiet", action="store_true", help="Suppress progress output")
     return p
 
 
 def _cmd_run(args):
-    _assert_numba_flag(args)
 
     selected = None
     if args.analysis:
@@ -276,13 +245,13 @@ def _add_explore_parser(subparsers):
     # source in circuitopt.explore so this subcommand can't drift from `python -m circuitopt.explore`.
     explore_add_cli_args(p)
     # Subcommand-level mechanism — not a feature arg, so it stays here.
-    p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
+    p.add_argument("--no-numba", action="store_true",
+                   help="Removed in v2.0.0 (errors): the numba engine no longer exists")
     _add_engine_arg(p)
     return p
 
 
 def _cmd_explore(args):
-    _assert_numba_flag(args)
     return explore_run_cli(args)
 
 
@@ -295,13 +264,13 @@ def _add_dataset_parser(subparsers):
     # can't drift from `python -m circuitopt.dataset`.
     dataset_add_cli_args(p)
     # Subcommand-level mechanism — not a feature arg, so it stays here.
-    p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
+    p.add_argument("--no-numba", action="store_true",
+                   help="Removed in v2.0.0 (errors): the numba engine no longer exists")
     _add_engine_arg(p)
     return p
 
 
 def _cmd_dataset(args):
-    _assert_numba_flag(args)
     return dataset_run_cli(args)
 
 
@@ -330,14 +299,14 @@ def _add_corners_parser(subparsers):
     _add_output_arg(p)
     p.add_argument("--workers", type=int, default=1,
                    help="Parallel corner workers (default: 1)")
-    p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
+    p.add_argument("--no-numba", action="store_true",
+                   help="Removed in v2.0.0 (errors): the numba engine no longer exists")
     _add_engine_arg(p)
     p.add_argument("--quiet", action="store_true", help="Suppress per-corner output")
     return p
 
 
 def _cmd_corners(args):
-    _assert_numba_flag(args)
 
     spec = _load_spec(args.circuit)
     freqs = _freqs_from_args(args)
@@ -391,14 +360,14 @@ def _add_mc_parser(subparsers):
     _add_freqs_args(p)
     _add_noise_band_arg(p)
     _add_output_arg(p)
-    p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
+    p.add_argument("--no-numba", action="store_true",
+                   help="Removed in v2.0.0 (errors): the numba engine no longer exists")
     _add_engine_arg(p)
     p.add_argument("--quiet", action="store_true", help="Suppress progress output")
     return p
 
 
 def _cmd_mc(args):
-    _assert_numba_flag(args)
 
     if not os.path.exists(args.circuit):
         raise SystemExit(f"file not found: {args.circuit}")
@@ -481,14 +450,14 @@ def _add_chopper_parser(subparsers):
     _add_freqs_args(p)
     _add_noise_band_arg(p)
     _add_output_arg(p)
-    p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
+    p.add_argument("--no-numba", action="store_true",
+                   help="Removed in v2.0.0 (errors): the numba engine no longer exists")
     _add_engine_arg(p)
     p.add_argument("--quiet", action="store_true", help="Suppress progress output")
     return p
 
 
 def _cmd_chopper(args):
-    _assert_numba_flag(args)
 
     spec = _load_spec(args.circuit)
     freqs = _freqs_from_args(args)
@@ -664,14 +633,14 @@ def _add_plot_parser(subparsers):
     p.add_argument("--npts", type=int, default=None,
                    help="Bode frequency points (per-plot default when omitted)")
     p.add_argument("--out-dir", default="results", help="output directory (default: results)")
-    p.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
+    p.add_argument("--no-numba", action="store_true",
+                   help="Removed in v2.0.0 (errors): the numba engine no longer exists")
     _add_engine_arg(p)
     p.add_argument("--quiet", action="store_true", help="Suppress the summary line")
     return p
 
 
 def _cmd_plot(args):
-    _assert_numba_flag(args)
     try:
         from examples import plot_bode as pbd
         from examples import plot_transient as ptr

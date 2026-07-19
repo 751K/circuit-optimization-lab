@@ -186,33 +186,11 @@ def transient_native_bsim4(
     failed_residuals = []
     near_residuals = []
     used_rust = current_engine() == "rust"
-    if used_rust:
-        used_numba = False
-    else:
-        from ...numba_kernels import NUMBA_AVAILABLE
-
-        used_numba = bool(NUMBA_AVAILABLE)
+    used_numba = False  # the numba engine was removed in v2.0.0 (rust is the only engine)
     if used_rust:
         from .rust_transient import solve_bsim4_rust
 
         xhist, nfail, first_fail = solve_bsim4_rust(
-            plan,
-            devices,
-            V0,
-            tgrid,
-            input_matrix,
-            dynamic_sources,
-            method=method,
-            newton_maxit=newton_maxit,
-            newton_vtol=newton_vtol,
-            newton_step_limit=newton_step_limit,
-            gmin=gmin,
-        )
-        solve_samples = ()
-    elif used_numba:
-        from .numba_transient import solve_bsim4_numba
-
-        xhist, nfail, first_fail = solve_bsim4_numba(
             plan,
             devices,
             V0,

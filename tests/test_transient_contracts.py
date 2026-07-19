@@ -31,7 +31,8 @@ PUBLIC_RESULT_KEYS = {
 }
 
 
-def _rc_transient(engine, monkeypatch):
+def _rc_transient_rust():
+    # Rust is the only engine (v2.0.0), so no engine override is needed.
     topology = Topology(
         solved=["OUT"],
         devices=[],
@@ -42,7 +43,6 @@ def _rc_transient(engine, monkeypatch):
     )
     times = np.linspace(0.0, 2e-6, 9)
     current = np.where(times == 0.0, 0.0, 1e-3)
-    monkeypatch.setattr(ts, "current_engine", lambda: engine)
     return ts.transient(
         {},
         {},
@@ -66,26 +66,21 @@ def test_transient_profile_slots_are_dense_and_named():
     assert tp.PROFILE_STALLED_RESIDUAL_ACCEPTS == tp.PROFILE_LEN - 1
 
 
-def test_transient_result_contract_is_engine_neutral(monkeypatch):
+def test_transient_result_contract():
+    # v2.0.0: rust is the only engine. The former engine-neutral A/B (vs the
+    # removed numba/Python transient) is now a rust-only contract check: the
+    # public result/profile schema is pinned, and the retired numba flags stay
+    # present-but-False while the rust flags report True.
     try:
         import circuitopt_core  # noqa: F401
     except ImportError:
         pytest.skip("circuitopt_core is not installed")
 
-    reference = _rc_transient("numba", monkeypatch)
-    rust = _rc_transient("rust", monkeypatch)
-
-    assert PUBLIC_RESULT_KEYS <= reference.keys()
+    rust = _rc_transient_rust()
     assert PUBLIC_RESULT_KEYS <= rust.keys()
-    assert reference["transient_profile"].keys() == rust["transient_profile"].keys()
-    assert reference["numba_grid_solver"] is True
-    assert reference["rust_grid_solver"] is False
     assert rust["numba_grid_solver"] is False
+    assert rust["numba_adaptive_solver"] is False
     assert rust["rust_grid_solver"] is True
-    assert rust["nfail"] == reference["nfail"]
-    assert rust["nretry"] == reference["nretry"]
-    assert rust["nsubsteps"] == reference["nsubsteps"]
-    np.testing.assert_allclose(rust["t"], reference["t"], rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(
-        rust["output"], reference["output"], rtol=1e-12, atol=1e-16
-    )
+    assert rust["nfail"] == 0
+    assert np.all(np.isfinite(rust["output"]))
+    assert np.all(np.isfinite(rust["t"]))

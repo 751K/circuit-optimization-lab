@@ -162,43 +162,21 @@ def test_native_5t_ota_transient_without_ngspice(monkeypatch):
     )
     assert result["backend"] == "bsim4_native"
     from circuitopt._engine import current_engine
-    if current_engine() == "rust":
-        assert result["numba_grid_solver"] is False
-        assert result["bsim4_numba_transient"] is False
-        assert result["bsim4_rust_transient"] is True
-    else:
-        assert result["numba_grid_solver"] is True
-        assert result["bsim4_numba_transient"] is True
-        assert result["bsim4_rust_transient"] is False
+    # v2.0.0: rust is the only engine.
+    assert current_engine() == "rust"
+    assert result["numba_grid_solver"] is False
+    assert result["bsim4_numba_transient"] is False
+    assert result["bsim4_rust_transient"] is True
     assert result["nfail"] == 0
     assert result["nodes"]["vout"][-1] > result["nodes"]["vout"][0] + 0.2
     assert np.all(np.isfinite(result["nodes"]["vout"]))
 
 
-def test_native_5t_ota_rust_grid_matches_numba(monkeypatch):
-    import circuitopt.compact_models.bsim4.transient as bsim_transient
-    from circuitopt.transient_solver import transient
-
-    spec, _ = _spec(driven=True)
-    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
-    time = np.linspace(0.0, 8e-9, 41)
-    vip = np.where(time < 2e-9, 0.55, 0.56)
-    vin = np.where(time < 2e-9, 0.55, 0.54)
-    kwargs = dict(
-        binding=spec.binding(), inputs={"vip": vip, "vin": vin},
-        V0=np.asarray((0.1, 0.45, 0.45)), integration_method="gear2",
-        max_step=0.2e-9)
-
-    monkeypatch.setattr(bsim_transient, "current_engine", lambda: "numba")
-    reference = transient(spec.sizes, spec.bias, time, **kwargs)
-    monkeypatch.setattr(bsim_transient, "current_engine", lambda: "rust")
-    got = transient(spec.sizes, spec.bias, time, **kwargs)
-
-    assert got["bsim4_rust_transient"] is True
-    assert got["nfail"] == reference["nfail"]
-    for name in got["nodes"]:
-        np.testing.assert_allclose(got["nodes"][name], reference["nodes"][name],
-                                   rtol=1e-12, atol=1e-15)
+# (v2.0.0) test_native_5t_ota_rust_grid_matches_numba was removed: it did a live
+# rust-grid vs numba-grid A/B, and the numba grid solver (compact_models/bsim4/
+# numba_transient.py) was deleted with the numba engine. The rust BSIM4 transient
+# is covered by tests/golden/engine_parity (freepdk45_5t_ota transient circuit
+# golden + devices.npz device grids) and the contract test below.
 
 
 def test_native_5t_ota_rust_grid_does_not_import_numba_transient(monkeypatch):

@@ -1,25 +1,24 @@
 """Compute-engine selection switch.
 
-CircuitOpt can run its numerical hot paths on one of three engines:
+As of v2.0.0 CircuitOpt runs its numerical work on a single engine — ``"rust"``,
+the compiled ``circuitopt_core`` core. It is the only supported value; there is
+no Python or numba fallback (see ``docs/rust_core_rewrite_plan.md`` §R6 and the
+v2.0.0 CHANGELOG entry).
 
-* ``"numba"``  — JIT-compiled scalar kernels (the default).
-* ``"python"`` — the pure-Python fallback (numba disabled); handy for
-  debugging and for environments without numba.
-* ``"rust"``   — the compiled Rust core (the ``circuitopt_core`` extension).
-
-Selection precedence is **argv > ``CIRCUIT_ENGINE`` env > default ("numba")**.
 ``apply_engine_env()`` runs once, at the very top of ``circuitopt/__init__.py``
-— before any solver import pulls in ``circuitopt.numba_kernels`` (which bakes
-its ``USE_NUMBA`` flag from ``CIRCUIT_USE_NUMBA`` at import time). It resolves
-the requested engine, writes the result back to ``CIRCUIT_ENGINE`` for child
-processes, and — for the pure-Python engine — reuses the existing
-``CIRCUIT_USE_NUMBA=0`` kill-switch.
+— before any solver import — and resolves the engine to ``"rust"``. The
+``--engine`` CLI flag and ``CIRCUIT_ENGINE`` env var are retained (the §7
+compatibility contract keeps the flag names), but their value domain has shrunk
+to ``{rust}``: any other value is a hard error that points at the CHANGELOG.
 
-R4 dispatches OTFT scalar evaluation, fixed/adaptive transient, BSIM4 transient,
-AC/noise MNA, periodic HB/PAC linearization, and scalar PNoise folding into the
-Rust core. SciPy sparse solves and FFT orchestration remain in Python. Requesting
-``"rust"`` warns and falls back to ``"numba"`` only when the extension cannot be
-imported.
+Removed in v2.0.0 (each is now a hard error, not a silent no-op):
+
+* ``--engine python`` / ``--engine numba`` / ``CIRCUIT_ENGINE=python|numba``
+  — the pure-Python reference engine and the numba JIT engine were both removed;
+  the frozen golden corpus (``tests/golden/engine_parity``) is the reference
+  oracle now.
+* ``--no-numba``            — the numba engine it disabled no longer exists.
+* ``CIRCUIT_USE_NUMBA``     — same.
 """
 from __future__ import annotations
 
@@ -27,12 +26,22 @@ import os
 import sys
 import warnings
 
-# The complete set of legal engine names.
-_VALID_ENGINES = ("rust", "numba", "python")
+# v2.0.0: rust is the sole engine.
+_VALID_ENGINES = ("rust",)
+_DEFAULT_ENGINE = "rust"
+
+# Engine names that used to be valid and are now removed, with a one-line reason.
+_REMOVED_ENGINES = {
+    "python": "the pure-Python reference engine was removed",
+    "numba": "the numba JIT engine was removed",
+}
+
+_CHANGELOG_HINT = (
+    "rust is the only engine in v2.0.0; see the v2.0.0 entry in CHANGELOG.md "
+    "(\"Python reference engine removed\")"
+)
 
 # Resolved once by apply_engine_env(); read by current_engine()/engine_info().
-# ``_requested_engine`` keeps the *asked-for* value (e.g. "rust") even after a
-# fallback, so engine_info() can report both what was requested and what runs.
 _resolved_engine: str | None = None
 _requested_engine: str | None = None
 
@@ -41,6 +50,11 @@ def _fail(message: str) -> None:
     """Print a clear error and exit with status 2 (argparse's usage-error code)."""
     print(f"circuitopt: error: {message}", file=sys.stderr)
     raise SystemExit(2)
+
+
+def _removed(what: str, reason: str) -> None:
+    """Exit 2 with a removal message that points at the CHANGELOG."""
+    _fail(f"{what} was removed in v2.0.0: {reason}. {_CHANGELOG_HINT}.")
 
 
 def _scan_argv_engine(argv: list[str]) -> str | None:
@@ -67,88 +81,72 @@ def _scan_argv_engine(argv: list[str]) -> str | None:
     return value
 
 
-def _resolve(requested: str) -> str:
-    """Map the requested engine to the one that will actually run.
+def _validate_engine(value: str, *, source: str) -> str:
+    """Return ``value`` if it is the sole supported engine, else exit 2.
 
-    Only ``"rust"`` can differ from the request: it falls back to ``"numba"``
-    (with exactly one ``RuntimeWarning``) when ``circuitopt_core`` is missing.
+    A retired engine name (``python``/``numba``) gets a removal message; any
+    other unknown value gets a generic invalid-choice message.
     """
-    if requested != "rust":
-        return requested
-    try:
-        import circuitopt_core  # noqa: F401  (import is the availability probe)
-    except Exception:
-        warnings.warn(
-            "CIRCUIT_ENGINE=rust requested but circuitopt_core is not "
-            "installed; falling back to numba",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-        return "numba"
-    return "rust"
+    if value in _VALID_ENGINES:
+        return value
+    if value in _REMOVED_ENGINES:
+        _removed(f"{source}={value}", _REMOVED_ENGINES[value])
+    _fail(f"invalid engine {value!r}; the only supported engine is 'rust'")
 
 
 def apply_engine_env(argv: list[str] | None = None) -> str:
     """Resolve the engine from argv/env and wire the process for it.
 
-    Called once from ``circuitopt/__init__.py`` before the solver imports. Steps
-    (matching the documented precedence argv > CIRCUIT_ENGINE > "numba"):
-
-    a. Pre-scan argv for ``--engine X`` / ``--engine=X``; an illegal value exits 2.
-    b. ``--no-numba`` forces the ``"python"`` engine; combining it with an argv
-       ``--engine`` other than ``python`` is a conflict and exits 2.
-    c. Write the *resolved* engine back to ``CIRCUIT_ENGINE`` (children inherit it
-       and thus never re-attempt — or re-warn about — an unavailable rust core).
-    d. The ``"python"`` engine reuses the existing ``CIRCUIT_USE_NUMBA=0`` switch.
-    e. A ``"rust"`` request resolves to ``"rust"`` when ``circuitopt_core`` imports,
-       otherwise warns once and resolves to ``"numba"``.
-
-    Returns the resolved engine name.
+    Called once from ``circuitopt/__init__.py`` before the solver imports. The
+    engine is always ``"rust"``; this function's job is to reject the retired
+    switches loudly (rather than silently ignoring them) and to write the
+    resolved engine back to ``CIRCUIT_ENGINE`` for child processes.
     """
     global _resolved_engine, _requested_engine
     if argv is None:
         argv = sys.argv
 
-    argv_engine = _scan_argv_engine(argv)
-    no_numba = "--no-numba" in argv
+    # Retired switches → hard errors (they used to select a now-removed engine).
+    if "--no-numba" in argv:
+        _removed("--no-numba", "the numba engine it disabled no longer exists")
+    if os.environ.get("CIRCUIT_USE_NUMBA") is not None:
+        _removed("the CIRCUIT_USE_NUMBA env var",
+                 "the numba engine it toggled no longer exists")
 
-    if no_numba:
-        # --no-numba is an argv-level request for the pure-Python engine; it
-        # outranks CIRCUIT_ENGINE but must not silently contradict an explicit
-        # argv --engine.
-        if argv_engine is not None and argv_engine != "python":
-            _fail(
-                f"--no-numba conflicts with --engine {argv_engine}: --no-numba "
-                "selects the pure-Python engine, so --engine must be 'python' "
-                "or omitted"
-            )
-        requested = "python"
-    elif argv_engine is not None:
-        requested = argv_engine
+    argv_engine = _scan_argv_engine(argv)
+    if argv_engine is not None:
+        requested = _validate_engine(argv_engine, source="--engine")
     else:
         env_engine = os.environ.get("CIRCUIT_ENGINE")
-        requested = env_engine if env_engine else "numba"
-
-    if requested not in _VALID_ENGINES:
-        _fail(
-            f"invalid engine {requested!r}; choose from "
-            f"{', '.join(_VALID_ENGINES)}"
-        )
+        if env_engine:
+            requested = _validate_engine(env_engine, source="CIRCUIT_ENGINE")
+        else:
+            requested = _DEFAULT_ENGINE
 
     _requested_engine = requested
-    resolved = _resolve(requested)
-    _resolved_engine = resolved
+    _resolved_engine = requested  # rust is the only value; nothing to fall back to
 
-    # (c) resolved result written back for child processes.
-    os.environ["CIRCUIT_ENGINE"] = resolved
-    # (d) pure-Python engine reuses the numba kill-switch that numba_kernels reads.
-    if resolved == "python":
-        os.environ["CIRCUIT_USE_NUMBA"] = "0"
-    return resolved
+    # Write it back so child processes inherit the resolved engine.
+    os.environ["CIRCUIT_ENGINE"] = requested
+
+    # Early, non-fatal heads-up when the compiled core is absent: `import
+    # circuitopt` still succeeds (version/tooling paths do not touch the core),
+    # but any solver call will fail. Warning here surfaces the cause sooner.
+    try:
+        import circuitopt_core  # noqa: F401
+    except Exception:
+        warnings.warn(
+            "circuitopt_core (the compiled rust core) is not importable; rust is "
+            "the only engine, so solver calls will fail until it is installed "
+            "(pip install circuitopt-core, or maturin develop rust/crates/co-py)",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return requested
 
 
 def current_engine() -> str:
-    """Return the engine that is actually active (``"numba"`` after a fallback)."""
+    """Return the active engine (always ``"rust"`` in v2.0.0)."""
     if _resolved_engine is None:
         # Defensive: any ``import circuitopt`` runs apply_engine_env() first, so
         # this only triggers if _engine is driven in isolation.
@@ -159,16 +157,15 @@ def current_engine() -> str:
 def engine_info() -> dict:
     """Return ``{"engine": <active>, "requested": <asked-for>, "core": <dict|None>}``.
 
-    ``core`` carries ``circuitopt_core.engine_info()`` when the rust core is live,
-    otherwise ``None``.
+    ``core`` carries ``circuitopt_core.engine_info()`` when the rust core is
+    importable, otherwise ``None``.
     """
     engine = current_engine()
     info: dict = {"engine": engine, "requested": _requested_engine, "core": None}
-    if engine == "rust":
-        try:
-            import circuitopt_core
+    try:
+        import circuitopt_core
 
-            info["core"] = circuitopt_core.engine_info()
-        except Exception:
-            info["core"] = None
+        info["core"] = circuitopt_core.engine_info()
+    except Exception:
+        info["core"] = None
     return info

@@ -10,23 +10,22 @@ Or from the command line::
 
     python -m circuitopt examples/periodic_rc.json
 
-Compute engine: the numerical hot paths run on one of three engines —
-``"numba"`` (default), ``"python"`` (pure-Python fallback), or ``"rust"`` (the
-compiled ``circuitopt_core`` core). Select with ``--engine`` / ``CIRCUIT_ENGINE``
-(precedence argv > env > default); ``--no-numba`` is shorthand for
-``--engine python``. ``current_engine()`` reports the active one. See
+Compute engine: as of v2.0.0 the numerical work runs on a single engine —
+``"rust"``, the compiled ``circuitopt_core`` core. The ``--engine`` flag and
+``CIRCUIT_ENGINE`` env var are retained but accept only ``rust``; the former
+``python``/``numba`` engines (and ``--no-numba`` / ``CIRCUIT_USE_NUMBA``) were
+removed and now error. ``current_engine()`` reports the active engine. See
 ``circuitopt/_engine.py``.
 """
 
 # ── Engine selection pre-scan (MUST run before any solver import below) ────────
-# circuitopt.numba_kernels reads CIRCUIT_USE_NUMBA and bakes USE_NUMBA/
-# NUMBA_AVAILABLE at *import time*. Under `python -m circuitopt …` this package
-# __init__ runs (and its solver imports below pull numba_kernels in transitively)
-# *before* __main__.py's code executes — so a later env tweak would be too late
-# and `--no-numba` / `--engine` would silently no-op. apply_engine_env() scans
-# argv here, at the earliest possible point, resolving the active engine
-# (rust | numba | python) with precedence argv > CIRCUIT_ENGINE env > "numba"
-# and setting CIRCUIT_USE_NUMBA=0 for the pure-Python engine. See _engine.py.
+# apply_engine_env() resolves the engine from argv/env at the earliest possible
+# point — before the solver imports below run. Under `python -m circuitopt …`
+# this package __init__ (and its transitive solver imports) executes *before*
+# __main__.py's code, so resolving here is what lets `--engine` / CIRCUIT_ENGINE
+# be validated at all (and the retired numba switches rejected loudly); the
+# resolved name is written back to CIRCUIT_ENGINE for child processes. See
+# _engine.py.
 from ._engine import apply_engine_env, current_engine
 
 apply_engine_env()
@@ -76,7 +75,7 @@ from .sar_explore import (apply_sar_variables, evaluate_sar,
 __all__ = [
     # package metadata
     "__version__",
-    # compute-engine switch (rust | numba | python)
+    # compute-engine switch (rust only, as of v2.0.0)
     "current_engine",
     # device model abstraction
     "TransistorModel",
