@@ -23,6 +23,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::missing_safety_doc)]
 
+mod sar_campaign;
 mod silicon_campaign;
 
 use std::collections::HashMap;
@@ -3261,5 +3262,7 @@ fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // PDK compilers parity surface.
     m.add_class::<PyCompiledPdk>()?;
     m.add_class::<PyCompiledCampaign>()?;
+    // SAR conversion batch (R8).
+    m.add_class::<sar_campaign::PyCompiledSarConversion>()?;
     Ok(())
 }

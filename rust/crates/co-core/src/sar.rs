@@ -275,7 +275,7 @@ impl ExpandedGrid {
     /// Port of `_expanded_grid`: subdivide each interval to at most `max_step`
     /// with `numpy.linspace` endpoints. `max_step <= 0` disables subdivision.
     pub fn build(tgrid: &[f64], max_step: f64) -> Self {
-        if !(max_step > 0.0) || tgrid.len() < 2 {
+        if max_step <= 0.0 || max_step.is_nan() || tgrid.len() < 2 {
             return Self {
                 times: tgrid.to_vec(),
                 requested_index: (0..tgrid.len()).collect(),
