@@ -73,13 +73,25 @@ impl Drop for HandleGuard {
     }
 }
 
-/// `bsim_transient::Evaluator` over one trial's handle set (mirrors the shared
-/// `RustBsimEvaluator`, but over owned guards).
-struct GuardEvaluator<'a> {
-    handles: &'a [HandleGuard],
+/// `bsim_transient::Evaluator` owning one trial's native handles (built once and
+/// reused across the trial's conversions — `eval_vp` recomputes from terminals
+/// and resets its per-handle scratch, so reuse is bit-identical to a fresh
+/// handle). Created, used, and dropped on one worker thread.
+struct GuardEvaluator {
+    handles: Vec<HandleGuard>,
 }
 
-impl bsim_transient::Evaluator for GuardEvaluator<'_> {
+impl GuardEvaluator {
+    fn new(cards: &[DeviceCard], delvto: &[f64]) -> Result<Self, String> {
+        let mut handles = Vec::with_capacity(cards.len());
+        for (card, &delvto) in cards.iter().zip(delvto) {
+            handles.push(build_handle(card, delvto)?);
+        }
+        Ok(Self { handles })
+    }
+}
+
+impl bsim_transient::Evaluator for GuardEvaluator {
     fn evaluate(
         &mut self,
         index: usize,
@@ -185,21 +197,16 @@ impl CandidateEvaluator for SarEvaluator<'_> {
             ));
         }
 
-        // Build this trial's handles (fresh, delvto-adjusted) on this thread.
-        let mut handles = Vec::with_capacity(t.cards.len());
-        for (card, &delvto) in t.cards.iter().zip(&trial.delvto) {
-            handles.push(
-                build_handle(card, delvto).map_err(|error| format!("trial {index}: {error}"))?,
-            );
-        }
-
         // Patch the trial's CDAC capacitor perturbation onto a circuit clone.
         let mut circuit = t.circuit.clone();
         for (capacitor, &value) in circuit.capacitors.iter_mut().zip(&trial.cap_values) {
             capacitor.capacitance = value;
         }
 
-        let mut evaluator = GuardEvaluator { handles: &handles };
+        // This trial's handle set (fresh, delvto-adjusted) on this thread; the
+        // evaluator rebuilds it per bit inside run_conversion.
+        let mut evaluator = GuardEvaluator::new(&t.cards, &trial.delvto)
+            .map_err(|error| format!("trial {index}: {error}"))?;
         let mut codes = Vec::with_capacity(t.vins.len());
         for &vin in &t.vins {
             let conversion = co_core::sar::run_conversion(

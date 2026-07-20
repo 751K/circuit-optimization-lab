@@ -108,10 +108,14 @@ fn np_interp(x: f64, xp: &[f64], fp: &[f64]) -> f64 {
     if xp[j] == x {
         return fp[j];
     }
+    // numpy's `interp` fuses the final `slope*(x-xp[j]) + fp[j]` into a single-
+    // rounding FMA (verified bit-for-bit against numpy 2.4.6). Plain `a*b + c`
+    // differs by up to 1 ULP, which the SAR's regenerative (clocked-latch)
+    // comparator amplifies to a flipped code — so this MUST use `mul_add`.
     let slope = (fp[j + 1] - fp[j]) / (xp[j + 1] - xp[j]);
-    let mut res = slope * (x - xp[j]) + fp[j];
+    let mut res = slope.mul_add(x - xp[j], fp[j]);
     if res.is_nan() {
-        res = slope * (x - xp[j + 1]) + fp[j + 1];
+        res = slope.mul_add(x - xp[j + 1], fp[j + 1]);
         if res.is_nan() && fp[j] == fp[j + 1] {
             res = fp[j];
         }
