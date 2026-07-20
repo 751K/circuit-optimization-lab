@@ -101,8 +101,32 @@ impl bsim_transient::Evaluator for GuardEvaluator<'_> {
     }
 }
 
-/// Build one native handle from a frozen card, overriding `delvto` with the
-/// trial's per-device offset (the only parameter mismatch perturbs).
+/// Set one parameter, mapping a nonzero status to an error string.
+fn set_param(
+    handle: *mut CoBsim4,
+    name: &str,
+    value: f64,
+    kind: &str,
+    setter: unsafe fn(*mut CoBsim4, *const std::os::raw::c_char, f64) -> std::os::raw::c_int,
+) -> Result<(), String> {
+    let cname = CString::new(name).map_err(|_| format!("{kind} param {name:?} has NUL"))?;
+    let status = unsafe { setter(handle, cname.as_ptr(), value) };
+    if status != 0 {
+        return Err(format!(
+            "{kind} setup failed for {name:?} (status {status})"
+        ));
+    }
+    Ok(())
+}
+
+/// Build one native handle from a frozen card, then append the trial's per-device
+/// `delvto` offset iff it is nonzero.
+///
+/// The reference path only writes `delvto` when `mismatch_v` is truthy
+/// (`freepdk45.library.device_card`: `if mismatch_v: parameters["delvto"] = ...`),
+/// appending it after the geometry parameters — so a zero offset (a device the
+/// mismatch draw never touched) leaves the instance card at its nominal shape,
+/// and a nonzero offset appends `delvto` last, exactly as the frozen card does.
 fn build_handle(card: &DeviceCard, delvto: f64) -> Result<HandleGuard, String> {
     let handle = unsafe { co_bsim4::create(card.polarity, card.temperature_k) };
     if handle.is_null() {
@@ -110,25 +134,19 @@ fn build_handle(card: &DeviceCard, delvto: f64) -> Result<HandleGuard, String> {
     }
     let guard = HandleGuard(handle);
     for (name, value) in &card.model {
-        let cname =
-            CString::new(name.as_str()).map_err(|_| format!("model param {name:?} has NUL"))?;
-        let status = unsafe { co_bsim4::set_model(guard.0, cname.as_ptr(), *value) };
-        if status != 0 {
-            return Err(format!("model setup failed for {name:?} (status {status})"));
-        }
+        set_param(guard.0, name, *value, "model", co_bsim4::set_model)?;
     }
     for (name, value) in &card.instance {
-        // `delvto` is the mismatch knob: substitute the trial's offset, keeping
-        // the frozen call order otherwise identical.
-        let value = if name == "delvto" { delvto } else { *value };
-        let cname =
-            CString::new(name.as_str()).map_err(|_| format!("instance param {name:?} has NUL"))?;
-        let status = unsafe { co_bsim4::set_instance(guard.0, cname.as_ptr(), value) };
-        if status != 0 {
-            return Err(format!(
-                "instance setup failed for {name:?} (status {status})"
-            ));
-        }
+        set_param(guard.0, name, *value, "instance", co_bsim4::set_instance)?;
+    }
+    if delvto != 0.0 {
+        set_param(
+            guard.0,
+            "delvto",
+            delvto,
+            "instance",
+            co_bsim4::set_instance,
+        )?;
     }
     let status = unsafe { co_bsim4::setup(guard.0) };
     if status != 0 {

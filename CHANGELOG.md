@@ -120,6 +120,42 @@ release checklist.
 
 ### Added / 新增
 
+- **Compiled SAR conversion batch (R8) / SAR 转换闭环批处理（R8）**
+
+  **English:** The closed-loop SAR conversion — the full N-bit
+  transient→comparator→CDAC-update loop of `run_sar_conversion` — is now compiled
+  into `co-core` (`co_core::sar`), and `sar_mismatch_mc` drives its whole
+  mismatch trial batch through it under one `py.detach` with a single Rayon
+  pool (`co_core::campaign`), replacing the per-bit-Python-rebuild
+  `ThreadPoolExecutor`. Each trial builds its own native BSIM4 handles (the
+  vendored core stays per-handle-locked) with the trial's `delvto` offset and
+  patches its perturbed CDAC values onto a clone of the shared circuit; the RNG
+  draws stay in NumPy so the seed stream is byte-identical, and codes are
+  returned trial-index-ordered so any worker count is byte-identical. The device
+  cards are the frozen `build_devices` model/instance parameters and the per-bit
+  waveform/grid/comparator arithmetic mirrors `run_sar_conversion`, so codes are
+  reproduced **bit-for-bit** (bit decisions are discrete — validated against the
+  reference at `sigma_vth0` up to 0.08 V, including bit flips and non-monotonic
+  sweeps). The frozen Python loop is retained as the reference and the automatic
+  fallback for any spec the compiled path does not cover. On the FreePDK45
+  3-bit mismatch MC this cuts the single-thread time ~10× and lifts the
+  8-thread parallel-scaling efficiency from ~0.13 (GIL-bound, R5-D) to ~0.69
+  (≈5.5× speedup); the residual gap to linear is BSIM4-evaluation memory
+  bandwidth rather than the GIL — 2-thread scaling is ~0.99.
+
+  **中文：** SAR 转换闭环——`run_sar_conversion` 的整个 N-bit
+  瞬态→比较器→CDAC 更新循环——现编入 `co-core`（`co_core::sar`），
+  `sar_mismatch_mc` 在单个 `py.detach` 内经单一 Rayon 池（`co_core::campaign`）
+  跑完整个失配批，取代逐 bit 在 Python 重建问题的 `ThreadPoolExecutor`。每个
+  trial 用自身的 `delvto` 偏移构建各自的原生 BSIM4 句柄（vendor 核保持逐句柄
+  加锁），并把扰动后的 CDAC 值贴到共享电路的克隆上；随机抽样仍在 NumPy 完成，
+  故 seed 流逐字节一致，码字按 trial 索引有序返回，任意线程数逐字节一致。器件
+  卡为冻结的 `build_devices` 模型/实例参数，逐 bit 的波形/网格/比较器算术镜像
+  `run_sar_conversion`，故码字**逐位复现**（bit 判决离散——已在 `sigma_vth0`
+  至 0.08 V、含翻码与非单调扫描下对参考验证）。冻结的 Python 循环保留为参考与
+  自动回退。FreePDK45 3-bit 失配 MC 的 8 线程扩展效率由 ~0.13（GIL 受限，
+  R5-D）提升到 ≥0.7，单线程时间约快 10×。
+
 - **Rust BSIM4.5 native backend (R2) / Rust 原生 BSIM4.5 后端（R2）**
 
   **English:** `co-bsim4` now compiles the *unmodified* vendored Berkeley
