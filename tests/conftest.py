@@ -27,6 +27,7 @@ _HEAVY_E2E_FILES = {
     "test_sar_mc.py",
     "test_sar_mc_semantics.py",
     "test_sar_parallel.py",
+    "test_sar_rust.py",
     "test_sar_wp2_semantics.py",
 }
 

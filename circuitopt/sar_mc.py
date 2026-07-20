@@ -38,6 +38,7 @@ from typing import Any, Callable, Mapping
 
 import numpy as np
 
+from . import diagnostics
 from .adc import static_ramp_metrics
 from .circuit_loader import CircuitSpec
 from .sar import _sar_config, run_sar_conversion
@@ -149,21 +150,18 @@ def perturb_capacitors(spec: CircuitSpec, rng: np.random.Generator,
     return _copy_with_capacitors(spec, new_caps)
 
 
-def _trial_metrics(spec: CircuitSpec, vin: np.ndarray, cfg: dict,
-                   corner: str | None, delvto: Mapping[str, float]) -> dict:
-    """One code-center sweep -> per-trial linearity row.
+def _row_from_codes(codes, vin: np.ndarray, cfg: dict) -> dict:
+    """Score one trial's code sweep into a linearity row.
 
-    Reuses :func:`run_sar_conversion` (the same machinery as ``run_sar_sweep``) but
-    guards :func:`static_ramp_metrics`, which requires monotonic codes: under heavy
-    mismatch a SAR can go non-monotonic, and that trial must be scored as a failure
-    rather than crash the sweep.
+    Shared by the reference sweep (:func:`_trial_metrics`) and the compiled batch
+    path so the two can never diverge on the codes -> metrics reduction.
+    :func:`static_ramp_metrics` requires monotonic codes: under heavy mismatch a
+    SAR can go non-monotonic, and that trial is scored as a failure rather than
+    crashing the sweep.
     """
     n_bits = cfg["n_bits"]
     levels = 1 << n_bits
-    codes = np.array(
-        [run_sar_conversion(spec, float(v), config=cfg, corner=corner,
-                            mismatch=delvto)["code"] for v in vin],
-        dtype=np.int64)
+    codes = np.asarray(codes, dtype=np.int64)
     present = np.unique(codes)
     missing = int(levels - present.size)
     monotonic = bool(np.all(np.diff(codes) >= 0))
@@ -181,6 +179,56 @@ def _trial_metrics(spec: CircuitSpec, vin: np.ndarray, cfg: dict,
         row["max_abs_inl"] = np.inf
         row["offset_lsb"] = np.nan
     return row
+
+
+def _trial_metrics(spec: CircuitSpec, vin: np.ndarray, cfg: dict,
+                   corner: str | None, delvto: Mapping[str, float]) -> dict:
+    """One code-center sweep -> per-trial linearity row (reference path).
+
+    Reuses :func:`run_sar_conversion` (the same machinery as ``run_sar_sweep``);
+    the frozen reference the compiled batch is validated against bit-for-bit.
+    """
+    codes = np.array(
+        [run_sar_conversion(spec, float(v), config=cfg, corner=corner,
+                            mismatch=delvto)["code"] for v in vin],
+        dtype=np.int64)
+    return _row_from_codes(codes, vin, cfg)
+
+
+def _rust_batch_rows(spec: CircuitSpec, cfg: dict, corner: str | None,
+                     draws: list, vin: np.ndarray, workers: int) -> list | None:
+    """Run the whole trial batch through the compiled SAR loop (rewrite step R8).
+
+    Marshals the SAR template once and evaluates every trial's code-center sweep
+    in the co-core closed-loop kernel under one Rayon pool (no per-bit Python
+    callback), with candidate-index-ordered write-back so any worker count is
+    byte-identical. The RNG draws stay in numpy so the seed stream matches the
+    reference exactly; only the conversions move to Rust.
+
+    Returns per-trial rows, or ``None`` to fall back to the frozen reference loop
+    — for a spec the compiled path does not reproduce, or on any batch error
+    (the reference loop then reproduces the exact result or exception).
+    """
+    try:
+        from .sar_rust import SarRustUnavailable, build_sar_batch
+    except ImportError:  # pragma: no cover - extension always present in-tree
+        return None
+    try:
+        batch = build_sar_batch(spec, cfg, corner=corner)
+        trials = [(delvto, [cap[3] for cap in trial_spec.topology.capacitors])
+                  for delvto, trial_spec in draws]
+        codes_list = batch.run(trials, workers)
+    except SarRustUnavailable:
+        return None
+    except Exception as exc:  # pragma: no cover - defensive reference fallback
+        diagnostics.note("sar_mc.rust_batch_fallback", exc)
+        return None
+    rows = []
+    for i, codes in enumerate(codes_list):
+        row = _row_from_codes(codes, vin, cfg)
+        row["trial"] = i
+        rows.append(row)
+    return rows
 
 
 def _summ(values: np.ndarray) -> dict:
@@ -243,6 +291,21 @@ def sar_mismatch_mc(spec: CircuitSpec, *, n: int = 50, seed: int = 0,
         delvto = draw_device_mismatch(spec, rng, mcfg)
         trial_spec = perturb_capacitors(spec, rng, mcfg)
         draws.append((delvto, trial_spec))
+
+    # Compiled fast path: run the whole batch in the co-core SAR loop under one
+    # Rayon pool (byte-identical for any worker count, bit-for-bit identical to
+    # the reference codes). Falls back to the frozen loop below when unavailable.
+    rust_rows = _rust_batch_rows(spec, cfg, corner, draws, vin, workers)
+    if rust_rows is not None:
+        if progress is not None:
+            # Fire progress post-batch in trial order — no per-bit Python callback
+            # runs during the parallel compute (the summary aggregates 1..i rows).
+            ordered = []
+            for i, row in enumerate(rust_rows):
+                ordered.append(row)
+                progress(i + 1, n, _summarize(ordered, mcfg))
+        return {"rows": rust_rows, "arrays": _arrays(rust_rows),
+                "summary": _summarize(rust_rows, mcfg), "config": mcfg}
 
     def _run_trial(i: int) -> dict:
         delvto, trial_spec = draws[i]
