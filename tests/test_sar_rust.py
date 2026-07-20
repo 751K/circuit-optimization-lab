@@ -107,3 +107,27 @@ def test_mismatch_mc_takes_the_compiled_path():
     # so sar_mismatch_mc's fast path is taken rather than the reference fallback.
     batch = build_sar_batch(spec, cfg)
     assert batch.levels == 8
+
+
+def test_mismatch_mc_never_calls_python_per_conversion(monkeypatch):
+    """The compiled batch does the whole MC in Rust — zero per-bit Python callback.
+
+    The reference path calls :func:`run_sar_conversion` once per conversion (per
+    bit inside it). If the compiled fast path is engaged, that Python function is
+    never entered during ``sar_mismatch_mc`` — the entire trial batch runs under
+    one ``py.detach``. Counting the calls is the "counting trap" that catches a
+    silent fallback to the GIL-bound Python loop.
+    """
+    import circuitopt.sar_mc as sar_mc
+    calls = {"n": 0}
+    real = sar_mc.run_sar_conversion
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sar_mc, "run_sar_conversion", counting)
+    result = sar_mc.sar_mismatch_mc(_spec(), n=3, seed=2,
+                                    config={"sigma_vth0": 0.02, "sigma_cu": 0.02})
+    assert len(result["rows"]) == 3
+    assert calls["n"] == 0          # compiled path: no Python conversion callback
