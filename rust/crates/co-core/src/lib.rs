@@ -12,6 +12,7 @@ pub mod mna;
 pub mod otft;
 pub mod otft_campaign;
 pub mod periodic;
+pub mod sar;
 pub mod transient;
 
 pub use error::CoreError;
