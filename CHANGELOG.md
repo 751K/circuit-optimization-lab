@@ -423,6 +423,29 @@ release checklist.
   未修改的 Berkeley 源码），且构建失败在进程内缓存、不再被每个测试重试
   ——此前一次 CI 曾因重复运行同一失败编译烧掉 2.5 小时。
 
+## [1.4.1] - 2026-07-17
+
+### Fixed / 修复
+
+- **Default test-suite runtime and native BSIM4 build robustness / 默认测试集耗时与原生 BSIM4 构建健壮性**
+
+  **English:** Marked the complete SAR/ADC conversion regressions as
+  `heavy_e2e` and excluded them from the default pytest run (on a machine with
+  FreePDK45 cards they took ~20 of the suite's ~22 minutes; the default run is
+  now minutes-level again, run them explicitly with `pytest -m heavy_e2e`).
+  The native BSIM4.5 runtime build now tolerates compilers that promote
+  implicit function declarations to errors (clang 16+ on Linux rejected the
+  unmodified Berkeley sources), and a failed build is cached per process
+  instead of being retried by every test — a CI run had burned 2.5 h
+  re-running the same failing compile.
+
+  **中文：** 将完整 SAR/ADC 转换回归标记为 `heavy_e2e` 并移出默认 pytest
+  运行（装有 FreePDK45 卡的机器上它们占 ~22 分钟中的 ~20 分钟；默认运行
+  恢复到分钟级，用 `pytest -m heavy_e2e` 显式执行）。原生 BSIM4.5 运行时
+  构建现兼容将隐式函数声明视为错误的编译器（Linux 上 clang 16+ 拒绝编译
+  未修改的 Berkeley 源码），且构建失败在进程内缓存、不再被每个测试重试
+  ——此前一次 CI 曾因重复运行同一失败编译烧掉 2.5 小时。
+
 ## [1.4.0] - 2026-07-17
 
 ### Added / 新增
