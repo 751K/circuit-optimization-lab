@@ -62,16 +62,22 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install package (with test extras)
-        run: python -m pip install -e ".[test]"
-      # Build + install the Rust core so tests/test_engine.py's rust-present
-      # branch is exercised here (locally it probe-skips when not installed).
+      # The compiled Rust core (distribution `circuitopt-core`, import name
+      # circuitopt_core) is the sole compute engine as of v2.0.0 and is NOT
+      # published to PyPI, while the main package pins it EXACTLY
+      # (`circuitopt-core==<version>` in pyproject). It must therefore be built
+      # and installed from the local workspace BEFORE `pip install -e .`, else
+      # the editable install cannot resolve the pin off the index. Installing it
+      # first also exercises tests/test_engine.py's rust-present branch (which
+      # asserts engine_info()["core"] is not None).
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
       - name: Install circuitopt_core (compiled rust engine)
         run: python -m pip install rust/crates/co-py
+      - name: Install package (with test extras)
+        run: python -m pip install -e ".[test]"
       - name: Run tests
         run: python -m pytest -q
 
@@ -87,6 +93,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      # calibration --all runs real solves on the compiled Rust core, so the
+      # `circuitopt-core` engine must be built and installed from the local
+      # workspace first — it is unpublished and pinned exactly, and v2.0.0 has
+      # no Python/numba fallback (see the test job for the full rationale).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install circuitopt_core (compiled rust engine)
+        run: python -m pip install rust/crates/co-py
       - name: Install package (with test extras)
         run: python -m pip install -e ".[test]"
       - name: Calibration byte-gate
