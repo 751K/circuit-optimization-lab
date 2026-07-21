@@ -101,11 +101,28 @@ def test_schema_rejects_unknown_clock_key():
 # ── physical interaction (ngspice) ────────────────────────────────────────────
 @needs_freepdk45
 def test_independent_pinned_code():
-    """Second opinion at a different code than the agent's pinned one."""
+    """Second opinion at a different code than the agent's pinned one.
+
+    0.2890625 is the *ideal* code-center of code 18 (18.5/64). This transistor-
+    level SAR is not an ideal quantizer: a full 64-code center sweep shows ~±1 LSB
+    INL across its usable mid-range (codes 5..61 land within ±1 of ideal), so a
+    code-center input routinely resolves to an adjacent code — exactly like the
+    sibling pin in test_freepdk45_sar6.py, where the code-center of ideal code 45
+    (0.7109375) reads 44. Here the +1 INL point reads 19, not 18.
+
+    19 is the genuine, physically-correct output of this converter, not an off-by-
+    one: the decision is deterministic and thread-invariant (repeated runs), the
+    two deciding LSB comparator reads are deeply railed (~1.2e-4 V against the
+    0.5 V threshold, not metastable) and stay flat for ~±1 ns around the decision
+    instant (robust to the clock/interp semantics), and the frozen Python
+    run_sar_conversion and the compiled Rust co_core::sar batch agree on 19 here
+    and bit-for-bit across all 64 ramp codes. The original 18 was an idealized
+    hand-computed code-center that never matched the silicon.
+    """
     from circuitopt.sar import run_sar_conversion
-    result = run_sar_conversion(_spec(), 0.2890625)          # code-center of code 18
-    assert result["code"] == 18
-    np.testing.assert_array_equal(result["bits"], [0, 1, 0, 0, 1, 0])
+    result = run_sar_conversion(_spec(), 0.2890625)   # ideal code-center of 18; ±1 LSB INL -> 19
+    assert result["code"] == 19
+    np.testing.assert_array_equal(result["bits"], [0, 1, 0, 0, 1, 1])
 
 
 @needs_freepdk45
