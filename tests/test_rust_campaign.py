@@ -442,7 +442,7 @@ def _silicon_ready(pdk):
     elif pdk == "tsmc28":
         from circuitopt.toolchain import tsmc28_model_dir
 
-        if not os.path.isdir(tsmc28_model_dir()):
+        if not os.path.isfile(os.path.join(tsmc28_model_dir(), "cln28hpcp_1d8_elk_v1d0_2p2.l")):
             return "licensed TSMC28HPC+ model is not installed"
     return None
 
