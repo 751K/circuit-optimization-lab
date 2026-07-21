@@ -45,7 +45,7 @@ package metadata. The repository's canonical version is
 | `--host` | `127.0.0.1` | Bind address. Loopback only by default; see [Security](#security). |
 | `--port` | `8341` | TCP port. |
 | `--reload` | off | uvicorn auto-reload for development. `--job-workers` is ignored in this mode (the reloader re-imports the app from `circuitopt.service.app:create_app`, which takes no arguments). |
-| `--job-workers` | `1` | Thread-pool size for background jobs (`explore`/`mc`). Solves are CPU-bound (NumPy/Numba); raise only if you have spare cores and want concurrent jobs running. |
+| `--job-workers` | `1` | Thread-pool size for background jobs (`explore`/`mc`). Solves are CPU-bound (the compiled Rust core releases the GIL in its hot loops); raise only if you have spare cores and want concurrent jobs running. |
 
 All routes are under the `/api/v1` prefix.
 

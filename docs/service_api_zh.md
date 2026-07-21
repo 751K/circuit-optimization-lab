@@ -42,7 +42,7 @@ curl http://127.0.0.1:8341/api/v1/health
 | `--host` | `127.0.0.1` | 绑定地址。默认仅本机可访问，见下面的"安全说明"一节。 |
 | `--port` | `8341` | 监听端口。 |
 | `--reload` | 关闭 | uvicorn 开发用自动重载。此模式下 `--job-workers` 不生效（reloader 通过 `circuitopt.service.app:create_app` 这个不带参数的工厂函数重新导入 app）。 |
-| `--job-workers` | `1` | 后台任务（`explore`/`mc`）的线程池大小。求解是 CPU 密集型（NumPy/Numba）；只有在有空闲核心且需要并发跑多个任务时才调大。 |
+| `--job-workers` | `1` | 后台任务（`explore`/`mc`）的线程池大小。求解是 CPU 密集型（编译 Rust core 在热路径中释放 GIL）；只有在有空闲核心且需要并发跑多个任务时才调大。 |
 
 所有路由都在 `/api/v1` 前缀下。
 

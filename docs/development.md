@@ -27,6 +27,7 @@ without breaking another backend.”
 | `circuitopt/dataset.py` | Dataset generation and provenance |
 | `circuitopt/surrogate*.py` / `optimize.py` | Surrogate training and optimization |
 | `circuitopt/service/` | Optional local HTTP layer |
+| `rust/crates/` | Compiled core (`co-core`/`co-bsim4`/`co-spice`/`co-pdk`/`co-py`) — the sole compute engine as of v2.0.0; see [Rust Core](#rust-core) below |
 | `examples/` | Runnable circuits and scripts |
 | `experiments/` | Longer campaigns and comparison drivers |
 | `tests/` | Unit, regression, and backend tests |
@@ -95,19 +96,26 @@ Use `git diff --check` before committing.
 
 ## Rust Core
 
-The `rust/` workspace hosts the compiled core: `co-core` (device, MNA, LTI, and
-transient kernels, **live as of R3**), `co-bsim4` (Berkeley BSIM4.5 host,
-**live as of R2**),
-and `co-py` — the `circuitopt_core` PyO3 extension. `co-bsim4` compiles the
-*unmodified* vendored Berkeley C (the same translation units `native.py`
-builds, minus `host.c`) at build time via the `cc` crate and reimplements the
-`host.c` adapter layer in Rust (parameter binding, internal-node reduction,
-terminal I/G/Q/C extraction, noise combination); `bindgen` derives the shared
-struct layouts so the port keeps an identical ABI with the compiled C. As of
-v2.0.0 this core is the sole engine: OTFT/BSIM4 transient, AC/noise MNA, the
-periodic HB/PAC/PNoise assembly, and the no-GIL design-space campaign all run
-through it. SciPy sparse/FFT orchestration and the DC basin/root-selection
-control plane remain in Python.
+The `rust/` workspace hosts the compiled core as five crates:
+
+| Crate | Responsibility |
+|---|---|
+| `co-core` | Device, MNA, LTI, and transient solver kernels; the OTFT model and the periodic (PSS/PAC/PNoise) assembly |
+| `co-bsim4` | Berkeley BSIM4.5 host |
+| `co-spice` | HSPICE parameter expression engine (lexer/parser/evaluator) |
+| `co-pdk` | FreePDK45 / SKY130 / TSMC28 PDK compilers (numeric model cards) |
+| `co-py` | The `circuitopt_core` PyO3 extension joining the above to Python |
+
+`co-bsim4` compiles the *unmodified* vendored Berkeley C (the same translation
+units `native.py` builds, minus `host.c`) at build time via the `cc` crate and
+reimplements the `host.c` adapter layer in Rust (parameter binding,
+internal-node reduction, terminal I/G/Q/C extraction, noise combination);
+`bindgen` derives the shared struct layouts so the port keeps an identical ABI
+with the compiled C. As of v2.0.0 this core is the sole engine: OTFT/BSIM4
+transient, AC/noise MNA, the periodic HB/PAC/PNoise assembly, PDK/HSPICE
+compilation, and the no-GIL design-space campaign all run through it. SciPy
+sparse/FFT orchestration and the DC basin/root-selection control plane remain
+in Python.
 
 The coarse PyO3 entry points accept read-only, C-contiguous NumPy arrays for
 frequency grids, source waveforms, states, and device grids. Rust borrows those
@@ -150,26 +158,24 @@ the test matrix so the solvers can run, and the release workflow builds and
 publishes both distributions together (the `circuit-optimization` sdist/wheel
 and per-OS `circuitopt_core` wheels).
 
-### BSIM4.5 backend selector (R2)
+### BSIM4.5 backend selector
 
-Independently of `CIRCUIT_ENGINE`, the native BSIM4.5 compact model chooses
-its numerical backend from `CIRCUIT_BSIM4_BACKEND`, read on **every**
-evaluation (never baked at import, mirroring `ngspice_chain_enabled`):
-
-- `cc` (default) — the historical path: `native.py` compiles the vendored C
-  at runtime with the system compiler and calls it through `ctypes`;
-- `rust` — the `co-bsim4` port, reached by loading the compiled
-  `circuitopt_core` extension and binding the identical `co_bsim4_*` C ABI.
-  Requires `maturin develop` to have installed the extension; otherwise a
-  clear `Bsim4NativeError` names the build command.
-
-Both backends produce the same results (currents/conductance/charges
-bit-identical to the reference C; the complex AC solve within ~1 ULP). Build
-the extension before selecting `rust`:
+The native BSIM4.5 compact model still reads a backend selector,
+`CIRCUIT_BSIM4_BACKEND`, on **every** evaluation (never baked at import,
+mirroring `ngspice_chain_enabled`) — but as of v2.0.0 it mirrors
+`CIRCUIT_ENGINE`'s lockdown: `rust` (the `co-bsim4` port, reached by loading
+the compiled `circuitopt_core` extension and binding the identical
+`co_bsim4_*` C ABI) is the only value, defaulted when the variable is unset.
+`CIRCUIT_BSIM4_BACKEND=cc` — the v1.x path where `native.py` compiled the
+vendored C at runtime with the system compiler and called it through
+`ctypes` — is gone; setting it now raises a clear `Bsim4NativeError`
+pointing at the v2.0.0 CHANGELOG entry, and any other value is likewise
+rejected. If the compiled extension itself is missing, the error names the
+build command instead:
 
 ```bash
 maturin develop --release -m rust/crates/co-py/Cargo.toml
-CIRCUIT_BSIM4_BACKEND=rust python -m pytest tests/compact_models/bsim4
+python -m pytest tests/compact_models/bsim4
 ```
 
 ## Version Management
