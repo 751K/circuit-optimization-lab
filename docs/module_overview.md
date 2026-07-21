@@ -78,7 +78,7 @@ circuitopt/
   freepdk45_model.py   FreePDK45 compatibility exports + explicit ngspice oracle registration.
   pdk/freepdk45/       Flat-card loader and native FreePDK45 nmos/pmos adapter.
   pdk/sky130/          Bundled resolved-card loader and native SKY130 nmos/pmos adapter.
-  compact_models/bsim4/ Native Berkeley BSIM4 host, ABI, Numba marshal, and transient.
+  compact_models/bsim4/ Native Berkeley BSIM4 host, ABI, and the ctypes bridge into the compiled Rust core.
   tsmc28_model.py      TSMC28HPC+ core nmos/pmos binding: nch_mac/pch_mac + HSPICE library closure.
   service/             Optional local FastAPI HTTP service layer (the `serve` extra) — see below.
     __init__.py        Re-exports CLI glue only; never imports fastapi (import circuitopt stays fastapi-free).
@@ -157,8 +157,8 @@ For AC and noise analysis, the solver extracts terminal `gm` and `gds` by finite
 
 `PMOS_TFT` inherits from :class:`~device_model.TransistorModel`, the abstract
 base class consumed by all solvers. It also provides `get_otft_params()` for the
-transient solver’s compiled inner loop and a Numba-accelerated `get_ss_params()`
-override.
+transient solver’s compiled inner loop and a `get_ss_params()` override backed by
+the compiled Rust core’s analytic terminal derivatives.
 
 ### `device_model.py`
 
@@ -378,9 +378,10 @@ Computes gain, bandwidth, and baseband noise for chopper variants around the AFE
   conversion linearization uses the Verilog-A-style `C(V)*ddt(V)` operator that
   Spectre PAC folds, not necessarily the transient companion operator used to
   generate the large-signal orbit. When every PMOS device exposes the `gate1`
-  network and Numba is enabled, the gate1-retained PAC linearization is assembled
-  by the compiled `pac_linearize_orbit_gate1` kernel; mixed topologies fall back
-  to the Python assembly. Set `time_domain=False` for the analytic-adjoint HB
+  network, the gate1-retained PAC linearization is assembled by the compiled Rust
+  kernel (`circuitopt_core.PeriodicLinearizationProblem`); topologies it does not
+  cover (controlled sources, bordered or vsource-driven systems) return early so
+  the caller continues to the next path. Set `time_domain=False` for the analytic-adjoint HB
   comparison path, or `analytic=False` for the original finite-difference
   shooting path. Static PSS orbits automatically reduce to ordinary `ac_solve`,
   avoiding PAC transient runs.
@@ -434,7 +435,7 @@ engine:
   `shooting_period_runs`, `shooting_jacobian_evals`, and
   `shooting_jacobian_reuses`. The history records the Jacobian kind used
   (`"analytic_monodromy"` or `"finite_difference"`).
-- PMOS chopper wrappers default to the Numba-grid transient path
+- PMOS chopper wrappers default to the compiled Rust grid transient path
   (`fallback_least_squares=False`), one stabilization period, and the chopper-only
   `cap_mode="average"` orbit when they build a PSS internally for PAC/PNoise.
   This preserves the residual/nfail convergence checks while avoiding Python
@@ -463,9 +464,9 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
      `(exp(jωT)I - Ψ)x0 = g` per frequency. This avoids HB sideband truncation
      and the large `(2K+1)n` conversion matrix. PMOS_TFT devices are expanded
      with their internal `gate1` small-signal states during periodic conversion.
-     The all-PMOS gate1 case uses a Numba assembly kernel; unsupported mixed,
-     bordered, or vsource-driven cases return `None` and continue to the next
-     path.
+     The all-PMOS gate1 case uses the compiled Rust linearization kernel;
+     unsupported mixed, bordered, or vsource-driven cases return `None` and
+     continue to the next path.
   3. **Analytic-adjoint** (generic default, `analytic=True`) — samples periodic G(t)/C(t)
      and input-coupling columns G_in(t)/C_in(t) on the PSS orbit, FFTs to
      harmonic coefficients G_k/C_k, builds the harmonic-balance conversion
@@ -504,13 +505,14 @@ chopper's differential input to `input_drive={"vip": 0.5, "vin": -0.5}`.
   large, very sparse HB matrices to SciPy sparse direct solves. Forced
   `iterative` uses block-Jacobi preconditioned GMRES, with per-harmonic diagonal
   block LU factors, and falls back to sparse direct if convergence fails.
-- With `CIRCUIT_ENGINE=rust`, HB block assembly, scalar
-  `freq × source × sideband²` noise folding, OTFT orbit linearization, retained
-  `gate1` dynamics, and generic four-terminal silicon G/C stamping run in the
-  Rust core. The Numba and Python engines retain their reference implementations
-  during the migration. Compiled code mainly helps the matrix-fill and noise-fold loops; HB
-  linear solves are dominated by BLAS/LAPACK, SuperLU, or GMRES rather than
-  Python loop overhead.
+- HB block assembly, scalar `freq × source × sideband²` noise folding, OTFT
+  orbit linearization, retained `gate1` dynamics, and generic four-terminal
+  silicon G/C stamping run in the compiled Rust core (`circuitopt_core`) — the
+  sole engine as of v2.0.0 (see `circuitopt/_engine.py`). Result flags
+  `pnoise_rust_hb_used` / `pnoise_rust_fold_used` report whether the Rust fast
+  path applied to a given call. Compiled code mainly helps the matrix-fill and
+  noise-fold loops; HB linear solves are dominated by BLAS/LAPACK, SuperLU, or
+  GMRES rather than Python loop overhead.
 - If `gains` or `pac_result` are not provided, pass the same `input_drive` and
   the function will call generic `pac_solve` for input-referred noise.
 
@@ -539,8 +541,8 @@ Solves the time-domain response of the topology-defined system using backward Eu
   `AdaptiveConfig` and shared by transient/PSS/chopper paths. PSS additionally
   uses `adaptive_freeze_factor` from the same config.
   The adaptive LTE policy constants and Python helpers live in
-  `circuitopt/adaptive_config.py`; Numba keeps a compiled mirror for performance, with
-  tests checking the two implementations agree. Newton failure rejects now shrink
+  `circuitopt/adaptive_config.py`; the compiled Rust core (`co-core`) keeps a
+  matching mirror, with tests checking the two implementations agree. Newton failure rejects now shrink
   the candidate step, while zero-error accepted steps may grow it.
 - `max_step`, `max_retry_subdivisions`, `fallback_full_jacobian`, and
   `fallback_least_squares` provide
@@ -555,18 +557,23 @@ Solves the time-domain response of the topology-defined system using backward Eu
   DC/AC/noise solvers, while switch devices can keep physical drain-current sign
   when source/drain voltages reverse.
 - Uses the DC operating point from `ac_solve` as the default initial condition.
-- Uses the Numba transient Newton kernel when available. The compiled path
-  evaluates PMOS operating points/capacitances, stamps the residual/Jacobian, and
-  solves the dense Newton step in one inner loop. The linear solve overwrites the
-  temporary Jacobian/residual arrays in place, and the Python substep loop reuses
-  the previous interpolated input as the next substep's start input.
+- Uses the compiled Rust transient Newton kernel (`circuitopt_core`, built via
+  `_rust_transient.build_otft_transient_problem`). The compiled path evaluates
+  PMOS operating points/capacitances, stamps the residual/Jacobian, solves the
+  dense Newton step, and steps substep-to-substep entirely inside Rust; Python
+  owns marshalling, dispatch, and result assembly only (`transient_solver.py`
+  carries no per-step numeric loop of its own).
 - For PSS-style non-robust runs (`fallback_least_squares=False` and
-  `fallback_full_jacobian=False`), the compiled grid solver stays in Numba across
+  `fallback_full_jacobian=False`), the compiled grid solver stays in Rust across
   the full period. Failed substeps are counted as failed intervals and the
   trajectory continues from the last accepted state, matching the non-throwing
-  Python transient behavior without rerunning the whole period in Python.
-- Robust fallback modes still return to the Python path so least-squares or full
-  finite-difference Jacobian recovery can be applied only when requested.
+  transient behavior without rerunning the whole period.
+- Robust modes (least-squares or full finite-difference Jacobian recovery) are
+  also compiled-core options passed in as call flags, applied only when
+  requested — not a separate Python numeric path. `result["rust_grid_solver"]` /
+  `result["rust_adaptive_solver"]` report which compiled path served a given
+  call (the retired `numba_grid_solver` result key no longer exists; tests
+  assert its absence rather than a `False` value).
 - Uses implicit differentiation of the PMOS internal nodes for faster transient
   Jacobians, with finite-difference fallback.
 
@@ -580,27 +587,25 @@ also supports variable-step BDF2 (second-order, stiffly stable). Key properties:
   while generic stiff circuits keep the charge default.
 - Step-ratio clamp ρ≤2 guarantees zero-stability on non-uniform grids.
 - BE self-start on the first step of every interval.
-- A compiled Numba gear2 grid solver (`_transient_solve_grid_gear2_impl`) handles
-  periodic PSS/PAC/PNoise orbits and raw-transient `max_step`,
-  `flat_max_step`, and `max_retry_subdivisions`; the analytic gear2 monodromy
-  (augmented 2n-state) feeds the PSS shooting Jacobian.
+- A compiled Rust gear2 grid solver handles periodic PSS/PAC/PNoise orbits and
+  raw-transient `max_step`, `flat_max_step`, and `max_retry_subdivisions`; the
+  analytic gear2 monodromy (augmented 2n-state) feeds the PSS shooting Jacobian.
 - The adaptive gear2 path uses a step-doubling LTE estimate and freezes the PSS
-  grid near convergence before the final fixed-grid orbit/monodromy. Numba
-  accelerates adaptive gear2 for `n_aug == n`; circuits with ideal-voltage-source
-  branch unknowns fall back to the Python adaptive loop.
+  grid near convergence before the final fixed-grid orbit/monodromy. The compiled
+  core (`_solve_adaptive_rust`, the sole adaptive driver) accelerates it.
 - Raw `transient(integration_method="gear2")` keeps the BE default opt-in
   boundary, but when `max_retry_subdivisions` or `max_step` asks for robustness
-  it stays in the Numba gear2 grid. The grid updates rolling two-step BDF2
+  it stays in the compiled Rust gear2 grid. The grid updates rolling two-step BDF2
   history after every accepted internal substep and retries failed substeps with
-  fixed `2**max_retry_subdivisions` bisection. The Python gear2 `solve_chunk`
-  path remains only as a last-resort fallback if the compiled robust step is
-  rejected.
+  fixed `2**max_retry_subdivisions` bisection. There is no separate Python
+  numeric fallback in `transient_solver.py`; a rejected robust step raises
+  instead.
 - Chopper PSS/PAC/PNoise default to gear2 — PAC baseband errors drop from BE's
   −2.5% (typ/fast) to <1% across all three corners.
 - Raw `transient()` still defaults to BE to preserve the established raw
   transient regression surface and first-order damping behavior. The default BE
-  hard-switched chopper transient hot path is also fully Numba now; normal runs
-  no longer enter a Python tail or SciPy `least_squares`.
+  hard-switched chopper transient hot path is also fully compiled (Rust) now;
+  normal runs no longer enter a Python tail or SciPy `least_squares`.
 
 ### Front-end stimulus (`ac_drives`)
 
@@ -772,10 +777,12 @@ polarities. DC, AC, noise, transient, PSS, PAC, and PNoise therefore share one
 in-process compact-model path.
 
 The native host also exports a versioned conserved-evaluation ABI, an all-`void *`
-entry point, and a batch evaluator. The fixed-grid BSIM4 transient keeps matrix
-assembly, Newton iteration, and time stepping inside Numba while calling the C
-compact model through a runtime ctypes function pointer. Disabling Numba retains
-the Python implementation as a reference path.
+entry point, and a batch evaluator. The fixed-grid BSIM4 transient runs matrix
+assembly, Newton iteration, and time stepping inside the compiled Rust core
+(`co-core` calling `co-bsim4` in-process); `compact_models/bsim4/native.py`'s
+ctypes binding is the Python-facing entry point onto the same compiled library
+for op-point/AC/noise device calls. There is no separate Python numeric
+implementation in production as of v2.0.0.
 
 - **`pdk/freepdk45/library.py`** — portable card resolution, strict corner and
   polarity validation, numeric parsing, and path/mtime/size caching.
@@ -806,7 +813,9 @@ entry, then `PDK_ROOT/tsmc28hpcp`. See [TSMC28HPC+ Local Adapter](tsmc28hpcp.md)
 `circuitopt/circuit_loader.py`'s optional `models` block (`{"M1": {"type": "sky130.nmos",
 ...}}`) binds specific devices in a JSON circuit to a non-default PDK, so a mixed
 OTFT+silicon (or all-silicon) circuit is just configuration — see
-[JSON Circuit Description](json_circuit_format.md).
+[JSON Circuit Description](json_circuit_format.md). Two complete fully-differential
+OTA design walkthroughs: [SKY130 FD-OTA](sky130_fd_ota_design.md),
+[FreePDK45 FD-OTA](freepdk45_fd_ota_design.md).
 
 ### Local service layer (`service/app.py` / `jobs.py` / `serialize.py` / `cli.py`)
 
@@ -939,8 +948,10 @@ at f_chop=225 Hz — from fast finite-edge harmonic math (~1 ms) through ideal
 LPTV folding, PMOS static-phase, quasi-static PMOS sideband folding, and the
 heavy hard-switched PMOS chopper transient. `bench_sweep.py` measures batch
 throughput of AC and AC+noise evaluation across randomly perturbed design
-candidates, simulating the explore layer's per-candidate workload.  The
-Use `CIRCUIT_ENGINE=rust|numba|python` to compare engines.
+candidates, simulating the explore layer's per-candidate workload. As of
+v2.0.0 `CIRCUIT_ENGINE` accepts only `rust`; there is no other engine left to
+compare against (see `docs/environment_performance.md` for the retired v1.x
+numba-vs-interpreted baselines).
 
 The old UI chopper full-flow bottleneck was the portable HB PAC frequency solve:
 explicit `PSS+PAC(HB)+PNoise` (`time_domain=False`) takes about 25.6 s for
