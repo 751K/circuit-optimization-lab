@@ -28,10 +28,22 @@ requires_rust_otft = pytest.mark.skipif(
 
 @requires_rust_otft
 def test_reference_oracle_is_bit_distinct_from_production():
-    """The recovery lever is real: at a contact-dominated bias the reference
-    oracle's `Vt` square (libm pow, ex-`_impl`) differs from production's
-    ``powi`` by ~1 ULP in the contact current, while the channel current and
-    the capacitances (which carry no `Vt` term) stay bit-identical."""
+    """The recovery lever is a faithful libm-``pow`` reproduction, and whether it
+    is *bit-distinct* from production is a property of the host libm — pinned here
+    as a platform truth, not a universal one.
+
+    Production squares the contact threshold ``Vt`` with ``powi(2)`` (``x*x``); the
+    reference oracle uses the system libm ``pow(x, 2.0)`` — reproducing the retired
+    Python ``_impl`` oracle's ``x ** 2`` bit-for-bit. That square is the *only*
+    difference between the two modes, so:
+
+    * macOS libm: ``pow(x, 2.0) != x*x`` (~1 ULP) -> the oracle diverges, and the
+      divergence surfaces in the contact branch ``I_s_s1``.
+    * glibc: ``pow`` is correctly rounded, ``pow(x, 2.0) == x*x`` -> the oracle
+      legitimately collapses onto production and is bit-identical everywhere.
+
+    The channel current ``Ich`` and the capacitances carry no ``Vt`` term, so they
+    stay bit-identical on every platform."""
     t = PMOS_TFT(W=1000, L=20)
     prod = t._get_rust_model()
     with otft_reference_mode():
@@ -43,10 +55,26 @@ def test_reference_oracle_is_bit_distinct_from_production():
              6.765993476290982, 4.117048005829847)
     pi = np.asarray(prod.eval_currents(*point))
     ri = np.asarray(ref.eval_currents(*point))
-    assert pi[0] != ri[0]          # I_s_s1 carries the Vt-square divergence
-    assert pi[3] == ri[3]          # Ich has no Vt term -> bit-identical
+
+    # Vt-free terms are bit-identical in either libm regime.
+    assert pi[3] == ri[3]          # Ich carries no Vt term
     np.testing.assert_array_equal(
         prod.capacitance_charges(*point), ref.capacitance_charges(*point))
+
+    # Detect the regime from the oracle's OWN contact-branch output (robust to a
+    # glibc-equivalent core), then pin the matching invariant.
+    if pi[0] != ri[0]:
+        # Split-libm regime: cross-check against CPython's own libm — ``float ** float``
+        # calls the exact ``pow`` symbol the oracle routes the reference square through —
+        # so ``pow(x, 2.0) != x*x`` must hold here too, confirming the contact-branch
+        # divergence is the reference-square effect and nothing else.
+        v_s = max(point[0], point[3])          # v_s = max(vs, vs1); see otft.rs::eval_currents
+        dv = v_s - point[2]                     # v_s - vg: the contact-threshold argument
+        assert (dv ** 2) != (dv * dv)
+    else:
+        # Correctly-rounded-libm regime (``pow(x, 2.0) == x*x``): the oracle is
+        # bit-identical to production everywhere.
+        np.testing.assert_array_equal(pi, ri)
 
 
 @requires_rust_otft

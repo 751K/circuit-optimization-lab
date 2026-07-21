@@ -57,13 +57,30 @@ def test_afe_dc_bounded_fallback_recovers_extreme_nominal_point():
     }
     bias = {"VDD": 40.0, "VCM": 22.417140125884185,
             "VB": 30.373926588097426, "VC": 18.902189620759245}
+    freqs = np.array([1.0])
 
-    ac = ac_solve(sizes, bias, np.array([1.0]))
+    ac = ac_solve(sizes, bias, freqs)
 
+    # The RESULT is the platform-independent contract: this extreme nominal point
+    # resolves to a bounded, finite DC operating point -- whether the production main
+    # path found it directly (e.g. glibc, where the whole libm trajectory converges) or
+    # the reference-oracle fallback recovered it (e.g. macOS, where the main path fails
+    # and the 1-ULP libm-``pow`` Vt square tips onto the convergent branch).
     assert ac is not None
-    from circuitopt._engine import current_engine
-    if current_engine() == "rust":
-        assert ac["rust_otft_reference_fallback"] is True
     assert np.isfinite(ac["gains"]).all()
     assert all(-0.5 <= ac["dc_op"][node] <= 40.5
                for node in ["VOP", "VON", "VFBP", "VFBN", "NET20", "NET2"])
+
+    from circuitopt._engine import current_engine
+    if current_engine() == "rust":
+        # Whether the reference-oracle fallback was NEEDED is platform-dependent: it
+        # fires only where the production main path fails. Probe this platform's main
+        # path directly (retry disabled) and require the recovery flag iff it failed.
+        main_path = ac_solve(sizes, bias, freqs, _rust_reference_retry=True)
+        fired = ac.get("rust_otft_reference_fallback", False)
+        if main_path is None:
+            assert fired is True        # main path failed here -> the oracle recovered it
+        else:
+            assert fired is False       # main path converged here -> no fallback needed
+            assert all(-0.5 <= main_path["dc_op"][node] <= 40.5
+                       for node in ["VOP", "VON", "VFBP", "VFBN", "NET20", "NET2"])
