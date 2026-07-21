@@ -8,6 +8,14 @@
 > 整体移除（其 OTFT 选根恢复 oracle 移植进 `circuitopt_core` 的
 > `OtftModel(reference=True)`）。新基线随 Rust 核演进，见
 > `results/engine_baseline_v140.json` 与基准脚本 `benchmarks/`。
+>
+> **v2.0.0 基线数字**（详见根目录 `CHANGELOG.md` `[2.0.0]` 条目，不在此重复整段）：
+> `CompiledCampaign.evaluate_batch` 单次 GIL 释放 + 单 Rayon 池，8-core 笔记本实测
+> 设计空间扫描 8 workers 下 FreePDK45 **5.4×**、TSMC28 **2.2×**；SAR 失配 MC 扩展
+> 效率从 GIL 束缚的 **0.13** 提升到 **0.70**，且单线程路径本身快约 **10×**；BSIM4.5
+> C 在 wheel 构建期编译，冷启动首个 AC 解降到旧 JIT 路径的约 **2%**。这些数字来自
+> `circuitopt-core` wheel 构建后的 Rust 核，与下文按 v1.x numba 环境测得的表格不可
+> 直接比较。
 
 > **文档状态：带日期的性能快照。** 本页记录特定机器、Python/Numba 版本和缓存状态
 > 下的历史测量，用于定位性能数量级，不是当前版本的固定 SLA。功能和命令以维护中
