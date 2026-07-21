@@ -2,9 +2,10 @@
 """Freeze the engine-parity golden corpus and performance baseline (rewrite phase R0).
 
 The Rust core rewrite (docs/rust_core_rewrite_plan.md, D10) froze a reference
-of what the engine computes (originally under the v1.4.0 numba engine; re-frozen
-under the rust engine in R6 and under the rust BSIM4 backend in R7 — the corpus
-is the permanent reference oracle, docs §4-D4), so every phase diffs against it:
+of what the engine computes (originally under the retired v1.4.0 numba engine;
+re-frozen under the compiled Rust engine that shipped as v2.0.0's sole engine)
+so every change since diffs against it. It is the permanent reference oracle
+(docs §4-D4), not a rewrite-in-progress artifact:
 
 * device-level golden grids   -> tests/golden/engine_parity/devices.npz
   I/G/Q/C (+ scalar noise PSD) over bias grids for the analytic OTFT model and

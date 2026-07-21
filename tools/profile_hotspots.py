@@ -128,7 +128,8 @@ def main():
     profile("Mismatch MC n=50 (warm)", _mc)
 
     print("\nDone.")
-    print("  CIRCUIT_USE_NUMBA=0 python tools/profile_hotspots.py")
+    print("  All paths above ran through the compiled rust core (circuitopt_core);")
+    print("  see docs/environment_performance.md for the v1.x/v2.0.0 baselines.")
 
 
 if __name__ == "__main__":
