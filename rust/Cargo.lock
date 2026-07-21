@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "co-bsim4"
-version = "2.0.0-rc1"
+version = "2.0.0"
 dependencies = [
  "bindgen",
  "cc",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "co-core"
-version = "2.0.0-rc1"
+version = "2.0.0"
 dependencies = [
  "num-complex",
  "rayon",
@@ -100,14 +100,14 @@ dependencies = [
 
 [[package]]
 name = "co-pdk"
-version = "2.0.0-rc1"
+version = "2.0.0"
 dependencies = [
  "co-spice",
 ]
 
 [[package]]
 name = "co-py"
-version = "2.0.0-rc1"
+version = "2.0.0"
 dependencies = [
  "co-bsim4",
  "co-core",
@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "co-spice"
-version = "2.0.0-rc1"
+version = "2.0.0"
 
 [[package]]
 name = "crossbeam-deque"

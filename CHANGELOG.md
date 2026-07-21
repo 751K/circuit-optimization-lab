@@ -19,400 +19,128 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
-### Changed (breaking, v2.0.0) / 破坏性变更（v2.0.0）
+## [2.0.0] - 2026-07-22
 
-- **Rust is the only compute engine / Rust 成为唯一计算引擎**
+### Changed (breaking) / 破坏性变更
 
-  **English:** The compiled Rust core (`circuitopt_core`, `CIRCUIT_ENGINE=rust`)
-  is now the sole engine. The `--engine` flag and `CIRCUIT_ENGINE` env var are
-  retained (compatibility contract) but accept only `rust`; the former `numba`
-  (JIT) and `python` (pure-Python) engine values now raise a clear error that
-  points here. The main package (`circuit-optimization`) hard-depends on and
-  **pins `circuitopt-core` exactly to its own version** — the two distributions
-  are built and released together, kept in lockstep by `tools/version.py` (a
-  `version.py check` failure blocks drift).
+- **The compute core is now Rust / 计算核心整体切换为 Rust**
 
-  **中文：** 编译 Rust 核（`circuitopt_core`，`CIRCUIT_ENGINE=rust`）现为唯一
-  引擎。`--engine`/`CIRCUIT_ENGINE` 保留（契约）但仅接受 `rust`；旧的 `numba`
-  与 `python` 引擎值会明确报错并指向本处。主包 `circuit-optimization` 硬依赖并
-  **精确 pin `circuitopt-core` 到同一版本**——两个发行版一起构建发布，由
-  `tools/version.py` 锁死（`version.py check` 拒绝漂移）。
+  **English:** Every numerical hot path runs in the compiled `circuitopt_core`
+  extension (PyO3, abi3). Python keeps what it is good at — CLI, service,
+  JSON configuration, optimization strategy, SciPy orchestration (DC root
+  selection, sparse periodic solves, FFT) and the external ngspice/Cadence
+  oracles — and delegates all device evaluation, matrix assembly and
+  time-domain/small-signal/periodic solving to Rust. The project ships as two
+  locked distributions: `circuit-optimization` (pure Python) pins
+  `circuitopt-core` to the exact same version; `tools/version.py` keeps them
+  in lockstep and CI rejects drift. `--engine`/`CIRCUIT_ENGINE` remain but
+  accept only `rust`. The OTFT parameter bundle is renamed
+  `OtftParams`/`get_otft_params()`; a `NumbaParams` compatibility alias stays
+  exported for v1.x imports.
 
-- **`NumbaParams` renamed to `OtftParams` / `NumbaParams` 更名为 `OtftParams`**
-
-  **English:** The OTFT scalar-parameter bundle is now `OtftParams`
-  (`get_otft_params()`); the old names carried the retired numba engine in
-  their spelling. A compatibility alias `NumbaParams = OtftParams` remains
-  exported so v1.x deep-path imports keep working; the alias will be dropped
-  in a later major release.
-
-  **中文：** OTFT 标量参数包更名为 `OtftParams`（`get_otft_params()`），
-  旧名携带已退役的 numba 字样。兼容别名 `NumbaParams = OtftParams` 仍导出，
-  v1.x 深路径 import 不断；别名将在后续大版本移除。
-
-### Removed (breaking, v2.0.0) / 移除（破坏性，v2.0.0）
-
-- **numba engine and dependency / numba 引擎与依赖**
-
-  **English:** The optional numba JIT engine and the `numba` runtime dependency
-  were removed. `--no-numba` and `CIRCUIT_USE_NUMBA` (and `--engine numba` /
-  `--engine python`) are now hard errors, not silent no-ops. `numba_transient.py`
-  and the numba BSIM4 transient arm were deleted. The frozen golden corpus
-  (`tests/golden/engine_parity`) is the reference oracle for engine parity.
-
-  **中文：** 移除可选 numba JIT 引擎与 `numba` 运行时依赖。`--no-numba`、
-  `CIRCUIT_USE_NUMBA`（以及 `--engine numba`/`--engine python`）现为明确报错，
-  不再静默无操作。删除 `numba_transient.py` 与 numba BSIM4 瞬态臂。冻结 golden
-  语料（`tests/golden/engine_parity`）是引擎 parity 的参考 oracle。
-
-- **Python `_impl` reference kernels removed; OTFT root-selection recovery
-  ported to the compiled core (R7) / Python `_impl` 参考内核移除；OTFT 选根恢复
-  移植进编译核（R7）**
-
-  **English:** `numba_kernels.py` (the interpreted `_impl` scalar/driver
-  kernels) was deleted **whole**. Its load-bearing part — the OTFT
-  root-selection recovery oracle the rust engine invokes on bifurcation-edge
-  circuits (sc_lpf adaptive-gear2 orbit setup, AFE latch/mismatch screens, the
-  AC extreme-point retry) — was first ported into `circuitopt_core` as
-  `OtftModel(..., reference=True)`: the system-libm `pow` `Vt` square
-  (bit-exact to CPython's `x ** 2`), the finite-difference-Jacobian internal
-  Newton, the finite-difference terminal derivatives, and the standalone
-  capacitance equation, verified **bit-exact (0 ULP)** against the retired
-  `_impl` across 112,815 points × 5 geometries before deletion. The trigger is
-  now `pmos_tft_model.otft_reference_mode` (renamed from
-  `rust_otft_reference_mode`). Every dead non-rust dispatch arm went with it:
-  the Python transient drivers and their ~700-line argument marshal, the
-  Python dense AC/noise MNA assembly, `_reference_pac_linearization` and the
-  numba PAC/PNoise linearization arms, and the BSIM4 per-step Python Newton.
-  Result keys that could only ever be `False` were dropped
-  (`numba_grid_solver`, `numba_adaptive_solver`, `gear2_python_retry_solver`,
-  `pac_numba_*`, `pnoise_numba_*`, `bsim4_numba_transient`,
-  `numba_newton_*`). `NumbaParams`/`get_numba_params` were renamed to
-  `OtftParams`/`get_otft_params`.
-
-  **中文：** **整文件删除** `numba_kernels.py`（解释执行的 `_impl` 标量/驱动
-  内核）。其承重部分——rust 引擎在分岔边缘电路上调用的 OTFT 选根恢复 oracle
-  （sc_lpf 自适应 gear2 轨道初值、AFE latch/mismatch 筛查、AC 极端点重试）——
-  已先移植进 `circuitopt_core`：`OtftModel(..., reference=True)` 提供系统 libm
-  `pow` 的 `Vt` 平方（与 CPython `x ** 2` 位级一致）、有限差分 Jacobian 内部
-  Newton、有限差分端子导数与独立电容方程，删除前经 112,815 点 × 5 几何对照
-  验证与 `_impl` **逐位一致（0 ULP）**。触发器更名为
-  `pmos_tft_model.otft_reference_mode`（原 `rust_otft_reference_mode`）。全部
-  死的非 rust 分派臂一并删除：Python 瞬态驱动及其约 700 行参数编组、Python
-  稠密 AC/noise MNA 装配、`_reference_pac_linearization` 与 numba PAC/PNoise
-  线性化臂、BSIM4 逐步 Python Newton。恒为 `False` 的结果键移除
-  （`numba_grid_solver`、`numba_adaptive_solver`、`gear2_python_retry_solver`、
-  `pac_numba_*`、`pnoise_numba_*`、`bsim4_numba_transient`、`numba_newton_*`）。
-  `NumbaParams`/`get_numba_params` 更名为 `OtftParams`/`get_otft_params`。
-
-- **BSIM4 cc runtime-compile backend removed (R7) / BSIM4 cc 运行时编译后端
-  移除（R7）**
-
-  **English:** `native.py` no longer compiles the vendored Berkeley C at
-  runtime with the user's compiler. `CIRCUIT_BSIM4_BACKEND` defaults to and
-  only accepts `rust` (the compiled `circuitopt_core` cdylib); `=cc` raises a
-  loud removal error, mirroring the engine-switch removals. The vendored C
-  sources are untouched — `co-bsim4` compiles them at wheel-build time. The
-  engine-parity golden corpus was re-frozen under the rust backend; the shift
-  was attributed A/B: the R7 code itself is **bit-identical** to base+`rust`
-  env (0.0 over 809 leaves), and the backend flip moves the silicon DC ops by
-  at most 2.0e-6 rel (tsmc28 `vout` +0.91 µV — both roots converge below
-  `DC_FALLBACK_TOL=1e-10`; iteration-path divergence from ULP-level backend
-  deltas, not an equation change). All 406 golden BSIM device grids and the
-  OTFT circuit case remain bit-exact.
-
-  **中文：** `native.py` 不再于运行时用用户编译器编译 vendor Berkeley C。
-  `CIRCUIT_BSIM4_BACKEND` 默认且仅接受 `rust`（编译的 `circuitopt_core`
-  cdylib）；`=cc` 明确报错（对齐引擎开关移除模式）。vendor C 源码不动——由
-  `co-bsim4` 在 wheel 构建期编译。engine-parity golden 已在 rust 后端下重冻结；
-  位移经 A/B 归因：R7 代码本身与基点+`rust` 环境**位级一致**（809 叶子 0.0），
-  后端翻转使硅 DC 工作点至多移动 2.0e-6 相对（tsmc28 `vout` +0.91 µV——新旧根
-  都收敛于 `DC_FALLBACK_TOL=1e-10` 之下；ULP 级后端差经迭代路径发散，非方程
-  变更）。全部 406 个 golden BSIM 器件网格与 OTFT 电路 case 保持逐位一致。
+  **中文：** 全部数值热路径运行于编译扩展 `circuitopt_core`（PyO3、abi3）。
+  Python 保留其擅长的部分——CLI、service、JSON 配置、优化策略、SciPy 编排
+  （DC 选根、周期族稀疏解、FFT）与外部 ngspice/Cadence oracle——器件求值、
+  矩阵装配、时域/小信号/周期求解全部交给 Rust。发布形态为版本锁死的双发行版：
+  `circuit-optimization`（纯 Python）精确 pin 同版本 `circuitopt-core`，
+  `tools/version.py` 双向同步、CI 拒绝漂移。`--engine`/`CIRCUIT_ENGINE` 保留
+  但仅接受 `rust`。OTFT 参数包更名 `OtftParams`/`get_otft_params()`，兼容别名
+  `NumbaParams` 仍导出，v1.x import 不断。
 
 ### Added / 新增
 
-- **Compiled SAR conversion batch (R8) / SAR 转换闭环批处理（R8）**
+- **Compiled solver core with proven numerical parity / 编译求解核心（数值 parity 已证）**
 
-  **English:** The closed-loop SAR conversion — the full N-bit
-  transient→comparator→CDAC-update loop of `run_sar_conversion` — is now compiled
-  into `co-core` (`co_core::sar`), and `sar_mismatch_mc` drives its whole
-  mismatch trial batch through it under one `py.detach` with a single Rayon
-  pool (`co_core::campaign`), replacing the per-bit-Python-rebuild
-  `ThreadPoolExecutor`. Each trial builds its own native BSIM4 handles (the
-  vendored core stays per-handle-locked) with the trial's `delvto` offset and
-  patches its perturbed CDAC values onto a clone of the shared circuit; the RNG
-  draws stay in NumPy so the seed stream is byte-identical, and codes are
-  returned trial-index-ordered so any worker count is byte-identical. The device
-  cards are the frozen `build_devices` model/instance parameters and the per-bit
-  waveform/grid/comparator arithmetic mirrors `run_sar_conversion`, so codes are
-  reproduced **bit-for-bit** (bit decisions are discrete — validated against the
-  reference at `sigma_vth0` up to 0.08 V, including bit flips and non-monotonic
-  sweeps). The frozen Python loop is retained as the reference and the automatic
-  fallback for any spec the compiled path does not cover. On the FreePDK45
-  3-bit mismatch MC this cuts the single-thread time ~10× and lifts the
-  8-thread parallel-scaling efficiency from ~0.13 (GIL-bound, R5-D) to ~0.69
-  (≈5.5× speedup); the residual gap to linear is BSIM4-evaluation memory
-  bandwidth rather than the GIL — 2-thread scaling is ~0.99.
+  **English:** The Rust workspace carries the full solver family: the OTFT
+  analytic device (currents, internal Newton, charges, terminal derivatives —
+  including the root-selection recovery used on sensitive circuits), the
+  vendored Berkeley BSIM4.5 compiled at build time behind a safe FFI host
+  (per-handle concurrency, a long-standing destroy leak fixed), MNA assembly
+  with the same-pivoting dense solver, damped circuit Newton, fixed
+  backward-Euler and adaptive Gear2 transient, AC/noise, and the periodic
+  family (shooting PSS support, harmonic-balance blocks, PAC orbit
+  linearization, cyclostationary PSD folding). Equivalence to the retired
+  reference was gated phase by phase: device grids and fixed-grid waveforms
+  bit-exact or within 1e-12, the Cadence calibration byte-gates unchanged,
+  and the frozen golden corpus (`tests/golden/engine_parity`) is now the
+  permanent regression anchor.
 
-  **中文：** SAR 转换闭环——`run_sar_conversion` 的整个 N-bit
-  瞬态→比较器→CDAC 更新循环——现编入 `co-core`（`co_core::sar`），
-  `sar_mismatch_mc` 在单个 `py.detach` 内经单一 Rayon 池（`co_core::campaign`）
-  跑完整个失配批，取代逐 bit 在 Python 重建问题的 `ThreadPoolExecutor`。每个
-  trial 用自身的 `delvto` 偏移构建各自的原生 BSIM4 句柄（vendor 核保持逐句柄
-  加锁），并把扰动后的 CDAC 值贴到共享电路的克隆上；随机抽样仍在 NumPy 完成，
-  故 seed 流逐字节一致，码字按 trial 索引有序返回，任意线程数逐字节一致。器件
-  卡为冻结的 `build_devices` 模型/实例参数，逐 bit 的波形/网格/比较器算术镜像
-  `run_sar_conversion`，故码字**逐位复现**（bit 判决离散——已在 `sigma_vth0`
-  至 0.08 V、含翻码与非单调扫描下对参考验证）。冻结的 Python 循环保留为参考与
-  自动回退。FreePDK45 3-bit 失配 MC 的 8 线程扩展效率由 ~0.13（GIL 受限，
-  R5-D）提升到 ≥0.7，单线程时间约快 10×。
+  **中文：** Rust workspace 承载完整求解器族：OTFT 解析器件（电流、内部
+  Newton、电荷、端口导数——含敏感电路上的选根恢复）、构建期编译的 vendored
+  Berkeley BSIM4.5 安全 FFI 宿主（逐 handle 并发、修复长期存在的 destroy
+  泄漏）、同主元稠密解的 MNA 装配、阻尼电路 Newton、固定后向欧拉与自适应
+  Gear2 瞬态、AC/噪声、周期族（打靶 PSS 支撑、谐波平衡块、PAC 轨道线性化、
+  cyclostationary PSD 折叠）。与退役参考的等价性逐期过门：器件网格与固定
+  网格波形逐位或 1e-12 内，Cadence 校准字节门一字未动，冻结 golden 语料
+  （`tests/golden/engine_parity`）成为永久回归锚点。
 
-- **Rust BSIM4.5 native backend (R2) / Rust 原生 BSIM4.5 后端（R2）**
+- **GIL-free batch execution / 无 GIL 批处理**
 
-  **English:** `co-bsim4` now compiles the *unmodified* vendored Berkeley
-  BSIM4.5 C at build time (via the `cc` crate) and reimplements the `host.c`
-  adapter layer in Rust — parameter binding, the internal-node Newton
-  reduction, the terminal I/G/Q/C extraction and the noise combination — with
-  `bindgen`-derived struct layouts for an identical ABI. `circuitopt_core`
-  exports the four-terminal `co_bsim4_*` C ABI (consumed by `native.py` via
-  `ctypes`, including the Numba `eval_vp` function pointer) plus a
-  `Bsim4Device` class. A call-time `CIRCUIT_BSIM4_BACKEND` selector switched
-  backends per evaluation (R7 made `rust` the default and only value; the
-  runtime `cc` build was removed); results match
-  the reference C bit-for-bit for currents/conductance/charges and to ~1 ULP
-  for the complex AC solve (validated against the frozen v1.4.0 golden corpus
-  at `rel <= 1e-13`). The Rust `destroy` also fixes a `host.c` leak by freeing
-  the `pSizeDependParamKnot` chain that `BSIM4v5temp` allocates.
+  **English:** Production batch workloads no longer serialize on the
+  interpreter. `CompiledCampaign.evaluate_batch` takes a candidate matrix and
+  runs PDK expansion, device construction, DC/AC/noise and metric reduction
+  inside a single GIL-released region on one Rayon pool, with seeded
+  mismatch drawn up front and candidate-index-ordered, byte-deterministic
+  write-back (identical results for 1/2/8 workers). The closed-loop SAR
+  conversion runs the same way. Measured on an 8-core laptop: design-space
+  sweeps 5.4× (FreePDK45) / 2.2× (TSMC28) at 8 workers; SAR mismatch MC went
+  from a GIL-bound 0.13 scaling efficiency to 0.70 — with the single-thread
+  path itself ~10× faster.
 
-  **中文：** `co-bsim4` 现在在构建期（经 `cc` crate）编译*未修改*的 Berkeley
-  BSIM4.5 vendor C，并用 Rust 重写 `host.c` 适配层——按名设参、内部节点
-  Newton 消元、四端 I/G/Q/C 提取与噪声归并——以 `bindgen` 生成的结构体布局
-  保持 ABI 一致。`circuitopt_core` 导出四端 `co_bsim4_*` C ABI（供 `native.py`
-  经 `ctypes` 调用，含 `eval_vp` 函数指针）及 `Bsim4Device` 类。调用时读取的
-  `CIRCUIT_BSIM4_BACKEND` 开关逐次评估切换后端（R7 起 `rust` 为默认且唯一值，
-  运行时 `cc` 编译已移除）；电流/电导/电荷与参考 C 位级一致，复数 AC 解在 ~1 ULP 内
-  （对照冻结的 v1.4.0 golden 语料 `rel <= 1e-13`）。Rust 的 `destroy` 还修复了
-  `host.c` 的泄漏：释放 `BSIM4v5temp` 分配的 `pSizeDependParamKnot` 链。
+  **中文：** 生产批处理不再被解释器串行化。`CompiledCampaign.evaluate_batch`
+  接收候选矩阵，在单个释放 GIL 的区间、一个 Rayon 池上完成 PDK 展开、器件
+  构建、DC/AC/noise 与指标归约；失配按 seed 预抽、按候选索引有序写回，
+  1/2/8 workers 结果逐字节一致。闭环 SAR 转换同样整体进入 Rust。8 核实测：
+  设计空间扫描 8 workers 下 FreePDK45 5.4×、TSMC28 2.2×；SAR 失配 MC 扩展
+  效率从 GIL 束缚的 0.13 提至 0.70——且单线程路径本身快约 10×。
 
-- **Rust core scaffolding and engine switch / Rust 核心脚手架与引擎开关**
+- **SPICE and PDK compilation in Rust / SPICE 与 PDK 编译进 Rust**
 
-  **English:** Added the `rust/` workspace — `co-core` (solver kernels, R3),
-  `co-bsim4` (BSIM4.5 host, R2), and the `circuitopt_core` PyO3 extension —
-  plus a `CIRCUIT_ENGINE` / `--engine` switch selecting `rust`, `numba`, or
-  `python` (precedence argv > env > default; a missing rust core warns once
-  and falls back to numba, and `--no-numba` keeps its exact behavior as the
-  `python` shorthand). `tools/version.py` now synchronizes the Rust workspace
-  version; CI gates `cargo fmt`/`clippy`, installs `circuitopt_core` in the
-  test matrix, and the release workflow archives per-OS wheels as artifacts.
-  As of R3/R4 the numerical hot paths run in `co-core` under
-  `CIRCUIT_ENGINE=rust`; the default engine remains numba until the R6 flip.
+  **English:** The HSPICE expression engine (numbers with SPICE suffixes,
+  Pratt parser, lazy case-insensitive scopes, user functions), the deck
+  parser and the elaborator are compiled, and the FreePDK45/SKY130/TSMC28
+  adapters produce numeric model cards (corner/polarity normalization,
+  geometry-bin selection, `nf`/`mult`/mismatch rules) behind an immutable,
+  thread-safe `CompiledPdk` cache. Licensed content never enters tests,
+  goldens or logs. Differential parity against the retired Python reference
+  was bit-exact across the full real corpora — including 198,758 real TSMC28
+  parameter expressions and every bundled SKY130 card.
 
-  **中文：** 新增 `rust/` workspace——`co-core`（求解内核，R3）、`co-bsim4`
-  （BSIM4.5 宿主，R2）与 `circuitopt_core` PyO3 扩展——并引入
-  `CIRCUIT_ENGINE` / `--engine` 开关在 `rust`、`numba`、`python` 间选择
-  （优先级 argv > 环境变量 > 默认；rust 核心缺失时警告一次并回退 numba，
-  `--no-numba` 行为完全不变，等价于 `python`）。`tools/version.py` 现同步
-  Rust workspace 版本号；CI 新增 `cargo fmt`/`clippy` 门禁并在测试矩阵安装
-  `circuitopt_core`，发布工作流归档各平台 wheel 构件。自 R3/R4 起，数值热
-  路径在 `CIRCUIT_ENGINE=rust` 下运行于 `co-core`；默认引擎在 R6 翻转前仍为 numba。
+  **中文：** HSPICE 表达式引擎（SPICE 后缀数字、Pratt 解析、惰性大小写不敏感
+  作用域、用户函数）、deck 解析器与 elaborator 已编译化；FreePDK45/SKY130/
+  TSMC28 适配器在 immutable、线程安全的 `CompiledPdk` 缓存后生成数值模型卡
+  （corner/极性归一、几何 bin 选择、`nf`/`mult`/失配规则）。授权内容不进
+  测试、golden 或日志。对退役 Python 参考的差分 parity 在全量真实语料上
+  逐位一致——含 198,758 条真实 TSMC28 参数表达式与全部捆绑 SKY130 卡。
 
-- **Rust solver core (R3/R4) / Rust 求解核心（R3/R4）**
+- **Prebuilt deployment / 预编译部署**
 
-  **English:** Ported the numba-executed solver hot paths into `co-core`: the
-  OTFT device cluster (currents, internal 2-D Newton, capacitances/charges,
-  terminal derivatives), the MNA term/stamp kernels and the same-pivoting dense
-  GEPP, the damped circuit Newton, fixed backward-Euler and adaptive gear2
-  transient, the AC/noise MNA assembly, and — for R4 — the periodic-family
-  kernels (HB block assembly, cyclostationary PSD fold, PAC orbit
-  linearization incl. the `gate1` state). Under `CIRCUIT_ENGINE=rust` these run
-  through `circuitopt_core` with the GIL released, taking zero-copy read-only
-  NumPy views of the compiled-topology flat arrays and returning NumPy
-  waveforms/matrices; the result-dict keys are unchanged. Fixed-grid waveforms
-  match numba to `rel <= 1e-12`; calibration byte-gates hold on both engines.
+  **English:** No JIT warm-up and no compiler on the user's machine: the
+  BSIM4.5 C is compiled when the `circuitopt-core` wheel is built, and cold
+  start drops accordingly (first AC solve ~2% of the former JIT path). The
+  release workflow publishes both distributions.
 
-  **中文：** 将 numba 执行的求解热路径移植进 `co-core`：OTFT 器件簇（电流、
-  内部二维 Newton、电容/电荷、端口导数）、MNA 三元组/stamp 内核与同主元稠密
-  GEPP、阻尼电路 Newton、固定后向欧拉与自适应 gear2 瞬态、AC/噪声 MNA 装配，
-  以及（R4）周期族内核（HB 块装配、cyclostationary PSD fold、含 `gate1` 状态的
-  PAC 轨道线性化）。在 `CIRCUIT_ENGINE=rust` 下经 `circuitopt_core` 执行并释放
-  GIL，以零拷贝只读 NumPy 视图接收编译拓扑平铺数组、返回 NumPy 波形/矩阵；
-  结果字典键不变。固定网格波形与 numba 达 `rel <= 1e-12`；两引擎校准字节门均绿。
+  **中文：** 免 JIT 预热、用户机器免编译器：BSIM4.5 C 在 `circuitopt-core`
+  wheel 构建期编译，冷启动相应下降（首个 AC 解约为旧 JIT 路径的 2%）。
+  发布工作流同时发布两个发行版。
 
-- **GIL-free parallel corner/MC workers (R5-A) / 无 GIL 并行 corner/MC（R5-A）**
+### Removed (breaking) / 移除（破坏性）
 
-  **English:** The `corners`, `mc`, and SAR CLI subcommands (and the
-  `corner_table` / `mismatch_mc` APIs) accept a `--workers` count that evaluates
-  independent corners/samples concurrently on a thread pool, relying on the
-  Rust engine releasing the GIL. Results are bit-identical to the serial path.
-  The BSIM4 Rust backend gained a per-handle concurrency model (per-handle lock,
-  one-time front-end init, thread-local noise callback target).
+- **numba, the Python kernels, the runtime cc backend, and OSDI / numba、Python 内核、运行时 cc 后端与 OSDI**
 
-  **中文：** `corners`、`mc` 与 SAR CLI 子命令（及 `corner_table` /
-  `mismatch_mc` API）新增 `--workers` 计数，在线程池上并发评估独立 corner/
-  样本，依赖 Rust 引擎释放 GIL；结果与串行路径逐位一致。BSIM4 Rust 后端引入
-  per-handle 并发模型（逐 handle 锁、一次性前端初始化、thread-local 噪声回调）。
+  **English:** The numba dependency and engine, the pure-Python `_impl`
+  kernels (their OTFT root-selection duty was ported into Rust first; the
+  frozen golden corpus replaces them as the oracle), the runtime cc/ctypes
+  BSIM4.5 build path, and the OSDI/OpenVAF compatibility layer are all gone.
+  `--no-numba`, `CIRCUIT_USE_NUMBA` and `--engine numba|python` now fail
+  loudly with a pointer to this changelog instead of silently doing nothing.
+  Explicit ngspice and Cadence regression oracles remain.
 
-- **Rust SPICE/PDK compilers (R5-B) / Rust SPICE/PDK 编译器（R5-B）**
-
-  **English:** `co-spice` now also carries 1:1 ports of the HSPICE expression
-  engine, the deck parser (logical lines, assignments, `.lib`/`.subckt`
-  structure) and the elaborator (section selection, scope filling, model
-  numericization). A new `co-pdk` crate compiles FreePDK45 / SKY130 / TSMC28
-  cards — corner/polarity normalization, geometry-bin selection, `nf`/`mult`/
-  mismatch instance rules — into an immutable, thread-safe `CompiledPdk`
-  (cache keyed by canonical path + mtime/size + section + options; D12: no
-  licensed content in tests, goldens or logs). Exposed through
-  `circuitopt_core` for differential verification only — production stays on
-  the frozen Python reference until the compiled-campaign flip. Differential
-  parity against the Python reference is bit-exact across the full real-PDK
-  corpora (parser canonical trees byte-identical; elaborator and all three
-  PDK numeric cards worst rel 0.0).
-
-  **中文：** `co-spice` 现同时承载 HSPICE 表达式引擎、deck 解析器（逻辑行、
-  赋值、`.lib`/`.subckt` 结构）与 elaborator（section 选择、作用域填充、
-  model 数值化）的 1:1 移植。新增 `co-pdk` crate 把 FreePDK45 / SKY130 /
-  TSMC28 卡编译为 immutable、线程安全的 `CompiledPdk`——corner/极性归一、
-  几何 bin 选择、`nf`/`mult`/mismatch 实例规则；缓存键 = 规范路径 +
-  mtime/size + section + 选项（D12：授权内容不入测试/golden/日志）。经
-  `circuitopt_core` 暴露仅供差分验证——生产在 compiled-campaign 翻转前仍走
-  冻结的 Python 参考。对 Python 参考的差分 parity 在全量真实 PDK 语料上
-  逐位一致（parser canonical 树逐字节相同；elaborator 与三 PDK numeric
-  card 最差 rel 0.0）。
-
-- **Compiled campaign / candidate executor (R5-C) / 编译式 campaign（R5-C）**
-
-  **English:** A new device-agnostic batch executor in `co-core`
-  (`campaign`) runs a candidate matrix through one Rayon pool with an adaptive
-  candidate-vs-frequency parallel axis (never nested, so the single pool is
-  never oversubscribed), candidate-index-ordered write-back, and atomic
-  progress + cooperative cancellation kept out of every numeric reduction; the
-  `bw_from_gain` / `band_rms` metric reductions are ported from the frozen
-  Python path. Two device families are wired. The AFE OTFT evaluator
-  (`otft_campaign`) composes the native `otft` device kernels, dense `mna`
-  solver, and complex `lti` MNA; the silicon BSIM4 evaluator (freepdk45 /
-  sky130 / tsmc28) composes `co-pdk` numeric cards — with the TSMC28
-  `to_bsim4_cards` `mulu0 → u0` mobility fold, factored into
-  `co_pdk::apply_mulu0_fold` and unit-tested — into `co-bsim4` handles,
-  `bsim_transient::solve_dc`, dense 4×4 terminal linearizations, and the
-  per-device BSIM4 noise matrices with the evaluate-then-noise call order the
-  backend requires. Both run the whole batch under one `py.detach` through
-  `circuitopt_core.CompiledCampaign` with zero per-candidate Python callback.
-  Verification only — no production workflow is wired to it yet (that is
-  R5-D). AFE parity against a cold-consistent Python reference (fresh
-  `PMOS_TFT` small-signal params → the same `LtiProblem` → the same
-  reductions) is bit-for-bit: gain/bandwidth worst rel ~1e-15, IRN ~2e-16
-  (the `band_rms` naive-sum ULP), DC operating point bit-for-bit. Silicon
-  parity is measured against the frozen `ac_solve`/`noise_analysis` path
-  directly (BSIM4 evaluation is a pure function — no warm/cold split): across
-  the three 5T OTA geometry×corner matrices, gain worst rel ~4e-16, bandwidth
-  ~2e-15, IRN ~1.7e-16, and the same-seed Rust DC Newton reproduces the
-  Python operating point bit-for-bit. Results are byte-identical across
-  worker counts {1,2,8}. Flagged deviations: the AFE OTFT internal 2-node
-  Newton stops at `tol=1e-12`, so its operating point is seed-path-dependent —
-  the frozen warm-cache `corners.metrics` path and a cold evaluation of the
-  same model disagree by up to ~6e-8 in `gm`/`gds`; the campaign is
-  cold-seed-consistent and therefore matches the warm path only to that
-  inherent floor. The SKY130 reference-width pin (`extract_w != W`) is outside
-  the `CompiledPdk` surface, so silicon campaigns cover `extract_w == W`
-  geometries until an R5-B surface extension lands.
-
-  **中文：** `co-core` 新增器件无关的批处理执行器（`campaign`）：单个 Rayon
-  池、候选级/频点级自适应并行轴（互斥不嵌套，单池永不过订阅）、按候选索引有序
-  写回、原子进度 + 协作取消且不入任何数值归约；`bw_from_gain` / `band_rms`
-  归约按冻结 Python 路径 1:1 移植。AFE OTFT evaluator（`otft_campaign`）把原生
-  `otft` 器件核、稠密 `mna` 求解与复数 `lti` MNA 组合成逐候选
-  器件构建 → DC → AC → noise 流水线，经 `circuitopt_core.CompiledCampaign`
-  暴露（`evaluate_batch` 在单个 `py.detach` 内跑完整 batch，零 per-candidate
-  Python 回调）。硅 BSIM4 evaluator（freepdk45 / sky130 / tsmc28）同批接入：
-  把 `co-pdk` numeric card——含 TSMC28 `to_bsim4_cards` 的 `mulu0 → u0`
-  迁移率折叠（提取为 `co_pdk::apply_mulu0_fold` 并单测）——组合进
-  `co-bsim4` handle、`bsim_transient::solve_dc`、4×4 端子线性化与逐器件
-  BSIM4 噪声矩阵（遵守后端要求的 evaluate-then-noise 调用序）。仅供验证——
-  尚未接入任何生产工作流（那是 R5-D）。AFE 对 cold-consistent Python 参考
-  （新建 `PMOS_TFT` 小信号参数 → 同一 `LtiProblem` → 同一归约）逐位一致：
-  增益/带宽最差 rel ~1e-15、IRN ~2e-16（`band_rms` 朴素求和 ULP）、DC
-  工作点逐位相同。硅侧直接对冻结的 `ac_solve`/`noise_analysis` 路径
-  （BSIM4 求值为纯函数，无 warm/cold 之分）：三家 5T OTA 几何×corner
-  矩阵上增益最差 rel ~4e-16、带宽 ~2e-15、IRN ~1.7e-16，同 seed 的 Rust DC
-  Newton 逐位复现 Python 工作点。结果在 workers ∈ {1,2,8} 下逐字节相同。
-  诚实标注：AFE OTFT 内部 2 节点 Newton 停在 `tol=1e-12`，工作点随 seed 路径
-  漂移——冻结的 warm-cache `corners.metrics` 路径与同模型 cold 求值在
-  `gm`/`gds` 上可差 ~6e-8；campaign 走 cold-seed-consistent，故与 warm 路径
-  仅一致到该固有地板。SKY130 的参考宽钉扎（`extract_w != W`）不在
-  `CompiledPdk` 面内，硅 campaign 现阶段覆盖 `extract_w == W` 几何，待
-  R5-B 面扩展补齐。
-
-- **Compiled campaign wired into the design-space sweep (R5-D) / 编译式 campaign 接入设计空间扫描（R5-D）**
-
-  **English:** The compiled campaign is now the batch executor for the
-  design-space sweep (`benchmarks.bench_sweep`, the `--workers` design-space
-  path) under the rust engine, via a new `circuitopt._campaign_sweep` dispatch
-  layer (family detection + the cold-DC safety policy; returns to the frozen
-  scalar reference when the engine is not rust or the circuit is not
-  campaign-able). The whole candidate matrix runs under one Rayon pool with no
-  per-candidate Python callback — proven two ways (a monkeypatch trap and a
-  `sys.setprofile` frame counter both read zero PDK/device frames). Throughput
-  (candidates/s, 8 vs 1 worker): FreePDK45 ~5.4×, TSMC28 ~2.2× (both ≥2×);
-  index-ordered results are byte-identical across workers {1,2,8}.
-  Prerequisites: `CompiledPdk::numeric_card` gained SKY130 `reference_width_um`
-  (the `extract_w != W` explore path), pinned bit-for-bit vs `load_sky130_card`
-  over every bundled geometry. A cold-DC behaviour gate
-  (`tests/test_campaign_cold_dc.py`) proves the campaign's cold circuit Newton
-  reaches the same physical branch as scipy `fsolve` on the monostable silicon
-  OTAs (worst node dV freepdk45 1.3e-8 V / sky130 1.3e-9 V / tsmc28 4.5e-6 V,
-  << the 1e-3 V calibration DC tol), with identical convergence rate; a 0-bin
-  geometry is rejected identically by both engines and never sinks its batch.
-  **Flagged / out of scope:** the AFE OTFT is multistable — a cold circuit
-  Newton can pick a different branch than `fsolve` (~tens of volts), and even
-  seeded from the nominal op it does not reproduce `fsolve`'s basin selection on
-  bifurcation-edge (latch-prone) designs, so it under-reports `latch_rate`. The
-  AFE latch/metric workflows (`corners.corner_table` / `mismatch_mc` /
-  `latch_screen`, and the `mc` service job that calls them) therefore stay on
-  the frozen scalar reference (both engines) and keep their R5-A worker pool —
-  no silent root substitution. SAR mismatch MC is a closed-loop transient (not a
-  DC→AC→noise campaign) and its native-backend conversions rebuild each bit's
-  problem in Python, so its 8-thread scaling stays GIL-bound (~0.13 efficiency
-  on this ngspice-less host); this is a pre-existing SAR/transient-architecture
-  limit, untouched here, and the byte-identity worker contract still holds.
-
-  **中文：** 编译式 campaign 现作为设计空间扫描（`benchmarks.bench_sweep` 的
-  `--workers` 路径）在 rust 引擎下的批处理执行器，经新增的
-  `circuitopt._campaign_sweep` 分派层接入（器件族识别 + 冷 DC 安全策略；非
-  rust 引擎或电路不可编译时回退到冻结的 Python 标量参考）。整个候选矩阵在
-  单个 Rayon 池内跑完、零 per-candidate Python 回调——双重证明（monkeypatch
-  陷阱 + `sys.setprofile` 帧计数器均读到零 PDK/device 帧）。吞吐（候选/秒，
-  8 vs 1 线程）：FreePDK45 ~5.4×、TSMC28 ~2.2×（均 ≥2×）；按索引有序的结果在
-  workers {1,2,8} 下逐字节相同。前置：`CompiledPdk::numeric_card` 新增 SKY130
-  `reference_width_um`（`extract_w != W` 的 explore 路径），对 `load_sky130_card`
-  在全部 bundled 几何上逐位钉死。冷 DC 行为门（`tests/test_campaign_cold_dc.py`）
-  证明 campaign 冷启动电路 Newton 在单稳的硅 OTA 上与 scipy `fsolve` 落在同一
-  物理分支（最差节点 dV：freepdk45 1.3e-8 V / sky130 1.3e-9 V / tsmc28
-  4.5e-6 V，远小于 1e-3 V 校准 DC 容差），收敛率一致；0-bin 几何两引擎同报错
-  且不拖累同批。**诚实标注/超出范围：** AFE OTFT 多稳——冷启动电路 Newton
-  可选到与 `fsolve` 不同的分支（~几十伏），即便从标称工作点 seed 也无法在
-  分岔边缘（易 latch）设计上复现 `fsolve` 的盆地选择，故会低报 `latch_rate`。
-  因此 AFE 的 latch/metric 工作流（`corners.corner_table` / `mismatch_mc` /
-  `latch_screen`，及调用它们的 `mc` service job）仍走冻结的标量参考（两引擎）
-  并保留 R5-A 线程池——不做静默换根。SAR mismatch MC 是闭环 transient（非
-  DC→AC→noise campaign），其原生后端逐 bit 在 Python 重建问题，故 8 线程扩展
-  仍受 GIL 限制（本无 ngspice 机器上 ~0.13 效率）；这是既有 SAR/transient
-  架构限制，本期未动，逐位一致的 worker 契约仍成立。
-
-### Changed / 变更
-
-- **Removed the OSDI/OpenVAF compatibility path / 删除 OSDI/OpenVAF 兼容路径**
-
-  **English:** The Rust refactor now standardizes silicon simulation on the
-  native BSIM4 backend. Removed the OSDI host/device/transient modules,
-  OpenVAF discovery and compile tooling, SKY130 OSDI model registration and
-  dispatch, OSDI-specific Numba kernels, tests, and current documentation.
-  Explicit ngspice and Cadence regression oracles remain available.
-
-  **中文：** Rust 重构现将硅工艺仿真统一到原生 BSIM4 后端。已删除 OSDI
-  host/device/transient 模块、OpenVAF 路径解析与编译工具、SKY130 OSDI 模型
-  注册与分派、OSDI 专用 Numba 内核、测试和当前使用文档。显式 ngspice 与
-  Cadence 回归 oracle 继续保留。
+  **中文：** numba 依赖与引擎、纯 Python `_impl` 内核（其 OTFT 选根职责已先
+  移植进 Rust；冻结 golden 语料接任 oracle）、运行时 cc/ctypes BSIM4.5 编译
+  路径、OSDI/OpenVAF 兼容层全部移除。`--no-numba`、`CIRCUIT_USE_NUMBA` 与
+  `--engine numba|python` 现在响亮报错并指向本 changelog，而非静默无操作。
+  显式 ngspice 与 Cadence 回归 oracle 保留。
 
 ## [1.4.1] - 2026-07-17
 
@@ -1042,7 +770,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.1...v2.0.0
 [1.4.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.1.0...v1.2.0

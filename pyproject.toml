@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "circuit-optimization"
-version = "2.0.0-rc1"
+version = "2.0.0"
 description = "Local analog-circuit simulation and optimization framework."
 readme = "README.md"
 license = "MIT"
@@ -36,7 +36,7 @@ dependencies = [
     # tools/version.py (see docs/rust_core_rewrite_plan.md D9). Both wheels are
     # built and released together from this repo. Do not hand-edit the pin — run
     # `python tools/version.py set <version>`.
-    "circuitopt-core==2.0.0-rc1",
+    "circuitopt-core==2.0.0",
     # NOTE: flask is NOT a core dependency — the solver/CLI import zero flask.
     # Only demo/server.py uses it, so it lives in the [demo] extra below.
 ]
