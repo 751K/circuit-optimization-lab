@@ -38,6 +38,18 @@ release checklist.
   **精确 pin `circuitopt-core` 到同一版本**——两个发行版一起构建发布，由
   `tools/version.py` 锁死（`version.py check` 拒绝漂移）。
 
+- **`NumbaParams` renamed to `OtftParams` / `NumbaParams` 更名为 `OtftParams`**
+
+  **English:** The OTFT scalar-parameter bundle is now `OtftParams`
+  (`get_otft_params()`); the old names carried the retired numba engine in
+  their spelling. A compatibility alias `NumbaParams = OtftParams` remains
+  exported so v1.x deep-path imports keep working; the alias will be dropped
+  in a later major release.
+
+  **中文：** OTFT 标量参数包更名为 `OtftParams`（`get_otft_params()`），
+  旧名携带已退役的 numba 字样。兼容别名 `NumbaParams = OtftParams` 仍导出，
+  v1.x 深路径 import 不断；别名将在后续大版本移除。
+
 ### Removed (breaking, v2.0.0) / 移除（破坏性，v2.0.0）
 
 - **numba engine and dependency / numba 引擎与依赖**
@@ -401,27 +413,6 @@ release checklist.
   host/device/transient 模块、OpenVAF 路径解析与编译工具、SKY130 OSDI 模型
   注册与分派、OSDI 专用 Numba 内核、测试和当前使用文档。显式 ngspice 与
   Cadence 回归 oracle 继续保留。
-
-### Fixed / 修复
-
-- **Default test-suite runtime and native BSIM4 build robustness / 默认测试集耗时与原生 BSIM4 构建健壮性**
-
-  **English:** Marked the complete SAR/ADC conversion regressions as
-  `heavy_e2e` and excluded them from the default pytest run (on a machine with
-  FreePDK45 cards they took ~20 of the suite's ~22 minutes; the default run is
-  now minutes-level again, run them explicitly with `pytest -m heavy_e2e`).
-  The native BSIM4.5 runtime build now tolerates compilers that promote
-  implicit function declarations to errors (clang 16+ on Linux rejected the
-  unmodified Berkeley sources), and a failed build is cached per process
-  instead of being retried by every test — a CI run had burned 2.5 h
-  re-running the same failing compile.
-
-  **中文：** 将完整 SAR/ADC 转换回归标记为 `heavy_e2e` 并移出默认 pytest
-  运行（装有 FreePDK45 卡的机器上它们占 ~22 分钟中的 ~20 分钟；默认运行
-  恢复到分钟级，用 `pytest -m heavy_e2e` 显式执行）。原生 BSIM4.5 运行时
-  构建现兼容将隐式函数声明视为错误的编译器（Linux 上 clang 16+ 拒绝编译
-  未修改的 Berkeley 源码），且构建失败在进程内缓存、不再被每个测试重试
-  ——此前一次 CI 曾因重复运行同一失败编译烧掉 2.5 小时。
 
 ## [1.4.1] - 2026-07-17
 
