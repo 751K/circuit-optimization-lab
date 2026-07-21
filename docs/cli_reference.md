@@ -62,6 +62,7 @@ circuit-opt run examples/tsmc28hpcp_5t_ota.json \
 | `--corner` | 覆盖工艺角；AT4000TG 为 `typical/slow/fast`，硅工艺使用各自支持的 corner |
 | `--noise-band LO HI` | CLI 汇总中的噪声积分带宽，默认 `0.05 100.0` Hz |
 | `-o`, `--output` | 把结果写成 JSON |
+| `--workers` | `--help` 中可见，但 `run` 当前不消费它（不影响单次分析求解）；并行批处理见 `corners`/`mc`/`dataset`/`adc` 各自的 `--workers` |
 | `--engine {rust}` | 计算引擎；v2.0.0 起仅 `rust`（省略即默认 `rust`） |
 | `--no-numba` | **已在 v2.0.0 移除（会报错）**：numba 引擎不再存在，改用 `--engine rust` |
 | `--quiet` | 关闭进度和摘要输出 |
@@ -93,6 +94,7 @@ circuit-opt explore examples/tsmc28hpcp_5t_ota.json -n 200 --corner ff
 | `--corner` | 无覆盖 | 求解时使用的工艺角 |
 | `-o`, `--out`, `--output` | 无 | 输出前缀，写 `<prefix>.csv` 和 `<prefix>.jsonl` |
 | `--quiet` | 关闭 | 不打印逐候选进度 |
+| `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
 | `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
 
 可探索变量、约束和目标见 JSON 文档的 `explore` 字段。
@@ -122,6 +124,8 @@ circuit-opt corners examples/afe_explore.json \
 | `--freqs-num` | `121` | 对数频率点数 |
 | `--noise-band LO HI` | `0.05 100.0` | IRN 积分带宽 |
 | `-o`, `--output` | 无 | CSV 输出 |
+| `--workers` | `1` | 并行 corner worker 数（`ThreadPoolExecutor`，每次求解各自释放 GIL）；只有 3 个 corner，故超过 3 无收益 |
+| `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
 | `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
 | `--quiet` | 关闭 | 关闭逐 corner 输出 |
 
@@ -145,10 +149,12 @@ circuit-opt mc examples/afe_explore.json \
 |---|---:|---|
 | `-n`, `--n` | `200` | MC 样本数 |
 | `--seed` | `0` | 随机种子 |
+| `--workers` | `1` | 并行 MC worker 数（`ThreadPoolExecutor`，每次求解各自释放 GIL）；mismatch 抽样在调度前预先抽好，结果与 worker 数无关、逐字节确定 |
 | `--corner` | `typical` | `typical`、`slow` 或 `fast` |
 | `--freqs-start/stop/num` | `0.01/10000/121` | AC/noise 网格 |
 | `--noise-band LO HI` | `0.05 100.0` | IRN 积分带宽 |
 | `-o`, `--output` | 无 | JSON 汇总 |
+| `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
 | `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
 | `--quiet` | 关闭 | 关闭进度输出 |
 
@@ -194,6 +200,10 @@ circuit-opt chopper examples/afe_explore.json --level transient \
 | `--n-periods` | `8` |
 | `--freqs-start/stop/num` | `0.01/10000/121` |
 | `--noise-band LO HI` | `0.05 100.0` Hz |
+| `-o`, `--output` | 把结果写成 JSON |
+| `--engine {rust}` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
+| `--no-numba` | v2.0.0 移除（报错）：numba 引擎不再存在 |
+| `--quiet` | 关闭摘要输出 |
 
 这个命令是项目 AFE chopper 包装层，不是任意 JSON 周期电路的唯一入口。通用周期电路
 优先在 JSON `periodic` 和 `analyses` 中配置，然后使用 `run`。
@@ -239,7 +249,7 @@ circuit-opt adc examples/freepdk45_sar6.json \
 | `--amplitude` | 正弦峰值，默认 `0.45*vref` |
 | `--offset` | 正弦直流偏置，默认 `0.5*vref` |
 | `--corner` | 当前 ADC CLI 接受 `nom/ss/ff` |
-| `--workers` | conversion 或 candidate 并发数；单次转换内 bit 判决仍串行 |
+| `--workers` | conversion 或 candidate 并发数；单次转换内 bit 判决仍串行。`--mc` 优先走编译 Rust 批处理（`circuitopt_core.CompiledSarConversion.evaluate_batch`，单 Rayon 池，结果与 worker 数无关、逐字节确定），不满足条件（非原生器件、DC seed 不完整等）时退回 `ThreadPoolExecutor` 逐 trial 求解；`--sweep`/`--sine`/`--explore` 走 `ThreadPoolExecutor` 逐 candidate 求解 |
 | `--plot [DIR]` | 输出对应 PNG，需要 `plot` extra |
 | `--csv` / `--jsonl` | ADC explore 输出 |
 | `-o`, `--output` | JSON 结果 |
@@ -260,6 +270,20 @@ uv pip install -e ".[plot]"
 circuit-opt plot bode --npts 121 --out-dir results
 circuit-opt plot chopper --f-chop 225 --input-diff 1e-3
 ```
+
+参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `--f0` | `10` Hz | AFE 瞬态正弦频率 |
+| `--amp` | `5e-4` V | AFE 瞬态差分半幅值 |
+| `--f-chop` | `225` Hz | chopper/pac 图使用的 chopper 频率 |
+| `--input-diff` | `1e-3` V | chopper 瞬态直流差分输入 |
+| `--npts` | 按图各自默认 | Bode 频率点数 |
+| `--out-dir` | `results` | 输出目录 |
+| `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
+| `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
+| `--quiet` | 关闭 | 关闭摘要输出 |
 
 ## `dataset`
 
@@ -284,6 +308,7 @@ circuit-opt dataset examples/sky130_chopper.json \
 |---|---:|---|
 | `-n`, `--n` | `200` | 样本数 |
 | `--seed` | `0` | 随机种子 |
+| `--workers` | `1` | 并行 candidate worker 数（`ThreadPoolExecutor`，每次求解各自释放 GIL） |
 | `--method` | `lhs` | `lhs` 或 `random` |
 | `--corner` | `typical` | 求解 corner；硅工艺可传自己的 corner |
 | `--labels` | `ac_noise` | `ac_noise,transient,pss,pac,pnoise` 的组合 |
@@ -294,6 +319,7 @@ circuit-opt dataset examples/sky130_chopper.json \
 | `--no-npz` | 关闭 | 不写 dense NPZ |
 | `--parquet` | 关闭 | 额外写 Parquet，需要 `parquet` extra |
 | `--quiet` | 关闭 | 关闭进度 |
+| `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
 | `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
 
 ## Surrogate 与优化

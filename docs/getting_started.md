@@ -9,20 +9,45 @@ This guide gets the repository running without requiring any external PDK.
 - Python 3.10 or newer.
 - `uv` is recommended for environment management; standard `venv` and `pip`
   remain supported.
-- A supported compiler only when a native compact-model backend must be built
-  for the first time.
+- The sole compute engine, `circuitopt_core`, is a compiled Rust extension
+  (package `circuitopt-core`, pinned exactly by version). Building it from
+  this repository checkout needs a Rust toolchain (`rustup`) and a C compiler
+  for the vendored BSIM4.5 sources — see "Build the Compiled Core" below.
+  Installing a released wheel instead (from the project's GitHub Releases
+  page) needs neither.
 - Optional PDK files and external tools only for the corresponding silicon
   process. See the [PDK Support Matrix](pdk_support.md).
 
+## Build the Compiled Core
+
+From a repository checkout, `circuitopt-core` is not on PyPI yet (see the
+project's GitHub Releases page for prebuilt wheels), so install
+[rustup](https://rustup.rs/) first, then build and install the extension into
+the active virtual environment **before** installing the Python package below:
+
+```bash
+python -m pip install "maturin>=1.14,<2.0"
+maturin develop --release -m rust/crates/co-py/Cargo.toml
+```
+
+This compiles the vendored Berkeley BSIM4.5 C sources once (via the `cc`
+crate) and installs `circuitopt_core` as an editable package. Re-run it after
+pulling Rust changes.
+
 ## Install With uv
 
-From the repository root:
+From the repository root, after the compiled core above is installed into the
+active environment:
 
 ```bash
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e .
 ```
+
+`circuit-optimization` pins `circuitopt-core` to an exact version; pip/uv
+resolve that pin against the extension already installed above rather than
+fetching it from an index.
 
 Install the development and test dependencies when modifying the project:
 
@@ -45,6 +70,8 @@ uv pip install -e ".[parquet]"  # Parquet dataset export
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install "maturin>=1.14,<2.0"
+maturin develop --release -m rust/crates/co-py/Cargo.toml
 python -m pip install -e .
 ```
 
@@ -76,10 +103,14 @@ pytest -q tests/test_cli_subcommands.py tests/test_periodic_solvers.py
 
 ## Run a Transistor Example
 
-The default transistor process is the built-in AT4000TG PMOS model:
+The default transistor process is the built-in AT4000TG PMOS model.
+`examples/single_stage.json` has no `analyses` block of its own (it is set up
+for the `explore`/`dataset` workflows below), so `circuit-opt run` does not
+apply to it; a process-corner sweep does, and prints gain/bandwidth/noise
+directly:
 
 ```bash
-circuit-opt run examples/single_stage.json --analysis ac,noise
+circuit-opt corners examples/single_stage.json
 ```
 
 Other processes are selected per device through the JSON `models` field. They
@@ -123,8 +154,6 @@ Common variables:
 | `TSMC28_MODEL_DIR` | Directory containing the supported TSMC HSPICE model file |
 | `TSMC28_PDK_ROOT` | Outer TSMC iPDK or delivery root |
 | `NGSPICE_BIN` | Explicit ngspice executable for oracle comparisons/card extraction |
-| `BSIM4_VA` | Explicit BSIM4 Verilog-A source |
-| `CIRCUITOPT_NATIVE_MODEL_CACHE` | Native compact-model build cache |
 
 Do not commit licensed model files, generated model cards, local virtual
 environments, or simulator caches.

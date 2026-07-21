@@ -404,7 +404,12 @@ bit 的 `decision_time` 附近脉冲到 `high`（评估）——锁存器在 CDA
 
 - **DC**：精确固定节点电压（节点仍在 solved 集合）；`ac_solve` 在 `branch_currents` 里附带报告支路电流（方向：源内部 `p → q`）。
 - **AC / Noise**：DC 源视为短路（AC 地）；理想源无热噪声。源名出现在 `ac_drives` 中时作为 AC 激励。
-- **Transient**：支持常数或波形 key 的 `E(t)`。编译 Rust 定网格内核作用于 `n` 节点，故含电压源的电路在扩展 `n_aug` 系统上回落到纯 Python `_impl` 参考路径（v2.0.0 起 numba 引擎已移除；此路径下 `rust_grid_solver` 与已弃用的 `numba_grid_solver` 均为 `False`）。
+- **Transient**：支持常数或波形 key 的 `E(t)`。编译 Rust 定网格内核直接处理扩展的
+  `n_aug = n + m` 系统——含 vsource（或 VCVS/CCVS）支路电流未知量的电路仍报告
+  `result["rust_grid_solver"] is True`。adaptive Gear2 路径（`adaptive=True`）目前
+  只覆盖 OTFT/`n_aug == n` 场景；对含支路未知量的电路请求 adaptive 会直接报错，
+  而不是静默回退。生产路径不存在 Python 数值兜底；已废弃的 `numba_grid_solver`
+  结果键已不存在（测试断言其不出现）。
 - **PSS / PAC / PNoise** 同样支持：shooting monodromy 与 harmonic-balance 矩阵都用支路电流未知量做 bordered 扩展（PNoise 在有电压源时走 dense 路径）。
 
 ### `vcvs`
