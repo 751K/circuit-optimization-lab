@@ -38,10 +38,12 @@ Resolution order is `TSMC28_MODEL_DIR`, `TSMC28_PDK_ROOT`, the project-local
 entry, then `PDK_ROOT/tsmc28hpcp`. No machine-specific absolute path is stored
 in circuit JSON or Python source.
 
-The first native BSIM4 use compiles a small shared library from the vendored
-Berkeley BSIM4.5 device source and caches the result outside the source tree.
-A C compiler is therefore required once; ngspice is not required for normal
-simulation.
+The vendored Berkeley BSIM4.5 device source is compiled into the
+`circuitopt_core` extension at build time (the `co-bsim4` Rust crate drives the
+build), not on first use at runtime. Installing a released `circuitopt-core`
+wheel needs no compiler at all; building it from a source checkout needs a Rust
+toolchain (rustup) and a C compiler once, via `maturin develop --release -m
+rust/crates/co-py/Cargo.toml`. ngspice is not required for normal simulation.
 
 ## Device Binding
 

@@ -10,14 +10,18 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 | 工艺 | 模型键 | 器件后端 | DC / AC / Noise | Transient | PSS / PAC / PNoise | 外部前置条件 |
 |---|---|---|---|---|---|---|
 | AT4000TG | `at4000tg.pmos` | 内置校准 PMOS 模型 | 支持 | 原生 | 支持 | 无 |
-| SKY130 | `sky130.nmos`、`sky130.pmos` | 随包解析卡 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 已接入原生端口后端，需按周期拓扑验证 | 首次构建需要 C 编译器；仅生成新卡时需要外部工具 |
-| FreePDK45 | `freepdk45.nmos`、`freepdk45.pmos` | 平铺模型卡加载器 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 已接入原生端口后端，需按周期拓扑验证 | FreePDK45 模型卡；首次构建需要 C 编译器 |
+| SKY130 | `sky130.nmos`、`sky130.pmos` | 随包解析卡 + 原生 Berkeley BSIM4.5 | 支持 | 编译 Rust core + 原生 C BSIM4 BE/Gear2 | 已接入原生端口后端，需按周期拓扑验证 | 装发布 wheel 无需任何前置条件；仅生成新卡时需要外部工具 |
+| FreePDK45 | `freepdk45.nmos`、`freepdk45.pmos` | 平铺模型卡加载器 + 原生 Berkeley BSIM4.5 | 支持 | 编译 Rust core + 原生 C BSIM4 BE/Gear2 | 已接入原生端口后端，需按周期拓扑验证 | FreePDK45 模型卡；装发布 wheel 不需要其他条件 |
 | FreePDK45 oracle | `freepdk45_ngspice.nmos`、`freepdk45_ngspice.pmos` | ngspice-C 缓存网格 / 完整网表 oracle | 仅用于 oracle | 仅用于 oracle | 不是默认周期后端 | FreePDK45 模型卡和 ngspice |
-| TSMC28HPC+ core | `tsmc28hpcp.nmos`、`tsmc28hpcp.pmos` | 内部 HSPICE 前端 + 原生 Berkeley BSIM4.5 | 支持 | Numba 电路循环 + 原生 C BSIM4 BE/Gear2 | 支持 | Licensed 模型文件；首次构建需要 C 编译器 |
+| TSMC28HPC+ core | `tsmc28hpcp.nmos`、`tsmc28hpcp.pmos` | 内部 HSPICE 前端 + 原生 Berkeley BSIM4.5 | 支持 | 编译 Rust core + 原生 C BSIM4 BE/Gear2 | 支持 | Licensed 模型文件；装发布 wheel 不需要其他条件 |
 | TSMC28HPC+ oracle | `tsmc28hpcp_ngspice.nmos`、`tsmc28hpcp_ngspice.pmos` | 显式 ngspice 对照路径 | 仅用于 oracle | 仅用于 oracle | 不是默认周期后端 | Licensed 模型文件和 ngspice |
 
 这里的“支持”表示分析链路已经接通，不表示自动达到 foundry sign-off 等价。每个新拓扑仍应对合适的
 参考仿真器做回归。
+
+从源码构建 `circuitopt_core`（而非直接装发布 wheel）还需要 Rust 工具链（rustup）
+和一个 C 编译器（用于随附的 BSIM4.5 源码）：`maturin develop --release -m
+rust/crates/co-py/Cargo.toml`；见[安装与快速上手](getting_started_zh.md)。
 
 ## 各工艺说明
 
@@ -48,9 +52,11 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
   做回归核对。
 - 原生后端提供完整四端电流、电导、电荷、电容和相关噪声，接入 DC、AC、noise、
   transient 及周期分析。
-- 固定时间网格瞬态的 Newton 迭代和矩阵盖章位于 Numba 内核中，并通过运行时
-  `void *` 函数指针直接调用 C 紧凑模型；设置 `CIRCUIT_USE_NUMBA=0` 可切换到
-  Python 参考路径。
+- 固定时间网格瞬态的 Newton 迭代和矩阵盖章整体运行在编译 Rust core 内
+  （`co-core` 进程内直接调用 `co-bsim4`）；Python 侧的
+  `compact_models/bsim4/native.py` 通过 `ctypes`（`void *` 函数指针接口）绑定
+  同一份编译 ABI，供 transient 循环之外的单点 op/AC/noise 求值使用。v2.0.0 起
+  `rust` 是唯一引擎，不存在运行时编译步骤，也没有 Python 数值兜底路径。
 - `freepdk45_ngspice.*` 与完整电路 ngspice helper 继续作为独立 oracle 保留，
   需要这些模型键时再导入 `circuitopt.freepdk45_model`；正常仿真不需要安装
   ngspice。
@@ -63,7 +69,7 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 - 当前适配 1d8 HSPICE 模型文件中的 0.9 V `nch_mac` / `pch_mac` core wrapper。
 - 内部解析器在内存中处理 `.lib`、参数、子电路、macro 和尺寸 bin。
 - 原生后端提供四端电流、电导、电荷、电容和相关噪声。
-- 瞬态使用与 FreePDK45 相同的 Numba 到 C BSIM4 桥。
+- 瞬态使用与 FreePDK45 相同的编译 Rust 到 C BSIM4 桥。
 - 工艺角：`tt`、`ss`、`ff`、`sf`、`fs`；`nom` 等价于 `tt`。
 - 器件绑定 API 中温度使用开尔文。
 - 当前不声称支持完整 iPDK 中的 IO、RF、SRAM、eFuse、可靠性、统计模型、版图提取或
@@ -112,7 +118,6 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 | 额外 SKY130 解析卡 | `SKY130_CARD_DIR`，然后使用包内卡 |
 | TSMC 模型目录 | `TSMC28_MODEL_DIR`、`TSMC28_PDK_ROOT`、项目内忽略入口、`PDK_ROOT/tsmc28hpcp` |
 | ngspice | `NGSPICE_BIN`、虚拟环境约定位置、`PATH` |
-| 原生模型缓存 | `CIRCUITOPT_NATIVE_MODEL_CACHE`，否则使用选定虚拟环境 |
 
 ## 不替代的流程
 

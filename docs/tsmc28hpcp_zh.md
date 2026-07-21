@@ -35,9 +35,11 @@ export TSMC28_PDK_ROOT=/path/to/iPDK_delivery
 解析顺序为 `TSMC28_MODEL_DIR`、`TSMC28_PDK_ROOT`、项目内标准入口，最后是
 `PDK_ROOT/tsmc28hpcp`。JSON 和 Python 源码中不记录任何电脑的绝对路径。
 
-第一次使用原生 BSIM4 时，项目会从随代码提供的 Berkeley BSIM4.5 器件源码编译
-一个小型共享库，并缓存到源码树之外。因此首次运行需要本机 C 编译器；正常仿真不
-需要 ngspice。
+随代码提供的 Berkeley BSIM4.5 器件源码在构建期被编译进 `circuitopt_core`
+扩展（由 `co-bsim4` Rust crate 驱动构建），而不是运行时首次使用才编译。安装
+发布好的 `circuitopt-core` wheel 完全不需要编译器；从源码构建它则需要一次
+Rust 工具链（rustup）和 C 编译器：`maturin develop --release -m
+rust/crates/co-py/Cargo.toml`。正常仿真不需要 ngspice。
 
 ## JSON 绑定
 

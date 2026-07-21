@@ -11,11 +11,16 @@ process consistently.
 | Process | Model keys | Device backend | DC / AC / Noise | Transient | PSS / PAC / PNoise | External prerequisites |
 |---|---|---|---|---|---|---|
 | AT4000TG | `at4000tg.pmos` | Built-in calibrated PMOS model | Yes | Native | Yes | None |
-| SKY130 | `sky130.nmos`, `sky130.pmos` | Bundled resolved cards + native Berkeley BSIM4.5 | Yes | Numba circuit loop + native C BSIM4 BE/Gear2 | Native terminal backend; validate each periodic topology | C compiler on first build; external tools only for new-card extraction |
-| FreePDK45 | `freepdk45.nmos`, `freepdk45.pmos` | Flat-card loader + native Berkeley BSIM4.5 | Yes | Numba circuit loop + native C BSIM4 BE/Gear2 | Native terminal backend; validate each periodic topology | FreePDK45 cards; C compiler on first build |
+| SKY130 | `sky130.nmos`, `sky130.pmos` | Bundled resolved cards + native Berkeley BSIM4.5 | Yes | Compiled Rust core + native C BSIM4 BE/Gear2 | Native terminal backend; validate each periodic topology | None for a released wheel; external tools only for new-card extraction |
+| FreePDK45 | `freepdk45.nmos`, `freepdk45.pmos` | Flat-card loader + native Berkeley BSIM4.5 | Yes | Compiled Rust core + native C BSIM4 BE/Gear2 | Native terminal backend; validate each periodic topology | FreePDK45 cards; none else for a released wheel |
 | FreePDK45 oracle | `freepdk45_ngspice.nmos`, `freepdk45_ngspice.pmos` | Cached ngspice-C grid / complete-deck oracle | Oracle only | Oracle only | Not the default periodic backend | FreePDK45 cards and ngspice |
-| TSMC28HPC+ core | `tsmc28hpcp.nmos`, `tsmc28hpcp.pmos` | Internal HSPICE frontend + native Berkeley BSIM4.5 | Yes | Numba circuit loop + native C BSIM4 BE/Gear2 | Yes | Licensed supported model file; C compiler on first build |
+| TSMC28HPC+ core | `tsmc28hpcp.nmos`, `tsmc28hpcp.pmos` | Internal HSPICE frontend + native Berkeley BSIM4.5 | Yes | Compiled Rust core + native C BSIM4 BE/Gear2 | Yes | Licensed supported model file; none else for a released wheel |
 | TSMC28HPC+ oracle | `tsmc28hpcp_ngspice.nmos`, `tsmc28hpcp_ngspice.pmos` | Explicit ngspice comparison path | Oracle only | Oracle only | Not the default periodic backend | Licensed model file and ngspice |
+
+Building `circuitopt_core` from a source checkout (instead of installing a
+released wheel) additionally needs a Rust toolchain (rustup) and a C compiler
+for the vendored BSIM4.5 sources (`maturin develop --release -m
+rust/crates/co-py/Cargo.toml`); see [Getting Started](getting_started.md).
 
 “Supported” means the backend is connected to the analysis path. It does not
 mean foundry sign-off equivalence. Each topology still needs regression against
@@ -56,9 +61,12 @@ an appropriate reference.
 - The native backend exposes full four-terminal current, conductance, charge,
   capacitance, and correlated noise for DC, AC, noise, transient, and periodic
   analyses.
-- The fixed-grid transient hot path keeps Newton iteration and matrix stamping
-  in Numba and calls the C compact model through a runtime `void *` function
-  pointer. `CIRCUIT_USE_NUMBA=0` selects the Python reference path.
+- The fixed-grid transient hot path runs Newton iteration and matrix stamping
+  inside the compiled Rust core (`co-core` calling `co-bsim4` in-process); the
+  Python-facing `compact_models/bsim4/native.py` module binds the same compiled
+  ABI through `ctypes` (a `void *` function-pointer interface) for single-device
+  op-point/AC/noise calls outside the transient loop. As of v2.0.0 `rust` is the
+  sole engine; there is no runtime compiler step and no Python numeric fallback.
 - `freepdk45_ngspice.*` and the full-circuit ngspice helpers remain available as
   independent regression oracles. Import `circuitopt.freepdk45_model` to
   register the oracle-only model keys. They are optional for normal simulation.
@@ -75,7 +83,7 @@ an appropriate reference.
   and geometry bins in memory.
 - The native backend exposes four-terminal current, conductance, charge,
   capacitance, and correlated noise.
-- Transient uses the same Numba-to-C BSIM4 bridge as FreePDK45.
+- Transient uses the same compiled Rust-to-C BSIM4 bridge as FreePDK45.
 - Corners: `tt`, `ss`, `ff`, `sf`, `fs`; `nom` aliases `tt`.
 - Temperature is passed in kelvin at the device binding API.
 - The current adapter does not claim support for IO devices, RF devices, SRAM,
@@ -125,7 +133,6 @@ documented under `models` in the [Circuit JSON Format](json_circuit_format.md).
 | Additional SKY130 resolved cards | `SKY130_CARD_DIR`, then bundled package cards |
 | TSMC model directory | `TSMC28_MODEL_DIR`, `TSMC28_PDK_ROOT`, project-local ignored entry, then `PDK_ROOT/tsmc28hpcp` |
 | ngspice | `NGSPICE_BIN`, virtual-environment locations, then `PATH` |
-| Native model cache | `CIRCUITOPT_NATIVE_MODEL_CACHE`, otherwise the selected virtual environment |
 
 ## What CircuitOpt Does Not Replace
 
