@@ -19,6 +19,8 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+## [2.0.1] - 2026-07-22
+
 ### Fixed / 修复
 
 - **`run --workers` removed (ineffective since introduction) / 移除 `run --workers`（自引入起无效）**
@@ -40,6 +42,22 @@ release checklist.
   的，自引入起零效果；其 help 文案（"Parallel corner workers"）甚至就是 corner
   专用措辞的原文照搬。现予移除。并行批处理仍保留在真正实现它的子命令上：
   `corners`、`mc`、`dataset`、`adc`。
+
+- **`tools/profile_hotspots.py` repaired (stale library calls) / 修复 `tools/profile_hotspots.py`（过期库调用）**
+
+  **English:** The profiling script crashed at its explore step (it passed
+  `ExploreConfig` a dict of variables where the library has always taken a
+  `list[Variable]`, plus operator-form constraints and list-form objectives
+  the library never supported) and, once past that, at its corners/MC step
+  (positional `freqs` landing on `nf`; a nonexistent `corner=` kwarg). Both
+  call sites were updated to the canonical API; the library was untouched.
+  The script now runs end-to-end on the compiled core.
+
+  **中文：** 性能剖析脚本在 explore 步崩溃（给 `ExploreConfig` 传了 dict 形式
+  的 variables，而库自始至终只接受 `list[Variable]`，另有库从不支持的运算符
+  形式约束与 list 形式目标），越过后又在 corners/MC 步崩溃（位置实参 `freqs`
+  落到 `nf` 上、不存在的 `corner=` 关键字）。两处调用点均改为正统 API，库
+  零改动；脚本现可在编译核上端到端运行。
 
 ## [2.0.0] - 2026-07-22
 
@@ -792,7 +810,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.1...v2.0.0
 [1.4.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.2.0...v1.3.0
