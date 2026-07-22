@@ -38,19 +38,51 @@ fn main() {
     let model_dir = vendor.join("bsim4v5");
     let support_dir = vendor.join("support");
 
+    // Are we compiling for the MSVC target ABI (x86_64-pc-windows-msvc)? Cargo
+    // sets CARGO_CFG_TARGET_ENV per *target* for build scripts, so this branches
+    // correctly under cross-compilation and is empty ("") on macOS, "gnu"/"musl"
+    // on Linux, and "gnu" on the windows-gnu (MinGW) ABI — i.e. only the true
+    // MSVC target takes the Windows path below; everything else keeps the exact
+    // historical clang/gcc invocation.
+    let is_msvc = env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    // Crate-local shim directory, OUTSIDE the frozen vendor tree. On MSVC only,
+    // it is prepended to the include path so its `ngspice/config.h` shadows the
+    // vendored, POSIX-configured one (the vendored headers already carry
+    // `_MSC_VER` branches; the only thing pulling in <unistd.h>/<strings.h>/
+    // <dirent.h> is that config.h advertising HAVE_UNISTD_H etc.). The vendor
+    // tree is never modified, and this directory is never on the include path
+    // for non-MSVC targets, so macOS/Linux builds are bit-for-bit unchanged.
+    let msvc_shim = crate_dir.join("msvc_shim");
+
     // ---- 1. compile the vendored Berkeley BSIM4.5 C -----------------------
     let mut build = cc::Build::new();
+    // MSVC: the shim include must precede the vendor include so its config.h
+    // wins the `#include "ngspice/config.h"` lookup. Added only for MSVC, so the
+    // unix include order is untouched.
+    if is_msvc {
+        build.include(&msvc_shim);
+    }
     build
         .include(&include_dir)
         .include(&model_dir)
         .opt_level(2)
         .pic(true)
-        .warnings(false)
-        .flag("-std=c99")
-        // clang 16+ promotes implicit-function-declaration to an error in C99
-        // mode; the unmodified Berkeley sources rely on implicit libc decls.
-        // Keep it a warning, exactly like native.py.
-        .flag("-Wno-error=implicit-function-declaration");
+        .warnings(false);
+    if is_msvc {
+        // cl.exe has no `-std=c99` switch, and — crucially — its *default* C mode
+        // keeps implicit-function-declaration a warning (C4013), which is exactly
+        // the tolerance the unix `-Wno-error=implicit-function-declaration` flag
+        // buys; a `/std:c11`/`/std:c17` switch would instead push it toward an
+        // error. So MSVC deliberately gets neither unix flag and uses its
+        // permissive default. `.pic()`/`.opt_level()` are translated by `cc`.
+    } else {
+        build
+            .flag("-std=c99")
+            // clang 16+ promotes implicit-function-declaration to an error in C99
+            // mode; the unmodified Berkeley sources rely on implicit libc decls.
+            // Keep it a warning, exactly like native.py.
+            .flag("-Wno-error=implicit-function-declaration");
+    }
     for name in VENDOR_MODEL_SOURCES {
         build.file(model_dir.join(name));
     }
@@ -58,9 +90,15 @@ fn main() {
     build.compile("co_bsim4_vendor");
 
     // ---- 2. bindgen the shared header set ---------------------------------
+    // bindgen always parses with libclang (never cl.exe), so `-std=c99` is a
+    // valid clang arg on every host and stays. On MSVC the same config.h shim is
+    // prepended so libclang, too, skips the POSIX-only includes.
     let wrapper = crate_dir.join("csrc/wrapper.h");
-    let bindings = bindgen::Builder::default()
-        .header(wrapper.to_string_lossy())
+    let mut builder = bindgen::Builder::default().header(wrapper.to_string_lossy());
+    if is_msvc {
+        builder = builder.clang_arg(format!("-I{}", msvc_shim.display()));
+    }
+    let bindings = builder
         .clang_arg(format!("-I{}", include_dir.display()))
         .clang_arg(format!("-I{}", model_dir.display()))
         .clang_arg("-std=c99")
