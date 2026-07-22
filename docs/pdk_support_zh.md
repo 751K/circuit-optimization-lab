@@ -23,6 +23,10 @@ CircuitOpt 通过逐器件模型绑定选择工艺。技术上可以在一个电
 和一个 C 编译器（用于随附的 BSIM4.5 源码）：`maturin develop --release -m
 rust/crates/co-py/Cargo.toml`；见[安装与快速上手](getting_started_zh.md)。
 
+预编译的 `circuitopt_core` wheel 会随 GitHub Release 发布，覆盖 Linux、macOS，以及
+自本次起（CI 构建、首个 Windows 版本）的 Windows（`win_amd64`，abi3-py310）；直接安装
+wheel 既不需要 Rust 工具链也不需要 C 编译器。
+
 ## 各工艺说明
 
 ### AT4000TG

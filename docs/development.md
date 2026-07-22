@@ -156,7 +156,14 @@ OTFT root-selection recovery they powered lives in the compiled core as
 CI lints the workspace (`cargo fmt` + `clippy`), installs `circuitopt_core` in
 the test matrix so the solvers can run, and the release workflow builds and
 publishes both distributions together (the `circuit-optimization` sdist/wheel
-and per-OS `circuitopt_core` wheels).
+and per-OS `circuitopt_core` wheels). The per-OS wheels cover Linux, macOS, and
+— starting with this release, CI-built as the first Windows build — Windows
+(`win_amd64`, abi3-py310); the test matrix and the wheel matrix both gained a
+`windows-latest` leg. That leg is provisional (continue-on-error) until a green
+Windows runner confirms the MSVC build of the vendored BSIM4.5 C, which is wired
+up by an out-of-vendor config shim in `rust/crates/co-bsim4/build.rs` (the vendor
+tree itself is unchanged); promote it to a hard gate by removing the
+`experimental` / `continue-on-error` markers.
 
 ### BSIM4.5 backend selector
 
