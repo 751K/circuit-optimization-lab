@@ -25,11 +25,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     # windows-latest (win_amd64, MSVC ABI) is PROVISIONAL: the first enablement
     # of the MSVC build of the vendored BSIM4.5 C, not validatable off a Windows
-    # runner. It runs continue-on-error so a red Windows wheel can never block a
     # release — the release job (needs: build-wheels) still publishes the Linux
     # and macOS wheels, and picks the Windows wheel up too once it goes green.
-    # Drop the continue-on-error expression to make it a required wheel.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:

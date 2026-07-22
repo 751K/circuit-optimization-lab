@@ -49,10 +49,7 @@ jobs:
     # The Windows row is PROVISIONAL: it is the first enablement of the MSVC
     # build of the vendored Berkeley BSIM4.5 C (via the out-of-vendor config
     # shim wired up in rust/crates/co-bsim4/build.rs). It cannot be validated
-    # off a Windows runner, so it runs continue-on-error until a green run
     # confirms it — a red Windows leg must not block the ubuntu/macOS gates.
-    # Promote it to a hard gate by deleting `experimental: true` from the row.
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -67,7 +64,6 @@ jobs:
           # with the macOS row.
           - os: windows-latest
             python-version: "3.12"
-            experimental: true
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

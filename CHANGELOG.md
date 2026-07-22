@@ -19,6 +19,8 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+## [2.0.2] - 2026-07-23
+
 ### Added / 新增
 
 - **Windows CI and wheels (first Windows build) / Windows CI 与 wheel（首个 Windows 版本）**
@@ -34,9 +36,8 @@ release checklist.
   resolve without POSIX-only headers. The vendored Berkeley BSIM4.5 C is unchanged
   and macOS/Linux builds are bit-for-bit identical (golden corpus reproduces
   bit-exactly). A repo-wide `.gitattributes` (`* text=auto eol=lf`) keeps the
-  byte-exact goldens and POSIX scripts LF on the Windows runner. The Windows legs
-  are provisional (continue-on-error) until a green Windows runner confirms the
-  MSVC build.
+  byte-exact goldens and POSIX scripts LF on the Windows runner. The Windows legs were promoted to required gates after the first green
+  Windows runner run confirmed the MSVC build.
 
   **中文：** `ci.yml` 的 `test` 矩阵与 `release.yml` 的 `build-wheels` 矩阵新增
   `windows-latest` 腿，`circuitopt-core` 现在除 Linux/macOS 外也覆盖 Windows
@@ -48,7 +49,7 @@ release checklist.
   让随附的 ngspice 头文件在不引入 POSIX-only 头的情况下解析。随附的 Berkeley BSIM4.5 C
   一字未改，macOS/Linux 构建逐位一致（golden 语料逐位复现）。仓库级 `.gitattributes`
   （`* text=auto eol=lf`）保证 byte-exact golden 与 POSIX 脚本在 Windows runner 上仍为
-  LF。Windows 腿在真实 runner 验证 MSVC 构建通过前，暂设为 continue-on-error。
+  LF。Windows 腿已在真实 runner 首次全绿后转为必过门。
 
 ## [2.0.1] - 2026-07-22
 
@@ -841,7 +842,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.2...HEAD
+[2.0.2]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.1...v2.0.0
 [1.4.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.3.0...v1.4.0
