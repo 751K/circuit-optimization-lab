@@ -19,6 +19,39 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Changed / 性能
+
+- **BSIM4 DC Newton skips capacitance extraction (D6 acLoad-skip) / BSIM4 DC 牛顿迭代跳过电容抽取（D6 acLoad-skip）**
+
+  **English:** The BSIM4 DC operating-point Newton (`bsim_transient::solve_dc`)
+  consumes only the terminal currents and conductance, but every device eval had
+  been running the full host.c tail — a `MODEINITSMSIG` reload plus `acLoad` and a
+  complex Schur reduction — to extract the small-signal capacitance nobody reads
+  until the final operating-point eval. That tail is now split out
+  (`co_bsim4::eval_vp_dc`, gated by the new `Evaluator::evaluate_dc`) and skipped
+  during DC iterations; the one-shot small-signal eval, the transient
+  (`solve_fixed_grid`), and every scalar/reference entry point still run the full
+  eval. Currents and conductance (and their conservation snap) are bit-for-bit
+  identical — the frozen engine-parity golden corpus reproduces bit-exactly, no
+  re-freeze — because `acLoad` writes only the per-call-cleared matrix and the DC
+  load's charge terms stamp `0` into the Jacobian. Measured on the pure DC solve
+  (median of 3, N=4000): freepdk45 5T OTA **1.88×** (178.1 → 94.5 µs/solve),
+  tsmc28 5T OTA **1.60×** (137.7 → 86.1 µs/solve). Set the escape hatch
+  `CIRCUIT_BSIM4_FULL_EVAL=1` to force the full extraction on the DC path (exact
+  rollback; also verified bit-exact).
+
+  **中文：** BSIM4 直流工作点牛顿迭代（`bsim_transient::solve_dc`）只消费端口电流与
+  电导，但此前每次器件求值都白跑 host.c 的完整尾段——一次 `MODEINITSMSIG` 重载加
+  `acLoad` 与复数 Schur 消元——去抽取直到最终工作点求值才会被读取的小信号电容。现在
+  该尾段被拆出（`co_bsim4::eval_vp_dc`，经新增的 `Evaluator::evaluate_dc` 分派）并在
+  DC 迭代期跳过；工作点处的单次小信号求值、瞬态（`solve_fixed_grid`）以及所有标量/
+  参考入口仍走完整求值。电流与电导（含守恒修正）逐位不变——冻结的 engine-parity
+  golden 语料逐位复现，无需重冻——因为 `acLoad` 只写每次调用前已清零的矩阵，且 DC
+  载入的电荷项在雅可比里恒印 `0`。纯 DC 求解实测（3 次中位，N=4000）：freepdk45 5T
+  OTA **1.88×**（178.1 → 94.5 µs/次），tsmc28 5T OTA **1.60×**（137.7 → 86.1
+  µs/次）。设 `CIRCUIT_BSIM4_FULL_EVAL=1` 可强制 DC 路径走完整抽取（精确回退，亦已
+  验证逐位一致）。
+
 ## [2.0.2] - 2026-07-23
 
 ### Added / 新增
