@@ -19,6 +19,37 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Added / 新增
+
+- **Windows CI and wheels (first Windows build) / Windows CI 与 wheel（首个 Windows 版本）**
+
+  **English:** The `test` matrix (`ci.yml`) and the `build-wheels` matrix
+  (`release.yml`) gained a `windows-latest` leg, so `circuitopt-core` now targets
+  Windows (`win_amd64`, MSVC ABI, one abi3-py310 wheel) alongside Linux and macOS.
+  `rust/crates/co-bsim4/build.rs` is now toolchain-conditional: the clang/gcc
+  invocation (`-std=c99 -Wno-error=implicit-function-declaration`) is preserved
+  byte-for-byte for macOS/Linux, while MSVC uses its permissive default C mode and
+  an out-of-vendor config shim (`co-bsim4/msvc_shim/ngspice/config.h`, prepended to
+  the include path only for the `msvc` target env) so the vendored ngspice headers
+  resolve without POSIX-only headers. The vendored Berkeley BSIM4.5 C is unchanged
+  and macOS/Linux builds are bit-for-bit identical (golden corpus reproduces
+  bit-exactly). A repo-wide `.gitattributes` (`* text=auto eol=lf`) keeps the
+  byte-exact goldens and POSIX scripts LF on the Windows runner. The Windows legs
+  are provisional (continue-on-error) until a green Windows runner confirms the
+  MSVC build.
+
+  **中文：** `ci.yml` 的 `test` 矩阵与 `release.yml` 的 `build-wheels` 矩阵新增
+  `windows-latest` 腿，`circuitopt-core` 现在除 Linux/macOS 外也覆盖 Windows
+  （`win_amd64`，MSVC ABI，单个 abi3-py310 wheel）。`rust/crates/co-bsim4/build.rs`
+  改为按工具链条件化：macOS/Linux 的 clang/gcc 编译参数
+  （`-std=c99 -Wno-error=implicit-function-declaration`）逐字保持不变，MSVC 则使用其
+  宽松的默认 C 模式，并通过一个位于 vendor 之外的 config 垫片
+  （`co-bsim4/msvc_shim/ngspice/config.h`，仅在 `msvc` 目标下前置到 include 路径），
+  让随附的 ngspice 头文件在不引入 POSIX-only 头的情况下解析。随附的 Berkeley BSIM4.5 C
+  一字未改，macOS/Linux 构建逐位一致（golden 语料逐位复现）。仓库级 `.gitattributes`
+  （`* text=auto eol=lf`）保证 byte-exact golden 与 POSIX 脚本在 Windows runner 上仍为
+  LF。Windows 腿在真实 runner 验证 MSVC 构建通过前，暂设为 continue-on-error。
+
 ## [2.0.1] - 2026-07-22
 
 ### Fixed / 修复

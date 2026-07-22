@@ -22,6 +22,11 @@ released wheel) additionally needs a Rust toolchain (rustup) and a C compiler
 for the vendored BSIM4.5 sources (`maturin develop --release -m
 rust/crates/co-py/Cargo.toml`); see [Getting Started](getting_started.md).
 
+Prebuilt `circuitopt_core` wheels are published on the GitHub Release for Linux,
+macOS, and — starting with this release, CI-built as the first Windows build —
+Windows (`win_amd64`, abi3-py310); installing one needs neither a Rust toolchain
+nor a C compiler.
+
 “Supported” means the backend is connected to the analysis path. It does not
 mean foundry sign-off equivalence. Each topology still needs regression against
 an appropriate reference.

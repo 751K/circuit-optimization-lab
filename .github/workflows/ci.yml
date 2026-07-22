@@ -46,6 +46,13 @@ jobs:
   test:
     needs: lint
     runs-on: ${{ matrix.os }}
+    # The Windows row is PROVISIONAL: it is the first enablement of the MSVC
+    # build of the vendored Berkeley BSIM4.5 C (via the out-of-vendor config
+    # shim wired up in rust/crates/co-bsim4/build.rs). It cannot be validated
+    # off a Windows runner, so it runs continue-on-error until a green run
+    # confirms it — a red Windows leg must not block the ubuntu/macOS gates.
+    # Promote it to a hard gate by deleting `experimental: true` from the row.
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -56,6 +63,11 @@ jobs:
             python-version: "3.12"
           - os: macos-latest
             python-version: "3.12"
+          # win_amd64 / MSVC ABI. abi3-py310 → one Python is enough, aligned
+          # with the macOS row.
+          - os: windows-latest
+            python-version: "3.12"
+            experimental: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -74,6 +86,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+      # bindgen needs libclang to parse the vendored ngspice headers. The
+      # windows-latest image ships LLVM under C:\Program Files\LLVM; the choco
+      # step is a fast no-op if it is already present (belt-and-suspenders across
+      # image revisions) and clang-sys is pointed at it via LIBCLANG_PATH.
+      # PYTHONUTF8/PYTHONIOENCODING neutralise the cp1252 default so any UTF-8
+      # fixture or subprocess output decodes identically to POSIX.
+      - name: Set up libclang (Windows)
+        if: runner.os == 'Windows'
+        run: choco install llvm --no-progress -y
+      - name: Configure Windows environment
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+          echo "PYTHONUTF8=1" >> "$GITHUB_ENV"
+          echo "PYTHONIOENCODING=utf-8" >> "$GITHUB_ENV"
       - name: Install circuitopt_core (compiled rust engine)
         run: python -m pip install rust/crates/co-py
       - name: Install package (with test extras)
@@ -83,6 +111,11 @@ jobs:
 
   # ── Byte-gate: Cadence-calibration reproduction gate ──
   # circuitopt.calibration --all exits 1 on any drift, so it doubles as a hard gate.
+  # Single-platform by design: the compiled core is deterministic and the
+  # calibration numbers are platform-independent, so one runner proves the
+  # reproduction. Windows adds no coverage here (its MSVC build path is already
+  # exercised by the provisional Windows row of the `test` job) and would only
+  # add an unverified leg to a bit-exact gate, so byte-gate stays ubuntu-only.
   byte-gate:
     needs: lint
     runs-on: ubuntu-latest

@@ -1,0 +1,21 @@
+# Line-ending policy.
+#
+# Byte-exact golden reproduction is this repository's core invariant
+# (tests/golden, calibration references), and several CI legs shell out to POSIX
+# scripts (tools/*.sh). Git for Windows defaults core.autocrlf=true, so on the
+# Windows CI runner text would otherwise be checked out CRLF and diverge from the
+# LF-anchored goldens and scripts. Force LF in every working tree.
+#
+# macOS/Linux already check out LF (no CRLF is committed anywhere), so this is a
+# no-op there: it introduces no renormalization diff and cannot change any
+# existing file's bytes.
+* text=auto eol=lf
+
+# Binary assets — never apply text/EOL normalization. Explicit markers guard the
+# 288 .npz device-grid goldens (and image assets) against git's text heuristic.
+*.npz  binary
+*.npy  binary
+*.png  binary
+*.pdf  binary
+*.ico  binary
+*.icns binary
