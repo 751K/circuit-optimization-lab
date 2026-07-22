@@ -27,12 +27,24 @@ const VENDOR_MODEL_SOURCES: &[&str] = &[
     "b4v5geo.c",
 ];
 
+/// `std::fs::canonicalize` returns `\\?\`-prefixed extended-length paths on
+/// Windows; cl.exe's C1 front end rejects them for *source* files (C1083:
+/// cannot open '\\b4v5.c'). Strip the prefix; a no-op everywhere else.
+fn strip_extended_length_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) => PathBuf::from(rest),
+        None => path,
+    }
+}
+
 fn main() {
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let native_src = crate_dir
-        .join("../../../circuitopt/compact_models/bsim4/native_src")
-        .canonicalize()
-        .expect("locate circuitopt/compact_models/bsim4/native_src (vendor tree)");
+    let native_src = strip_extended_length_prefix(
+        crate_dir
+            .join("../../../circuitopt/compact_models/bsim4/native_src")
+            .canonicalize()
+            .expect("locate circuitopt/compact_models/bsim4/native_src (vendor tree)"),
+    );
     let vendor = native_src.join("vendor");
     let include_dir = vendor.join("include");
     let model_dir = vendor.join("bsim4v5");
