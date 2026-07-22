@@ -128,7 +128,7 @@ circuit-opt dataset examples/single_stage.json -n 500 --out results/datasets/sin
 circuit-opt serve
 ```
 
-在硅 PDK 上使用这些流程前先看 [CLI 参考手册](cli_reference.md)；不同后端的
+在硅 PDK 上使用这些流程前先看 [CLI 参考手册](cli_reference_zh.md)；不同后端的
 corner 和 mismatch 覆盖并不相同。
 
 ## 路径与可迁移性
@@ -151,7 +151,7 @@ corner 和 mismatch 覆盖并不相同。
 ## 下一步
 
 - 编写电路：[JSON 电路描述格式](json_circuit_format_zh.md)
-- 运行分析：[CLI 参考手册](cli_reference.md)
+- 运行分析：[CLI 参考手册](cli_reference_zh.md)
 - 选择工艺：[PDK 支持矩阵](pdk_support_zh.md)
 - 供其他应用调用：[本地服务 API](service_api_zh.md)
 - 修改代码：[开发者接手指南](development.md)

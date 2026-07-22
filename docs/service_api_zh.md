@@ -1,7 +1,7 @@
 # 本地服务 API
 
 [项目概览](README.md) | [核心求解器概览](module_overview.md) |
-[CLI 参考手册](cli_reference.md) | [English](service_api.md)
+[CLI 参考手册](cli_reference_zh.md) | [English](service_api.md)
 
 > **文档状态：持续维护的 API 参考。** 服务默认只在本机运行、进程内保存任务，
 > 且不提供鉴权。
@@ -408,7 +408,7 @@ NaN/Inf → `null` 这条规则的原因是严格 JSON（RFC 8259）没有非有
 ## 与 CLI 的对应关系
 
 这里的每个端点都对应一个已有的 CLI 子命令——服务层不引入任何新的求解器行为，
-只是给同一批入口套一层 HTTP 传输。各命令的完整参数参考见 [CLI 参考手册](cli_reference.md)。
+只是给同一批入口套一层 HTTP 传输。各命令的完整参数参考见 [CLI 参考手册](cli_reference_zh.md)。
 
 | HTTP 端点 | CLI 对应 | 共用入口函数 |
 |-----------|---------|-------------|
@@ -426,6 +426,6 @@ NaN/Inf → `null` 这条规则的原因是严格 JSON（RFC 8259）没有非有
 
 - [JSON 电路描述格式](json_circuit_format_zh.md) —— 本 API 里每个 `circuit`
   字段遵循的 schema。
-- [CLI 参考手册](cli_reference.md) —— `serve` 子命令及所有其他命令行入口。
+- [CLI 参考手册](cli_reference_zh.md) —— `serve` 子命令及所有其他命令行入口。
 - [核心求解器概览](module_overview_zh.md) —— 模块地图里的 `service/` 子包条目，
   以及每个端点背后调用的求解器内部实现。

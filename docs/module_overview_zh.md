@@ -556,7 +556,7 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   `device_factory.py` 里；`explore.py` 从那里 import，而不是自己定义。
 - `add_cli_args(parser)` / `run_cli(args)` 是 CLI 参数定义的单一来源——`python -m circuitopt explore`
   子命令和独立的 `python -m circuitopt.explore` 入口都调用同一对函数，两个入口不会再互相漂移
-  （见 [`cli_reference.md`](cli_reference.md)）。
+  （见 [`cli_reference_zh.md`](cli_reference_zh.md)）。
 - `explore_from_dict(data, n=, seed=, method=, corner=, progress=None, should_stop=None)`——
   `explore` 子命令和服务层 `POST /api/v1/jobs/explore` 共用的单一入口：解析 `explore` 块、
   绑定硅 `models`、再调用 `explore()`。`progress(done, total)` / `should_stop()` 是可选钩子，

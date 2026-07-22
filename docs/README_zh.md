@@ -12,7 +12,7 @@
 
 1. [安装与快速上手](getting_started_zh.md)：使用 `uv` 或标准 `venv`
    建环境，运行无 PDK 的冒烟测试，并选择可选依赖。
-2. [CLI 参考手册](cli_reference.md)：分析、探索、工艺角、失配、ADC、绘图、
+2. [CLI 参考手册](cli_reference_zh.md)：分析、探索、工艺角、失配、ADC、绘图、
    数据集和本地服务命令。
 3. [JSON 电路描述格式](json_circuit_format_zh.md)：电路描述的字段级维护文档。
 4. [PDK 支持矩阵](pdk_support_zh.md)：模型键、前置依赖、分析覆盖、工艺角和限制。
@@ -43,7 +43,7 @@ Foundry 模型文件只是本地输入，不属于仓库内容，必须保持 Gi
 | 文档 | 用途 | 维护状态 |
 |---|---|---|
 | [安装与快速上手](getting_started_zh.md) | 安装和第一次运行 | 持续维护 |
-| [CLI 参考手册](cli_reference.md) | 当前命令行接口 | 持续维护 |
+| [CLI 参考手册](cli_reference_zh.md) | 当前命令行接口 | 持续维护 |
 | [JSON 电路描述格式](json_circuit_format_zh.md) | 电路 schema 与示例 | 持续维护 |
 | [PDK 支持矩阵](pdk_support_zh.md) | 工艺和后端能力边界 | 持续维护 |
 | [核心求解器概览](module_overview_zh.md) | 实现架构 | 持续维护 |
