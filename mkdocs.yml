@@ -64,6 +64,7 @@ nav:
       - 核心求解器概览: module_overview_zh.md
       - JSON 电路描述格式: json_circuit_format_zh.md
       - 本地服务 API: service_api_zh.md
+      - CLI 参考手册: cli_reference_zh.md
       - 许可证与第三方软件: third_party_licenses.md
 
 markdown_extensions:

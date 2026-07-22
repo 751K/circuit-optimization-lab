@@ -1,38 +1,40 @@
-# CLI 参考手册
+# CLI Reference
 
-[文档首页](README_zh.md) | [安装与快速上手](getting_started_zh.md) |
-[JSON 电路格式](json_circuit_format_zh.md)
+[Documentation Home](README.md) | [Getting Started](getting_started.md) |
+[Circuit JSON Format](json_circuit_format.md) | [中文版](cli_reference_zh.md)
 
-本文只记录当前公开命令。以实际 `--help` 输出为最终依据：
+This document covers only the currently public commands. Treat the actual
+`--help` output as the final source of truth:
 
 ```bash
 circuit-opt --help
 python -m circuitopt --help
 ```
 
-两个入口等价。下文统一使用 `circuit-opt`。
+The two entry points are equivalent. The rest of this document uses
+`circuit-opt` throughout.
 
-## 命令总览
+## Command Overview
 
-| 命令 | 用途 |
+| Command | Purpose |
 |---|---|
-| `run` | 按 JSON 配置运行 AC、noise、transient、PSS、PAC、PNoise |
-| `explore` | 从 `explore` 块采样、求解、筛约束并生成 Pareto 前沿 |
-| `corners` | AT4000TG 的 `typical/slow/fast` 固定工艺角扫描 |
-| `mc` | AT4000TG 逐器件 mismatch Monte Carlo |
-| `chopper` | AFE chopper 的理想、静态、LPTV、PSS、PAC、PNoise 和瞬态流程 |
-| `adc` | SAR ADC 单次转换、静态扫描、正弦动态、失配 MC 和设计探索 |
-| `plot` | 生成内置 AFE/chopper 波形和 Bode 图 |
-| `dataset` | 生成带 provenance 的 surrogate 数据集 |
-| `serve` | 启动可选 FastAPI 本地服务 |
+| `run` | Run AC, noise, transient, PSS, PAC, PNoise per the JSON config |
+| `explore` | Sample, solve, filter by constraints, and generate the Pareto front from an `explore` block |
+| `corners` | Fixed `typical/slow/fast` process-corner sweep for AT4000TG |
+| `mc` | Per-device mismatch Monte Carlo for AT4000TG |
+| `chopper` | Ideal, static-phase, LPTV, PSS, PAC, PNoise, and transient flows for the AFE chopper |
+| `adc` | SAR ADC single conversion, static sweep, sine-wave dynamic test, mismatch MC, and design exploration |
+| `plot` | Render the built-in AFE/chopper waveform and Bode plots |
+| `dataset` | Build a surrogate dataset with provenance |
+| `serve` | Start the optional local FastAPI service |
 
-无子命令的旧写法仍会自动路由到 `run`：
+The legacy no-subcommand form still auto-routes to `run`:
 
 ```bash
 circuit-opt examples/periodic_rc.json
 ```
 
-新文档和脚本应显式写 `run`。
+New docs and scripts should spell out `run` explicitly.
 
 ## `run`
 
@@ -40,34 +42,34 @@ circuit-opt examples/periodic_rc.json
 circuit-opt run CIRCUIT.json [options]
 ```
 
-常用示例：
+Common examples:
 
 ```bash
-# 运行 JSON analyses 块中的全部分析
+# Run every analysis in the JSON analyses block
 circuit-opt run examples/periodic_rc.json
 
-# 只运行 AC 和 noise
+# Run only AC and noise
 circuit-opt run examples/periodic_rc.json --analysis ac,noise
 
-# 覆盖工艺角并输出 JSON
+# Override the process corner and write JSON output
 circuit-opt run examples/tsmc28hpcp_5t_ota.json \
   --analysis ac,noise --corner ss --output results/tsmc28_ss.json
 ```
 
-参数：
+Flags:
 
-| 参数 | 说明 |
+| Flag | Description |
 |---|---|
-| `-a`, `--analysis` | 逗号分隔的分析子集：`ac,noise,transient,pss,pac,pnoise` |
-| `--corner` | 覆盖工艺角；AT4000TG 为 `typical/slow/fast`，硅工艺使用各自支持的 corner |
-| `--noise-band LO HI` | CLI 汇总中的噪声积分带宽，默认 `0.05 100.0` Hz |
-| `-o`, `--output` | 把结果写成 JSON |
-| `--engine {rust}` | 计算引擎；v2.0.0 起仅 `rust`（省略即默认 `rust`） |
-| `--no-numba` | **已在 v2.0.0 移除（会报错）**：numba 引擎不再存在，改用 `--engine rust` |
-| `--quiet` | 关闭进度和摘要输出 |
+| `-a`, `--analysis` | Comma-separated subset of analyses: `ac,noise,transient,pss,pac,pnoise` |
+| `--corner` | Process-corner override; `typical/slow/fast` for AT4000TG, silicon PDKs use their own supported corners |
+| `--noise-band LO HI` | Noise integration band for the CLI summary, default `0.05 100.0` Hz |
+| `-o`, `--output` | Write results to JSON |
+| `--engine {rust}` | Compute engine; only `rust` as of v2.0.0 (omitting the flag defaults to `rust`) |
+| `--no-numba` | **Removed in v2.0.0 (errors out)**: the numba engine no longer exists; use `--engine rust` instead |
+| `--quiet` | Suppress progress and summary output |
 
-`run` 的具体数值选项来自 JSON 顶层 `analyses` 块。字段见
-[JSON 电路格式](json_circuit_format_zh.md)。
+`run`'s specific numeric options come from the JSON top-level `analyses`
+block. See [Circuit JSON Format](json_circuit_format.md) for the fields.
 
 ## `explore`
 
@@ -75,7 +77,8 @@ circuit-opt run examples/tsmc28hpcp_5t_ota.json \
 circuit-opt explore CONFIG.json [options]
 ```
 
-配置文件必须是完整电路 JSON，并包含 `explore` 块。
+The config file must be a complete circuit JSON that includes an `explore`
+block.
 
 ```bash
 circuit-opt explore examples/afe_explore.json -n 500 --seed 1
@@ -83,20 +86,21 @@ circuit-opt explore examples/sky130_5t_ota.json -n 200 --corner ss
 circuit-opt explore examples/tsmc28hpcp_5t_ota.json -n 200 --corner ff
 ```
 
-参数：
+Flags:
 
-| 参数 | 默认值 | 说明 |
+| Flag | Default | Description |
 |---|---:|---|
-| `-n`, `--n` | `200` | 候选数量 |
-| `--seed` | `0` | 随机种子 |
-| `--method` | `lhs` | `lhs` 或 `random` |
-| `--corner` | 无覆盖 | 求解时使用的工艺角 |
-| `-o`, `--out`, `--output` | 无 | 输出前缀，写 `<prefix>.csv` 和 `<prefix>.jsonl` |
-| `--quiet` | 关闭 | 不打印逐候选进度 |
-| `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
-| `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
+| `-n`, `--n` | `200` | Number of candidates |
+| `--seed` | `0` | RNG seed |
+| `--method` | `lhs` | `lhs` or `random` |
+| `--corner` | no override | Process corner used for solving |
+| `-o`, `--out`, `--output` | none | Output prefix; writes `<prefix>.csv` and `<prefix>.jsonl` |
+| `--quiet` | off | Don't print per-candidate progress |
+| `--engine {rust}` | `rust` | Only `rust` as of v2.0.0 (omitting the flag defaults to `rust`) |
+| `--no-numba` | — | Removed in v2.0.0 (errors out): the numba engine no longer exists |
 
-可探索变量、约束和目标见 JSON 文档的 `explore` 字段。
+See the `explore` field in the JSON documentation for explorable variables,
+constraints, and objectives.
 
 ## `corners`
 
@@ -104,9 +108,10 @@ circuit-opt explore examples/tsmc28hpcp_5t_ota.json -n 200 --corner ff
 circuit-opt corners CIRCUIT.json [options]
 ```
 
-当前实现调用 `circuitopt.corners.corner_table`，固定扫描 AT4000TG 的
-`typical/slow/fast`。它不是通用硅 PVT campaign 驱动器。硅工艺可使用
-`run --corner`、`explore --corner` 或 `experiments/` 下的专用 campaign。
+The current implementation calls `circuitopt.corners.corner_table`, a fixed
+sweep over AT4000TG's `typical/slow/fast`. It is not a general-purpose
+silicon PVT campaign driver. For silicon PDKs, use `run --corner`,
+`explore --corner`, or a dedicated campaign under `experiments/`.
 
 ```bash
 circuit-opt corners examples/afe_explore.json \
@@ -114,19 +119,19 @@ circuit-opt corners examples/afe_explore.json \
   --noise-band 0.05 100 --output results/afe_corners.csv
 ```
 
-参数：
+Flags:
 
-| 参数 | 默认值 | 说明 |
+| Flag | Default | Description |
 |---|---:|---|
-| `--freqs-start` | `0.01` | 起始频率，Hz |
-| `--freqs-stop` | `10000` | 终止频率，Hz |
-| `--freqs-num` | `121` | 对数频率点数 |
-| `--noise-band LO HI` | `0.05 100.0` | IRN 积分带宽 |
-| `-o`, `--output` | 无 | CSV 输出 |
-| `--workers` | `1` | 并行 corner worker 数（`ThreadPoolExecutor`，每次求解各自释放 GIL）；只有 3 个 corner，故超过 3 无收益 |
-| `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
-| `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
-| `--quiet` | 关闭 | 关闭逐 corner 输出 |
+| `--freqs-start` | `0.01` | Start frequency, Hz |
+| `--freqs-stop` | `10000` | Stop frequency, Hz |
+| `--freqs-num` | `121` | Number of log-spaced frequency points |
+| `--noise-band LO HI` | `0.05 100.0` | IRN integration band |
+| `-o`, `--output` | none | CSV output |
+| `--workers` | `1` | Number of parallel corner workers (`ThreadPoolExecutor`; each solve releases the GIL independently); there are only 3 corners, so going beyond 3 has no benefit |
+| `--engine {rust}` | `rust` | Only `rust` as of v2.0.0 (omitting the flag defaults to `rust`) |
+| `--no-numba` | — | Removed in v2.0.0 (errors out): the numba engine no longer exists |
+| `--quiet` | off | Suppress per-corner output |
 
 ## `mc`
 
@@ -134,30 +139,32 @@ circuit-opt corners examples/afe_explore.json \
 circuit-opt mc CIRCUIT.json [options]
 ```
 
-当前通用 `mc` 使用 AT4000TG 的 `mvt0`/`mbeta0` 连续失配模型和 AFE latch
-判据。它不是通用 foundry mismatch engine。
+The current general-purpose `mc` uses AT4000TG's `mvt0`/`mbeta0` continuous
+mismatch model and the AFE latch criterion. It is not a general-purpose
+foundry mismatch engine.
 
 ```bash
 circuit-opt mc examples/afe_explore.json \
   -n 300 --seed 1 --corner slow --output results/afe_mc.json
 ```
 
-参数：
+Flags:
 
-| 参数 | 默认值 | 说明 |
+| Flag | Default | Description |
 |---|---:|---|
-| `-n`, `--n` | `200` | MC 样本数 |
-| `--seed` | `0` | 随机种子 |
-| `--workers` | `1` | 并行 MC worker 数（`ThreadPoolExecutor`，每次求解各自释放 GIL）；mismatch 抽样在调度前预先抽好，结果与 worker 数无关、逐字节确定 |
-| `--corner` | `typical` | `typical`、`slow` 或 `fast` |
-| `--freqs-start/stop/num` | `0.01/10000/121` | AC/noise 网格 |
-| `--noise-band LO HI` | `0.05 100.0` | IRN 积分带宽 |
-| `-o`, `--output` | 无 | JSON 汇总 |
-| `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
-| `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
-| `--quiet` | 关闭 | 关闭进度输出 |
+| `-n`, `--n` | `200` | Number of MC samples |
+| `--seed` | `0` | RNG seed |
+| `--workers` | `1` | Number of parallel MC workers (`ThreadPoolExecutor`; each solve releases the GIL independently); mismatch draws are pre-sampled before dispatch, so results are byte-identical regardless of worker count |
+| `--corner` | `typical` | `typical`, `slow`, or `fast` |
+| `--freqs-start/stop/num` | `0.01/10000/121` | AC/noise grid |
+| `--noise-band LO HI` | `0.05 100.0` | IRN integration band |
+| `-o`, `--output` | none | JSON summary |
+| `--engine {rust}` | `rust` | Only `rust` as of v2.0.0 (omitting the flag defaults to `rust`) |
+| `--no-numba` | — | Removed in v2.0.0 (errors out): the numba engine no longer exists |
+| `--quiet` | off | Suppress progress output |
 
-SAR ADC 有独立的 `adc --mc` 流程，其失配语义来自 JSON `adc.mismatch`。
+SAR ADC has its own separate `adc --mc` flow, whose mismatch semantics come
+from the JSON `adc.mismatch` block.
 
 ## `chopper`
 
@@ -165,17 +172,17 @@ SAR ADC 有独立的 `adc --mc` 流程，其失配语义来自 JSON `adc.mismatc
 circuit-opt chopper CIRCUIT.json --level LEVEL [options]
 ```
 
-`LEVEL`：
+`LEVEL`:
 
-| Level | 含义 |
+| Level | Meaning |
 |---|---|
-| `ideal` | 理想方波 LPTV |
-| `pmos` | PMOS 开关静态相位 |
-| `lptv` | PMOS 边带折叠 |
+| `ideal` | Ideal square-wave LPTV |
+| `pmos` | PMOS switch static phase |
+| `lptv` | PMOS sideband folding |
 | `pss` | Shooting PSS |
-| `pac` | PSS 轨道上的 PAC |
-| `pnoise` | PSS/PAC 后的周期噪声 |
-| `transient` | 硬开关瞬态 |
+| `pac` | PAC on the PSS orbit |
+| `pnoise` | Periodic noise after PSS/PAC |
+| `transient` | Hard-switched transient |
 
 ```bash
 circuit-opt chopper examples/afe_explore.json --level ideal
@@ -185,9 +192,9 @@ circuit-opt chopper examples/afe_explore.json --level transient \
   --n-periods 8 --n-points 121
 ```
 
-主要参数：
+Main flags:
 
-| 参数 | 默认值 |
+| Flag | Default |
 |---|---:|
 | `--f-chop` | `225` Hz |
 | `--switch-w` / `--switch-l` | `5000` / `30` µm |
@@ -199,13 +206,15 @@ circuit-opt chopper examples/afe_explore.json --level transient \
 | `--n-periods` | `8` |
 | `--freqs-start/stop/num` | `0.01/10000/121` |
 | `--noise-band LO HI` | `0.05 100.0` Hz |
-| `-o`, `--output` | 把结果写成 JSON |
-| `--engine {rust}` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
-| `--no-numba` | v2.0.0 移除（报错）：numba 引擎不再存在 |
-| `--quiet` | 关闭摘要输出 |
+| `-o`, `--output` | Write results to JSON |
+| `--engine {rust}` | Only `rust` as of v2.0.0 (omitting the flag defaults to `rust`) |
+| `--no-numba` | Removed in v2.0.0 (errors out): the numba engine no longer exists |
+| `--quiet` | Suppress summary output |
 
-这个命令是项目 AFE chopper 包装层，不是任意 JSON 周期电路的唯一入口。通用周期电路
-优先在 JSON `periodic` 和 `analyses` 中配置，然后使用 `run`。
+This command is a wrapper around the project's AFE chopper; it is not the
+sole entry point for arbitrary JSON periodic circuits. For general periodic
+circuits, configure `periodic` and `analyses` in the JSON first, then use
+`run`.
 
 ## `adc`
 
@@ -213,48 +222,53 @@ circuit-opt chopper examples/afe_explore.json --level transient \
 circuit-opt adc CIRCUIT.json MODE [options]
 ```
 
-模式互斥：
+The modes are mutually exclusive:
 
 ```bash
-# 单次转换
+# Single conversion
 circuit-opt adc examples/freepdk45_sar3.json --vin 0.7
 
-# 静态 ramp、DNL、INL 和 missing code
+# Static ramp, DNL, INL, and missing codes
 circuit-opt adc examples/freepdk45_sar6.json --sweep 64 --workers 8
 
-# 相干正弦、SNDR、SFDR 和 ENOB
+# Coherent sine wave, SNDR, SFDR, and ENOB
 circuit-opt adc examples/freepdk45_sar6.json \
   --sine 128 --tone-bin 13 --sample-rate 10e6 --workers 8
 
-# 使用 adc.mismatch 配置做 MC
+# MC using the adc.mismatch config
 circuit-opt adc examples/freepdk45_sar6.json \
   --mc 32 --seed 1 --workers 8
 
-# 设计空间探索
+# Design-space exploration
 circuit-opt adc examples/freepdk45_sar6.json \
   --explore examples/freepdk45_sar6_explore.json -n 20 --workers 4
 ```
 
-主要参数：
+Main flags:
 
-| 参数 | 说明 |
+| Flag | Description |
 |---|---|
-| `--vin VIN` | 单次转换；不指定模式时默认以 0.5 V 运行一次 |
-| `--sweep N` | N 个均匀 ramp 输入 |
-| `--sine N` | N 个相干正弦样本 |
-| `--mc N` | N 次逐器件失配 MC |
-| `--tone-bin` | 相干输入 FFT bin，默认 3 |
-| `--sample-rate` | 结果中报告的采样率，默认 10 MHz |
-| `--amplitude` | 正弦峰值，默认 `0.45*vref` |
-| `--offset` | 正弦直流偏置，默认 `0.5*vref` |
-| `--corner` | 当前 ADC CLI 接受 `nom/ss/ff` |
-| `--workers` | conversion 或 candidate 并发数；单次转换内 bit 判决仍串行。`--mc` 优先走编译 Rust 批处理（`circuitopt_core.CompiledSarConversion.evaluate_batch`，单 Rayon 池，结果与 worker 数无关、逐字节确定），不满足条件（非原生器件、DC seed 不完整等）时退回 `ThreadPoolExecutor` 逐 trial 求解；`--sweep`/`--sine`/`--explore` 走 `ThreadPoolExecutor` 逐 candidate 求解 |
-| `--plot [DIR]` | 输出对应 PNG，需要 `plot` extra |
-| `--csv` / `--jsonl` | ADC explore 输出 |
-| `-o`, `--output` | JSON 结果 |
+| `--vin VIN` | Single conversion; defaults to running one conversion at 0.5 V when no mode flag is given |
+| `--sweep N` | N uniformly spaced ramp inputs |
+| `--sine N` | N coherent sine-wave samples |
+| `--mc N` | N per-device mismatch MC trials |
+| `--explore CONFIG` | Standalone SAR-explore config JSON; runs ADC design-space exploration; mutually exclusive with `--vin`/`--sweep`/`--sine`/`--mc` |
+| `--tone-bin` | Coherent-input FFT bin, default 3 |
+| `--sample-rate` | Sample rate reported in the results, default 10 MHz |
+| `--amplitude` | Sine peak amplitude, default `0.45*vref` |
+| `--offset` | Sine DC offset, default `0.5*vref` |
+| `--corner` | The current ADC CLI accepts `nom/ss/ff` |
+| `-n`, `--n` | Number of candidates in `--explore` mode, default `50` |
+| `--seed` | RNG seed in `--explore` mode, default `0` |
+| `--workers` | Concurrency for conversions or candidates; bit decisions within a single conversion stay serial. `--mc` prefers the compiled Rust batch path (`circuitopt_core.CompiledSarConversion.evaluate_batch`, a single Rayon pool, results byte-identical regardless of worker count); when the conditions aren't met (non-native devices, an incomplete DC seed, etc.) it falls back to `ThreadPoolExecutor` per-trial solving; `--sweep`/`--sine`/`--explore` use `ThreadPoolExecutor` per-candidate solving |
+| `--plot [DIR]` | Write the corresponding PNG; needs the `plot` extra |
+| `--csv` / `--jsonl` | ADC explore output |
+| `-o`, `--output` | JSON result |
 
-ADC 控制状态机在 Python 中，比较器、CDAC 和开关仍由晶体管级瞬态计算。当前流程不等价于
-完整晶体管级数字 SAR 控制器。
+The ADC control state machine runs in Python; the comparator, CDAC, and
+switches are still computed by transistor-level transient analysis. The
+current flow is not equivalent to a full transistor-level digital SAR
+controller.
 
 ## `plot`
 
@@ -262,7 +276,8 @@ ADC 控制状态机在 Python 中，比较器、CDAC 和开关仍由晶体管级
 circuit-opt plot [all|transient|bode|afe|chopper|ac|pac] [options]
 ```
 
-该命令绘制项目内置 AFE/chopper 示例，不读取任意电路 JSON。
+This command renders the project's built-in AFE/chopper examples; it does
+not read an arbitrary circuit JSON.
 
 ```bash
 uv pip install -e ".[plot]"
@@ -270,19 +285,19 @@ circuit-opt plot bode --npts 121 --out-dir results
 circuit-opt plot chopper --f-chop 225 --input-diff 1e-3
 ```
 
-参数：
+Flags:
 
-| 参数 | 默认值 | 说明 |
+| Flag | Default | Description |
 |---|---:|---|
-| `--f0` | `10` Hz | AFE 瞬态正弦频率 |
-| `--amp` | `5e-4` V | AFE 瞬态差分半幅值 |
-| `--f-chop` | `225` Hz | chopper/pac 图使用的 chopper 频率 |
-| `--input-diff` | `1e-3` V | chopper 瞬态直流差分输入 |
-| `--npts` | 按图各自默认 | Bode 频率点数 |
-| `--out-dir` | `results` | 输出目录 |
-| `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
-| `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
-| `--quiet` | 关闭 | 关闭摘要输出 |
+| `--f0` | `10` Hz | AFE transient sine frequency |
+| `--amp` | `5e-4` V | AFE transient differential half-amplitude |
+| `--f-chop` | `225` Hz | Chopper frequency used by the chopper/pac plots |
+| `--input-diff` | `1e-3` V | Chopper transient DC differential input |
+| `--npts` | per-plot default | Number of Bode frequency points |
+| `--out-dir` | `results` | Output directory |
+| `--engine {rust}` | `rust` | Only `rust` as of v2.0.0 (omitting the flag defaults to `rust`) |
+| `--no-numba` | — | Removed in v2.0.0 (errors out): the numba engine no longer exists |
+| `--quiet` | off | Suppress summary output |
 
 ## `dataset`
 
@@ -290,8 +305,9 @@ circuit-opt plot chopper --f-chop 225 --input-diff 1e-3
 circuit-opt dataset CONFIG.json [options]
 ```
 
-输入必须是带 `explore` 块的完整电路 JSON。每个样本保留设计变量、标签、失败状态和
-provenance。
+The input must be a complete circuit JSON with an `explore` block. Each
+sample retains its design variables, labels, failure status, and
+provenance.
 
 ```bash
 circuit-opt dataset examples/single_stage.json \
@@ -301,29 +317,29 @@ circuit-opt dataset examples/sky130_chopper.json \
   -n 200 --labels pss,pac,pnoise --out results/datasets/sky_chopper
 ```
 
-参数：
+Flags:
 
-| 参数 | 默认值 | 说明 |
+| Flag | Default | Description |
 |---|---:|---|
-| `-n`, `--n` | `200` | 样本数 |
-| `--seed` | `0` | 随机种子 |
-| `--workers` | `1` | 并行 candidate worker 数（`ThreadPoolExecutor`，每次求解各自释放 GIL） |
-| `--method` | `lhs` | `lhs` 或 `random` |
-| `--corner` | `typical` | 求解 corner；硅工艺可传自己的 corner |
-| `--labels` | `ac_noise` | `ac_noise,transient,pss,pac,pnoise` 的组合 |
-| `--freqs-start` | `-2` | AC 起始 decade |
-| `--freqs-stop` | 无覆盖 | AC 终止 decade |
-| `--freqs-num` | `101` | AC 点数 |
-| `--out` | 自动 | 输出前缀 |
-| `--no-npz` | 关闭 | 不写 dense NPZ |
-| `--parquet` | 关闭 | 额外写 Parquet，需要 `parquet` extra |
-| `--quiet` | 关闭 | 关闭进度 |
-| `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |
-| `--no-numba` | — | v2.0.0 移除（报错）：numba 引擎不再存在 |
+| `-n`, `--n` | `200` | Number of samples |
+| `--seed` | `0` | RNG seed |
+| `--workers` | `1` | Number of parallel candidate workers (`ThreadPoolExecutor`; each solve releases the GIL independently) |
+| `--method` | `lhs` | `lhs` or `random` |
+| `--corner` | `typical` | Solve corner; silicon PDKs may pass their own corner |
+| `--labels` | `ac_noise` | Any combination of `ac_noise,transient,pss,pac,pnoise` |
+| `--freqs-start` | `-2` | AC start decade |
+| `--freqs-stop` | no override | AC stop decade |
+| `--freqs-num` | `101` | AC point count |
+| `--out` | automatic | Output prefix |
+| `--no-npz` | off | Don't write the dense NPZ |
+| `--parquet` | off | Also write a Parquet table; needs the `parquet` extra |
+| `--quiet` | off | Suppress progress |
+| `--engine {rust}` | `rust` | Only `rust` as of v2.0.0 (omitting the flag defaults to `rust`) |
+| `--no-numba` | — | Removed in v2.0.0 (errors out): the numba engine no longer exists |
 
-## Surrogate 与优化
+## Surrogate and Optimization
 
-这些是独立模块入口，不是主 CLI 子命令：
+These are standalone module entry points, not subcommands of the main CLI:
 
 ```bash
 uv pip install -e ".[ml]"
@@ -339,14 +355,15 @@ python -m circuitopt.optimize \
   --n-screen 100000 --top-k 20
 ```
 
-PyTorch 版本：
+PyTorch variant:
 
 ```bash
 uv pip install -e ".[torch]"
 python -m circuitopt.surrogate_torch --help
 ```
 
-Surrogate 只用于筛选或梯度搜索，最终可行性应回到物理求解器复核。
+The surrogate is only for screening or gradient-based search; final
+feasibility should always be re-verified against the physical solver.
 
 ## `serve`
 
@@ -355,21 +372,22 @@ uv pip install -e ".[serve]"
 circuit-opt serve
 ```
 
-参数：
+Flags:
 
-| 参数 | 默认值 | 说明 |
+| Flag | Default | Description |
 |---|---:|---|
-| `--host` | `127.0.0.1` | 监听地址 |
-| `--port` | `8341` | TCP 端口 |
-| `--reload` | 关闭 | uvicorn 开发自动重载 |
-| `--job-workers` | `1` | `explore`/`mc` 后台 worker 数 |
+| `--host` | `127.0.0.1` | Listen address |
+| `--port` | `8341` | TCP port |
+| `--reload` | off | uvicorn development auto-reload |
+| `--job-workers` | `1` | Number of background workers for `explore`/`mc` |
 
-`0.0.0.0` 会把无鉴权服务暴露到网络，不应作为默认配置。完整协议见
-[本地服务 API](service_api_zh.md)。
+`0.0.0.0` exposes the unauthenticated service to the network and should not
+be used as a default configuration. See [Local Service API](service_api.md)
+for the full protocol.
 
-## 校准与基准
+## Calibration and Benchmarks
 
-校准回归：
+Calibration regression:
 
 ```bash
 python -m circuitopt.calibration --all
@@ -377,7 +395,7 @@ python -m circuitopt.calibration --all --json
 python -m circuitopt.calibration calibration/amp_design3_typical/ --analyses ac,noise
 ```
 
-性能基准：
+Performance benchmarks:
 
 ```bash
 python -m benchmarks.bench_afe --warm-runs 3
@@ -387,13 +405,17 @@ python -m benchmarks.bench_chopper --warm-runs 3
 python -m benchmarks.bench_sweep --n-candidates 200
 ```
 
-性能数字受 Python、Numba、CPU、冷启动和缓存状态影响。历史测量见
-[运行环境与性能基准](environment_performance.md)。
+Performance numbers are affected by Python, Numba, CPU, cold-start, and
+cache state. See [Environment & Benchmarks](environment_performance.md) for
+historical measurements.
 
-## 退出码与输出
+## Exit Codes and Output
 
-- 成功返回 0，参数错误、缺文件、分析失败或校准不通过返回非零。
-- `run` 输出 JSON；`corners` 输出 CSV；`explore` 输出 CSV/JSONL；
-  `dataset` 输出 JSONL/manifest/NPZ，可选 Parquet。
-- 数值结果中的频率单位为 Hz，时间单位为秒，电压为 V，电流为 A。
-- 噪声积分结果必须同时记录积分带宽。
+- Returns 0 on success; returns non-zero for argument errors, missing
+  files, analysis failures, or failed calibration.
+- `run` outputs JSON; `corners` outputs CSV; `explore` outputs CSV/JSONL;
+  `dataset` outputs JSONL/manifest/NPZ, with optional Parquet.
+- In numeric results, frequency is in Hz, time is in seconds, voltage is in
+  V, and current is in A.
+- Noise integration results must always record the integration band
+  alongside them.
