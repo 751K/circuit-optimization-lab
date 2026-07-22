@@ -319,9 +319,15 @@ def test_no_python_device_callback_during_batch(monkeypatch):
 
 
 def test_gil_released_speedup():
+    # A wall-clock scaling assertion is only meaningful with enough real cores;
+    # shared CI runners report 3-4 and time-slice with neighbours.
+    if (os.cpu_count() or 1) < 4:
+        pytest.skip("needs >=4 CPU cores for a meaningful GIL-release speedup")
     camp = _campaign()
-    # Cold-Newton candidates are heavy enough to expose parallel scaling.
-    cands = _newton_candidates(camp, 48)
+    # Cold-Newton candidates are heavy enough to expose parallel scaling. Repeat
+    # them so the single-worker wall time is well above scheduler noise: a CI
+    # run measured t1=10ms on 48 candidates, far too small to time reliably.
+    cands = _newton_candidates(camp, 48) * 8
 
     def timed(workers):
         best = float("inf")
