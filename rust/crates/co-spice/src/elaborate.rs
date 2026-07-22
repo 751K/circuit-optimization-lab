@@ -51,12 +51,30 @@ fn apply_parameter_statements(scope: &Arc<ScopeInner>, statements: &[Statement])
     }
 }
 
-/// POSIX `os.path.basename`: the path component after the last `/`.
-fn basename(path: &str) -> &str {
-    match path.rfind('/') {
+/// Path separators recognised by `os.path.basename` on the host platform.
+/// Python's `os.path` is the *platform* module: `posixpath` (Unix) treats only
+/// `/` as a separator, while `ntpath` (Windows) treats both `/` and `\`. We
+/// mirror the host module so this elaborator matches its Python oracle on the
+/// platform it is compiled for — on Windows a `.lib "models.l" sect` reference
+/// has to resolve against a native `C:\...\models.l` library path.
+#[cfg(windows)]
+const PATH_SEPARATORS: &[char] = &['/', '\\'];
+#[cfg(not(windows))]
+const PATH_SEPARATORS: &[char] = &['/'];
+
+/// The final path component after the last of `separators` (the whole string
+/// when none is present). Split out from [`basename`] so both separator regimes
+/// are exercised by unit tests on every host, not only the one it compiles for.
+fn basename_with<'a>(path: &'a str, separators: &[char]) -> &'a str {
+    match path.rfind(separators) {
         Some(pos) => &path[pos + 1..],
         None => path,
     }
+}
+
+/// `os.path.basename` for the host platform.
+fn basename(path: &str) -> &str {
+    basename_with(path, PATH_SEPARATORS)
 }
 
 /// Strip leading/trailing `'`/`"` (Python `str.strip("'\"")`).
@@ -501,5 +519,37 @@ mod tests {
                 .unwrap(),
             1e-6
         );
+    }
+
+    #[test]
+    fn basename_with_honours_each_separator_regime() {
+        // posixpath regime: only '/' separates; '\' is an ordinary filename byte.
+        assert_eq!(basename_with("/tmp/pytest/models.l", &['/']), "models.l");
+        assert_eq!(basename_with("models.l", &['/']), "models.l");
+        assert_eq!(basename_with(r"weird\name.l", &['/']), r"weird\name.l");
+        assert_eq!(
+            basename_with(r"C:\Temp\models.l", &['/']),
+            r"C:\Temp\models.l"
+        );
+        // ntpath regime: the last of '/' or '\' separates — the Windows build's
+        // regime, reproduced here so the split is verified on a POSIX host.
+        assert_eq!(
+            basename_with(r"C:\Users\runner\Temp\models.l", &['/', '\\']),
+            "models.l"
+        );
+        assert_eq!(basename_with(r"a/b\c/d\models.l", &['/', '\\']), "models.l");
+        assert_eq!(basename_with("models.l", &['/', '\\']), "models.l");
+    }
+
+    #[test]
+    fn host_basename_uses_platform_separators() {
+        assert_eq!(basename("/a/b/models.l"), "models.l");
+        #[cfg(not(windows))]
+        assert_eq!(basename(r"no\sep"), r"no\sep");
+        #[cfg(windows)]
+        {
+            assert_eq!(basename(r"C:\a\b\models.l"), "models.l");
+            assert_eq!(basename("C:/a/b/models.l"), "models.l");
+        }
     }
 }
