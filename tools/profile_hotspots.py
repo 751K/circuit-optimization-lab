@@ -112,17 +112,17 @@ def main():
     profile("Explore 50 candidates (warm)", _explore)
 
     # ── 6. Corner + MC summary ──
-    from circuitopt.corners import corner_table, mismatch_mc, CORNERS
+    from circuitopt.corners import corner_table, mismatch_mc
 
     def _corners():
-        return corner_table(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
+        return corner_table(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology, freqs=freqs)
 
     _corners()
     profile("Corners typ/slow/fast (warm)", _corners)
 
     def _mc():
-        return mismatch_mc(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf,
-                           n=50, corner=CORNERS["typical"], seed=1)
+        return mismatch_mc(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology, freqs=freqs,
+                           n=50, base="typical", seed=1)
 
     _mc()
     profile("Mismatch MC n=50 (warm)", _mc)
