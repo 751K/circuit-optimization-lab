@@ -239,7 +239,12 @@ def check(root: Path = ROOT, tag: str | None = None) -> list[str]:
             f"pyproject.toml circuitopt-core pin is {pin}, expected {version}")
     for path, expected in synchronized_content(root, version).items():
         if path.read_text(encoding="utf-8") != expected:
-            errors.append(f"{path.relative_to(root)} is not synchronized to {version}")
+            # Report a repo-relative POSIX path so the message is identical on
+            # every OS. `str(PurePath)` would emit native separators (`rust\
+            # Cargo.toml` on Windows); `as_posix()` always uses `/` and is
+            # byte-for-byte unchanged on POSIX hosts.
+            rel = path.relative_to(root).as_posix()
+            errors.append(f"{rel} is not synchronized to {version}")
     if tag is not None and tag != f"v{version}":
         errors.append(f"release tag {tag!r} does not match project version v{version}")
     if tag is not None:
