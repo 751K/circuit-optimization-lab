@@ -180,8 +180,6 @@ def _add_run_parser(subparsers):
                         "NMOS slow + PMOS fast, fs the reverse)")
     _add_noise_band_arg(p)
     _add_output_arg(p)
-    p.add_argument("--workers", type=int, default=1,
-                   help="Parallel corner workers (default: 1)")
     p.add_argument("--no-numba", action="store_true",
                    help="Removed in v2.0.0 (errors): the numba engine no longer exists")
     _add_engine_arg(p)

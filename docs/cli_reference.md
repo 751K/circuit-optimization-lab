@@ -62,7 +62,6 @@ circuit-opt run examples/tsmc28hpcp_5t_ota.json \
 | `--corner` | 覆盖工艺角；AT4000TG 为 `typical/slow/fast`，硅工艺使用各自支持的 corner |
 | `--noise-band LO HI` | CLI 汇总中的噪声积分带宽，默认 `0.05 100.0` Hz |
 | `-o`, `--output` | 把结果写成 JSON |
-| `--workers` | `--help` 中可见，但 `run` 当前不消费它（不影响单次分析求解）；并行批处理见 `corners`/`mc`/`dataset`/`adc` 各自的 `--workers` |
 | `--engine {rust}` | 计算引擎；v2.0.0 起仅 `rust`（省略即默认 `rust`） |
 | `--no-numba` | **已在 v2.0.0 移除（会报错）**：numba 引擎不再存在，改用 `--engine rust` |
 | `--quiet` | 关闭进度和摘要输出 |

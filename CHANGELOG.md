@@ -19,6 +19,28 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Fixed / 修复
+
+- **`run --workers` removed (ineffective since introduction) / 移除 `run --workers`（自引入起无效）**
+
+  **English:** The `run` subcommand listed a `--workers` flag in `--help`, but
+  `_cmd_run` never read it and `run_analysis_suite` has no `workers` parameter —
+  `run` executes a single analysis suite for one circuit at one corner, with no
+  independent corner/sample sweep to parallelize. The flag was copy-pasted into
+  `_add_run_parser` alongside the R5-A `corners` parser fix (v2.0.0, commit
+  `9e333e6`) and had zero effect from the moment it was introduced; its help
+  text ("Parallel corner workers") was even the verbatim corner-specific
+  wording. Removed it. Parallel batch execution stays on the subcommands that
+  actually implement it: `corners`, `mc`, `dataset`, and `adc`.
+
+  **中文：** `run` 子命令曾在 `--help` 中列出 `--workers`，但 `_cmd_run` 从不
+  读取它，`run_analysis_suite` 也没有 `workers` 参数——`run` 只对单个电路、单个
+  工艺角执行一次分析套件，没有可并行的独立 corner/样本扫描。该 flag 是在 R5-A
+  修 `corners` parser 时（v2.0.0，提交 `9e333e6`）连带粘贴进 `_add_run_parser`
+  的，自引入起零效果；其 help 文案（"Parallel corner workers"）甚至就是 corner
+  专用措辞的原文照搬。现予移除。并行批处理仍保留在真正实现它的子命令上：
+  `corners`、`mc`、`dataset`、`adc`。
+
 ## [2.0.0] - 2026-07-22
 
 ### Changed (breaking) / 破坏性变更
