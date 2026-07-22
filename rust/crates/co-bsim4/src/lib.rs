@@ -804,6 +804,82 @@ unsafe fn device_nodes(
 // DC + small-signal core (host.c `co_bsim4_dc`). Requires the lock to be held.
 // ---------------------------------------------------------------------------
 
+/// Small-signal extraction tail of `co_bsim4_dc`: the `MODEINITSMSIG` reload that
+/// fills the instance charge/capacitance fields, the terminal charge read-back,
+/// and the `acLoad` + complex Schur reduction yielding the 4x4 terminal
+/// capacitance. Split verbatim out of `dc_inner` so the DC-Newton path can skip
+/// it (D6 acLoad-skip). Its only persistent effect is the instance small-signal
+/// fields the next full eval overwrites; `acLoad` writes solely into the
+/// per-call-cleared matrix, so skipping it is bit-neutral to the Newton
+/// trajectory. Requires the lock held and the DC operating point already loaded.
+unsafe fn extract_small_signal(
+    device: *mut CoBsim4,
+    external: &[c_int; CO_TERMINALS],
+    internal: &[c_int; CO_MAX_INTERNAL],
+    internal_count: usize,
+    charges: *mut f64,
+    capacitance: *mut f64,
+) -> c_int {
+    (*device).ckt.CKTmode = MODEDCOP | MODEINITSMSIG;
+    co_clear(device);
+    let status = ffi::BSIM4v5load(
+        addr_of_mut!((*device).model).cast(),
+        addr_of_mut!((*device).ckt),
+    );
+    if status != OK {
+        return status;
+    }
+    let state_base = (*device).instance.BSIM4v5states;
+    *charges.add(0) = (*device).state0[(state_base + OFF_QD) as usize];
+    *charges.add(1) = (*device).state0[(state_base + OFF_QG) as usize];
+    *charges.add(2) = (*device).state0[(state_base + OFF_QS) as usize];
+    *charges.add(3) = (*device).state0[(state_base + OFF_QB) as usize];
+    if (*device).instance.BSIM4v5rbodyMod != 0 {
+        *charges.add(3) += (*device).state0[(state_base + OFF_QBD) as usize];
+        *charges.add(3) += (*device).state0[(state_base + OFF_QBS) as usize];
+    }
+    let model_type = (*device).model.BSIM4v5type as f64;
+    for terminal in 0..CO_TERMINALS {
+        *charges.add(terminal) *= model_type;
+    }
+
+    (*device).ckt.CKTomega = 1.0;
+    co_clear(device);
+    let status = ffi::BSIM4v5acLoad(
+        addr_of_mut!((*device).model).cast(),
+        addr_of_mut!((*device).ckt),
+    );
+    if status != OK {
+        return status;
+    }
+    for row in 0..CO_TERMINALS {
+        for col in 0..CO_TERMINALS {
+            let mut reduced = matrix_value(device, external[row], external[col]);
+            if internal_count > 0 {
+                let mut system = [[CoComplex::ZERO; CO_MAX_INTERNAL]; CO_MAX_INTERNAL];
+                let mut right = [CoComplex::ZERO; CO_MAX_INTERNAL];
+                let mut solution = [CoComplex::ZERO; CO_MAX_INTERNAL];
+                for i in 0..internal_count {
+                    right[i] = matrix_value(device, internal[i], external[col]);
+                    for j in 0..internal_count {
+                        system[i][j] = matrix_value(device, internal[i], internal[j]);
+                    }
+                }
+                let status = solve_complex(internal_count, &system, &right, &mut solution);
+                if status != OK {
+                    return status;
+                }
+                for i in 0..internal_count {
+                    reduced = reduced
+                        .sub(matrix_value(device, external[row], internal[i]).mul(solution[i]));
+                }
+            }
+            *capacitance.add(row * CO_TERMINALS + col) = reduced.imag;
+        }
+    }
+    OK
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn dc_inner(
     device: *mut CoBsim4,
@@ -813,6 +889,7 @@ unsafe fn dc_inner(
     charges: *mut f64,
     capacitance: *mut f64,
     op: *mut f64,
+    want_caps: bool,
 ) -> c_int {
     if device.is_null() || (*device).setup_done == 0 {
         return E_BADPARM;
@@ -939,61 +1016,28 @@ unsafe fn dc_inner(
         }
     }
 
-    (*device).ckt.CKTmode = MODEDCOP | MODEINITSMSIG;
-    co_clear(device);
-    let status = ffi::BSIM4v5load(
-        addr_of_mut!((*device).model).cast(),
-        addr_of_mut!((*device).ckt),
-    );
-    if status != OK {
-        return status;
-    }
-    let state_base = (*device).instance.BSIM4v5states;
-    *charges.add(0) = (*device).state0[(state_base + OFF_QD) as usize];
-    *charges.add(1) = (*device).state0[(state_base + OFF_QG) as usize];
-    *charges.add(2) = (*device).state0[(state_base + OFF_QS) as usize];
-    *charges.add(3) = (*device).state0[(state_base + OFF_QB) as usize];
-    if (*device).instance.BSIM4v5rbodyMod != 0 {
-        *charges.add(3) += (*device).state0[(state_base + OFF_QBD) as usize];
-        *charges.add(3) += (*device).state0[(state_base + OFF_QBS) as usize];
-    }
-    let model_type = (*device).model.BSIM4v5type as f64;
-    for terminal in 0..CO_TERMINALS {
-        *charges.add(terminal) *= model_type;
-    }
-
-    (*device).ckt.CKTomega = 1.0;
-    co_clear(device);
-    let status = ffi::BSIM4v5acLoad(
-        addr_of_mut!((*device).model).cast(),
-        addr_of_mut!((*device).ckt),
-    );
-    if status != OK {
-        return status;
-    }
-    for row in 0..CO_TERMINALS {
-        for col in 0..CO_TERMINALS {
-            let mut reduced = matrix_value(device, external[row], external[col]);
-            if internal_count > 0 {
-                let mut system = [[CoComplex::ZERO; CO_MAX_INTERNAL]; CO_MAX_INTERNAL];
-                let mut right = [CoComplex::ZERO; CO_MAX_INTERNAL];
-                let mut solution = [CoComplex::ZERO; CO_MAX_INTERNAL];
-                for i in 0..internal_count {
-                    right[i] = matrix_value(device, internal[i], external[col]);
-                    for j in 0..internal_count {
-                        system[i][j] = matrix_value(device, internal[i], internal[j]);
-                    }
-                }
-                let status = solve_complex(internal_count, &system, &right, &mut solution);
-                if status != OK {
-                    return status;
-                }
-                for i in 0..internal_count {
-                    reduced = reduced
-                        .sub(matrix_value(device, external[row], internal[i]).mul(solution[i]));
-                }
-            }
-            *capacitance.add(row * CO_TERMINALS + col) = reduced.imag;
+    if want_caps {
+        let status = extract_small_signal(
+            device,
+            &external,
+            &internal,
+            internal_count,
+            charges,
+            capacitance,
+        );
+        if status != OK {
+            return status;
+        }
+    } else {
+        // DC-Newton fast path (D6 acLoad-skip): the caller consumes currents and
+        // conductance only, so skip the MODEINITSMSIG reload + `acLoad`
+        // capacitance extraction entirely. Zero the unused charge/capacitance
+        // outputs so the result is deterministic regardless of prior handle state.
+        for terminal in 0..CO_TERMINALS {
+            *charges.add(terminal) = 0.0;
+        }
+        for offset in 0..CO_TERMINALS * CO_TERMINALS {
+            *capacitance.add(offset) = 0.0;
         }
     }
 
@@ -1085,6 +1129,7 @@ pub unsafe fn dc(
         charges,
         capacitance,
         op,
+        true,
     )
 }
 
@@ -1110,6 +1155,45 @@ pub unsafe fn eval(
         charges,
         capacitance,
         op,
+        true,
+    );
+    if status != OK {
+        return status;
+    }
+    enforce_terminal_conservation(currents, conductance, charges, capacitance)
+}
+
+/// DC-Newton evaluation (host.c `co_bsim4_dc` + conservation snap) with the D6
+/// acLoad-skip. With `want_caps = false` the `MODEINITSMSIG` reload and `acLoad`
+/// capacitance extraction are skipped: `currents` and `conductance` (and their
+/// conservation snap) are bit-for-bit identical to `eval`, while `charges` and
+/// `capacitance` are returned as zero. Valid only where the caller consumes
+/// currents+conductance — i.e. the DC Newton residual/Jacobian in `solve_dc`.
+/// `want_caps = true` is exactly `eval`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn eval_dc(
+    device: *mut CoBsim4,
+    terminals: *const f64,
+    currents: *mut f64,
+    conductance: *mut f64,
+    charges: *mut f64,
+    capacitance: *mut f64,
+    op: *mut f64,
+    want_caps: bool,
+) -> c_int {
+    if device.is_null() {
+        return E_BADPARM;
+    }
+    let _guard = lock_device(device);
+    let status = dc_inner(
+        device,
+        terminals,
+        currents,
+        conductance,
+        charges,
+        capacitance,
+        op,
+        want_caps,
     );
     if status != OK {
         return status;
@@ -1136,6 +1220,52 @@ pub unsafe fn eval_vp(
         capacitance,
         op.as_mut_ptr(),
     )
+}
+
+/// All-`void*` DC-Newton evaluation with the D6 acLoad-skip (`eval_dc` behind the
+/// `eval_vp` shape). `want_caps = false` skips capacitance/charge extraction; this
+/// is the entry the `bsim_transient::solve_dc` evaluators use for the Newton
+/// residual/Jacobian.
+pub unsafe fn eval_vp_dc(
+    device: *mut CoBsim4,
+    terminals: *const f64,
+    currents: *mut f64,
+    conductance: *mut f64,
+    charges: *mut f64,
+    capacitance: *mut f64,
+    want_caps: bool,
+) -> c_int {
+    let mut op = [0.0f64; 8];
+    eval_dc(
+        device,
+        terminals,
+        currents,
+        conductance,
+        charges,
+        capacitance,
+        op.as_mut_ptr(),
+        want_caps,
+    )
+}
+
+/// Process-level kill switch for the D6 acLoad-skip. `CIRCUIT_BSIM4_FULL_EVAL`
+/// set to a truthy value (anything but empty / `0` / `false` / `no`) forces the
+/// DC-Newton path back to the full small-signal extraction. Read once and cached
+/// for the process lifetime.
+pub fn full_eval_forced() -> bool {
+    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| {
+        std::env::var_os("CIRCUIT_BSIM4_FULL_EVAL")
+            .map(|value| {
+                let value = value.to_string_lossy();
+                let value = value.trim();
+                !(value.is_empty()
+                    || value == "0"
+                    || value.eq_ignore_ascii_case("false")
+                    || value.eq_ignore_ascii_case("no"))
+            })
+            .unwrap_or(false)
+    })
 }
 
 pub unsafe fn noise(
@@ -1574,6 +1704,97 @@ mod tests {
             .chain(flicker_imag)
             .map(f64::to_bits)
             .collect()
+    }
+
+    /// Evaluate at one bias and return the raw bit patterns of currents,
+    /// conductance, charges, and capacitance.
+    unsafe fn eval_dc_bits(
+        device: *mut CoBsim4,
+        terminals: &[f64; 4],
+        want_caps: bool,
+    ) -> ([u64; 4], [u64; 16], [u64; 4], [u64; 16]) {
+        let mut currents = [0.0f64; 4];
+        let mut conductance = [0.0f64; 16];
+        let mut charges = [0.0f64; 4];
+        let mut capacitance = [0.0f64; 16];
+        let mut op = [0.0f64; 8];
+        assert_eq!(
+            eval_dc(
+                device,
+                terminals.as_ptr(),
+                currents.as_mut_ptr(),
+                conductance.as_mut_ptr(),
+                charges.as_mut_ptr(),
+                capacitance.as_mut_ptr(),
+                op.as_mut_ptr(),
+                want_caps,
+            ),
+            OK
+        );
+        (
+            currents.map(f64::to_bits),
+            conductance.map(f64::to_bits),
+            charges.map(f64::to_bits),
+            capacitance.map(f64::to_bits),
+        )
+    }
+
+    /// D6 acLoad-skip safety probe. Two independent, identically-built handles are
+    /// driven through the same bias trajectory: one always runs the full
+    /// small-signal extraction (`want_caps = true`), the other skips it on every
+    /// DC-Newton eval (`want_caps = false`). The skip must leave the Newton
+    /// residual/Jacobian (currents + conductance) bit-for-bit identical at every
+    /// step, and a subsequent full eval must reproduce the capacitance the skip
+    /// trajectory never computed, bit-for-bit. A single-ULP drift fails the test.
+    #[test]
+    fn dc_skip_is_bit_exact_on_ig_and_final_caps() {
+        unsafe {
+            let full = make_device(1);
+            let skip = make_device(1);
+
+            // Moves around and revisits points to exercise the internal-node warm
+            // start and the state0 voltages the next load reads for limiting.
+            let trajectory = [
+                [0.6f64, 0.6, 0.0, 0.0],
+                [0.7, 0.5, 0.0, 0.0],
+                [0.65, 0.55, 0.0, 0.0],
+                [0.6, 0.6, 0.0, 0.0],
+                [0.9, 0.45, 0.0, 0.0],
+                [0.55, 0.75, 0.0, 0.0],
+                [0.6, 0.6, 0.0, 0.0],
+                [1.0, 0.8, 0.0, 0.0],
+                [0.3, 0.9, 0.0, 0.0],
+                [0.6, 0.6, 0.0, 0.0],
+            ];
+
+            for (step, terminals) in trajectory.iter().enumerate() {
+                let (i_full, g_full, _q, _c) = eval_dc_bits(full, terminals, true);
+                let (i_skip, g_skip, q_skip, c_skip) = eval_dc_bits(skip, terminals, false);
+                assert_eq!(i_full, i_skip, "currents differ at step {step}");
+                assert_eq!(g_full, g_skip, "conductance differs at step {step}");
+                assert!(
+                    q_skip.iter().all(|&b| b == 0),
+                    "charges not zeroed at step {step}"
+                );
+                assert!(
+                    c_skip.iter().all(|&b| b == 0),
+                    "capacitance not zeroed at step {step}"
+                );
+            }
+
+            // Final full eval at a fresh bias on both handles: the "final eval"
+            // production contract — capacitance is reproduced exactly.
+            let final_bias = [0.75f64, 0.62, 0.0, 0.0];
+            let (i_a, g_a, q_a, c_a) = eval_dc_bits(full, &final_bias, true);
+            let (i_b, g_b, q_b, c_b) = eval_dc_bits(skip, &final_bias, true);
+            assert_eq!(i_a, i_b, "final currents differ");
+            assert_eq!(g_a, g_b, "final conductance differs");
+            assert_eq!(q_a, q_b, "final charges differ");
+            assert_eq!(c_a, c_b, "final capacitance differs");
+
+            destroy(full);
+            destroy(skip);
+        }
     }
 
     #[test]

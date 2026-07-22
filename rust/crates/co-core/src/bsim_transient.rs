@@ -23,6 +23,15 @@ pub struct Evaluation {
 
 pub trait Evaluator {
     fn evaluate(&mut self, index: usize, terminals: [f64; 4]) -> Option<Evaluation>;
+
+    /// DC-Newton variant used inside `solve_dc`, which consumes only the currents
+    /// and conductance. A small-signal device backend may skip capacitance/charge
+    /// extraction here (D6 acLoad-skip) — the returned `charges`/`capacitance` are
+    /// then unspecified and must not be read. The default runs the full
+    /// `evaluate`, so implementors that do not override this are unaffected.
+    fn evaluate_dc(&mut self, index: usize, terminals: [f64; 4]) -> Option<Evaluation> {
+        self.evaluate(index, terminals)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,6 +115,21 @@ fn evaluate_device<E: Evaluator>(
         terminals[position] = term.resolve(state, inputs)?;
     }
     evaluator.evaluate(device.evaluator_index, terminals)
+}
+
+/// `evaluate_device` for the DC-Newton path: routes through `Evaluator::evaluate_dc`
+/// so a backend can skip capacitance/charge extraction (D6 acLoad-skip).
+fn evaluate_device_dc<E: Evaluator>(
+    evaluator: &mut E,
+    device: Device,
+    state: &[f64],
+    inputs: &[f64],
+) -> Option<Evaluation> {
+    let mut terminals = [0.0; 4];
+    for (position, term) in device.terms.into_iter().enumerate() {
+        terminals[position] = term.resolve(state, inputs)?;
+    }
+    evaluator.evaluate_dc(device.evaluator_index, terminals)
 }
 
 fn history_for(circuit: &CircuitProblem, state: &[f64], inputs: &[f64]) -> Option<HistoryTerms> {
@@ -381,7 +405,7 @@ pub fn solve_dc<E: Evaluator>(
         system.jacobian.fill(0.0);
         let mut evaluation_failed = false;
         for device in devices.iter().copied() {
-            let Some(evaluation) = evaluate_device(evaluator, device, &state, inputs) else {
+            let Some(evaluation) = evaluate_device_dc(evaluator, device, &state, inputs) else {
                 evaluation_failed = true;
                 break;
             };

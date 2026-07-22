@@ -251,6 +251,30 @@ impl bsim_transient::Evaluator for GuardEvaluator<'_> {
         };
         (status == 0).then_some(evaluation)
     }
+
+    /// DC-Newton eval (D6 acLoad-skip): skip the small-signal capacitance/charge
+    /// extraction unless `CIRCUIT_BSIM4_FULL_EVAL` forces the full path. `solve_dc`
+    /// consumes only currents+conductance, which are bit-for-bit identical.
+    fn evaluate_dc(
+        &mut self,
+        index: usize,
+        terminals: [f64; 4],
+    ) -> Option<bsim_transient::Evaluation> {
+        let handle = self.handles.get(index)?.0;
+        let mut evaluation = bsim_transient::Evaluation::default();
+        let status = unsafe {
+            co_bsim4::eval_vp_dc(
+                handle,
+                terminals.as_ptr(),
+                evaluation.currents.as_mut_ptr(),
+                evaluation.conductance.as_mut_ptr(),
+                evaluation.charges.as_mut_ptr(),
+                evaluation.capacitance.as_mut_ptr(),
+                co_bsim4::full_eval_forced(),
+            )
+        };
+        (status == 0).then_some(evaluation)
+    }
 }
 
 pub struct SiliconEvaluator<'a> {

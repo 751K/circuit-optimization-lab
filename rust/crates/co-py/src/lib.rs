@@ -1399,6 +1399,38 @@ impl bsim_transient::Evaluator for RustBsimEvaluator {
             capacitance,
         })
     }
+
+    /// DC-Newton eval (D6 acLoad-skip): skip the small-signal capacitance/charge
+    /// extraction unless `CIRCUIT_BSIM4_FULL_EVAL` forces the full path. `solve_dc`
+    /// consumes only currents+conductance, which are bit-for-bit identical.
+    fn evaluate_dc(
+        &mut self,
+        index: usize,
+        terminals: [f64; 4],
+    ) -> Option<bsim_transient::Evaluation> {
+        let handle = *self.handles.get(index)? as *mut CoBsim4;
+        let mut currents = [0.0; 4];
+        let mut conductance = [0.0; 16];
+        let mut charges = [0.0; 4];
+        let mut capacitance = [0.0; 16];
+        let status = unsafe {
+            co_bsim4::eval_vp_dc(
+                handle,
+                terminals.as_ptr(),
+                currents.as_mut_ptr(),
+                conductance.as_mut_ptr(),
+                charges.as_mut_ptr(),
+                capacitance.as_mut_ptr(),
+                co_bsim4::full_eval_forced(),
+            )
+        };
+        (status == OK).then_some(bsim_transient::Evaluation {
+            currents,
+            conductance,
+            charges,
+            capacitance,
+        })
+    }
 }
 
 /// Non-owning circuit/grid solver for Rust-backed BSIM4 handles.
