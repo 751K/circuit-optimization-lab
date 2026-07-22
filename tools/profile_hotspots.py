@@ -94,13 +94,13 @@ def main():
     from circuitopt.explore import ExploreConfig, Variable
 
     cfg = ExploreConfig(
-        variables={
-            "W6": Variable("W6", 1000, 4000),
-            "L6": Variable("L6", 50, 150),
-            "VB": Variable("VB", 8.0, 12.0),
-        },
-        constraints={"gain_dB": {">": 15.0}},
-        objectives=["area"],
+        variables=[
+            Variable("W6", 1000, 4000),
+            Variable("L6", 50, 150),
+            Variable("VB", 8.0, 12.0),
+        ],
+        constraints={"gain_dB": {"min": 15.0}},
+        objectives={"area": "min"},
         band=(0.05, 100.0),
         freqs=freqs,
     )
