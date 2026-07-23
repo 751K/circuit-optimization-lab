@@ -414,3 +414,115 @@ def test_corner_table_zero_bin_skip_survives_and_counts():
                           corners=cs, freqs=_SI_FREQS, band=_SI_BAND, binding=binding)
     assert all(good[c] is not None for c in cs)
     assert diagnostics.snapshot().get("corners.corner_zero_bin_skip", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# R10 item (2): temperature axis (°C) on corner_table.
+# ---------------------------------------------------------------------------
+
+_TEMPS = (-40.0, 27.0, 125.0)
+
+
+def _pvt_scalar(fn, monkeypatch):
+    """Run ``fn`` with the silicon campaign forced off -> the frozen scalar reference."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(C, "silicon_campaign_for", lambda *a, **k: None)
+        return fn()
+
+
+@pytest.mark.parametrize("key", list(_CASES))
+def test_corner_table_temperature_axis_parity_and_shape(key, monkeypatch):
+    """Temperature axis: nested {corner: {temp_c: metrics}} and campaign==scalar per point.
+
+    The new coverage surface is the temperature extremes (-40 / +125 °C) crossed with
+    every corner (incl. the tsmc28 ff/sf/fs bins). The compiled-campaign point must
+    agree with the frozen scalar reference at the same temperature within the cold-DC
+    behaviour floor (bit-for-bit on freepdk45/sky130, ~1e-9 on the tsmc28 cold Newton),
+    and the temperature must actually move the metric (no silently-ignored axis)."""
+    _require_rust()
+    path, cs = _CASES[key]
+    _ready(path)
+    spec, binding = _load(path)
+    kw = dict(nf=spec.nf, topo=spec.topology, corners=cs, freqs=_SI_FREQS,
+              band=_SI_BAND, binding=binding, temps=_TEMPS)
+    camp = C.corner_table(spec.sizes, spec.bias, **kw)
+    scal = _pvt_scalar(lambda: C.corner_table(spec.sizes, spec.bias, **kw), monkeypatch)
+
+    assert set(camp) == set(cs)
+    for c in cs:
+        assert set(camp[c]) == set(_TEMPS), (key, c, "temp keys")
+        for t in _TEMPS:
+            a, s = camp[c][t], scal[c][t]
+            assert (a is None) == (s is None), (key, c, t, "convergence")
+            if a is None:
+                continue
+            assert _rel(a["gain_peak_dB"], s["gain_peak_dB"]) <= 1e-7, (key, c, t, "gain")
+            assert _rel(a["bw_Hz"], s["bw_Hz"]) <= 1e-7, (key, c, t, "bw")
+            if np.isfinite(a["irn_uV"]) or np.isfinite(s["irn_uV"]):
+                assert _rel(a["irn_uV"], s["irn_uV"]) <= 1e-7, (key, c, t, "irn")
+    # Temperature moves the metric: cold gain differs from hot for the nominal corner.
+    c0 = cs[0]
+    assert abs(camp[c0][-40.0]["gain_peak_dB"] - camp[c0][125.0]["gain_peak_dB"]) > 0.1
+
+
+def test_corner_table_temps_none_is_flat_and_unchanged():
+    """``temps=None`` keeps the flat {corner: metrics} shape, identical to no temps.
+
+    This pins the red line: the default (no new axis) path is untouched — same shape,
+    same values — so opting into temps is the only thing that nests the result."""
+    _require_rust()
+    path, cs = _CASES["freepdk45_5t"]
+    _ready(path)
+    spec, binding = _load(path)
+    kw = dict(nf=spec.nf, topo=spec.topology, corners=cs, freqs=_SI_FREQS,
+              band=_SI_BAND, binding=binding)
+    flat = C.corner_table(spec.sizes, spec.bias, **kw)
+    also = C.corner_table(spec.sizes, spec.bias, temps=None, **kw)
+    assert list(flat) == list(also) == list(cs)
+    for c in cs:
+        assert "gain_peak_dB" in flat[c]           # flat metrics, not a temp-nest
+        for k in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
+            assert (flat[c][k] == also[c][k]
+                    or (np.isnan(flat[c][k]) and np.isnan(also[c][k]))), (c, k)
+
+
+@pytest.mark.parametrize("key", ["freepdk45_5t", "tsmc28_5t"])
+def test_corner_table_temps_deterministic_across_workers(key):
+    """The temperature grid is byte-identical for workers in {1, 2, 8}."""
+    _require_rust()
+    path, cs = _CASES[key]
+    _ready(path)
+    spec, binding = _load(path)
+
+    def run(w):
+        return C.corner_table(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
+                              corners=cs, freqs=_SI_FREQS, band=_SI_BAND, workers=w,
+                              binding=binding, temps=_TEMPS)
+
+    base = run(1)
+    for w in (1, 2, 8):
+        got = run(w)
+        for c in cs:
+            for t in _TEMPS:
+                a, b = base[c][t], got[c][t]
+                assert (a is None) == (b is None), (key, w, c, t)
+                if a is None:
+                    continue
+                for k in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
+                    assert (a[k] == b[k] or (np.isnan(a[k]) and np.isnan(b[k]))), \
+                        (key, w, c, t, k)
+
+
+def test_corner_table_temps_rejects_otft_and_empty():
+    """temps is silicon-only and non-empty: an AFE binding or ``()`` raises ValueError."""
+    _require_rust()
+    spec = load_circuit_json("examples/afe_explore.json")
+    with pytest.raises(ValueError, match="silicon"):
+        C.corner_table(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
+                       temps=(27.0,))
+    path, cs = _CASES["freepdk45_5t"]
+    _ready(path)
+    sspec, binding = _load(path)
+    with pytest.raises(ValueError, match="non-empty"):
+        C.corner_table(sspec.sizes, sspec.bias, nf=sspec.nf, topo=sspec.topology,
+                       corners=cs, binding=binding, temps=())

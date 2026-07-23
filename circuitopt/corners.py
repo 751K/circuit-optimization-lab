@@ -228,7 +228,7 @@ def _is_silicon_binding(binding) -> bool:
 
 def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
                  corners=("typical", "slow", "fast"), freqs=None, band=(0.05, 100.0),
-                 include_noise=True, workers=1, *, binding=None):
+                 include_noise=True, workers=1, *, binding=None, temps=None):
     """Evaluate a design across process corners -> {corner: metrics-or-None}.
 
     ``binding`` (a :class:`CircuitBinding`): when it binds a silicon circuit the whole
@@ -237,10 +237,32 @@ def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
     per-corner fallback (any corner the campaign fails to converge rolls back to
     scalar and is flagged). AFE / default-PDK (``binding=None`` or empty model_types)
     keeps the legacy scalar path byte-for-byte — ``corners`` are then OTFT process
-    names (``typical/slow/fast``); for silicon they are card corners (``tt/ss/ff/...``)."""
+    names (``typical/slow/fast``); for silicon they are card corners (``tt/ss/ff/...``).
+
+    ``temps`` (silicon only) adds a **temperature axis** in °C. ``temps=None`` is the
+    frozen behaviour — a flat ``{corner: metrics}`` at the device-default 300.15 K,
+    byte-for-byte identical to the pre-R10 path. A sequence (e.g. ``(-40, 27, 125)``)
+    nests the result as ``{corner: {temp_c: metrics}}``; the temperature rides on the
+    frozen silicon-device ``temperature`` ctor kwarg (Kelvin), so both the compiled
+    campaign and the scalar reference see it. An OTFT / default-PDK circuit rejects
+    ``temps`` (its model has no defined temperature axis)."""
     if workers is None or workers < 1:
         raise ValueError("workers must be a positive integer")
     corner_names = tuple(corners)
+
+    if temps is not None:
+        # The temperature axis is silicon-only: the OTFT / default-PDK model has no
+        # defined temperature semantics, so it rejects the axis rather than silently
+        # ignoring it (and injecting a binding would perturb the cold OTFT solve).
+        if not _is_silicon_binding(binding):
+            raise ValueError(
+                "temps requires an all-silicon binding (BSIM4); the OTFT / default-PDK "
+                "family has no defined temperature axis")
+        if len(tuple(temps)) == 0:
+            raise ValueError("temps must be a non-empty sequence of °C values, or None")
+        freqs_eff = _DEFAULT_FREQS if freqs is None else freqs
+        return _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs_eff, band,
+                                 include_noise, workers, binding, temps)
 
     if _is_silicon_binding(binding):
         freqs_eff = _DEFAULT_FREQS if freqs is None else freqs
@@ -311,6 +333,72 @@ def _corner_table_silicon(camp, sizes, bias, nf, topo, corner_names, freqs, band
             m = scalar_corner(name)         # 0-bin here returns None (+ counted)
         out[name] = m
     return out
+
+
+def _temperature_binding(binding, temp_c, devices):
+    """A binding with a uniform device temperature (°C) baked onto every device.
+
+    Reuses the frozen temperature primitive — the silicon device ctor's
+    ``temperature`` kwarg (Kelvin) rides on ``device_kwargs`` exactly as
+    :func:`_silicon_sample_binding` rides ``delvto`` on it. Both arms then pick it up
+    identically: the compiled campaign (``dev.temperature`` -> the template device
+    record -> ``CompiledPdk::numeric_card`` card selection for tsmc28 +
+    ``co_bsim4::create`` handle temperature) and the scalar ``metrics`` reference (the
+    ctor ``temperature`` kwarg -> ``Bsim4Bias.temperature_k``). ``temp_c is None``
+    returns ``binding`` unchanged (the frozen 300.15 K device default)."""
+    if temp_c is None:
+        return binding
+    kelvin = float(temp_c) + 273.15
+    base_dk = binding.device_kwargs or {}
+    dk = {d: {**base_dk.get(d, {}), "temperature": kelvin} for d in devices}
+    return dataclasses.replace(binding, device_kwargs=dk)
+
+
+def _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs, band,
+                      include_noise, workers, binding, temps, vdd_scale=None):
+    """PVT grid: nest the silicon corner sweep over the temperature (°C) axis.
+
+    Result shape (documented on :func:`corner_table`): each active axis nests under
+    the corner in the fixed order ``[temp_c, vdd_scale]``. With only ``temps`` active
+    the shape is ``{corner: {temp_c: metrics}}``.
+
+    Each ``(temp, vdd)`` slice is one compiled campaign over the (scaled) bias and the
+    baked device temperature — the R9 dataset-layering precedent: temperature and bias
+    are template-baked (only the corner is per-candidate), so a distinct
+    temperature/bias means a fresh :func:`silicon_campaign_for`. Every slice runs all
+    corners through :func:`_corner_table_silicon`, inheriting its 0-bin per-corner skip
+    and non-convergence rollback unchanged."""
+    devices = [d for d, *_ in topo.devices]
+    temp_axis = tuple(temps) if temps is not None else (None,)
+    vdd_axis = tuple(vdd_scale) if vdd_scale is not None else (None,)
+
+    out = {c: {} for c in corner_names}
+    for tc in temp_axis:
+        tbind = _temperature_binding(binding, tc, devices)
+        for vs in vdd_axis:
+            sbias = (bias if vs is None
+                     else {k: v * float(vs) for k, v in bias.items()})
+            camp = silicon_campaign_for(topo, sizes, sbias, nf, tbind, freqs, band)
+            tbl = _corner_table_silicon(camp, sizes, sbias, nf, topo, corner_names,
+                                        freqs, band, include_noise, workers, tbind)
+            for c in corner_names:
+                _pvt_place(out[c], tc, vs, tbl[c])
+    return out
+
+
+def _pvt_place(node, tc, vs, value):
+    """Place ``value`` in a per-corner nest at the active-axis depth ``[temp, vdd]``.
+
+    ``tc``/``vs`` are the temperature (°C) / supply-scale key, or ``None`` when that
+    axis is inactive. The inactive axis is collapsed so a single-axis grid stays a
+    one-level nest (``{corner: {temp: m}}`` or ``{corner: {vdd: m}}``) and a two-axis
+    grid nests temp-outer, vdd-inner (``{corner: {temp: {vdd: m}}}``)."""
+    if tc is not None and vs is not None:
+        node.setdefault(tc, {})[vs] = value
+    elif tc is not None:
+        node[tc] = value
+    else:                       # vs is not None (the PVT path always has >=1 axis)
+        node[vs] = value
 
 
 def _mc_summary(rows, latch_dV, noise_evaluated, *, stopped_early=False):
