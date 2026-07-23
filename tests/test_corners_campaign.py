@@ -609,6 +609,21 @@ def test_corner_table_pvt_combined_grid_shape_and_parity(monkeypatch):
                 n_points += 1
     assert n_points == len(cs) * len(temps) * len(vdd)   # full grid evaluated
 
+    # The full grid is parallelised across its slices; it must stay byte-identical
+    # for any worker count (the determinism red line, on the multi-slice path).
+    for w in (2, 8):
+        got = C.corner_table(spec.sizes, spec.bias, workers=w, **kw)
+        for c in cs:
+            for t in temps:
+                for v in vdd:
+                    a, g = camp[c][t][v], got[c][t][v]
+                    assert (a is None) == (g is None), (c, t, v, w)
+                    if a is None:
+                        continue
+                    for k in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
+                        assert (a[k] == g[k] or (np.isnan(a[k]) and np.isnan(g[k]))), \
+                            (c, t, v, w, k)
+
 
 def test_corner_table_vdd_scale_rejects_otft():
     """``vdd_scale`` is silicon-only: an AFE binding raises ValueError."""
