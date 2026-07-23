@@ -396,135 +396,135 @@
   ],
   "models": {
     "MBN": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MPRN": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MPR": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "MPC": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "MCND": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MCPD": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "MNC": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MREPP": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "MREP": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MCMP": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "MCMD": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M0": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M1": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M2": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M3": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M4": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M5": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "M6": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "M7": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "M8": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "M9": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M10": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M11": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "M12": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "MRZ1": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MRZ2": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MS1": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MS2": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MS3": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MS4": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MT1": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MT2": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MDL1": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "MDS1": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "MRA": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MRB": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MTB": {
-      "type": "freepdk45.nmos"
+      "pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MDL2": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     },
     "MDS2": {
-      "type": "freepdk45.pmos",
+      "pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 1.0
     }
   },

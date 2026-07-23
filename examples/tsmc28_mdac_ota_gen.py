@@ -196,8 +196,8 @@ def _port(deck: dict, vdd: float) -> dict:
     ])
 
     for model in deck["models"].values():
-        polarity = model["type"].rsplit(".", 1)[-1]
-        model["type"] = f"tsmc28hpcp.{polarity}"
+        polarity = model["model"]
+        model["pdk"] = "tsmc28hpcp"
         if polarity == "pmos":
             model["vb"] = vdd
 
@@ -322,7 +322,10 @@ def build_transient(vdd: float = VDD_NOM) -> dict:
             "name": name, "drain": drain, "gate": gate, "source": source,
             "W": width, "L": 0.05, "NF": _nf(width),
         })
-        model = {"type": f"tsmc28hpcp.{polarity}"}
+        model = {
+            "pdk": "tsmc28hpcp", "model": polarity,
+            "section": "inherit", "bin": "auto",
+        }
         if polarity == "pmos":
             model["vb"] = vdd
         deck["models"][name] = model

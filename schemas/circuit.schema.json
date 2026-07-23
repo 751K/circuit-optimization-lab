@@ -5,6 +5,17 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["solved", "rails", "devices"],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "devices": {"minItems": 1}
+        },
+        "required": ["devices"]
+      },
+      "then": {"required": ["models"]}
+    }
+  ],
   "properties": {
     "name": {
       "type": "string",
@@ -205,7 +216,7 @@
     },
     "models": {
       "$ref": "#/$defs/models",
-      "description": "Optional per-device model binding: PDK model-registry type + constructor kwargs (e.g. silicon SKY130 devices). Devices omitted here use the default PDK."
+      "description": "Required complete per-MOS binding. Every device must explicitly select pdk, model, section, and bin; omissions are invalid."
     }
   },
   "$defs": {
@@ -263,14 +274,18 @@
     },
     "models": {
       "type": "object",
-      "description": "Device name -> {type, ...ctor kwargs}. 'type' is a model-registry key such as 'sky130.nmos'/'sky130.pmos'.",
+      "description": "Device name -> explicit {pdk, model, section, bin, ...kwargs} binding.",
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
+        "required": ["pdk", "model", "section", "bin"],
         "properties": {
-          "type": {"$ref": "#/$defs/name"},
+          "pdk": {"$ref": "#/$defs/name"},
+          "model": {"$ref": "#/$defs/name"},
+          "section": {"$ref": "#/$defs/name"},
+          "bin": {"$ref": "#/$defs/name"},
           "vb": {"type": "number"},
-          "corner": {"type": "string"},
+          "bulk_rail": {"$ref": "#/$defs/name"},
           "extract_w": {"$ref": "#/$defs/positiveNumber"},
           "temperature": {"$ref": "#/$defs/positiveNumber"},
           "NF": {"type": "integer", "minimum": 1}

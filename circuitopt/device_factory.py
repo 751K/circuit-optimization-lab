@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 
 from .device_model import create_device, get_default_model_type, get_model_class
+from .run_contract import ModelBindingError
 
 if TYPE_CHECKING:
     from .device_model import TransistorModel
@@ -97,35 +98,93 @@ def build_devices(sizes: Mapping[str, tuple[float, float]], *,
     device-creation dict comprehension in each file.  Resolves NF per-device
     via :func:`dev_nf` and applies corner shifts via :func:`dev_corner`.
 
-    ``model_types`` optionally maps a device name to a model-registry key (e.g.
-    ``"sky130.nmos"``) for mixed-process / complementary testbenches; unnamed
-    devices fall back to the default PDK.  ``device_kwargs`` passes extra
-    per-device constructor kwargs (e.g. ``{"vb": 1.8}`` for a PMOS bulk).  Both
-    default to empty, so the OTFT path is unchanged.
+    ``model_types`` maps every device name to a model-registry key (e.g.
+    ``"sky130.nmos"``). ``device_kwargs`` must explicitly carry ``section`` and
+    ``bin`` for every MOS in addition to constructor kwargs such as ``vb``.
     """
+    model_types = model_types if model_types is not None else getattr(
+        topo, "model_types", None)
+    device_kwargs = device_kwargs if device_kwargs is not None else getattr(
+        topo, "device_kwargs", None)
     model_types = model_types or {}
     device_kwargs = device_kwargs or {}
+    missing = [name for name, *_ in topo.devices if name not in model_types]
+    if missing:
+        raise ModelBindingError(
+            "Every MOS must have an explicit PDK/model binding; missing: "
+            + ", ".join(missing))
     devices = {}
     multiplicity = getattr(topo, "device_mult", {})
     for name, *_ in topo.devices:
-        model_type = model_types.get(name, get_default_model_type())
+        model_type = model_types[name]
         kwargs = {
             **dev_corner(corner, name),
             **device_kwargs.get(name, {}),
         }
-        model_class = get_model_class(model_type)
-        if (
-            model_class is not None
-            and getattr(model_class, "SUPPORTS_MULTIPLICITY", False)
-        ):
-            kwargs.setdefault("mult", int(multiplicity.get(name, 1)))
-        devices[name] = create_device(
-            model_type,
-            W=sizes[name][0],
-            L=sizes[name][1],
-            NF=dev_nf(nf, name),
-            **kwargs,
-        )
+        binding_section = str(
+            kwargs.pop("section", kwargs.pop("_binding_section", ""))).strip()
+        binding_bin = str(
+            kwargs.pop("bin", kwargs.pop("_binding_bin", ""))).strip()
+        binding_bulk_rail = kwargs.pop("bulk_rail", None)
+        if not binding_section or not binding_bin:
+            raise ModelBindingError(
+                "explicit section/bin binding metadata is missing", device=name)
+        try:
+            model_class = get_model_class(model_type)
+            if (
+                model_class is not None
+                and getattr(model_class, "SUPPORTS_MULTIPLICITY", False)
+            ):
+                kwargs.setdefault("mult", int(multiplicity.get(name, 1)))
+            device = create_device(
+                model_type,
+                W=sizes[name][0],
+                L=sizes[name][1],
+                NF=dev_nf(nf, name),
+                **kwargs,
+            )
+            resolved_bin = getattr(device, "bin_name", None)
+            if resolved_bin is None:
+                resolved_bin = getattr(device, "model_name", None)
+            if binding_bin.lower() != "auto":
+                if not resolved_bin:
+                    raise ValueError(
+                        f"model backend cannot verify explicit bin {binding_bin!r}")
+                if str(resolved_bin) != binding_bin:
+                    raise ValueError(
+                        f"requested bin {binding_bin!r}, resolved {resolved_bin!r}")
+            elif hasattr(device, "bin_name") and not resolved_bin:
+                raise ValueError("automatic geometry bin selection returned no bin")
+            resolved_section = str(getattr(
+                device, "corner", binding_section)).strip()
+            if (
+                binding_section.lower() != "inherit"
+                and resolved_section.lower() != binding_section.lower()
+            ):
+                raise ValueError(
+                    f"requested section {binding_section!r}, resolved "
+                    f"{resolved_section!r}")
+        except ModelBindingError:
+            raise
+        except Exception as exc:
+            raise ModelBindingError(
+                f"explicit model/bin construction failed: "
+                f"{type(exc).__name__}: {exc}",
+                device=name,
+            ) from exc
+        device.binding = {
+            "pdk": model_type.rsplit(".", 1)[0],
+            "model": model_type.rsplit(".", 1)[-1],
+            "section": resolved_section,
+            "section_selector": binding_section,
+            "bin": str(resolved_bin or binding_bin),
+            "bin_selector": binding_bin,
+            **(
+                {"bulk_rail": str(binding_bulk_rail)}
+                if binding_bulk_rail is not None else {}
+            ),
+        }
+        devices[name] = device
     return devices
 
 
@@ -162,6 +221,15 @@ SILICON_CORNERS = SKY130_CORNERS | {"nom"}
 _SILICON_PREFIXES = ("sky130", "freepdk45", "tsmc28hpcp")
 
 
+def is_silicon_model_types(model_types: Mapping[str, str] | None) -> bool:
+    """Whether a complete model map uses one supported native silicon PDK."""
+    values = tuple(str(model) for model in (model_types or {}).values())
+    if not values:
+        return False
+    families = {model.split(".", 1)[0] for model in values}
+    return len(families) == 1 and families.pop() in _SILICON_PREFIXES
+
+
 def apply_silicon_corner(
     model_types: Mapping[str, str] | None,
     device_kwargs: Mapping[str, Mapping[str, Any]] | None,
@@ -186,7 +254,19 @@ def apply_silicon_corner(
     dk = {name: dict(kw) for name, kw in (device_kwargs or {}).items()}
     for name, model in mt.items():
         if str(model).startswith(_SILICON_PREFIXES):
-            dk.setdefault(name, {})["corner"] = key
+            model_kwargs = dk.setdefault(name, {})
+            section = str(model_kwargs.get(
+                "section", model_kwargs.get("_binding_section", ""))).lower()
+            if not section:
+                raise ValueError(f"{name}: explicit section binding is missing")
+            if section == "inherit":
+                model_kwargs["corner"] = key
+            elif section != key:
+                raise ValueError(
+                    f"{name}: fixed section {section!r} conflicts with requested "
+                    f"corner {key!r}")
+            else:
+                model_kwargs["corner"] = section
     return dk, None
 
 
@@ -208,12 +288,12 @@ class CircuitBinding:
         The :class:`~circuitopt.topology.Topology` (circuit structure). Typed loosely to
         avoid a hard import dependency on the topology module.
     model_types:
-        Optional ``{device: model-registry key}`` map (e.g. ``freepdk45.nmos``).
-        ``None`` keeps the default PDK — this is the field whose omission caused
-        the silent OTFT regressions.
+        Complete ``{device: model-registry key}`` map (e.g.
+        ``freepdk45.nmos``). It may be omitted from the dataclass constructor only
+        when ``topo`` already owns the complete explicit map.
     device_kwargs:
-        Optional ``{device: extra ctor kwargs}`` map (``vb``, baked silicon
-        ``corner``, ...).
+        Complete per-device binding metadata (``section`` and ``bin``) plus
+        constructor kwargs such as ``vb`` and baked silicon ``corner``.
     nf:
         Finger count: ``None``, a global int, or a per-device map.
     corner:
@@ -273,6 +353,10 @@ def resolve_binding(binding: CircuitBinding | None, *, topo: Any = None,
     default (``AFE_TOPO``) after this returns.
     """
     if binding is None:
+        if model_types is None and topo is not None:
+            model_types = getattr(topo, "model_types", None)
+        if device_kwargs is None and topo is not None:
+            device_kwargs = getattr(topo, "device_kwargs", None)
         return topo, nf, corner, model_types, device_kwargs, x0_guess
     if topo is None:
         topo = binding.topo

@@ -24,6 +24,7 @@ from .pac_solver import pac_solve
 from .pnoise_solver import pnoise_solve
 from .pss_solver import pss_solve
 from .transient_solver import transient
+from .run_contract import ensure_analysis_valid
 
 
 ANALYSIS_ORDER = ("ac", "noise", "transient", "pss", "pac", "pnoise")
@@ -523,6 +524,8 @@ def run_analysis_suite(spec_or_path: CircuitSpec | str | Path,
                 fundamental=_fundamental_from(periodic), corner=corner, band=band,
                 pac_result=pac_result, input_drive=input_drive, **kwargs,
             )
+    for analysis_name, analysis_result in results.items():
+        ensure_analysis_valid(analysis_name, analysis_result)
     return results
 
 

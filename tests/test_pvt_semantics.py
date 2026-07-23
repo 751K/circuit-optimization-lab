@@ -77,8 +77,8 @@ def _pmos_op_spec():
              "W": 2.0, "L": 0.05},
             {"name": "MPTRIODE", "drain": "DT", "gate": "VG", "source": "VDD",
              "W": 2.0, "L": 0.05}],
-        "models": {"MPDIODE": {"type": "freepdk45.pmos", "vb": 1.0},
-                   "MPTRIODE": {"type": "freepdk45.pmos", "vb": 1.0}},
+        "models": {"MPDIODE": {"pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.0},
+                   "MPTRIODE": {"pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.0}},
         "resistors": [["RD", "D", "GND", 5000.0], ["RT", "VDHIGH", "DT", 1.0]],
         "outputs": ["D"]})
 

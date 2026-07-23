@@ -87,6 +87,10 @@ def build_afe_testbench(sizes=None, bias=None, *, r_el=R_EL, c_el=C_EL,
         ],
         load_caps=[("VOP", "GND", c_load), ("VON", "GND", c_load)],
         transient_inputs={},                   # gates are driven via node_inputs at Vinp/Vinn
+        model_types=dict(AFE_TOPO.model_types),
+        device_kwargs={
+            name: dict(kwargs) for name, kwargs in AFE_TOPO.device_kwargs.items()
+        },
     )
     return topo, sizes, bias
 

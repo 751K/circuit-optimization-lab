@@ -76,8 +76,15 @@ def test_afe_dc_bounded_fallback_recovers_extreme_nominal_point():
         # Whether the reference-oracle fallback was NEEDED is platform-dependent: it
         # fires only where the production main path fails. Probe this platform's main
         # path directly (retry disabled) and require the recovery flag iff it failed.
-        main_path = ac_solve(sizes, bias, freqs, _rust_reference_retry=True)
-        fired = ac.get("rust_otft_reference_fallback", False)
+        try:
+            main_path = ac_solve(
+                sizes, bias, freqs, _rust_reference_retry=True)
+        except Exception as exc:
+            from circuitopt.run_contract import SimulationInvalid
+
+            assert isinstance(exc, SimulationInvalid)
+            main_path = None
+        fired = ac.get("solver_fallback") == "otft_reference"
         if main_path is None:
             assert fired is True        # main path failed here -> the oracle recovered it
         else:

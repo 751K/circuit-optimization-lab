@@ -27,15 +27,15 @@
     {"name": "MD",  "drain": "CTRL", "gate": "CTRL",  "source": "VDD",  "W": 23.8, "L": 0.8}
   ],
   "models": {
-    "M0": {"type": "sky130.nmos"}, "M1": {"type": "sky130.nmos"},
-    "M2": {"type": "sky130.nmos"}, "M3": {"type": "sky130.nmos"},
-    "M4": {"type": "sky130.nmos"},
-    "M5": {"type": "sky130.pmos", "vb": 1.8}, "M6": {"type": "sky130.pmos", "vb": 1.8},
-    "M7": {"type": "sky130.pmos", "vb": 1.8}, "M8": {"type": "sky130.pmos", "vb": 1.8},
-    "MS1": {"type": "sky130.nmos"}, "MS2": {"type": "sky130.nmos"},
-    "MS3": {"type": "sky130.nmos"}, "MS4": {"type": "sky130.nmos"},
-    "MT1": {"type": "sky130.nmos"}, "MT2": {"type": "sky130.nmos"},
-    "MD": {"type": "sky130.pmos", "vb": 1.8}
+    "M0": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}, "M1": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M2": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}, "M3": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M4": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M5": {"pdk": "sky130", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.8}, "M6": {"pdk": "sky130", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.8},
+    "M7": {"pdk": "sky130", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.8}, "M8": {"pdk": "sky130", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.8},
+    "MS1": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}, "MS2": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "MS3": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}, "MS4": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "MT1": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}, "MT2": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "MD": {"pdk": "sky130", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.8}
   },
   "resistors": [
     {"name": "RS1", "a": "VINP", "b": "VSP", "R": 1000.0},

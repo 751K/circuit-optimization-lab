@@ -1,10 +1,9 @@
-"""Solver-fallback diagnostics: the counter mechanics + a real zeroed-device hit.
+"""Solver diagnostics: counter mechanics and strict model-failure propagation.
 
 ``circuitopt.diagnostics`` makes the solvers' deliberate exception-fallback paths
 observable without changing any numerical result. These tests pin the counter
-API and prove that the model-eval "return zeroed gm/gds" path -- the one that can
-turn a diverged device into a plausible-but-wrong solve -- actually records a
-``model.ss_params_zeroed`` event when it fires.
+API and prove that a model evaluation failure is recorded and raised instead of
+turning a diverged device into a plausible-but-wrong solve.
 """
 import logging
 
@@ -85,25 +84,21 @@ def test_note_critical_first_sighting_logs_at_warning(caplog):
     assert diagnostics.snapshot()["model.device_state_zeroed"] == 2
 
 
-def test_model_zeroed_ss_params_path_is_recorded():
-    """The real hazard: a device whose evaluation fails returns fabricated
-    gm=0 / gds=1e-12 so the circuit still "solves". That must be counted."""
+def test_model_ss_params_failure_is_recorded_and_raised():
+    """A failed device evaluation must invalidate the run, never fabricate gm/gds."""
     dev = create_device("pmos_tft", W=1000, L=20)
 
     def _boom(*_a, **_k):
         raise RuntimeError("forced device-eval failure")
 
-    # Kill both the numba and the finite-difference small-signal branches so the
-    # fabricated-zero fallback (pmos_tft_model.get_ss_params) is the only exit.
+    # Kill both compiled and finite-difference small-signal branches.
     dev.get_op = _boom
     dev.get_Idc = _boom
     dev._eval_currents = _boom
 
-    params = dev.get_ss_params(40.0, 0.0, 20.0)
+    with pytest.raises(RuntimeError, match="refusing to fabricate"):
+        dev.get_ss_params(40.0, 0.0, 20.0)
 
-    # Behaviour is unchanged: the fabricated zeroed small-signal dict.
-    assert params == {"gm": 0.0, "gds": 1e-12, "Cgs": 0.0, "Cgd": 0.0, "Ich": 0.0}
-    # ...but it is no longer silent: a human-written detail is recorded (it takes
-    # precedence over the raw exception repr).
-    assert diagnostics.snapshot().get("model.ss_params_zeroed", 0) >= 1
-    assert "fabricated" in diagnostics.last_details()["model.ss_params_zeroed"]
+    assert diagnostics.snapshot().get("model.ss_params_failed", 0) >= 1
+    assert "candidate is invalid" in diagnostics.last_details()[
+        "model.ss_params_failed"]

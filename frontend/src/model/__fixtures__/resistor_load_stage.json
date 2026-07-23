@@ -9,6 +9,9 @@
   "devices": [
     {"name": "MPU", "drain": "OUT", "gate": "IN", "source": "VDD", "W": 2000, "L": 80}
   ],
+  "models": {
+    "MPU": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"}
+  },
   "resistors": [
     {"name": "RL", "a": "OUT", "b": "GND", "R": 4e6}
   ],

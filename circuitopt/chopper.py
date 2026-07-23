@@ -457,6 +457,35 @@ def build_afe_pmos_chopper(*, switch_size=(20000.0, 80.0), switch_nf=1,
         isources=isources,
         dc_tol=1e-8,
         require_dc_in_box=True,
+        model_types={
+            **{
+                name: base_topo.model_types[name]
+                for name, *_ in devices
+                if name in getattr(base_topo, "model_types", {})
+            },
+            **({
+                "M16": base_topo.model_types["M7"],
+                "M17": base_topo.model_types["M8"],
+            } if split_input_pair else {}),
+            **{
+                name: "at4000tg.pmos" for name in switch_names
+            },
+        },
+        device_kwargs={
+            **{
+                name: dict(base_topo.device_kwargs[name])
+                for name, *_ in devices
+                if name in getattr(base_topo, "device_kwargs", {})
+            },
+            **({
+                "M16": dict(base_topo.device_kwargs["M7"]),
+                "M17": dict(base_topo.device_kwargs["M8"]),
+            } if split_input_pair else {}),
+            **{
+                name: {"section": "inherit", "bin": "auto"}
+                for name in switch_names
+            },
+        },
     )
     return PMOSChopperBuild(
         topology=topo,

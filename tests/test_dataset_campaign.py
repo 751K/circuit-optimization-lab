@@ -2,9 +2,9 @@
 
 An all-silicon, fixed-topology size/bias grid with only the AC/noise label group
 batches its qualifying ``(bias, nf)`` layers through the compiled campaign; the
-AC/DC labels come from the batch and ``power_uW`` / ``area`` from the frozen
-post-batch reductions (``explore._supply_power_uW`` over the campaign's per-device
-channel current ``ich``; ``explore._area``). Every other candidate — a fragmented
+AC/DC labels come from the batch; ``power_uW`` is recomputed from the solved
+operating point and complete device terminal currents, while area uses
+``explore._area``. Every other candidate — a fragmented
 layer (< threshold), a periodic label group, a structural / PVT axis, a per-candidate
 DC seed, or an AFE circuit — keeps the scalar ``evaluate`` path byte-for-byte.
 
@@ -206,9 +206,9 @@ def test_dataset_campaign_guard_afe(tmp_path):
 def test_silicon_campaign_exposes_gain_db_and_ich(path, corner):
     """The new silicon result fields reproduce the frozen labels bit-for-bit, 3 PDKs.
 
-    ``gain_dB`` == ``ac_solver.Av_dc_dB`` and ``power_uW`` (via ``_supply_power_uW``
-    over the campaign ``ich``) == ``explore.evaluate``'s power — seeded from the same
-    nominal op so the comparison isolates the reductions from the DC root."""
+    ``gain_dB`` matches the scalar AC solve and the campaign still exposes finite
+    channel currents for diagnostics. Power is compared through the scalar solver's
+    full terminal-current source accounting, not reconstructed from ``ich``."""
     _require_rust()
     if "tsmc28" in path:
         from circuitopt.toolchain import tsmc28_model_dir
@@ -219,7 +219,7 @@ def test_silicon_campaign_exposes_gain_db_and_ich(path, corner):
         _freepdk45_ready()
     from circuitopt.circuit_loader import load_circuit_json
     from circuitopt.ac_solver import ac_solve
-    from circuitopt.explore import evaluate, _supply_power_uW
+    from circuitopt.explore import evaluate
     from circuitopt._rust_campaign import SiliconCampaign
     import numpy as np
 
@@ -234,15 +234,14 @@ def test_silicon_campaign_exposes_gain_db_and_ich(path, corner):
     row = camp.evaluate_batch(
         [camp.candidate(spec.sizes, corner, seed=camp.seed_vector(ac["dc_op"]),
                         trust_seed_as_op=True)], 1, ["dc", "ac", "noise"])[0]
-    devs = [n for n, *_ in spec.topology.devices]
-    power = _supply_power_uW(spec.topology, spec.bias,
-                             {n: {"Ich": row["ich"][k]} for k, n in enumerate(devs)})
+    power = float(ac["source_power"]["total_w"]) * 1e6
 
     def rel(a, c):
         return abs(a - c) / max(abs(a), abs(c), 1e-30)
     assert rel(row["gain_dB"], ref["gain_dB"]) <= 1e-12, row["gain_dB"]
     assert rel(power, ref["power_uW"]) <= 1e-12, (power, ref["power_uW"])
-    assert len(row["ich"]) == len(devs)
+    assert len(row["ich"]) == len(spec.topology.devices)
+    assert np.all(np.isfinite(row["ich"]))
 
 
 class _FrameTrap:

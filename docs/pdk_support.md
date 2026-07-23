@@ -121,8 +121,10 @@ an appropriate reference.
     }
   ],
   "models": {
-    "MN": {"type": "tsmc28hpcp.nmos"},
-    "MP": {"type": "tsmc28hpcp.pmos", "vb": 0.9}
+    "MN": {"pdk": "tsmc28hpcp", "model": "nmos",
+           "section": "inherit", "bin": "auto"},
+    "MP": {"pdk": "tsmc28hpcp", "model": "pmos",
+           "section": "inherit", "bin": "auto", "vb": 0.9}
   }
 }
 ```

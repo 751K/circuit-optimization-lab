@@ -158,25 +158,32 @@ Device-level `NF` in the device object is overridden by top-level `nf` when both
 
 ### `models`
 
-Optional. Binds specific devices to a non-default PDK model type (e.g. silicon
-SKY130) instead of the default `"pmos_tft"` (AT4000TG OTFT). Devices not listed here
-use the default PDK — this is purely additive, so an OTFT-only config never needs it.
+Required whenever `devices` is non-empty. Every MOS must explicitly bind its PDK,
+model, process section, and geometry bin policy. Missing or partial bindings fail
+during parsing; there is no default-PDK fallback.
 
 ```json
 "models": {
-  "M1": {"type": "sky130.nmos", "extract_w": 24.0},
-  "M3": {"type": "sky130.pmos", "vb": 1.8, "extract_w": 12.0}
+  "M1": {"pdk": "sky130", "model": "nmos",
+         "section": "inherit", "bin": "auto", "extract_w": 24.0},
+  "M3": {"pdk": "sky130", "model": "pmos",
+         "section": "inherit", "bin": "auto", "vb": 1.8, "extract_w": 12.0}
 }
 ```
 
-- `type` — a model-registry key, `"<pdk>.<polarity>"` (e.g. `"sky130.nmos"`,
-  `"sky130.pmos"`, `"freepdk45.nmos"`, `"tsmc28hpcp.nmos"`, `"at4000tg.pmos"`). See
-  `circuitopt.device_model.register_pdk`.
+- `pdk` and `model` select the registered process and device model.
+- `section` is a fixed card section such as `tt`/`ss`, or `inherit` when a PVT
+  run is allowed to select the section.
+- `bin` is an exact model/bin name, or `auto` for unique geometry-based selection.
+  An exact selector must match the resolved card bin.
+- `type` is obsolete and rejected.
 - Remaining keys are forwarded to the device constructor. For SKY130 devices:
-  `vb` (bulk bias, volts; default 0), `corner` (SKY130 process corner —
-  `tt`/`ss`/`ff`/`sf`/`fs`; default `tt`), `extract_w` (µm — select a bundled
+  `vb` (bulk bias, volts; default 0), `extract_w` (µm — select a bundled
   reference-width card while the native BSIM instance uses the actual `W`),
   `temperature` (kelvin; default 300.15), `NF` (int).
+- `bulk_rail` optionally names the physical rail that supplies `vb`. It is useful
+  when several rails share the same DC voltage; source-power reporting otherwise
+  resolves a source-tied bulk or conventional `GND`/`VSS`/`VDD` rail.
 - **FreePDK45** (`"freepdk45.nmos"` / `"freepdk45.pmos"`) directly parses the
   flat BSIM4 level-54 cards and evaluates them with the in-process Berkeley
   BSIM4.5 backend. The cards declare `version=4.0`; this metadata field does not
@@ -784,7 +791,8 @@ Supported (model abstraction):
   New model types can be added without modifying solver code.
 - NMOS and PMOS across AT4000TG (PMOS-only), SKY130, FreePDK45, and TSMC28HPC+.
 - Per-device model binding via the ``models`` field — mixed OTFT/silicon circuits
-  (default PDK stays ``"at4000tg.pmos"`` unless overridden).
+  with an explicit PDK, model, section, and geometry-bin selector for every MOS.
+  Missing or partial bindings fail during parsing.
 - Silicon DC/AC/noise/transient; SKY130, FreePDK45, and TSMC28HPC+ use the
   internal native BSIM4 backend.
 

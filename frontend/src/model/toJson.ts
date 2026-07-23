@@ -245,8 +245,8 @@ export function graphToCircuitJson(
   for (const k of railKeys) orderedRails[k] = rails[k]!;
 
   // ── devices (source order replayed, else sorted by name) + models/drives.
-  // `modelKwargs` may hold two merged sources: recognized `models` kwargs (vb,
-  // corner, ...) that go back into the `models` block, and rare unknown
+  // `modelKwargs` may hold two merged sources: binding selectors / recognized
+  // `models` kwargs that go back into the `models` block, and rare unknown
   // device-object extras that go back onto the device object. Split them here.
   {
     const byName = new Map(devicesRaw.map((m) => [m.name, m]));
@@ -279,14 +279,28 @@ export function graphToCircuitJson(
 
   const models: Record<string, ModelEntry> = {};
   for (const m of devicesRaw) {
-    const entry: ModelEntry = {};
-    if (m.model !== undefined) entry.type = m.model;
+    if (m.model === undefined) {
+      throw new Error(`${m.name}: every MOS requires an explicit PDK/model binding`);
+    }
+    const split = m.model.lastIndexOf(".");
+    if (split <= 0 || split === m.model.length - 1) {
+      throw new Error(`${m.name}: model must be a fully qualified "pdk.model" key`);
+    }
+    const entry: ModelEntry = {
+      pdk: m.model.slice(0, split),
+      model: m.model.slice(split + 1),
+      section: "inherit",
+      bin: "auto",
+    };
     if (m.modelKwargs) {
       for (const [k, v] of Object.entries(m.modelKwargs)) {
         if (MODEL_KWARG_KEYS.has(k)) entry[k] = v;
       }
     }
-    if (Object.keys(entry).length > 0) models[m.name] = entry;
+    if (!entry.section || !entry.bin) {
+      throw new Error(`${m.name}: section and bin selectors must be non-empty`);
+    }
+    models[m.name] = entry;
   }
 
   const inputDrives: Record<string, number> = {};
@@ -365,7 +379,9 @@ export function graphToCircuitJson(
 // The recognized `models` ctor kwargs (mirrors circuit_loader._MODEL_KWARGS).
 // Anything in a node's `modelKwargs` outside this set came from a rare unknown
 // device-object extra and is re-emitted on the device object instead.
-const MODEL_KWARG_KEYS = new Set(["vb", "corner", "extract_w", "temperature", "NF"]);
+const MODEL_KWARG_KEYS = new Set([
+  "section", "bin", "vb", "bulk_rail", "extract_w", "temperature", "NF",
+]);
 
 function loadCapIndex(id: string): number {
   const m = /__loadcap_(\d+)$/.exec(id);

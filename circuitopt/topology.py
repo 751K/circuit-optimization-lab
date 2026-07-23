@@ -21,7 +21,8 @@ class Topology:
                  load_caps=None, dc_guesses=None, aliases=None, transient_inputs=None,
                  resistors=None, capacitors=None, isources=None, vccs=None,
                  vsources=None, vcvs=None, cccs=None, ccvs=None, ac_drives=None,
-                 dc_tol=None, require_dc_in_box=False, device_mult=None):
+                 dc_tol=None, require_dc_in_box=False, device_mult=None,
+                 model_types=None, device_kwargs=None):
         self.solved = list(solved)                 # MNA node order (index = position)
         # Optional per-device parallel multiplicity (SPICE ``m=``). Structural, like
         # the device list itself: m parallel copies of one drawn instance. Renderers
@@ -33,6 +34,13 @@ class Topology:
         self.idx = {n: i for i, n in enumerate(self.solved)}
         self.n = len(self.solved)
         self.devices = list(devices)               # (name, drain, gate, source) by node name
+        # Explicit process binding may travel with a topology for low-level solver
+        # callers. JSON-loaded circuits always populate both maps.
+        self.model_types = dict(model_types or {})
+        self.device_kwargs = {
+            str(name): dict(kwargs)
+            for name, kwargs in (device_kwargs or {}).items()
+        }
         self.rails = dict(rails)                   # rail name -> bias-key (str) or constant (float)
         # Passive / source elements (two-terminal). Transistors stay in `devices`
         # and are handled by the :class:`~device_model.TransistorModel` interface;
@@ -327,4 +335,10 @@ AFE_TOPO = Topology(
     aliases={"net2": "NET2", "n20": "NET20", "vfb": "VFBP",
              "vfbp": "VFBP", "vfbn": "VFBN"},
     transient_inputs={"M7": "vip", "M8": "vin"},
+    model_types={name: "at4000tg.pmos" for name in (
+        "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15")},
+    device_kwargs={name: {
+        "section": "inherit", "bin": "auto",
+    } for name in (
+        "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15")},
 )

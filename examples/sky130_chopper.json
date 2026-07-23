@@ -22,13 +22,13 @@
     {"name": "SO4", "drain": "OUTN", "gate": "CLKB", "source": "D1", "W": 2.0, "L": 0.15}
   ],
   "models": {
-    "SI1": {"type": "sky130.nmos"}, "SI2": {"type": "sky130.nmos"},
-    "SI3": {"type": "sky130.nmos"}, "SI4": {"type": "sky130.nmos"},
-    "M1": {"type": "sky130.nmos"}, "M2": {"type": "sky130.nmos"},
-    "M3": {"type": "sky130.pmos", "vb": 1.8}, "M4": {"type": "sky130.pmos", "vb": 1.8},
-    "M5": {"type": "sky130.nmos"},
-    "SO1": {"type": "sky130.nmos"}, "SO2": {"type": "sky130.nmos"},
-    "SO3": {"type": "sky130.nmos"}, "SO4": {"type": "sky130.nmos"}
+    "SI1": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}, "SI2": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "SI3": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}, "SI4": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M1": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}, "M2": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M3": {"pdk": "sky130", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.8}, "M4": {"pdk": "sky130", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.8},
+    "M5": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "SO1": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}, "SO2": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "SO3": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}, "SO4": {"pdk": "sky130", "model": "nmos", "section": "inherit", "bin": "auto"}
   },
   "capacitors": [
     {"name": "CO1", "a": "OUTP", "b": "GND", "C": 1e-11},

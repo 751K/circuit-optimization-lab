@@ -34,6 +34,7 @@ from .device_factory import (apply_silicon_corner, build_devices, dev_corner,
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
 from . import diagnostics
+from .run_contract import ModelEvaluationError, ensure_analysis_valid
 
 if TYPE_CHECKING:
     from .device_factory import CircuitBinding
@@ -44,17 +45,23 @@ _TEMP = 300.15              # physical temperature for resistor thermal noise [K
 
 
 def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1, model_type=None,
-               device_kwargs=None):
+               device_kwargs=None, dev_inst=None):
     """Drain-current noise PSD A^2/Hz over freqs: S_th + S_fl_1Hz/f."""
-    t = create_device(model_type or get_default_model_type(), W=W, L=L, NF=nf,
-                      **(corner or {}), **(device_kwargs or {}))
+    if dev_inst is None:
+        kwargs = {
+            key: value for key, value in (device_kwargs or {}).items()
+            if key not in {"section", "bin"}
+            and not str(key).startswith("_binding_")
+        }
+        t = create_device(model_type or get_default_model_type(), W=W, L=L, NF=nf,
+                          **(corner or {}), **kwargs)
+    else:
+        t = dev_inst
     try:
         S_th, S_fl_1 = t.get_noise_psd(Vs, Vd, Vg, frequency=1.0)
     except Exception as exc:
-        diagnostics.note_critical(
-            "model.noise_psd_zeroed", exc,
-            detail="device noise PSD -> 0 (thermal+flicker fabricated)")
-        return np.zeros_like(freqs), 0.0, 0.0
+        raise ModelEvaluationError(
+            str(model_type or "device"), "noise PSD evaluation", exc) from exc
     return S_th + S_fl_1 / freqs, S_th, S_fl_1
 
 
@@ -120,7 +127,8 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
         S, S_th, S_fl1 = device_psd(
             W, L, Vs, Vd, Vg, freqs, corner=dev_corner(corner, name),
             nf=dev_nf(nf, name), model_type=(model_types or {}).get(name),
-            device_kwargs=(device_kwargs or {}).get(name))
+            device_kwargs=(device_kwargs or {}).get(name),
+            dev_inst=dev_inst[name])
         psd[name] = S
         psd_split[name] = (S_th, S_fl1)
 
@@ -209,7 +217,12 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
                 flicker = np.zeros(len(freqs))
                 Vs, Vd, Vg = bpts[name]
                 for fi, frequency in enumerate(freqs):
-                    noise = dev.get_terminal_noise(Vs, Vd, Vg, float(frequency))
+                    try:
+                        noise = dev.get_terminal_noise(
+                            Vs, Vd, Vg, float(frequency))
+                    except Exception as exc:
+                        raise ModelEvaluationError(
+                            name, "terminal-noise evaluation", exc) from exc
                     zi = z[fi]
                     contrib[fi] = max(
                         float(np.real(zi @ noise.spectral_density @ zi.conj())),
@@ -239,7 +252,7 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
         out_psd += contrib
 
     # ── 4/5. integrate + input-refer ──
-    return {
+    result = {
         "freqs": freqs,
         "out_psd": out_psd,          # differential output noise PSD V^2/Hz
         "dev_psd": dev_psd,          # per-device output PSD
@@ -253,6 +266,8 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
         "dc": dc,
         "rust_lti_solver": True,
     }
+    ensure_analysis_valid("noise", result)
+    return result
 
 
 def bpts_order(sizes):

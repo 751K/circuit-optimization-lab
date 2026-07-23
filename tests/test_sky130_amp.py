@@ -17,7 +17,7 @@ _RL = 5e3
 _SIZES = {"M1": (10.0, 0.15)}
 _BIAS = {"VDD": 1.8, "VIN": 0.5}
 _MT = {"M1": "sky130.pmos"}
-_DK = {"M1": {"vb": 1.8}}
+_DK = {"M1": {"vb": 1.8, "section": "inherit", "bin": "auto"}}
 
 
 def _amp(*, load_cap=0.0, transient_input=False):
@@ -66,7 +66,9 @@ def test_nmos_cs_gain_matches_analytic():
                    resistors=[("RL", "VDD", "vout", 3e3)],
                    input_drives={"M1": 1.0}, outputs=("vout",))
     r = ac_solve({"M1": (10.0, 0.5)}, {"VDD": 1.8, "VIN": 0.8}, np.logspace(0, 8, 60),
-                 topo=csn, model_types={"M1": "sky130.nmos"})
+                 topo=csn, model_types={"M1": "sky130.nmos"},
+                 device_kwargs={
+                     "M1": {"section": "inherit", "bin": "auto"}})
     assert r is not None                                     # NMOS DC now converges
     ro = 1.0 / r["ss"]["M1"]["gds"]
     assert r["gains"][0] == pytest.approx(r["ss"]["M1"]["gm"] * (3e3 * ro / (3e3 + ro)),
@@ -86,7 +88,13 @@ def test_complementary_5t_ota_differential_gain():
         dc_guesses=[{"tail": 0.30, "n1": 0.95, "vout": 0.90}])
     mt = {"M1": "sky130.nmos", "M2": "sky130.nmos", "M5": "sky130.nmos",
           "M3": "sky130.pmos", "M4": "sky130.pmos"}
-    dk = {"M3": {"vb": 1.8}, "M4": {"vb": 1.8}}
+    dk = {
+        name: {
+            "section": "inherit", "bin": "auto",
+            **({"vb": 1.8} if name in {"M3", "M4"} else {}),
+        }
+        for name in mt
+    }
     szs = {"M1": (20.0, 0.5), "M2": (20.0, 0.5), "M3": (10.0, 0.5),
            "M4": (10.0, 0.5), "M5": (40.0, 0.5)}
     r = ac_solve(szs, {"VDD": 1.8, "VCM": 0.9, "VB": 0.75}, np.logspace(0, 8, 60),

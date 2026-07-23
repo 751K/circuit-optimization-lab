@@ -10,6 +10,10 @@
     {"name": "M1", "drain": "VMID", "gate": "CLK1", "source": "VIN", "W": 5000, "L": 30},
     {"name": "M2", "drain": "VOUT", "gate": "CLK2", "source": "VMID", "W": 5000, "L": 30}
   ],
+  "models": {
+    "M1": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "M2": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"}
+  },
   "vsources": [
     {"name": "V_CLK1", "p": "CLK1", "q": "GND", "value": "clk1"},
     {"name": "V_CLK2", "p": "CLK2", "q": "GND", "value": "clk2"},

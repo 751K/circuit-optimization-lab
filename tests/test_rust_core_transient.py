@@ -32,6 +32,14 @@ requires_rust_transient = pytest.mark.skipif(
 )
 
 
+def _otft_binding():
+    return {
+        "model_types": {"M1": "at4000tg.pmos"},
+        "device_kwargs": {
+            "M1": {"section": "inherit", "bin": "auto"}},
+    }
+
+
 def _device_context(cap_mode):
     topo = Topology(
         solved=["OUT"],
@@ -42,6 +50,7 @@ def _device_context(cap_mode):
         capacitors=[("CL", "OUT", "GND", 3e-12)],
         isources=[("IB", "VDD", "OUT", 2e-6)],
         outputs=("OUT",),
+        **_otft_binding(),
     )
     tgrid = np.array([0.0, 1e-6])
     waveform = np.array([25.0, 25.2])
@@ -176,6 +185,7 @@ def test_rust_fixed_grid_solves_and_reports_profile(integration_method, max_step
         capacitors=[("CL", "OUT", "GND", 3e-12)],
         isources=[("IB", "VDD", "OUT", 2e-6)],
         outputs=("OUT",),
+        **_otft_binding(),
     )
     tgrid = np.linspace(0.0, 3e-6, 7)
     waveform = 25.0 + 0.15 * np.sin(2.0 * np.pi * tgrid / tgrid[-1])
@@ -231,6 +241,7 @@ def test_rust_gear2_binary_retry_recovers_with_slices():
         capacitors=[("CL", "OUT", "GND", 3e-12)],
         isources=[("IB", "VDD", "OUT", 2e-6)],
         outputs=("OUT",),
+        **_otft_binding(),
     )
     times = np.array([0.0, 1e-7, 2e-7])
     waveform = np.array([25.0, 25.2, 24.8])
@@ -355,6 +366,7 @@ def test_rust_nonlinear_adaptive_rejection_pins():
         capacitors=[("CL", "OUT", "GND", 3e-12)],
         isources=[("IB", "VDD", "OUT", 2e-6)],
         outputs=("OUT",),
+        **_otft_binding(),
     )
     times = np.array([0.0, 2.5e-6, 5e-6, 1e-5])
     waveform = np.array([25.0, 25.0, 25.2, 24.8])

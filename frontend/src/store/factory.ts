@@ -58,7 +58,10 @@ export function newMosfet(
     ports: [{ id: "D" }, { id: "G" }, { id: "S" }],
     position,
   };
-  if (opts.defaultModel) node.model = opts.defaultModel;
+  if (opts.defaultModel) {
+    node.model = opts.defaultModel;
+    node.modelKwargs = { section: "inherit", bin: "auto" };
+  }
   return node;
 }
 

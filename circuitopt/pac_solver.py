@@ -552,6 +552,8 @@ def _try_lti_ac_fast_path(sizes, bias, freqs, pss_result, input_drive, nf,
         ccvs=topo.ccvs,
         dc_tol=topo.dc_tol,
         require_dc_in_box=topo.require_dc_in_box,
+        model_types=getattr(topo, "model_types", None),
+        device_kwargs=getattr(topo, "device_kwargs", None),
     )
     ac = ac_solve(
         sizes, tbias, freqs, topo=fast_topo, nf=nf, corner=corner,
@@ -1335,7 +1337,13 @@ def pac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             y_env = b_y + y_cols @ dx0
         if not np.all(np.isfinite(y_env)):
-            y_env = np.nan_to_num(y_env, nan=0.0, posinf=0.0, neginf=0.0)
+            from .run_contract import SimulationInvalid
+
+            raise SimulationInvalid(
+                "non_finite_result",
+                f"PAC response became non-finite at {float(freqs[pos])} Hz",
+                analysis="pac",
+            )
         out_response[pos] = _periodic_average(
             tgrid, y_env * np.exp(-1j * omega * tgrid)
         )

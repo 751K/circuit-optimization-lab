@@ -63,9 +63,15 @@ def test_demo_retry_uses_preset_branch_seed_after_cold_failure():
     # solve_ac_with_retries tries the canonical cold solve (x0_guess=None) first,
     # so this direct call reproduces exactly THIS platform's cold attempt. It is a
     # pure solver call and does not mutate the demo seed state used below.
-    cold = demo_server.ac_solve(
-        DEMO_COLD_FAIL_SIZES, DEMO_COLD_FAIL_BIAS, freqs, x0_guess=None
-    )
+    try:
+        cold = demo_server.ac_solve(
+            DEMO_COLD_FAIL_SIZES, DEMO_COLD_FAIL_BIAS, freqs, x0_guess=None
+        )
+    except Exception as exc:
+        from circuitopt.run_contract import SimulationInvalid
+
+        assert isinstance(exc, SimulationInvalid)
+        cold = None
 
     ac, mode = demo_server.solve_ac_with_retries(
         DEMO_COLD_FAIL_SIZES,

@@ -10,6 +10,10 @@
     {"name": "MPU", "drain": "OUT", "gate": "IN", "source": "VDD", "W": 2000, "L": 80},
     {"name": "MLD", "drain": "GND", "gate": "GND", "source": "OUT", "W": 1500, "L": 80}
   ],
+  "models": {
+    "MPU": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "MLD": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"}
+  },
   "bias": {
     "VDD": 40.0,
     "VIN": 25.0

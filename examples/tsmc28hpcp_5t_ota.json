@@ -57,11 +57,11 @@
     }
   ],
   "models": {
-    "M1": {"type": "tsmc28hpcp.nmos"},
-    "M2": {"type": "tsmc28hpcp.nmos"},
-    "M3": {"type": "tsmc28hpcp.pmos", "vb": 0.9},
-    "M4": {"type": "tsmc28hpcp.pmos", "vb": 0.9},
-    "M5": {"type": "tsmc28hpcp.nmos"}
+    "M1": {"pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M2": {"pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M3": {"pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 0.9},
+    "M4": {"pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 0.9},
+    "M5": {"pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"}
   },
   "bias": {
     "VDD": 0.9,

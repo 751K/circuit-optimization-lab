@@ -440,10 +440,13 @@ class PMOS_TFT(TransistorModel):
             Ich = self._eval_channel(Vs, Vd, Vg, s1, d1)["Ich"]
             return {"gm": gm, "gds": gds, "Cgs": Cgss, "Cgd": Cgdd, "Ich": Ich}
         except Exception as exc:
-            diagnostics.note_critical(
-                "model.ss_params_zeroed", exc,
-                detail="gm/gds/Cgs/Cgd/Ich -> 0/1e-12 (small-signal params fabricated)")
-            return {"gm": 0.0, "gds": 1e-12, "Cgs": 0.0, "Cgd": 0.0, "Ich": 0.0}
+            diagnostics.note(
+                "model.ss_params_failed", exc,
+                detail="no fabricated small-signal parameters; candidate is invalid")
+            raise RuntimeError(
+                "AT4000TG small-signal evaluation failed; refusing to fabricate "
+                "gm/gds/capacitance values"
+            ) from exc
 
     # ── Private helpers ──────────────────────────────────────────────────
 

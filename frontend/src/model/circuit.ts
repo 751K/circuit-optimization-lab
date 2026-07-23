@@ -50,11 +50,14 @@ export type Sizes = Record<string, [number, number]>;
 /** `nf`: a global finger count, or per-device. */
 export type Nf = number | Record<string, number>;
 
-/** A `models` entry: a PDK model-type key plus forwarded ctor kwargs. */
+/** A complete explicit MOS binding plus supported constructor kwargs. */
 export interface ModelEntry {
-  type?: string;
+  pdk: string;
+  model: string;
+  section: string;
+  bin: string;
   vb?: number;
-  corner?: string;
+  bulk_rail?: string;
   extract_w?: number;
   temperature?: number;
   NF?: number;

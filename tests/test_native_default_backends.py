@@ -19,7 +19,8 @@ def test_normal_examples_do_not_bind_oracle_models():
     for path in sorted((ROOT / "examples").glob("*.json")):
         config = json.loads(path.read_text(encoding="utf-8"))
         for name, binding in (config.get("models") or {}).items():
-            model_type = str(binding.get("type", ""))
+            model_type = (
+                f"{binding.get('pdk', '')}.{binding.get('model', '')}")
             if any(token in model_type for token in forbidden):
                 violations.append(f"{path.name}:{name}={model_type}")
     assert not violations, "normal examples bind oracle models: " + ", ".join(violations)

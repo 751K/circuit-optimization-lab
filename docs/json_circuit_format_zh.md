@@ -163,22 +163,28 @@ examples/periodic_rc.json
 
 ### `models`
 
-可选。把特定器件绑定到非默认 PDK 模型（例如硅 SKY130），而不是默认的 `"pmos_tft"`
-（AT4000TG OTFT）。这里没列到的器件仍用默认 PDK——纯增量，纯 OTFT 配置完全不需要这个字段。
+只要 `devices` 非空就必填。每个 MOS 都必须显式绑定 PDK、模型、工艺 section 和
+几何 bin 策略；缺失或不完整会在解析阶段立即失败，不再回退到默认 PDK。
 
 ```json
 "models": {
-  "M1": {"type": "sky130.nmos", "extract_w": 24.0},
-  "M3": {"type": "sky130.pmos", "vb": 1.8, "extract_w": 12.0}
+  "M1": {"pdk": "sky130", "model": "nmos",
+         "section": "inherit", "bin": "auto", "extract_w": 24.0},
+  "M3": {"pdk": "sky130", "model": "pmos",
+         "section": "inherit", "bin": "auto", "vb": 1.8, "extract_w": 12.0}
 }
 ```
 
-- `type` ——模型注册键，格式 `"<pdk>.<极性>"`（如 `"sky130.nmos"`、`"sky130.pmos"`、
-  `"freepdk45.nmos"`、`"tsmc28hpcp.nmos"`、`"at4000tg.pmos"`）。见 `circuitopt.device_model.register_pdk`。
+- `pdk` 与 `model` 选择已注册的工艺和器件模型。
+- `section` 可写固定卡片 section（如 `tt`/`ss`），或写 `inherit` 允许 PVT 扫描选择。
+- `bin` 可写精确模型/bin 名，或写 `auto` 按几何唯一选 bin；精确值必须与解析结果一致。
+- 旧 `type` 字段已废弃并会被拒绝。
 - 其余键透传给器件构造函数。对 SKY130 器件：`vb`（衬底偏置，伏特；默认 0）、
-  `corner`（SKY130 工艺角——`tt`/`ss`/`ff`/`sf`/`fs`；默认 `tt`）、`extract_w`
-  （µm——选择一个随包参考宽度参数卡，原生 BSIM 实例仍使用实际 `W`）、
+  `extract_w`（µm——选择一个随包参考宽度参数卡，原生 BSIM 实例仍使用实际 `W`）、
   `temperature`（开尔文；默认 300.15）、`NF`（整数）。
+- `bulk_rail` 可选，用于显式指出给 `vb` 供电的物理 rail；当多个 rail 具有相同直流
+  电压时建议填写。未填写时，功耗统计会依次尝试 source 同名 rail 和常规
+  `GND`/`VSS`/`VDD` 电源名。
 - **FreePDK45**（`"freepdk45.nmos"` / `"freepdk45.pmos"`）直接解析平铺的
   BSIM4 level-54 模型卡，并使用进程内 Berkeley BSIM4.5 后端求值。模型卡声明
   `version=4.0`；该元数据字段不会在内置内核中切换另一套方程，原生单管与五管 OTA
@@ -663,8 +669,9 @@ surrogate 筛选→校验入围候选）三处消费。
 | `"periodic.frequency"` | 周期激励的时钟频率 | 需要 `periodic` 块 |
 | `"pvt0"` / `"pbeta0"` | 连续全局工艺偏移 | 路由进 `evaluate(corner=...)`；采样它就把离散 corner 扫描变成连续 PVT 训练数据 |
 
-上面 `models` 字段用于把某个变量目标的器件绑到非默认 PDK（比如扫描一个 SKY130 器件
-的 `W`）；`explore` 块本身不用变——`models` 和 `explore.variables` 可以自由组合。
+上面 `models` 字段为每个 MOS 显式绑定 PDK、模型、section 和几何 bin 策略（例如扫描
+一个 SKY130 器件的 `W`）；`explore` 块本身不用变——`models` 和
+`explore.variables` 可以自由组合。
 
 ## 完整示例
 
@@ -734,8 +741,8 @@ pnoise_irn = results["pnoise"]["irn_uV_band"]
 - 器件模型抽象（``circuitopt/device_model.py``）——支持新增模型类型而不改求解器代码。
 - NMOS 和 PMOS 覆盖 AT4000TG OTFT（仅 PMOS）以及 SKY130、FreePDK45、
   TSMC28HPC+ 三套硅 PDK。
-- 通过 `models` 字段做逐器件模型绑定——混合 OTFT/硅电路（不覆盖时默认 PDK 仍是
-  ``"at4000tg.pmos"``）。
+- 通过 `models` 字段做逐器件模型绑定——混合 OTFT/硅电路；每个 MOS 都必须显式给出
+  PDK、模型、section 和 bin，缺失或不完整会立即报错。
 - 硅 DC/AC/noise/transient；SKY130、FreePDK45 与 TSMC28HPC+ 均走项目内部
   原生 BSIM4 后端。
 

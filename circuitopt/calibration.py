@@ -201,6 +201,15 @@ def _sc_lpf_topology(c):
         rails={"GND": 0.0, "VDD": float(c.get("vdd", 40.0))},
         solved=list(c["solved"]),
         outputs=tuple(c["outputs"]),
+        model_types={
+            str(device[0]): "at4000tg.pmos" for device in c["devices"]
+        },
+        device_kwargs={
+            str(device[0]): {
+                "section": "inherit", "bin": "auto",
+            }
+            for device in c["devices"]
+        },
     )
 
 

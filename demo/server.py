@@ -47,6 +47,7 @@ def py_type(v):
     return v
 
 from circuitopt.ac_solver import ac_solve
+from circuitopt.run_contract import SimulationInvalid
 from circuitopt.noise_solver import noise_analysis, band_rms
 
 app = Flask(__name__, static_folder=str(DEMO_DIR / "static"), static_url_path="/static")
@@ -165,7 +166,10 @@ def _preset_dc_seed(name):
     if name in _preset_seed_cache:
         return _preset_seed_cache[name]
     preset = PRESETS[name]
-    ac = ac_solve(preset["sizes"], preset["bias"], np.array([1.0]))
+    try:
+        ac = ac_solve(preset["sizes"], preset["bias"], np.array([1.0]))
+    except SimulationInvalid:
+        ac = None
     if ac is None:
         _preset_seed_cache[name] = None
     else:
@@ -203,7 +207,10 @@ def solve_ac_with_retries(sizes, bias, freqs):
     global _last_dc_seed, _last_dc_bias
 
     for mode, x0 in _demo_dc_attempts(bias):
-        ac = ac_solve(sizes, bias, freqs, x0_guess=x0)
+        try:
+            ac = ac_solve(sizes, bias, freqs, x0_guess=x0)
+        except SimulationInvalid:
+            ac = None
         if ac is not None:
             with _dc_seed_lock:
                 _last_dc_seed = _compact_dc_seed(ac["dc_op"])

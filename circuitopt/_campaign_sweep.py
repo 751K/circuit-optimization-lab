@@ -109,12 +109,17 @@ def make_sweep_campaign(spec, freqs, band) -> SweepCampaign | None:
     try:
         binding = spec.binding()
         model_types = dict(binding.model_types or {})
-        if model_types:
+        from .device_factory import is_silicon_model_types
+
+        if is_silicon_model_types(model_types):
             from ._rust_campaign import SiliconCampaign
 
             core = SiliconCampaign(spec, freqs, band=tuple(band))
             return SweepCampaign(core, "silicon_bsim4", core.nominal_corner,
                                  needs_seed=False)
+        if not model_types or not all(
+                str(model).startswith("at4000tg.") for model in model_types.values()):
+            return None
         from ._rust_campaign import AfeOtftCampaign
 
         core = AfeOtftCampaign(spec.bias, freqs, band=tuple(band),
@@ -134,15 +139,17 @@ def silicon_campaign_for(topo, sizes, bias, nf, binding, freqs, band
     loaded ``CircuitSpec``, so this synthesises the minimal spec ``make_sweep_campaign``
     needs and returns its campaign **only when the circuit is all-silicon** (an
     explicit ``binding`` with a non-empty ``model_types``). Returns ``None`` for the
-    AFE / default-PDK family, when no binding is supplied, or when the campaign is
+    explicitly bound OTFT AFE family, when no binding is supplied, or when the campaign is
     unavailable — the caller then keeps its frozen scalar path. AFE deliberately
     stays scalar here: the multistable OTFT would let a cold campaign under-report
     the latch rate (the R5-D red line), so only silicon (monostable, cold-DC
     consistent) is routed."""
     if binding is None or not campaign_enabled():
         return None
-    if not (binding.model_types or {}):
-        return None                       # AFE / default PDK -> scalar reference
+    from .device_factory import is_silicon_model_types
+
+    if not is_silicon_model_types(binding.model_types):
+        return None                       # explicitly bound OTFT -> scalar reference
     try:
         from .circuit_loader import CircuitSpec
 

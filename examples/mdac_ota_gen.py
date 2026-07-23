@@ -198,9 +198,15 @@ def core(vdd=VDD_NOM, gate_rename=None):
             dv["NF"] = max(2, int(round(W / 2.0)))
         devices.append(dv)
         if kind == "n":
-            models[name] = {"type": "freepdk45.nmos"}
+            models[name] = {
+                "pdk": "freepdk45", "model": "nmos",
+                "section": "inherit", "bin": "auto",
+            }
         else:
-            models[name] = {"type": "freepdk45.pmos", "vb": vdd}
+            models[name] = {
+                "pdk": "freepdk45", "model": "pmos",
+                "section": "inherit", "bin": "auto", "vb": vdd,
+            }
     return devices, models
 
 

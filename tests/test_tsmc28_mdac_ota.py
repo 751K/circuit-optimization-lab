@@ -53,8 +53,11 @@ def test_dut_uses_one_reference_current_and_no_ideal_active_devices():
     # 46 explicit instances collapsed to 38: the 8 parallel clones (M0B/M0C,
     # M9B, M10B, M11B/M11C, M12B/M12C) now render as m= multiplicity.
     assert len(deck["devices"]) == 38
-    assert {model["type"] for model in deck["models"].values()} == {
-        "tsmc28hpcp.nmos", "tsmc28hpcp.pmos",
+    assert {
+        (model["pdk"], model["model"])
+        for model in deck["models"].values()
+    } == {
+        ("tsmc28hpcp", "nmos"), ("tsmc28hpcp", "pmos"),
     }
 
 
@@ -111,7 +114,10 @@ def test_all_transistors_have_portable_tsmc_bindings_and_native_nf():
     models = deck["models"]
     for device in deck["devices"]:
         name = device["name"]
-        assert models[name]["type"].startswith("tsmc28hpcp.")
+        assert models[name]["pdk"] == "tsmc28hpcp"
+        assert models[name]["model"] in {"nmos", "pmos"}
+        assert models[name]["section"] == "inherit"
+        assert models[name]["bin"] == "auto"
         assert isinstance(device["NF"], int) and device["NF"] >= 1
     encoded = json.dumps(deck)
     assert "/Users/" not in encoded

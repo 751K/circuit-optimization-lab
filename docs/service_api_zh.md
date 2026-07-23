@@ -175,12 +175,48 @@ curl -X POST http://127.0.0.1:8341/api/v1/solve \
 
 ```json
 {
+  "status": "valid",
   "results": {
     "ac": {"Av_dc_dB": 22.90, "bw_Hz": 562.3, "response": [{"re": 1.0, "im": 0.0}, "..."]}
+  },
+  "metrics": {
+    "gain": {"value": 22.90, "unit": "dB", "status": "valid"},
+    "phase_margin": {"value": 71.2, "unit": "deg", "status": "valid"},
+    "dc_source_power": {
+      "value": 0.0018,
+      "unit": "W",
+      "status": "valid",
+      "branches": {
+        "VDD": {
+          "voltage": {"value": 0.9, "unit": "V", "status": "valid"},
+          "current": {"value": 0.002, "unit": "A", "status": "valid"},
+          "power": {"value": 0.0018, "unit": "W", "status": "valid"}
+        }
+      }
+    },
+    "saturation": {
+      "value": true,
+      "unit": "boolean",
+      "status": "valid",
+      "devices": {
+        "M1": {
+          "value": true,
+          "unit": "boolean",
+          "status": "valid",
+          "vds": {"value": 0.42, "unit": "V", "status": "valid"},
+          "vdsat": {"value": 0.16, "unit": "V", "status": "valid"},
+          "headroom": {"value": 0.26, "unit": "V", "status": "valid"}
+        }
+      }
+    }
   },
   "elapsed_s": 0.0034
 }
 ```
+
+选择 noise 或 transient 时，`metrics` 还会返回带 `integration_band_hz` 的输入/输出
+积分噪声（`V_rms`）和带容差的建立时间（秒）。模型绑定缺失属于解析错误；紧凑模型
+失败、不收敛和非有限结果属于求解阶段 invalid，绝不会用替代值继续。
 
 失败（`422`）——解析错误（电路结构不合法）和求解错误（如 DC 不收敛、`analyses`
 选项键拼错）各带一个 `stage`，客户端可据此判断是哪个阶段失败。绝不泄漏 traceback。
@@ -191,6 +227,11 @@ curl -X POST http://127.0.0.1:8341/api/v1/solve \
 
 ```json
 {"detail": {"stage": "solve", "message": "unknown option(s) for 'ac': {'bogus_key'}; valid: [...]"}}
+```
+
+```json
+{"detail": {"stage": "solve", "status": "invalid", "code": "not_converged",
+            "analysis": "ac", "message": "DC operating-point solve did not converge"}}
 ```
 
 ## 后台任务

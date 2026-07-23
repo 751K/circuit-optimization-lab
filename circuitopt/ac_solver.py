@@ -18,6 +18,8 @@ from .dc_solver import (DC_FALLBACK_TOL, bounded_least_squares_dc,
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
 from . import diagnostics
+from .run_contract import (ModelEvaluationError, SimulationInvalid,
+                           ensure_analysis_valid, reraise_invalid)
 
 if TYPE_CHECKING:
     from .device_factory import CircuitBinding
@@ -120,7 +122,15 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                 _rust_reference_retry=True,
             )
         if result is not None:
-            result["rust_otft_reference_fallback"] = True
+            result["solver_fallback"] = "otft_reference"
+        return result
+
+    def require_retry_result():
+        result = retry_with_reference_device()
+        if result is None:
+            raise SimulationInvalid(
+                "not_converged", "DC operating-point solve did not converge",
+                analysis="ac")
         return result
 
     def Id(name, Vs, Vd, Vg):
@@ -130,10 +140,8 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
             # and -1 for source-low (NMOS), whose drain current leaves the drain.
             return getattr(dev, "kcl_sign", 1.0) * abs(dev.get_Idc(Vs, Vd, Vg))
         except Exception as exc:
-            diagnostics.note_critical(
-                "model.idc_eval_zeroed", exc,
-                detail=f"{name} drain current -> 1e-18 (device eval failed)")
-            return 1e-18
+            reraise_invalid(exc)
+            raise ModelEvaluationError(name, "drain-current evaluation", exc) from exc
 
     def terminal_currents(name, Vs, Vd, Vg):
         dev = _dev_inst[name]
@@ -142,10 +150,8 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
         try:
             return dev.get_terminal_currents(Vs, Vd, Vg)
         except Exception as exc:
-            diagnostics.note_critical(
-                "model.terminal_currents_fallback", exc,
-                detail=f"{name} four-terminal DC currents unavailable; using Ids")
-            return None
+            reraise_invalid(exc)
+            raise ModelEvaluationError(name, "terminal-current evaluation", exc) from exc
 
     native_batch_handles = None
     native_batch_leases = None
@@ -256,6 +262,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                 if dc_residual_ok(residuals, sol, tol=dc_tol) or (per_dev and ier == 1):
                     break
             except Exception as exc:
+                reraise_invalid(exc)
                 diagnostics.note("dc.fsolve_guess_fail", exc)
         else:
             # ── FALLBACK (runs ONLY when every standard guess failed; never alters
@@ -274,6 +281,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                     return s if (dc_residual_ok(rfun, s, tol=dc_tol) or
                                  (per_dev and ier == 1)) else None
                 except Exception as exc:
+                    reraise_invalid(exc)
                     diagnostics.note("dc.fallback_solve_fail", exc)
                     return None
 
@@ -314,7 +322,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                     sol = bounded_least_squares_dc(residuals, guesses + [flat], topo, bias,
                                                     tol=dc_tol)
             if sol is None:
-                return retry_with_reference_device()
+                return require_retry_result()
 
         nv = topo.node_vals(sol)                  # {node_name: voltage}, full asymmetric op
         if topo.n_branches:                       # voltage-source branch currents
@@ -331,10 +339,10 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     if getattr(topo, "require_dc_in_box", False) and not topo.in_voltage_box(nv, bias):
         sbox = bounded_least_squares_dc(residuals, guesses, topo, bias, tol=dc_tol)
         if sbox is None:
-            return retry_with_reference_device()
+            return require_retry_result()
         nv = topo.node_vals(sbox)
         if not topo.in_voltage_box(nv, bias):
-            return retry_with_reference_device()
+            return require_retry_result()
 
     # ── PHYSICALITY GUARD ── No internal node can sit above the supply or below ground
     # here. A solution with e.g. net20 > VDD means the tail M11 is reversed — a
@@ -352,6 +360,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                 s2, _, ier, _ = fsolve(residuals, topo.guess_vector(g),
                                        full_output=True, xtol=1e-12, maxfev=4000)
             except Exception as exc:
+                reraise_invalid(exc)
                 diagnostics.note("dc.box_guess_fail", exc)
                 continue
             if (dc_residual_ok(residuals, s2, tol=DC_FALLBACK_TOL) and
@@ -361,7 +370,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
             box_vecs = [topo.guess_vector(g) for g in box_guesses]
             s3 = bounded_least_squares_dc(residuals, box_vecs + guesses, topo, bias)
             if s3 is None:
-                return retry_with_reference_device()
+                return require_retry_result()
             nv = topo.node_vals(s3)
 
     # ── SYMMETRY GUARD ── No per-device mismatch ⇒ physical op is symmetric (VOP=VON,
@@ -381,10 +390,17 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     bpts = plan.bias_points(nv)                   # per-device (Vs, Vd, Vg)
 
     # ── 2. Small-signal params at the true per-device DC op ──
-    ss = {name: get_ss_params(sizes[name][0], sizes[name][1], *bpts[name],
-                              corner=dev_corner(corner, name), nf=dev_nf(nf, name),
-                              dev_inst=_dev_inst[name])
-          for name, *_ in topo.devices}
+    ss = {}
+    for name, *_ in topo.devices:
+        try:
+            ss[name] = get_ss_params(
+                sizes[name][0], sizes[name][1], *bpts[name],
+                corner=dev_corner(corner, name), nf=dev_nf(nf, name),
+                dev_inst=_dev_inst[name])
+        except Exception as exc:
+            reraise_invalid(exc)
+            raise ModelEvaluationError(
+                name, "small-signal evaluation", exc) from exc
 
     # ── 3. Build & solve the small-signal MNA (terminals from the topology) ──
     drive = topo.input_drives
@@ -425,6 +441,11 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     bw_Hz = bw_from_gain(freqs, gains)
 
     dc_op = topo.dc_op_with_aliases(nv)
+    from .dc_measurements import operating_regions, source_power
+
+    source_power_result = source_power(
+        topo, bias, nv, _dev_inst, branch_currents)
+    region_result = operating_regions(topo, bias, nv, _dev_inst)
     result = _AcResult({
         "Av_dc_dB": Av_dc_dB,
         "peak_dB": 20 * np.log10(max(peak, 1e-9)),
@@ -434,6 +455,12 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
         "freqs": freqs,
         "dc_op": dc_op,
         "branch_currents": branch_currents,
+        "device_bindings": {
+            name: dict(device.binding)
+            for name, device in _dev_inst.items()
+        },
+        "source_power": source_power_result,
+        "operating_regions": region_result,
         "ss": ss,
         "corner": corner,
         "rust_lti_solver": True,
@@ -441,6 +468,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     # Avoid a non-serializable public dictionary key while allowing an immediate
     # noise analysis to reuse already-elaborated foundry model cards.
     result._devices = _dev_inst
+    ensure_analysis_valid("ac", result)
     return result
 
 

@@ -361,120 +361,120 @@
   ],
   "models": {
     "MBN": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MPRN": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MPR": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "MPC": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "MCND": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MCPD": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "MNC": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MREPP": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "MREP": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MCMP": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "MCMD": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M0": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M1": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M2": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M3": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M4": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M5": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "M6": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "M7": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "M8": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "M9": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M10": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "M11": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "M12": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "MS1": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MS2": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MT1": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MDL1": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "MDS1": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "MRA": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MRB": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MTB": {
-      "type": "tsmc28hpcp.nmos"
+      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
     },
     "MDL2": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     },
     "MDS2": {
-      "type": "tsmc28hpcp.pmos",
+      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
       "vb": 0.9
     }
   },

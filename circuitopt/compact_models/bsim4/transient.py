@@ -7,6 +7,7 @@ import numpy as np
 
 from ...compiled_topology import CompiledTopology, TERM_SOLVED
 from ...device_factory import build_devices
+from ...run_contract import ModelEvaluationError
 
 
 def _expanded_grid(tgrid, inputs, max_step):
@@ -161,9 +162,13 @@ def transient_native_bsim4(
         vs = term_value(item.s, x, sample)
         vd = term_value(item.d, x, sample)
         vg = term_value(item.g, x, sample)
-        currents = dev.get_terminal_currents(vs, vd, vg)
-        charges = dev.get_terminal_charges(vs, vd, vg)
-        conductance, capacitance = dev.get_terminal_linearization(vs, vd, vg)
+        try:
+            currents = dev.get_terminal_currents(vs, vd, vg)
+            charges = dev.get_terminal_charges(vs, vd, vg)
+            conductance, capacitance = dev.get_terminal_linearization(vs, vd, vg)
+        except Exception as exc:
+            raise ModelEvaluationError(
+                item.name, "transient charge/current evaluation", exc) from exc
         return currents, charges, conductance, capacitance
 
     def coefficients(sample):

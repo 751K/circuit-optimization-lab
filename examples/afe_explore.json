@@ -20,6 +20,18 @@
     {"name": "M14", "drain": "GND",   "gate": "GND",  "source": "VFBN",  "W": 5224,  "L": 46},
     {"name": "M15", "drain": "GND",   "gate": "GND",  "source": "VFBP",  "W": 5224,  "L": 46}
   ],
+  "models": {
+    "M6": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "M7": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "M8": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "M9": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "M10": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "M11": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "M12": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "M13": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "M14": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"},
+    "M15": {"pdk": "at4000tg", "model": "pmos", "section": "inherit", "bin": "auto"}
+  },
   "bias": {"VDD": 40.0, "VCM": 30.65, "VB": 9.84, "VC": 16.0},
   "outputs": ["VOP", "VON"],
   "input_drives": {"M7": 0.5, "M8": -0.5},

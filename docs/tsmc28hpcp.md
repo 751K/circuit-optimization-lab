@@ -54,8 +54,10 @@ rust/crates/co-py/Cargo.toml`. ngspice is not required for normal simulation.
     {"name": "MP", "drain": "OUT", "gate": "IN", "source": "VDD", "W": 2.0, "L": 0.03}
   ],
   "models": {
-    "MN": {"type": "tsmc28hpcp.nmos"},
-    "MP": {"type": "tsmc28hpcp.pmos", "vb": 0.9}
+    "MN": {"pdk": "tsmc28hpcp", "model": "nmos",
+           "section": "inherit", "bin": "auto"},
+    "MP": {"pdk": "tsmc28hpcp", "model": "pmos",
+           "section": "inherit", "bin": "auto", "vb": 0.9}
   },
   "bias": {"VDD": 0.9}
 }

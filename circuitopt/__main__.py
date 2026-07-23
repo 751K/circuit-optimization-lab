@@ -42,11 +42,13 @@ from .chopper import (chopper_analysis, pmos_chopper_analysis,
                       pmos_chopper_transient)
 from .circuit_loader import load_circuit_json
 from .corners import corner_table, mismatch_mc_from_dict, silicon_corner_names
+from .device_factory import is_silicon_model_types
 from .dataset import add_cli_args as dataset_add_cli_args
 from .dataset import run_cli as dataset_run_cli
 from .explore import add_cli_args as explore_add_cli_args
 from .explore import run_cli as explore_run_cli
 from .noise_solver import band_rms
+from .run_contract import summarize_design_metrics
 # The service subpackage's CLI glue is fastapi-free (fastapi/uvicorn are imported
 # lazily inside serve_run_cli), so importing it here never pulls the serve extra.
 from .service import add_cli_args as serve_add_cli_args
@@ -200,7 +202,8 @@ def _cmd_run(args):
         what = ",".join(selected) if selected else "all configured"
         print(f"Running {what} analyses for {args.circuit}")
 
-    results = run_analysis_suite(args.circuit, selected=selected, corner=args.corner)
+    spec = _load_spec(args.circuit)
+    results = run_analysis_suite(spec, selected=selected, corner=args.corner)
 
     lo, hi = args.noise_band
     for key in ("noise", "pnoise"):
@@ -216,23 +219,20 @@ def _cmd_run(args):
     if not args.quiet:
         print(_format_analysis_summary(results))
 
+    measurements = summarize_design_metrics(
+        spec, results, noise_band=(float(lo), float(hi)))
+    payload = {
+        "status": "valid",
+        "results": results,
+        "metrics": measurements,
+    }
     if args.output:
-        serializable = {}
-        for name, r in results.items():
-            if r is None:
-                continue
-            if isinstance(r, dict):
-                serializable[name] = {
-                    k: (v.tolist() if hasattr(v, "tolist") else v)
-                    for k, v in r.items()
-                    if not callable(v) and not k.startswith("_")
-                }
         os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
         with open(args.output, "w") as f:
-            json.dump(serializable, f, indent=2, default=str)
+            json.dump(_jsonable(payload), f, indent=2, default=str)
         print(f"wrote {args.output}")
 
-    return results
+    return payload
 
 
 # ── subcommand: explore ──────────────────────────────────────────────────────
@@ -395,12 +395,13 @@ def _cmd_corners(args):
     # (and routes through the compiled campaign) instead of silently reverting to the
     # default OTFT PDK; silicon then sweeps card corners, OTFT keeps typical/slow/fast.
     binding = spec.binding()
-    corners = (silicon_corner_names(binding.model_types) if binding.model_types
+    silicon = is_silicon_model_types(binding.model_types)
+    corners = (silicon_corner_names(binding.model_types) if silicon
                else ("typical", "slow", "fast"))
 
     # The PVT axes are silicon-only (corner_table enforces the same guard); fail early
     # and cleanly here so an OTFT circuit gets a message, not a partial table + trace.
-    if (temps is not None or vdd_scale is not None) and not binding.model_types:
+    if (temps is not None or vdd_scale is not None) and not silicon:
         raise SystemExit(
             "corners: --temps/--vdd-scale require an all-silicon circuit; this "
             "OTFT/default-PDK circuit has no temperature or supply-scale axis")

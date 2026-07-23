@@ -92,8 +92,8 @@ def _two_fet_spec():
         "devices": [
             {"name": "MN", "drain": "DN", "gate": "VGN", "source": "GND", "W": 1.0, "L": 0.05},
             {"name": "MP", "drain": "DP", "gate": "VGP", "source": "VDD", "W": 1.0, "L": 0.05}],
-        "models": {"MN": {"type": "freepdk45.nmos"},
-                   "MP": {"type": "freepdk45.pmos", "vb": 1.0}},
+        "models": {"MN": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"},
+                   "MP": {"pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.0}},
         "resistors": [["RN", "VDD", "DN", 5000.0], ["RP", "DP", "GND", 5000.0]],
         "outputs": ["DN"],
     })
@@ -253,7 +253,7 @@ def test_op_ngspice_saturation_and_triode_region_check():
         "devices": [
             {"name": "MDIODE", "drain": "D", "gate": "D", "source": "GND", "W": 1.0, "L": 0.05},
             {"name": "MTRIODE", "drain": "DT", "gate": "VG", "source": "GND", "W": 1.0, "L": 0.05}],
-        "models": {"MDIODE": {"type": "freepdk45.nmos"}, "MTRIODE": {"type": "freepdk45.nmos"}},
+        "models": {"MDIODE": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"}, "MTRIODE": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"}},
         "resistors": [["RD", "VDD", "D", 5000.0], ["RT", "VDLOW", "DT", 1.0]],
         "outputs": ["D"]})
     op = op_ngspice(spec.sizes, spec.bias, topo=spec.topology,

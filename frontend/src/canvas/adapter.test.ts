@@ -32,7 +32,12 @@ function sampleNodes(): GraphNode[] {
       L: 0.5,
       hasEmbeddedWL: true,
       model: "sky130.pmos",
-      modelKwargs: { vb: 1.8, extract_w: 12 },
+      modelKwargs: {
+        section: "inherit",
+        bin: "auto",
+        vb: 1.8,
+        extract_w: 12,
+      },
       inputDrive: 1,
       ports: [{ id: "D", originalNet: "vout" }, { id: "G", originalNet: "vinp" }, { id: "S", originalNet: "VDD" }],
       position: [10, 20],

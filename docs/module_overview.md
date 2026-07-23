@@ -6,7 +6,9 @@
 > data flow are maintained; benchmark and calibration numbers near the end are
 > dated snapshots and should be reproduced before use in a new report.
 
-This document introduces the current `circuitopt/` solver stack. The code is a compact local implementation of an AT4000TG OTFT ECG AFE solver, calibrated against Cadence/Spectre behavior. It is intended as the first concrete backend of the broader local circuit optimization flow.
+This document introduces the current `circuitopt/` solver stack. It is a local
+analog-circuit simulation and optimization framework spanning the AT4000TG
+analytic model and native BSIM4-backed SKY130, FreePDK45, and TSMC28 flows.
 
 ## Scope
 
@@ -632,8 +634,8 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
   the same JSON path; legacy `builtin_topology` configs are no longer accepted
   in the exploration layer.
 - Sampling is `lhs` (Latin hypercube) or `random`, with a seeded RNG for repeatability.
-- Metrics: `gain_dB`, `bw_Hz`, `irn_uV`, `power_uW` (top-rail supply current x rail
-  voltage), and `area` (sum of per-device `g_area`).
+- Metrics: `gain_dB`, `bw_Hz`, `irn_uV`, `power_uW` (the sum of solved source
+  branch voltage-current products), and `area` (sum of per-device `g_area`).
 - A variable's `targets` can drive several keys at once, keeping matched pairs
   (M7=M8, ...) identical so the AFE's symmetric DC continuation stays on the
   physical branch.
@@ -810,9 +812,9 @@ The default portable model entry is
 Resolution priority is `TSMC28_MODEL_DIR`, `TSMC28_PDK_ROOT`, that project-local
 entry, then `PDK_ROOT/tsmc28hpcp`. See [TSMC28HPC+ Local Adapter](tsmc28hpcp.md).
 
-`circuitopt/circuit_loader.py`'s optional `models` block (`{"M1": {"type": "sky130.nmos",
-...}}`) binds specific devices in a JSON circuit to a non-default PDK, so a mixed
-OTFT+silicon (or all-silicon) circuit is just configuration — see
+`circuitopt/circuit_loader.py` requires every MOS in JSON to carry an explicit
+`models` entry (`pdk`, `model`, `section`, and `bin`). A mixed OTFT/silicon
+(or all-silicon) circuit is therefore just configuration; see
 [JSON Circuit Description](json_circuit_format.md). Two complete fully-differential
 OTA design walkthroughs: [SKY130 FD-OTA](sky130_fd_ota_design.md),
 [FreePDK45 FD-OTA](freepdk45_fd_ota_design.md).

@@ -202,8 +202,13 @@ export function circuitJsonToGraph(json: CircuitJson): ToGraphResult {
     }
     const m = models[d.name];
     if (m) {
-      const { type, ...kwargs } = m;
-      if (type !== undefined) node.model = type;
+      const { pdk, model, section, bin, ...kwargs } = m;
+      node.model = `${pdk}.${model}`;
+      node.modelKwargs = {
+        ...(node.modelKwargs ?? {}),
+        section,
+        bin,
+      };
       if (Object.keys(kwargs).length > 0) {
         node.modelKwargs = { ...(node.modelKwargs ?? {}), ...kwargs };
       }

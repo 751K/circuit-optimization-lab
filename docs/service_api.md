@@ -188,12 +188,50 @@ Success (`200`):
 
 ```json
 {
+  "status": "valid",
   "results": {
     "ac": {"Av_dc_dB": 22.90, "bw_Hz": 562.3, "response": [{"re": 1.0, "im": 0.0}, "..."]}
+  },
+  "metrics": {
+    "gain": {"value": 22.90, "unit": "dB", "status": "valid"},
+    "phase_margin": {"value": 71.2, "unit": "deg", "status": "valid"},
+    "dc_source_power": {
+      "value": 0.0018,
+      "unit": "W",
+      "status": "valid",
+      "branches": {
+        "VDD": {
+          "voltage": {"value": 0.9, "unit": "V", "status": "valid"},
+          "current": {"value": 0.002, "unit": "A", "status": "valid"},
+          "power": {"value": 0.0018, "unit": "W", "status": "valid"}
+        }
+      }
+    },
+    "saturation": {
+      "value": true,
+      "unit": "boolean",
+      "status": "valid",
+      "devices": {
+        "M1": {
+          "value": true,
+          "unit": "boolean",
+          "status": "valid",
+          "vds": {"value": 0.42, "unit": "V", "status": "valid"},
+          "vdsat": {"value": 0.16, "unit": "V", "status": "valid"},
+          "headroom": {"value": 0.26, "unit": "V", "status": "valid"}
+        }
+      }
+    }
   },
   "elapsed_s": 0.0034
 }
 ```
+
+When noise or transient is selected, `metrics` also contains integrated input
+and output noise in `V_rms` with `integration_band_hz`, and settling time in
+seconds with its tolerance. Missing model bindings are parse errors. Compact-model
+failures, non-convergence, and non-finite results are solve-stage invalid results;
+they are never replaced by fallback values.
 
 Failure (`422`) — a parse error (malformed circuit structure) or a solve error
 (e.g. DC non-convergence, a bad `analyses` option key) each carry a `stage` so
@@ -205,6 +243,11 @@ a client can tell which phase failed. No traceback is ever leaked.
 
 ```json
 {"detail": {"stage": "solve", "message": "unknown option(s) for 'ac': {'bogus_key'}; valid: [...]"}}
+```
+
+```json
+{"detail": {"stage": "solve", "status": "invalid", "code": "not_converged",
+            "analysis": "ac", "message": "DC operating-point solve did not converge"}}
 ```
 
 ## Background Jobs

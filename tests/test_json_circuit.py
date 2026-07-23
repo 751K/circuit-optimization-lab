@@ -125,7 +125,17 @@ def test_dispatch_reuses_ac_dc_op_as_noise_seed(monkeypatch):
     spec = load_circuit_json("examples/single_stage.json")
     freqs = np.array([1.0, 10.0])
     ac_dc = {"OUT": 12.0}
-    ac_result = {"dc_op": ac_dc, "gains": np.ones_like(freqs), "freqs": freqs.copy()}
+    ac_result = {
+        "dc_op": ac_dc,
+        "gains": np.ones_like(freqs),
+        "freqs": freqs.copy(),
+        "source_power": {
+            "total_w": 0.0,
+            "per_source_w": {},
+            "source_currents_a": {},
+            "source_voltages_v": {},
+        },
+    }
 
     def fake_ac_solve(*_args, **_kwargs):
         return ac_result
@@ -160,10 +170,16 @@ def test_dispatch_resolves_and_keeps_process_corner_consistent(monkeypatch):
         return {
             "dc_op": {"OUT": 0.0},
             "freqs": freqs.copy(),
-            "gains": np.ones_like(freqs),
-            "response": np.ones_like(freqs, dtype=complex),
-            "corner": kwargs.get("corner"),
-        }
+                "gains": np.ones_like(freqs),
+                "response": np.ones_like(freqs, dtype=complex),
+                "corner": kwargs.get("corner"),
+                "source_power": {
+                    "total_w": 0.0,
+                    "per_source_w": {},
+                    "source_currents_a": {},
+                    "source_voltages_v": {},
+                },
+            }
 
     def fake_noise_analysis(*_args, **kwargs):
         seen.append(("noise", kwargs.get("corner"), kwargs.get("ac_result") is not None))

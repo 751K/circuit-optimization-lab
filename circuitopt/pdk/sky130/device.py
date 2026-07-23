@@ -111,6 +111,11 @@ class _Sky130NativeFet(TransistorModel):
         self._evaluate(Vs, Vd, Vg)
         return ()
 
+    def get_operating_point(self, Vs: float, Vd: float, Vg: float) -> Dict[str, float]:
+        op = dict(self._evaluate(Vs, Vd, Vg).operating_point)
+        op.update({"vds": float(Vd - Vs), "vgs": float(Vg - Vs)})
+        return op
+
     def get_ss_params(self, Vs: float, Vd: float, Vg: float) -> Dict[str, float]:
         result = self._evaluate(Vs, Vd, Vg)
         matrix = result.conductance

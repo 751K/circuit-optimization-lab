@@ -26,8 +26,9 @@ import numpy as np
 from .ac_solver import ac_solve
 from ._campaign_sweep import silicon_campaign_for
 from .circuit_loader import circuit_from_dict
-from .device_factory import CORNERS
+from .device_factory import CORNERS, is_silicon_model_types
 from .noise_solver import band_rms, noise_analysis
+from .run_contract import ModelBindingError, SimulationInvalid
 from .topology import AFE_TOPO
 from . import diagnostics
 
@@ -110,7 +111,7 @@ def latch_screen(sizes, bias, nf=None, base="slow", topo=AFE_TOPO, k=3.0,
                     topo=topo, x0_guess=x0_guess, freqs=freqs,
                     include_noise=False)
         if m is None:
-            continue
+            return float("inf")
         worst = max(worst, m["latch_dV"])
         if len(outs) == 2:
             op = m["dc_op"]
@@ -120,8 +121,9 @@ def latch_screen(sizes, bias, nf=None, base="slow", topo=AFE_TOPO, k=3.0,
                 m2 = metrics(sizes, bias, nf=nf, corner=kick,
                              topo=topo, x0_guess=seeded, freqs=freqs,
                              include_noise=False)
-                if m2 is not None:
-                    worst = max(worst, m2["latch_dV"])
+                if m2 is None:
+                    return float("inf")
+                worst = max(worst, m2["latch_dV"])
     return worst
 
 
@@ -143,9 +145,13 @@ def metrics(sizes, bias, nf=None, corner=None, topo=AFE_TOPO, x0_guess=None,
     and falls back to."""
     if freqs is None:
         freqs = _DEFAULT_FREQS
-    ac = ac_solve(sizes, bias, freqs, corner=corner, nf=nf, topo=topo,
-                  x0_guess=x0_guess, binding=binding)
-    if ac is None:
+    try:
+        ac = ac_solve(sizes, bias, freqs, corner=corner, nf=nf, topo=topo,
+                      x0_guess=x0_guess, binding=binding)
+    except ModelBindingError:
+        raise
+    except SimulationInvalid as exc:
+        diagnostics.note("corners.ac_invalid", exc)
         return None
     out = {"gain_peak_dB": float(ac["peak_dB"]), "bw_Hz": float(ac["bw_Hz"]),
            "dc_op": ac["dc_op"]}
@@ -160,9 +166,9 @@ def metrics(sizes, bias, nf=None, corner=None, topo=AFE_TOPO, x0_guess=None,
                                 x0_guess=ac["dc_op"], binding=binding)
             out["irn_uV"] = band_rms(freqs, nz["irn_psd"], *band) * 1e6 if nz else float("nan")
             out["_noise_evaluated"] = True
-        except Exception as exc:
-            diagnostics.note("corners.irn_eval_fail", exc)
-            out["irn_uV"] = float("nan")
+        except SimulationInvalid as exc:
+            diagnostics.note("corners.irn_invalid", exc)
+            return None
     return out
 
 
@@ -178,6 +184,17 @@ def _metrics_from_campaign_row(row, solved, noise_evaluated):
     if not row.get("ok"):
         return None
     dc_vec = row.get("dc_op") or []
+    numeric = [
+        row.get("gain_peak_dB"), row.get("bw_Hz"), row.get("latch_dV"),
+        *(dc_vec or ()),
+    ]
+    if noise_evaluated:
+        numeric.append(row.get("irn_uV"))
+    if not np.all(np.isfinite(np.asarray(numeric, dtype=float))):
+        diagnostics.note(
+            "corners.campaign_non_finite",
+            detail="compiled campaign returned non-finite metrics")
+        return None
     return {
         "gain_peak_dB": float(row["gain_peak_dB"]),
         "bw_Hz": float(row["bw_Hz"]),
@@ -223,7 +240,7 @@ def _is_silicon_binding(binding) -> bool:
     empty ``model_types`` (the AFE OTFT / default-PDK family) stays on the legacy
     scalar path, threaded **without** a binding so it is byte-for-byte unchanged
     (a binding would inject its default DC seed and perturb the cold OTFT solve)."""
-    return binding is not None and bool(binding.model_types or {})
+    return binding is not None and is_silicon_model_types(binding.model_types)
 
 
 def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
@@ -370,6 +387,21 @@ def _temperature_binding(binding, temp_c, devices):
     return dataclasses.replace(binding, device_kwargs=dk)
 
 
+def _supply_scaled_binding(binding, scale, devices):
+    """Scale explicit MOS bulk biases with the ratioed supply/bias axis."""
+    if scale is None:
+        return binding
+    factor = float(scale)
+    base_dk = binding.device_kwargs or {}
+    dk = {}
+    for device in devices:
+        kwargs = dict(base_dk.get(device, {}))
+        if "vb" in kwargs:
+            kwargs["vb"] = float(kwargs["vb"]) * factor
+        dk[device] = kwargs
+    return dataclasses.replace(binding, device_kwargs=dk)
+
+
 def _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs, band,
                       include_noise, workers, binding, temps, vdd_scale=None):
     """PVT grid: nest the silicon corner sweep over the temperature (°C) and
@@ -406,6 +438,7 @@ def _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs, band,
     def run_slice(key):
         tc, vs = key
         tbind = _temperature_binding(binding, tc, devices)
+        tbind = _supply_scaled_binding(tbind, vs, devices)
         sbias = (bias if vs is None
                  else {k: v * float(vs) for k, v in bias.items()})
         camp = silicon_campaign_for(topo, sizes, sbias, nf, tbind, freqs, band)
@@ -767,7 +800,7 @@ def mismatch_mc_from_dict(data, n=300, seed=0, corner="typical", freqs=None,
     spec = circuit_from_dict(data)
     binding = spec.binding()
     base = (_silicon_base_corner(binding.model_types, corner)
-            if binding.model_types else corner)
+            if is_silicon_model_types(binding.model_types) else corner)
     return mismatch_mc(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
                        base=base, n=n, seed=seed, freqs=freqs, band=band,
                        progress=progress, should_stop=should_stop, workers=workers,

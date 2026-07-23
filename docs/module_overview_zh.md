@@ -549,7 +549,7 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - `load_explore_json(path)`——从完整电路 JSON 中读取 `explore` 块。拓扑、器件尺寸、
   偏置和可选 NF 都走同一条 JSON 路径；探索层不再接受旧的 `builtin_topology` 配置。
 - 采样方式为 `lhs`（拉丁超立方）或 `random`，使用带种子的 RNG 保证可重复性。
-- 指标：`gain_dB`、`bw_Hz`、`irn_uV`、`power_uW`（顶 rail 供电电流 × rail 电压）和 `area`（各器件 `g_area` 之和）。
+- 指标：`gain_dB`、`bw_Hz`、`irn_uV`、`power_uW`（所有已求解电源支路的电压电流乘积之和）和 `area`（各器件 `g_area` 之和）。
 - 变量的 `targets` 可以同时驱动多个键值，保持匹配对（M7=M8, …）一致，使 AFE 的对称 DC 续流保持在物理支路上。
 - 结果导出为 CSV 和 JSONL；CLI 运行 `python -m circuitopt.explore <config.json>`。
 - 硅 corner 路由（`SKY130_CORNERS`/`SILICON_CORNERS`/`apply_silicon_corner`）现在在
@@ -675,8 +675,8 @@ PSS、PAC、PNoise 都不需要 ngspice 子进程。旧工艺适配器仅以显�
 解析优先级为 `TSMC28_MODEL_DIR`、`TSMC28_PDK_ROOT`、项目内入口、
 `PDK_ROOT/tsmc28hpcp`。详见 [TSMC28HPC+ 适配说明](tsmc28hpcp.md)。
 
-`circuitopt/circuit_loader.py` 的可选 `models` 块（`{"M1": {"type": "sky130.nmos", ...}}` 或
-`"freepdk45.nmos"` / `"tsmc28hpcp.nmos"`）把 JSON 电路里的特定器件绑到非默认 PDK，
+`circuitopt/circuit_loader.py` 要求 JSON 中每个 MOS 都有显式 `models` 条目
+（`pdk`、`model`、`section`、`bin`），从而把器件明确绑定到对应 PDK，
 所以一个混合 OTFT+硅（或全硅）电路只是配置
 问题——见 [JSON 电路格式](json_circuit_format_zh.md)。两个完整的全差分 OTA 设计流程案例:
 [SKY130 FD-OTA](sky130_fd_ota_design.md)、[FreePDK45 FD-OTA](freepdk45_fd_ota_design.md)。

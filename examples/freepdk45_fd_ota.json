@@ -27,15 +27,15 @@
     {"name": "MD",  "drain": "CTRL", "gate": "CTRL",  "source": "VDD",  "W": 4.0, "L": 0.2}
   ],
   "models": {
-    "M0": {"type": "freepdk45.nmos"}, "M1": {"type": "freepdk45.nmos"},
-    "M2": {"type": "freepdk45.nmos"}, "M3": {"type": "freepdk45.nmos"},
-    "M4": {"type": "freepdk45.nmos"},
-    "M5": {"type": "freepdk45.pmos", "vb": 1.0}, "M6": {"type": "freepdk45.pmos", "vb": 1.0},
-    "M7": {"type": "freepdk45.pmos", "vb": 1.0}, "M8": {"type": "freepdk45.pmos", "vb": 1.0},
-    "MS1": {"type": "freepdk45.nmos"}, "MS2": {"type": "freepdk45.nmos"},
-    "MS3": {"type": "freepdk45.nmos"}, "MS4": {"type": "freepdk45.nmos"},
-    "MT1": {"type": "freepdk45.nmos"}, "MT2": {"type": "freepdk45.nmos"},
-    "MD": {"type": "freepdk45.pmos", "vb": 1.0}
+    "M0": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"}, "M1": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M2": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"}, "M3": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M4": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M5": {"pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.0}, "M6": {"pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.0},
+    "M7": {"pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.0}, "M8": {"pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.0},
+    "MS1": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"}, "MS2": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "MS3": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"}, "MS4": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "MT1": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"}, "MT2": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "MD": {"pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.0}
   },
   "resistors": [
     {"name": "RS1", "a": "VINP", "b": "VSP", "R": 1000.0},

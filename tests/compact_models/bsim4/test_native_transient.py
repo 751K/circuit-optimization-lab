@@ -32,8 +32,8 @@ def test_native_inverter_charge_transient_without_ngspice(monkeypatch):
              "W": 2.0, "L": 0.03},
         ],
         "models": {
-            "MN": {"type": "tsmc28hpcp.nmos"},
-            "MP": {"type": "tsmc28hpcp.pmos", "vb": 0.9},
+            "MN": {"pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"},
+            "MP": {"pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 0.9},
         },
         "bias": {"VDD": 0.9},
         "outputs": ["OUT"],

@@ -43,10 +43,11 @@ import numpy as np
 from . import diagnostics
 from .circuit_loader import circuit_from_dict, models_from_config
 from .device_factory import (CORNERS, SKY130_CORNERS, CircuitBinding,
-                             apply_silicon_corner)
+                             apply_silicon_corner, is_silicon_model_types)
 from .device_model import get_default_model_type
 from .explore import (METRICS, apply_variables,
                       evaluate, parse_explore, sample)
+from .run_contract import SimulationInvalid
 from .transient_solver import transient
 
 SCHEMA_VERSION = "1.2"
@@ -146,7 +147,7 @@ def _finite_or_none(value):
     return v if math.isfinite(v) else None
 
 
-def _row(idx, var_values, metrics, extra=None, labels=LABELS):
+def _row(idx, var_values, metrics, extra=None, labels=LABELS, invalid=None):
     """One dataset record: design inputs, label outputs, and status flags.
 
     A DC-failed candidate (``metrics is None``) is kept with null labels and
@@ -162,14 +163,26 @@ def _row(idx, var_values, metrics, extra=None, labels=LABELS):
         else:
             values[name] = _finite_or_none(metrics.get(name)) if metrics else None
     metrics_finite = dc_converged and all(values[n] is not None for n in labels)
+    if invalid is None and not dc_converged:
+        invalid = {
+            "code": "not_converged",
+            "message": "candidate did not produce a converged DC operating point",
+        }
+    if invalid is None and not metrics_finite:
+        invalid = {
+            "code": "non_finite_result",
+            "message": "candidate did not produce all requested finite labels",
+        }
     return {
         "idx": int(idx),
         "design": {k: v for k, v in var_values.items()},
         "metrics": values,
         "status": {
+            "state": "invalid" if invalid is not None else "valid",
             "dc_converged": dc_converged,
             "noise_evaluated": noise_evaluated,
             "metrics_finite": metrics_finite,
+            **(invalid or {}),
         },
     }
 
@@ -443,24 +456,36 @@ def _hashable_nf(nf):
     return ("nf", nf)
 
 
-def _campaign_dataset_metrics(row, binding, sizes, topo, bias, device_names):
+def _campaign_dataset_metrics(row, binding, sizes, topo, bias):
     """A silicon-campaign result row -> the :func:`explore.evaluate` metrics dict.
 
-    ``gain_dB`` / ``gain_peak_dB`` / ``bw_Hz`` / ``irn_uV`` come straight from the
-    campaign; ``power_uW`` is the frozen ``explore._supply_power_uW`` reduction over
-    the campaign's per-device channel currents (``ich``); ``area`` is the frozen
-    ``explore._area`` (a pure geometry sum, PVT-independent). ``None`` when the
-    candidate's DC did not converge (a kept, null-label row — never dropped)."""
-    from .explore import _area, _supply_power_uW
+    AC/noise values come from the campaign. Power is deliberately recomputed from
+    the solved DC node voltages and complete device terminal currents; channel-current
+    shortcuts cannot account for bulk/gate currents or non-MOS supply branches."""
+    from .dc_measurements import source_power
+    from .explore import _area
 
     if not row.get("ok"):
         return None
-    ss = {name: {"Ich": float(row["ich"][k])} for k, name in enumerate(device_names)}
-    try:
-        power_uW = float(_supply_power_uW(topo, bias, ss))
-    except Exception as exc:                       # match evaluate()'s guard
-        diagnostics.note("dataset.campaign_power_eval_fail", exc)
-        power_uW = float("nan")
+    campaign_values = [
+        row.get("gain_dB"), row.get("gain_peak_dB"), row.get("bw_Hz"),
+        row.get("irn_uV"), *(row.get("dc_op") or ()),
+    ]
+    if not np.all(np.isfinite(np.asarray(campaign_values, dtype=float))):
+        return None
+    if topo.vsources or topo.vcvs or topo.ccvs or topo.cccs:
+        raise ValueError(
+            "compiled campaign does not expose controlled/voltage-source branch "
+            "currents required for exact source power")
+    dc_op = {
+        node: float(value)
+        for node, value in zip(topo.solved, row.get("dc_op") or ())
+    }
+    if len(dc_op) != len(topo.solved):
+        raise ValueError("compiled campaign returned an incomplete DC operating point")
+    devices = binding.build(sizes)
+    power_uW = float(
+        source_power(topo, bias, dc_op, devices, {})["total_w"] * 1e6)
     return {
         "gain_dB": float(row["gain_dB"]),
         "gain_peak_dB": float(row["gain_peak_dB"]),
@@ -494,7 +519,6 @@ def _campaign_dataset_rows(samples, size_vars, size_names, base_sizes, base_bias
         layers.setdefault(key, []).append((i, sizes, bias, cand_nf))
 
     out: dict = {}
-    device_names = [name for name, *_ in topo.devices]
     for members in layers.values():
         if len(members) < _MIN_CAMPAIGN_BATCH:
             continue                                # fragmented layer -> scalar
@@ -507,9 +531,10 @@ def _campaign_dataset_rows(samples, size_vars, size_names, base_sizes, base_bias
         cands = [camp.candidate(sizes, corner=corner) for _, sizes, _, _ in members]
         results = camp.evaluate_batch(cands, workers=workers,
                                       analyses=("dc", "ac", "noise"))
-        for (i, sizes, bias, _), row in zip(members, results):
-            metrics = _campaign_dataset_metrics(row, base_binding, sizes, topo, bias,
-                                                device_names)
+        for (i, sizes, bias, cand_nf), row in zip(members, results):
+            candidate_binding = dataclasses.replace(base_binding, nf=cand_nf)
+            metrics = _campaign_dataset_metrics(
+                row, candidate_binding, sizes, topo, bias)
             out[i] = _row(i, samples[i], metrics, None, labels)
     return out
 
@@ -598,23 +623,33 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
         # drop them (bug #95).
         cand_binding = dataclasses.replace(base_binding, topo=cand_topo, nf=cand_nf)
         x0 = seed_fn(sizes, bias) if seed_fn is not None else None
-        metrics = evaluate(cand_topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
-                           binding=cand_binding, x0_guess=x0, corner=eff_shift,
-                           require_noise=True)
+        try:
+            metrics = evaluate(
+                cand_topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
+                binding=cand_binding, x0_guess=x0, corner=eff_shift,
+                require_noise=True)
+        except SimulationInvalid as exc:
+            return _row(
+                i, var_values, None, labels=labels, invalid=exc.as_dict())
         extra = {}
         if periodic_groups and metrics is not None and spec is not None:  # DC converged
             for g in direct_groups:                        # transient
                 try:
                     extra.update(_PERIODIC_RUNNERS[g](spec, cand_binding, periodic,
                                                       sizes, bias, eff_shift))
-                except Exception as exc:
-                    diagnostics.note(f"dataset.{g}_eval_fail", exc)
+                except SimulationInvalid as exc:
+                    diagnostics.note(f"dataset.{g}_invalid", exc)
+                    return _row(
+                        i, var_values, None, labels=labels, invalid=exc.as_dict())
             if suite_groups:                               # pss/pac/pnoise, one chain
                 try:
                     extra.update(_run_suite_features(spec, cand_binding, suite_groups,
                                                      sizes, bias, eff_shift))
-                except Exception as exc:
-                    diagnostics.note(f"dataset.{'+'.join(suite_groups)}_eval_fail", exc)
+                except SimulationInvalid as exc:
+                    diagnostics.note(
+                        f"dataset.{'+'.join(suite_groups)}_invalid", exc)
+                    return _row(
+                        i, var_values, None, labels=labels, invalid=exc.as_dict())
         return _row(i, var_values, metrics, extra or None, labels)
 
     rows = [None] * n
@@ -625,7 +660,8 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
     # campaign; every other candidate keeps the scalar ``evaluate`` path byte-for-byte.
     campaign_rows = {}
     from ._campaign_sweep import campaign_enabled
-    if (campaign_enabled() and (base_binding.model_types or {}) and not struct_vars
+    if (campaign_enabled() and is_silicon_model_types(base_binding.model_types)
+            and not struct_vars
             and not corner_vars and seed_fn is None
             and tuple(groups) == ("ac_noise",)):
         try:

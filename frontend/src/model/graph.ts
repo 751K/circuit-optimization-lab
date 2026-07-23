@@ -48,8 +48,9 @@ interface BaseNode {
 
 /**
  * A three-terminal transistor. `model` + `modelKwargs` mirror a `models` entry
- * (PDK type and forwarded ctor kwargs: vb / corner / extract_w / temperature /
- * NF). `inputDrive` mirrors an `input_drives[name]` AC gate drive. Ports are
+ * (explicit PDK/model key, section/bin selectors, and forwarded ctor kwargs:
+ * vb / extract_w / temperature / NF). `inputDrive` mirrors an
+ * `input_drives[name]` AC gate drive. Ports are
  * always exactly D / G / S.
  */
 export interface MosfetNode extends BaseNode {
@@ -68,7 +69,7 @@ export interface MosfetNode extends BaseNode {
   nf?: number;
   /** PDK model-type key from a `models` entry (e.g. "sky130.nmos"). */
   model?: string;
-  /** Forwarded `models` kwargs (vb, corner, extract_w, temperature, NF, ...). */
+  /** Binding selectors and ctor kwargs (section, bin, vb, extract_w, ...). */
   modelKwargs?: Record<string, unknown>;
   /** AC small-signal gate drive from `input_drives`. */
   inputDrive?: number;

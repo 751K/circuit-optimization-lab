@@ -124,7 +124,9 @@ def test_ota_ac_matches_ngspice(tmp_path):
              "vdd vdd 0 1.0", "vb vb 0 0.55",
              "vip vip 0 dc 0.55 ac 0.5", "vin vin 0 dc 0.55 ac -0.5"]
     for d in cfg["devices"]:
-        mdl = "PMOS_VTG" if cfg["models"][d["name"]]["type"].endswith("pmos") else "NMOS_VTG"
+        mdl = ("PMOS_VTG"
+               if cfg["models"][d["name"]]["model"] == "pmos"
+               else "NMOS_VTG")
         b = "vdd" if mdl == "PMOS_VTG" else "0"
         lines.append(f'm{d["name"].lower()} {nm.get(d["drain"], d["drain"])} '
                      f'{nm.get(d["gate"], d["gate"])} {nm.get(d["source"], d["source"])} '
@@ -253,7 +255,9 @@ def test_fd_ota_ac_matches_ngspice(tmp_path):
              f"vbcn vbcn 0 {b['VB_CN']}", f"vbcp vbcp 0 {b['VB_CP']}",
              f"vip vip 0 dc {b['VINP']} ac 0.5", f"vin vin 0 dc {b['VINN']} ac -0.5"]
     for d in cfg["devices"]:
-        mdl = "PMOS_VTG" if cfg["models"][d["name"]]["type"].endswith("pmos") else "NMOS_VTG"
+        mdl = ("PMOS_VTG"
+               if cfg["models"][d["name"]]["model"] == "pmos"
+               else "NMOS_VTG")
         bulk = "vdd" if mdl == "PMOS_VTG" else "0"
         lines.append(f"m{d['name'].lower()} {net(d['drain'])} {net(d['gate'])} "
                      f"{net(d['source'])} {bulk} {mdl} w={d['W']}u l={d['L']}u")

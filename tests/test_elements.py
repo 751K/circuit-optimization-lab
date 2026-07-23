@@ -35,7 +35,10 @@ def test_current_source_into_resistor_dc():
 def test_capacitor_element_matches_load_cap_in_ac():
     common = dict(solved=["OUT"], devices=[("MPU", "OUT", "IN", "VDD")],
                   rails={"VDD": "VDD", "GND": 0.0, "IN": "VIN"}, outputs=("OUT",),
-                  input_drives={"MPU": 1.0}, resistors=[("RL", "OUT", "GND", 4e6)])
+                  input_drives={"MPU": 1.0}, resistors=[("RL", "OUT", "GND", 4e6)],
+                  model_types={"MPU": "at4000tg.pmos"},
+                  device_kwargs={
+                      "MPU": {"section": "inherit", "bin": "auto"}})
     topo_lc = Topology(load_caps=[("OUT", "GND", 2e-12)], **common)
     topo_cap = Topology(capacitors=[("CL", "OUT", "GND", 2e-12)], **common)
     sizes, bias = {"MPU": (2000, 80)}, {"VDD": 40.0, "VIN": 25.0}
@@ -113,6 +116,8 @@ def test_loader_rejects_unknown_resistor_node():
     bad = {"solved": ["OUT"], "rails": {"VDD": "VDD", "GND": 0.0},
            "devices": [{"name": "M1", "drain": "OUT", "gate": "VDD", "source": "VDD",
                         "W": 1000, "L": 80}],
+           "models": {"M1": {"pdk": "at4000tg", "model": "pmos",
+                              "section": "inherit", "bin": "auto"}},
            "resistors": [{"name": "RL", "a": "OUT", "b": "NOPE", "R": 1e3}],
            "outputs": ["OUT"]}
     with pytest.raises(ValueError, match="unknown node"):
@@ -123,6 +128,8 @@ def test_loader_rejects_nonpositive_resistor():
     bad = {"solved": ["OUT"], "rails": {"VDD": "VDD", "GND": 0.0},
            "devices": [{"name": "M1", "drain": "OUT", "gate": "VDD", "source": "VDD",
                         "W": 1000, "L": 80}],
+           "models": {"M1": {"pdk": "at4000tg", "model": "pmos",
+                              "section": "inherit", "bin": "auto"}},
            "resistors": [["RL", "OUT", "GND", 0.0]],
            "outputs": ["OUT"]}
     with pytest.raises(ValueError, match="must be positive"):
@@ -133,6 +140,8 @@ def test_loader_accepts_tuple_current_source():
     data = {"solved": ["OUT"], "rails": {"VDD": "VDD", "GND": 0.0},
             "devices": [{"name": "M1", "drain": "OUT", "gate": "VDD", "source": "VDD",
                          "W": 1000, "L": 80}],
+            "models": {"M1": {"pdk": "at4000tg", "model": "pmos",
+                               "section": "inherit", "bin": "auto"}},
             "current_sources": [["IB", "OUT", "GND", -1e-6]],   # negative current allowed
             "outputs": ["OUT"]}
     spec = circuit_from_dict(data)

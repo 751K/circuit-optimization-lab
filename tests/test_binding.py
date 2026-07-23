@@ -16,6 +16,7 @@ The FreePDK45 cases require only the local model cards; simulation uses native
 C BSIM4.
 """
 import dataclasses
+import copy
 import os
 
 import numpy as np
@@ -231,14 +232,12 @@ def test_binding_override():
     ac_x0_direct = ac_solve(AFE_SIZES, AFE_BIAS, freqs, x0_guess=seed)
     assert np.array_equal(ac_x0["gains"], ac_x0_direct["gains"])
 
-    # (c) explicit model_types overrides the binding's. A binding carrying a bogus
-    #     model map, overridden by an explicit empty-ish OTFT map ({}), must match
-    #     the plain default-PDK solve.
+    # (c) an explicit empty model map is not a request for a default PDK. Every
+    #     transistor must stay explicitly bound.
     b_models = CircuitBinding(topo=AFE_TOPO,
                               model_types={"M7": "does.not.exist"})
-    ac_mt = ac_solve(AFE_SIZES, AFE_BIAS, freqs, model_types={}, binding=b_models)
-    assert ac_mt is not None
-    assert np.array_equal(ac_mt["gains"], ac_ref["gains"])
+    with pytest.raises(ValueError, match="Every MOS must have an explicit"):
+        ac_solve(AFE_SIZES, AFE_BIAS, freqs, model_types={}, binding=b_models)
 
 
 # ── T7: dispatch never silently reverts to OTFT ──────────────────────────────
@@ -259,11 +258,11 @@ def test_dispatch_no_silent_otft_fallback():
     assert suite["ac"] is not None and direct is not None
     assert np.array_equal(suite["ac"]["gains"], direct["gains"])
 
-    # (b) strip the per-device models (model_types/device_kwargs → None): the circuit
-    #     silently falls back to the default OTFT PDK, and the gain is off by a mile.
-    stripped = dataclasses.replace(spec, model_types=None, device_kwargs=None)
-    otft = run_analysis_suite(stripped, analyses, selected=["ac"])
-    assert otft["ac"] is not None
-    good_dB = 20.0 * np.log10(suite["ac"]["gains"][0])
-    otft_dB = 20.0 * np.log10(otft["ac"]["gains"][0])
-    assert abs(good_dB - otft_dB) > 3.0    # in fact ~100 dB — a catastrophic revert
+    # (b) if both the spec and topology lose the binding, solving fails immediately.
+    stripped_topo = copy.copy(spec.topology)
+    stripped_topo.model_types = {}
+    stripped_topo.device_kwargs = {}
+    stripped = dataclasses.replace(
+        spec, topology=stripped_topo, model_types=None, device_kwargs=None)
+    with pytest.raises(ValueError, match="Every MOS must have an explicit"):
+        run_analysis_suite(stripped, analyses, selected=["ac"])

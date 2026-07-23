@@ -43,7 +43,8 @@ def test_row_schema_and_all_samples_kept():
         assert r["idx"] == i
         assert set(r["design"]) == var_names
         assert set(r["metrics"]) == set(ds.LABELS)
-        assert set(r["status"]) == {"dc_converged", "noise_evaluated", "metrics_finite"}
+        assert {"state", "dc_converged", "noise_evaluated", "metrics_finite"} <= set(
+            r["status"])
         json.dumps(r)                              # valid JSON (NaN/inf coerced to null)
 
 
@@ -176,6 +177,12 @@ _TRAN_CONFIG = {
         {"name": "MPU", "drain": "OUT", "gate": "IN", "source": "VDD", "W": 2000, "L": 80},
         {"name": "MLD", "drain": "GND", "gate": "GND", "source": "OUT", "W": 1500, "L": 80},
     ],
+    "models": {
+        "MPU": {"pdk": "at4000tg", "model": "pmos",
+                "section": "inherit", "bin": "auto"},
+        "MLD": {"pdk": "at4000tg", "model": "pmos",
+                "section": "inherit", "bin": "auto"},
+    },
     "vsources": [{"name": "V_IN", "p": "IN", "q": "GND", "value": "vin"}],
     "bias": {"VDD": 40.0},
     "outputs": ["OUT"],

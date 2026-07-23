@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import json
 from typing import TYPE_CHECKING, Any
 
+from .device_model import get_pdk
 from .topology import Topology
 
 if TYPE_CHECKING:
@@ -89,43 +90,73 @@ def _load_devices(raw_devices):
     return devices, sizes, nf, mult
 
 
-# Per-device constructor kwargs accepted in a ``models`` entry (besides ``type``).
+# Per-device constructor kwargs accepted in a ``models`` entry.
 # Restricted to a known set so a typo raises instead of being silently dropped by the
 # device constructor's ``**kwargs``. ``vb``/``extract_w``/``temperature`` are floats,
 # ``corner`` a SKY130 corner name, ``NF`` an integer finger count.
-_MODEL_KWARGS = ("vb", "corner", "extract_w", "temperature", "NF")
+_MODEL_KWARGS = ("vb", "bulk_rail", "extract_w", "temperature", "NF")
+_MODEL_BINDING_KEYS = ("pdk", "model", "section", "bin")
 
 
 def _load_models(raw_models, devices):
-    """Parse the optional ``models`` block: per-device PDK model type + ctor kwargs.
+    """Parse the required explicit per-device process/model selection.
 
-    ``{"M1": {"type": "sky130.nmos", "vb": 1.8}}`` becomes
-    ``({"M1": "sky130.nmos"}, {"M1": {"vb": 1.8}})``. ``type`` names a model-registry
-    key (see :func:`circuitopt.device_model.register_pdk`); the remaining keys are forwarded
-    to the device constructor. Devices absent from the block fall back to the default
-    PDK, so the block is purely additive (an OTFT config omits it entirely)."""
+    Every MOS must name ``pdk``, ``model``, ``section`` and ``bin``. ``section`` may
+    be ``"inherit"`` so a PVT campaign selects it, while ``bin="auto"`` requests the
+    PDK's geometry-based unique-bin selection.
+    """
     model_types, device_kwargs = {}, {}
-    if raw_models is None:
+    if not devices:
         return model_types, device_kwargs
+    if raw_models is None:
+        names = ", ".join(name for name, *_ in devices)
+        raise ValueError(f"models is required; every MOS must be explicitly bound: {names}")
     if not isinstance(raw_models, dict):
-        raise ValueError("models must be an object mapping device name to {type, ...kwargs}")
+        raise ValueError(
+            "models must map each MOS to {pdk, model, section, bin, ...kwargs}")
     dev_names = {name for name, *_ in devices}
+    missing = sorted(dev_names - set(raw_models))
+    if missing:
+        raise ValueError(
+            "Missing explicit model binding for MOS device(s): " + ", ".join(missing))
     for name, spec in raw_models.items():
         if name not in dev_names:
             raise ValueError(f"models[{name!r}]: unknown device {name!r}")
         if not isinstance(spec, dict):
-            raise ValueError(f"models[{name!r}] must be an object with a 'type' and/or kwargs")
+            raise ValueError(
+                f"models[{name!r}] must contain pdk, model, section and bin")
+        if "type" in spec:
+            raise ValueError(
+                f"models[{name!r}].type is obsolete; use explicit "
+                "{pdk, model, section, bin}")
+        absent = [key for key in _MODEL_BINDING_KEYS if key not in spec]
+        if absent:
+            raise ValueError(
+                f"models[{name!r}] missing required binding key(s): {', '.join(absent)}")
+        pdk = str(spec["pdk"]).strip()
+        model = str(spec["model"]).strip()
+        section = str(spec["section"]).strip()
+        bin_selector = str(spec["bin"]).strip()
+        if not all((pdk, model, section, bin_selector)):
+            raise ValueError(f"models[{name!r}] binding values must be non-empty strings")
+        model_type = get_pdk(pdk).model_type(model)
+        model_types[str(name)] = model_type
         kwargs = {}
         for key, value in spec.items():
-            if key == "type":
-                model_types[str(name)] = str(value)
+            if key in _MODEL_BINDING_KEYS:
+                continue
             elif key in _MODEL_KWARGS:
                 kwargs[key] = int(value) if key == "NF" else value
             else:
-                raise ValueError(f"models[{name!r}]: unknown key {key!r}; known: 'type', "
-                                 + ", ".join(repr(k) for k in _MODEL_KWARGS))
-        if kwargs:
-            device_kwargs[str(name)] = kwargs
+                known = (*_MODEL_BINDING_KEYS, *_MODEL_KWARGS)
+                raise ValueError(
+                    f"models[{name!r}]: unknown key {key!r}; known: "
+                    + ", ".join(repr(k) for k in known))
+        if section.lower() != "inherit":
+            kwargs["corner"] = section
+        kwargs["section"] = section
+        kwargs["bin"] = bin_selector
+        device_kwargs[str(name)] = kwargs
     return model_types, device_kwargs
 
 
@@ -470,6 +501,11 @@ def circuit_from_dict(data):
         device_mult=embedded_mult,
     )
     _validate_nodes(topo)
+    model_types, device_kwargs = _load_models(data.get("models"), devices)
+    topo.model_types = dict(model_types)
+    topo.device_kwargs = {
+        str(dev): dict(kwargs) for dev, kwargs in device_kwargs.items()
+    }
     bias = {str(k): float(v) for k, v in data.get("bias", {}).items()}
     periodic = data.get("periodic")
     if periodic is not None and not isinstance(periodic, dict):
@@ -480,7 +516,6 @@ def circuit_from_dict(data):
     adc = data.get("adc")
     if adc is not None and not isinstance(adc, dict):
         raise ValueError("adc must be an object")
-    model_types, device_kwargs = _load_models(data.get("models"), devices)
     return CircuitSpec(
         name=name, topology=topo, sizes=sizes, bias=bias, nf=nf,
         periodic=dict(periodic) if periodic is not None else None,

@@ -45,8 +45,14 @@ import numpy as np
 from .ac_solver import ac_solve
 from .device_factory import CircuitBinding
 from .noise_solver import band_rms, noise_analysis
+from .run_contract import (
+    SimulationInvalid,
+    metric as unit_metric,
+    saturation_metric,
+    source_power_metric,
+)
 from .circuit_loader import circuit_from_dict, models_from_config
-from . import diagnostics
+from .frequency_metrics import phase_margin, unity_gain_freq
 
 
 METRICS = ("gain_dB", "gain_peak_dB", "bw_Hz", "irn_uV", "power_uW", "area")
@@ -242,21 +248,6 @@ def apply_variables(variables, var_values, base_sizes, base_bias, base_nf=None):
 
 
 # ── evaluation ──────────────────────────────────────────────────────────────
-def _supply_power_uW(topo, bias, ss):
-    """Top-rail supply current x rail voltage. Assumes the highest-voltage rail is
-    the supply and all current enters through devices sourced from it (true for
-    PMOS-top topologies like the AFE and the single-stage example)."""
-    rail_v = topo.rail_values(bias)
-    numeric = {k: v for k, v in rail_v.items() if isinstance(v, (int, float))}
-    if not numeric:
-        return 0.0
-    top_rail = max(numeric, key=numeric.get)
-    top_v = numeric[top_rail]
-    i_supply = sum(abs(ss[name].get("Ich", 0.0))
-                   for name, d, g, s in topo.devices if s == top_rail)
-    return top_v * i_supply * 1e6
-
-
 def _area(binding, sizes):
     """Sum of per-device ``g_area`` under *binding*. Each device is built with its own
     model type so a mixed-process circuit sums each PDK's real area metric (OTFT
@@ -292,13 +283,13 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
     bare-AFE operating point).
     corner applies a process shift (flat dict, e.g. the slow corner) or per-device
     mismatch map; passed straight through to the solvers.
-    model_types / device_kwargs bind non-default per-device models (e.g. silicon
-    SKY130 nmos/pmos); ``None`` keeps the default-PDK path byte-for-byte unchanged.
+    model_types / device_kwargs carry each MOS's explicit PDK, model, section,
+    and bin binding. They may be omitted only when ``topo`` already owns that
+    complete binding.
 
     Two calling conventions, one behavior. ``binding`` (a :class:`CircuitBinding`
     supplying topo / model_types / device_kwargs) is the **preferred** path and the
-    one all internal callers now use — it carries the per-device model map so no
-    candidate silently reverts to the default PDK. The bare ``model_types`` /
+    one all internal callers now use. The bare ``model_types`` /
     ``device_kwargs`` kwargs are the **legacy** path, kept only for external scripts;
     with ``binding=None`` a binding is constructed from them, so the result is
     equivalent. When both are given, an explicit non-``None`` kwarg (and the explicit
@@ -326,11 +317,9 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
     if ac is None:
         return None
     irn_uV = float("nan")
-    try:
-        power_uW = float(_supply_power_uW(binding.topo, bias, ac["ss"]))
-    except Exception as exc:
-        diagnostics.note("explore.power_eval_fail", exc)
-        power_uW = float("nan")
+    power_uW = float(ac["source_power"]["total_w"]) * 1e6
+    ugf = float(unity_gain_freq(ac["freqs"], ac["response"]))
+    pm = float(phase_margin(ac["freqs"], ac["response"]))
     metrics = {
         "gain_dB": float(ac["Av_dc_dB"]),          # gain at the lowest analysis freq
         "gain_peak_dB": float(ac["peak_dB"]),      # passband peak (the spec gain for a bandpass)
@@ -339,19 +328,35 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
         "power_uW": power_uW,
         "area": _area(binding, sizes),
         "_noise_evaluated": False,
+        "measurements": {
+            "gain": unit_metric(float(ac["Av_dc_dB"]), "dB"),
+            "unity_gain_frequency": unit_metric(
+                ugf if np.isfinite(ugf) else None, "Hz",
+                status="valid" if np.isfinite(ugf) else "no_crossing",
+            ),
+            "phase_margin": unit_metric(
+                pm if np.isfinite(pm) else None, "deg",
+                status="valid" if np.isfinite(pm) else "no_crossing",
+            ),
+            "dc_source_power": source_power_metric(ac["source_power"]),
+            "saturation": saturation_metric(ac.get("operating_regions", {})),
+        },
     }
     if (_needs_noise(constraints, objectives, require_noise) and
             is_feasible(metrics, _non_noise_constraints(constraints))):
-        try:
-            noise = noise_analysis(sizes, bias, freqs, binding=binding,
-                                   x0_guess=ac["dc_op"], corner=corner)
-            if noise is not None:
-                metrics["irn_uV"] = float(band_rms(freqs, noise["irn_psd"],
-                                                   band[0], band[1]) * 1e6)
-            metrics["_noise_evaluated"] = True
-        except Exception as exc:
-            diagnostics.note("explore.irn_eval_fail", exc)
-            metrics["irn_uV"] = float("nan")
+        noise = noise_analysis(sizes, bias, freqs, binding=binding,
+                               x0_guess=ac["dc_op"], corner=corner)
+        metrics["irn_uV"] = float(band_rms(
+            freqs, noise["irn_psd"], band[0], band[1]) * 1e6)
+        metrics["measurements"]["integrated_input_noise"] = unit_metric(
+            metrics["irn_uV"] * 1e-6, "V_rms",
+            integration_band_hz=[float(band[0]), float(band[1])],
+        )
+        metrics["measurements"]["integrated_output_noise"] = unit_metric(
+            float(band_rms(freqs, noise["out_psd"], band[0], band[1])), "V_rms",
+            integration_band_hz=[float(band[0]), float(band[1])],
+        )
+        metrics["_noise_evaluated"] = True
     return metrics
 
 
@@ -432,9 +437,15 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
         sizes, bias, cand_nf = apply_variables(cfg.variables, var_values,
                                                base_sizes, base_bias, base_nf=nf)
         x0 = seed_fn(sizes, bias) if seed_fn is not None else None
-        metrics = evaluate(topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
-                           binding=binding, x0_guess=x0, corner=corner,
-                           constraints=cfg.constraints, objectives=cfg.objectives)
+        invalid = None
+        try:
+            metrics = evaluate(
+                topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
+                binding=binding, x0_guess=x0, corner=corner,
+                constraints=cfg.constraints, objectives=cfg.objectives)
+        except SimulationInvalid as exc:
+            metrics = None
+            invalid = exc.as_dict()
         complete = bool(metrics is not None and _has_finite_metrics(metrics, cfg.objectives))
         candidates.append({
             "idx": i,
@@ -445,6 +456,10 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
                              is_feasible(metrics, cfg.constraints)),
             "pareto": False,
             "noise_evaluated": bool(metrics and metrics.get("_noise_evaluated", False)),
+            "status": (
+                {"state": "invalid", **invalid}
+                if invalid is not None else {"state": "valid"}
+            ),
         })
         if progress is not None:
             progress(i + 1, n)

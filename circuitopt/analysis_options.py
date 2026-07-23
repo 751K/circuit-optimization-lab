@@ -221,7 +221,7 @@ ANALYSIS_OPTIONS = {
 DISPATCH_KEYS = {
     "ac": frozenset({"freqs", "corner"}),
     "noise": frozenset({"freqs", "corner", "band"}),
-    "transient": frozenset({"signed_devices"}),
+    "transient": frozenset({"signed_devices", "settling_tolerance"}),
     "pss": frozenset(),
     "pac": frozenset(),
     "pnoise": frozenset(),
@@ -293,4 +293,3 @@ def solver_kwargs(analysis, cfg, *, include_defaults=False):
 
 def schema_properties(analysis):
     return {opt.name: opt.schema for opt in options_for(analysis) if opt.schema is not None}
-

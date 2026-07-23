@@ -163,6 +163,8 @@ def _silicon_pdk_of(model_types: Mapping[str, str]) -> str:
     if len(families) != 1:
         raise ValueError(f"expected one silicon PDK family, got {sorted(families)}")
     family = families.pop()
+    if family not in {"sky130", "freepdk45", "tsmc28hpcp"}:
+        raise ValueError(f"unsupported native silicon PDK family {family!r}")
     # Device-registry name -> CompiledPdk name.
     return {"tsmc28hpcp": "tsmc28"}.get(family, family)
 

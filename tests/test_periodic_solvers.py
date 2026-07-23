@@ -340,7 +340,7 @@ def test_pnoise_reports_sparse_solver_degradation(monkeypatch):
     assert any(w["code"] == "hb_sparse_unavailable" for w in pn["pnoise_warnings"])
 
 
-def test_pnoise_reports_device_noise_degradation(monkeypatch):
+def test_pnoise_rejects_device_noise_degradation(monkeypatch):
     from circuitopt.pmos_tft_model import PMOS_TFT
 
     period = 1e-3
@@ -351,6 +351,8 @@ def test_pnoise_reports_device_noise_degradation(monkeypatch):
         rails={"VDD": 40.0, "VG": 0.0, "GND": 0.0},
         outputs=("OUT",),
         resistors=[("R1", "OUT", "GND", 1e6)],
+        model_types={"M1": "at4000tg.pmos"},
+        device_kwargs={"M1": {"section": "inherit", "bin": "auto"}},
     )
     pss = {
         "topology": topo,
@@ -365,16 +367,14 @@ def test_pnoise_reports_device_noise_degradation(monkeypatch):
         raise NotImplementedError("noise hook missing")
 
     monkeypatch.setattr(PMOS_TFT, "get_noise_psd", fail_noise)
-    with pytest.warns(RuntimeWarning, match="device noise evaluation failed"):
-        pn = pnoise_solve(
+    from circuitopt.run_contract import ModelEvaluationError
+
+    with pytest.raises(ModelEvaluationError, match="periodic noise-PSD"):
+        pnoise_solve(
             {"M1": (5000.0, 30.0)}, {}, np.array([100.0]), pss_result=pss,
             max_sideband=0, n_period_samples=16, gains=np.ones(1),
             lti_fast_path=False, cache_linearization=False,
         )
-    assert pn["pnoise_degraded"] is True
-    assert pn["pnoise_noise_failure_count"] > 0
-    assert pn["pnoise_noise_failure_devices"] == ("M1",)
-    assert any(w["code"] == "device_noise_unsupported" for w in pn["pnoise_warnings"])
 
 
 def test_gear2_is_second_order_on_rc_lowpass():
@@ -512,6 +512,8 @@ def test_reverse_biased_pass_switch_restores_not_pumps():
         rails={"VIN": 20.0, "VG": 0.0, "GND": 0.0},    # source 20, gate 0 -> PMOS on
         capacitors=[("C1", "MID", "GND", 1e-9)],
         outputs=("MID",),
+        model_types={"M1": "at4000tg.pmos"},
+        device_kwargs={"M1": {"section": "inherit", "bin": "auto"}},
     )
     t = np.linspace(0.0, 5e-3, 2001)
     tr = transient({"M1": (5000.0, 30.0)}, {}, t, topo=topo,

@@ -81,6 +81,11 @@ def build_sc_topo() -> Topology:
         rails={"GND": 0.0, "VDD": VDD},
         solved=["VIN", "CLK1", "CLK2", "VMID", "VOUT"],
         outputs=["VOUT"],
+        model_types={"M1": "at4000tg.pmos", "M2": "at4000tg.pmos"},
+        device_kwargs={
+            name: {"section": "inherit", "bin": "auto"}
+            for name in ("M1", "M2")
+        },
     )
 
 

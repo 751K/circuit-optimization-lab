@@ -108,3 +108,27 @@ describe("passthrough: unmodeled blocks survive verbatim", () => {
     expect(deepEqual(chop.description, chopOut.description).equal).toBe(true);
   });
 });
+
+describe("strict MOS binding export", () => {
+  it("rejects a MOS without an explicit model", () => {
+    const { graph, rest } = circuitJsonToGraph(fixtures.find(
+      (f) => f.name === "single_stage.json",
+    )!.json);
+    const mos = graph.nodes.find((node) => node.kind === "mosfet")!;
+    if (mos.kind === "mosfet") mos.model = undefined;
+    expect(() => graphToCircuitJson(graph, rest)).toThrow(
+      /every MOS requires an explicit PDK\/model binding/,
+    );
+  });
+
+  it("rejects an unqualified model key", () => {
+    const { graph, rest } = circuitJsonToGraph(fixtures.find(
+      (f) => f.name === "single_stage.json",
+    )!.json);
+    const mos = graph.nodes.find((node) => node.kind === "mosfet")!;
+    if (mos.kind === "mosfet") mos.model = "pmos";
+    expect(() => graphToCircuitJson(graph, rest)).toThrow(
+      /fully qualified "pdk\.model"/,
+    );
+  });
+});

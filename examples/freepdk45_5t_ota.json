@@ -11,9 +11,9 @@
     {"name": "M5", "drain": "tail", "gate": "vbias", "source": "GND",  "W": 1.0, "L": 0.1}
   ],
   "models": {
-    "M1": {"type": "freepdk45.nmos"}, "M2": {"type": "freepdk45.nmos"},
-    "M3": {"type": "freepdk45.pmos", "vb": 1.0}, "M4": {"type": "freepdk45.pmos", "vb": 1.0},
-    "M5": {"type": "freepdk45.nmos"}
+    "M1": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"}, "M2": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"},
+    "M3": {"pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.0}, "M4": {"pdk": "freepdk45", "model": "pmos", "section": "inherit", "bin": "auto", "vb": 1.0},
+    "M5": {"pdk": "freepdk45", "model": "nmos", "section": "inherit", "bin": "auto"}
   },
   "bias": {"VDD": 1.0, "VCM": 0.55, "VB": 0.55},
   "outputs": ["vout"],

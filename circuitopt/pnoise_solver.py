@@ -33,6 +33,7 @@ from .device_factory import (
     resolve_binding,
 )
 from .noise_solver import band_rms, noise_analysis
+from .run_contract import ModelEvaluationError, SimulationInvalid
 from .pac_solver import (
     _conversion_charge_caps,
     _freeze_kwargs,
@@ -794,24 +795,18 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
                                         float(exponent))
                         continue
                     except Exception as exc:
-                        diagnostics.note("pnoise.device_noise_zeroed", exc)
-                        noise_failure_count += 1
-                        noise_failure_devices.add(name)
-                        if not noise_failure_reason:
-                            noise_failure_reason = type(exc).__name__
-                        continue
+                        raise ModelEvaluationError(
+                            name, "periodic terminal-noise evaluation", exc
+                        ) from exc
                 else:
                     try:
                         S_th, S_fl1 = dev_inst[name].get_noise_psd(
                             Vs, Vd, Vg, frequency=1.0
                         )
                     except Exception as exc:
-                        diagnostics.note("pnoise.device_noise_zeroed", exc)
-                        noise_failure_count += 1
-                        noise_failure_devices.add(name)
-                        if not noise_failure_reason:
-                            noise_failure_reason = type(exc).__name__
-                        S_th, S_fl1 = 0.0, 0.0
+                        raise ModelEvaluationError(
+                            name, "periodic noise-PSD evaluation", exc
+                        ) from exc
                 Sth[j, m] = max(float(S_th), 0.0)
                 Sfl[j, m] = max(float(S_fl1), 0.0)
 
@@ -863,13 +858,11 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
             }
     noise_failure_devices = tuple(sorted(noise_failure_devices))
     if noise_failure_count:
-        devices_s = ", ".join(noise_failure_devices)
-        add_warning(
-            "device_noise_unsupported",
-            "device noise evaluation failed for "
-            f"{noise_failure_count} orbit samples on {devices_s}; "
-            "those device noise contributions were set to zero. "
-            "This degradation path is not fully supported yet.",
+        raise SimulationInvalid(
+            "model_evaluation_failed",
+            "cached periodic-noise linearization contains failed device-noise "
+            f"samples for: {', '.join(noise_failure_devices)}",
+            analysis="pnoise",
         )
     linearization_time_s = time.perf_counter() - t_linear0
 

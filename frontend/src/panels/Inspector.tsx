@@ -19,7 +19,9 @@ import {
 } from "../model";
 import { NumberField, TextField } from "./fields";
 
-const MODEL_KWARG_KEYS = ["vb", "corner", "extract_w", "temperature", "NF"] as const;
+const MODEL_KWARG_KEYS = [
+  "section", "bin", "vb", "bulk_rail", "extract_w", "temperature", "NF",
+] as const;
 
 export default function Inspector() {
   const graph = useEditor((s) => s.graph);
@@ -127,7 +129,7 @@ function MosfetEditor({ node, models }: { node: MosfetNode; models: string[] }) 
 
       <div className="subhead">model kwargs</div>
       {MODEL_KWARG_KEYS.map((k) =>
-        k === "corner" ? (
+        k === "section" || k === "bin" || k === "bulk_rail" ? (
           <TextField
             key={k}
             label={k}
