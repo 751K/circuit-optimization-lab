@@ -198,6 +198,50 @@ def test_dataset_campaign_guard_afe(tmp_path):
     assert calls["n"] == 0                                  # AFE stays scalar
 
 
+@pytest.mark.parametrize("path,corner", [
+    ("examples/freepdk45_5t_ota.json", "nom"),
+    ("examples/sky130_5t_ota.json", "tt"),
+    ("examples/tsmc28hpcp_5t_ota.json", "tt"),
+])
+def test_silicon_campaign_exposes_gain_db_and_ich(path, corner):
+    """The new silicon result fields reproduce the frozen labels bit-for-bit, 3 PDKs.
+
+    ``gain_dB`` == ``ac_solver.Av_dc_dB`` and ``power_uW`` (via ``_supply_power_uW``
+    over the campaign ``ich``) == ``explore.evaluate``'s power — seeded from the same
+    nominal op so the comparison isolates the reductions from the DC root."""
+    _require_rust()
+    if "tsmc28" in path and "TSMC28_PDK_ROOT" not in os.environ:
+        pytest.skip("TSMC28_PDK_ROOT not set")
+    if "freepdk45" in path:
+        _freepdk45_ready()
+    from circuitopt.circuit_loader import load_circuit_json
+    from circuitopt.ac_solver import ac_solve
+    from circuitopt.explore import evaluate, _supply_power_uW
+    from circuitopt._rust_campaign import SiliconCampaign
+    import numpy as np
+
+    freqs, band = np.logspace(3, 7, 25), (1e3, 1e6)
+    spec = load_circuit_json(path)
+    b = spec.binding()
+    ac = ac_solve(spec.sizes, spec.bias, freqs, corner=corner, nf=spec.nf, binding=b)
+    ref = evaluate(spec.topology, spec.sizes, spec.bias, spec.nf, freqs, band,
+                   binding=b.at_corner(corner), corner=None, x0_guess=ac["dc_op"],
+                   require_noise=True)
+    camp = SiliconCampaign(spec, freqs, band=band)
+    row = camp.evaluate_batch(
+        [camp.candidate(spec.sizes, corner, seed=camp.seed_vector(ac["dc_op"]),
+                        trust_seed_as_op=True)], 1, ["dc", "ac", "noise"])[0]
+    devs = [n for n, *_ in spec.topology.devices]
+    power = _supply_power_uW(spec.topology, spec.bias,
+                             {n: {"Ich": row["ich"][k]} for k, n in enumerate(devs)})
+
+    def rel(a, c):
+        return abs(a - c) / max(abs(a), abs(c), 1e-30)
+    assert rel(row["gain_dB"], ref["gain_dB"]) <= 1e-12, row["gain_dB"]
+    assert rel(power, ref["power_uW"]) <= 1e-12, (power, ref["power_uW"])
+    assert len(row["ich"]) == len(devs)
+
+
 class _FrameTrap:
     def __init__(self, needles):
         self.needles, self.hits = needles, 0
