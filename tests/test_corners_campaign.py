@@ -60,8 +60,11 @@ def _require_rust():
 
 def _ready(path):
     """Skip if the PDK cards for ``path`` are not installed in this checkout."""
-    if "tsmc28" in path and not os.environ.get("TSMC28_PDK_ROOT"):
-        pytest.skip("TSMC28_PDK_ROOT not set")
+    if "tsmc28" in path:
+        from circuitopt.toolchain import tsmc28_model_dir
+        if not os.path.isfile(os.path.join(
+                tsmc28_model_dir(), "cln28hpcp_1d8_elk_v1d0_2p2.l")):
+            pytest.skip("licensed TSMC28HPC+ model is not installed")
     if "freepdk45" in path:
         from circuitopt.toolchain import pdk_root
         if not os.path.isfile(os.path.join(pdk_root(), "freepdk45", "models_nom",

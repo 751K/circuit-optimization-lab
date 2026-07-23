@@ -210,8 +210,11 @@ def test_silicon_campaign_exposes_gain_db_and_ich(path, corner):
     over the campaign ``ich``) == ``explore.evaluate``'s power — seeded from the same
     nominal op so the comparison isolates the reductions from the DC root."""
     _require_rust()
-    if "tsmc28" in path and "TSMC28_PDK_ROOT" not in os.environ:
-        pytest.skip("TSMC28_PDK_ROOT not set")
+    if "tsmc28" in path:
+        from circuitopt.toolchain import tsmc28_model_dir
+        if not os.path.isfile(os.path.join(
+                tsmc28_model_dir(), "cln28hpcp_1d8_elk_v1d0_2p2.l")):
+            pytest.skip("licensed TSMC28HPC+ model is not installed")
     if "freepdk45" in path:
         _freepdk45_ready()
     from circuitopt.circuit_loader import load_circuit_json
