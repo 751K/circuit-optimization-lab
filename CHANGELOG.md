@@ -21,6 +21,50 @@ release checklist.
 
 ### Changed / 性能
 
+- **Silicon corners / mismatch-MC / dataset route through the compiled campaign / 硅工艺 corners / 失配 MC / 数据集接入编译 campaign**
+
+  **English:** The silicon (BSIM4) paths of `corners.corner_table`,
+  `corners.mismatch_mc`, and the `dataset` size-grid builder now evaluate their
+  candidate matrix through the compiled campaign (`circuitopt._rust_campaign`) —
+  one Rayon pool, per-candidate corner, `workers` scaled, and **no per-candidate
+  Python callback** — instead of a per-candidate Python solve. The frozen scalar
+  path (`ac_solve` / `noise_analysis` under the same binding; `delvto` mismatch via
+  the device `delvto` knob; `explore._supply_power_uW` / `_area` post-batch
+  reductions) is the reference the campaign is validated bit-for-bit against and the
+  per-corner / per-layer fallback. **AFE / mixed circuits are untouched and stay on
+  the scalar path**: a cold campaign cannot reproduce the multistable OTFT basin and
+  would under-report the latch rate, so only the monostable, cold-DC-consistent
+  silicon families route (guard tests pin this). No result key, CLI flag, or JSON
+  contract changes; the CLI `corners`/`mc` and the service MC job auto-benefit for
+  silicon. `corner_table`/`mismatch_mc` gain a `binding=` argument; the silicon
+  campaign result additionally exposes `gain_dB` (DC gain) and per-device `ich`
+  (channel current) — both already computed in the pipeline, surfaced for the
+  dataset `power_uW`/`gain_dB` labels. Parity: campaign vs the frozen scalar path is
+  bit-for-bit on freepdk45/sky130 and ≤1e-9 relative on tsmc28 (the cold
+  Newton-vs-fsolve DC-root floor, far inside the 1e-3 calibration tolerance);
+  byte-identical across workers {1, 2, 8}; golden corpus reproduces bit-exactly (no
+  re-freeze). Measured speedup vs the scalar `workers=1` baseline (median of 3):
+  mismatch-MC N=200 freepdk45 **26.8×** at 8 workers (5.4× at 1), tsmc28 **4.8×**
+  (macro-expansion-bound per candidate); dataset build (freepdk45, 120 rows)
+  **5.0×**; `corner_table` **2.1×** (its parallelism is capped at the corner count).
+
+  **中文：** `corners.corner_table`、`corners.mismatch_mc` 与 `dataset` 尺寸网格构建
+  的**硅工艺（BSIM4）**路径现将候选矩阵交由编译 campaign（`circuitopt._rust_campaign`）
+  求值——单 Rayon 池、逐候选 corner、`workers` 可扩、**无逐候选 Python 回调**——取代
+  原先的逐候选 Python 求解。冻结标量路径（同 binding 下的 `ac_solve` / `noise_analysis`；
+  `delvto` 失配走器件 `delvto` 端；`explore._supply_power_uW` / `_area` 批后归约）作为
+  campaign 逐位对照的参考及逐 corner / 逐层回退。**AFE / 混合电路一字不动，保留标量
+  路径**：冷 campaign 复现不了多稳 OTFT 盆地、会把 latch_rate 低报，故仅单稳、冷 DC
+  一致的硅族接入（守卫测试钉死）。结果键、CLI 参数、JSON 契约均不变；CLI `corners`/`mc`
+  与 service MC 作业对硅自动受益。`corner_table`/`mismatch_mc` 新增 `binding=` 参数；
+  硅 campaign 结果另导出 `gain_dB`（直流增益）与逐器件 `ich`（沟道电流）——二者本已在
+  流水线中算出，为数据集 `power_uW`/`gain_dB` 标签疏通。Parity：campaign 对冻结标量
+  在 freepdk45/sky130 逐位、tsmc28 ≤1e-9 相对（冷牛顿 vs fsolve 的 DC 根下限，远在 1e-3
+  校准容差内）；workers {1, 2, 8} 逐字节一致；golden 语料逐位复现（无重冻）。相对标量
+  `workers=1` 基线实测加速（3 次中位）：失配 MC N=200 freepdk45 8 workers **26.8×**
+  （1 worker 5.4×），tsmc28 **4.8×**（逐候选受宏展开支配）；数据集构建（freepdk45,
+  120 行）**5.0×**；`corner_table` **2.1×**（并行度上限为 corner 数）。
+
 - **BSIM4 DC Newton skips capacitance extraction (D6 acLoad-skip) / BSIM4 DC 牛顿迭代跳过电容抽取（D6 acLoad-skip）**
 
   **English:** The BSIM4 DC operating-point Newton (`bsim_transient::solve_dc`)
