@@ -41,7 +41,7 @@ from .chopper import (chopper_analysis, pmos_chopper_analysis,
                       pmos_chopper_pnoise, pmos_chopper_pss,
                       pmos_chopper_transient)
 from .circuit_loader import load_circuit_json
-from .corners import corner_table, mismatch_mc_from_dict
+from .corners import corner_table, mismatch_mc_from_dict, silicon_corner_names
 from .dataset import add_cli_args as dataset_add_cli_args
 from .dataset import run_cli as dataset_run_cli
 from .explore import add_cli_args as explore_add_cli_args
@@ -310,14 +310,23 @@ def _cmd_corners(args):
     freqs = _freqs_from_args(args)
     lo, hi = args.noise_band
 
+    # Carry the per-device model binding so a silicon circuit keeps its BSIM4 cards
+    # (and routes through the compiled campaign) instead of silently reverting to the
+    # default OTFT PDK; silicon then sweeps card corners, OTFT keeps typical/slow/fast.
+    binding = spec.binding()
+    corners = (silicon_corner_names(binding.model_types) if binding.model_types
+               else ("typical", "slow", "fast"))
+
     if not args.quiet:
         print(f"Corner sweep for {args.circuit}")
         print(f"  freqs: {args.freqs_start:.2g}–{args.freqs_stop:.2g} Hz ({args.freqs_num} pts)")
         print(f"  band:  {lo}–{hi} Hz")
+        print(f"  corners: {', '.join(corners)}")
         print(f"  workers: {args.workers}")
 
-    table = corner_table(spec.sizes, spec.bias, nf=spec.nf,
-                         topo=spec.topology, freqs=freqs, workers=args.workers)
+    table = corner_table(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
+                         corners=corners, freqs=freqs, workers=args.workers,
+                         binding=binding)
     for corner_name, metrics in table.items():
         if metrics is None:
             print(f"  {corner_name:>7s}:  (failed)")

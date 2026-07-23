@@ -33,6 +33,11 @@ from typing import Any, Sequence
 from . import diagnostics
 from ._engine import current_engine
 
+# Sentinel for "caller did not pass a corner" so ``candidate`` keeps stamping the
+# family nominal corner (the AFE/size-sweep default) while an explicit
+# ``corner=<name>`` (e.g. a silicon ``corner_table`` arm) can override it.
+_NOMINAL = object()
+
 
 def campaign_enabled() -> bool:
     """True iff the rust engine is active and exposes ``CompiledCampaign``."""
@@ -61,12 +66,24 @@ class SweepCampaign:
         self.nominal_corner = nominal_corner
         self.needs_seed = needs_seed
 
-    def candidate(self, sizes, *, seed=None, trust_seed_as_op: bool = False,
-                  mismatch=None, nf=None) -> dict:
-        """One marshalled candidate at the nominal corner (family-appropriate)."""
-        return self._core.candidate(sizes, self.nominal_corner, mismatch=mismatch,
+    def candidate(self, sizes, *, corner=_NOMINAL, seed=None,
+                  trust_seed_as_op: bool = False, mismatch=None, nf=None) -> dict:
+        """One marshalled candidate.
+
+        ``corner`` defaults to the family nominal (what a plain size-sweep stamps);
+        pass an explicit corner name to place the candidate at a specific process
+        corner (the silicon ``corner_table`` / ``mismatch_mc`` arms). For the
+        silicon family ``mismatch`` is a ``{device: delvto_volts}`` map; for AFE it
+        is the ``{device: {mvt0, mbeta0}}`` map (see the respective core)."""
+        chosen = self.nominal_corner if corner is _NOMINAL else corner
+        return self._core.candidate(sizes, chosen, mismatch=mismatch,
                                     nf=nf, seed=seed,
                                     trust_seed_as_op=trust_seed_as_op)
+
+    @property
+    def solved(self) -> tuple:
+        """Solved-node names in DC/seed vector order (for ``dc_op`` reconstruction)."""
+        return self._core.solved
 
     def seed_vector(self, dc_op) -> list[float]:
         """Solved-order DC seed vector from a ``{node: V}`` operating point."""
@@ -106,6 +123,40 @@ def make_sweep_campaign(spec, freqs, band) -> SweepCampaign | None:
     except Exception as exc:  # noqa: BLE001 - fall back to the scalar reference
         diagnostics.note("campaign_sweep.build_fail", exc)
         return None
+
+
+def silicon_campaign_for(topo, sizes, bias, nf, binding, freqs, band
+                         ) -> SweepCampaign | None:
+    """A silicon :class:`SweepCampaign` for a loose ``(topo, sizes, bias, nf)`` + binding.
+
+    The corner/robustness entry points (``corners.corner_table`` /
+    ``corners.mismatch_mc``) thread the six-param cluster by hand rather than a
+    loaded ``CircuitSpec``, so this synthesises the minimal spec ``make_sweep_campaign``
+    needs and returns its campaign **only when the circuit is all-silicon** (an
+    explicit ``binding`` with a non-empty ``model_types``). Returns ``None`` for the
+    AFE / default-PDK family, when no binding is supplied, or when the campaign is
+    unavailable — the caller then keeps its frozen scalar path. AFE deliberately
+    stays scalar here: the multistable OTFT would let a cold campaign under-report
+    the latch rate (the R5-D red line), so only silicon (monostable, cold-DC
+    consistent) is routed."""
+    if binding is None or not campaign_enabled():
+        return None
+    if not (binding.model_types or {}):
+        return None                       # AFE / default PDK -> scalar reference
+    try:
+        from .circuit_loader import CircuitSpec
+
+        spec = CircuitSpec(name="_campaign", topology=topo, sizes=dict(sizes),
+                           bias=dict(bias), nf=nf,
+                           model_types=binding.model_types,
+                           device_kwargs=binding.device_kwargs)
+        camp = make_sweep_campaign(spec, freqs, band)
+    except Exception as exc:  # noqa: BLE001 - fall back to the scalar reference
+        diagnostics.note("campaign_sweep.silicon_build_fail", exc)
+        return None
+    if camp is None or camp.family != "silicon_bsim4":
+        return None
+    return camp
 
 
 def evaluate_sizes(campaign: SweepCampaign, size_dicts: Sequence[Any], *,

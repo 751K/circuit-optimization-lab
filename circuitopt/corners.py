@@ -23,6 +23,7 @@ from functools import wraps
 import numpy as np
 
 from .ac_solver import ac_solve
+from ._campaign_sweep import silicon_campaign_for
 from .circuit_loader import circuit_from_dict
 from .device_factory import CORNERS
 from .noise_solver import band_rms, noise_analysis
@@ -116,17 +117,24 @@ def latch_screen(sizes, bias, nf=None, base="slow", topo=AFE_TOPO, k=3.0,
 
 def metrics(sizes, bias, nf=None, corner=None, topo=AFE_TOPO, x0_guess=None,
             freqs=None, band=(0.05, 100.0), include_noise=True,
-            noise_gate=None):
+            noise_gate=None, *, binding=None):
     """Evaluate one design at one corner. Returns a dict with:
         gain_peak_dB, bw_Hz, irn_uV, latch_dV (|out+ - out-| at the DC op;
         large => regenerative latch), and dc_op. None if the DC solve fails.
 
     Noise is optional because latch/gain/BW screens only need the AC/DC result.
     `noise_gate(out)` can defer IRN until after AC/latch checks, e.g. mismatch MC
-    skips IRN for latched samples that are excluded from final stats."""
+    skips IRN for latched samples that are excluded from final stats.
+
+    ``binding`` (a :class:`CircuitBinding`) supplies the per-device model map so a
+    silicon circuit keeps its BSIM4 devices instead of reverting to the default
+    OTFT PDK; ``binding=None`` reproduces the legacy path byte-for-byte. It is the
+    frozen scalar reference the silicon compiled-campaign arm is validated against
+    and falls back to."""
     if freqs is None:
         freqs = _DEFAULT_FREQS
-    ac = ac_solve(sizes, bias, freqs, corner=corner, nf=nf, topo=topo, x0_guess=x0_guess)
+    ac = ac_solve(sizes, bias, freqs, corner=corner, nf=nf, topo=topo,
+                  x0_guess=x0_guess, binding=binding)
     if ac is None:
         return None
     out = {"gain_peak_dB": float(ac["peak_dB"]), "bw_Hz": float(ac["bw_Hz"]),
@@ -139,7 +147,7 @@ def metrics(sizes, bias, nf=None, corner=None, topo=AFE_TOPO, x0_guess=None,
     if include_noise and (noise_gate is None or noise_gate(out)):
         try:
             nz = noise_analysis(sizes, bias, freqs, corner=corner, nf=nf, topo=topo,
-                                x0_guess=ac["dc_op"])
+                                x0_guess=ac["dc_op"], binding=binding)
             out["irn_uV"] = band_rms(freqs, nz["irn_psd"], *band) * 1e6 if nz else float("nan")
             out["_noise_evaluated"] = True
         except Exception as exc:
@@ -148,13 +156,74 @@ def metrics(sizes, bias, nf=None, corner=None, topo=AFE_TOPO, x0_guess=None,
     return out
 
 
+def _metrics_from_campaign_row(row, solved, noise_evaluated):
+    """A compiled-campaign result row -> the :func:`metrics` dict shape, or ``None``.
+
+    ``None`` when the candidate did not converge (``ok`` False) — the same signal
+    :func:`metrics` gives on a failed DC solve, so callers treat a non-converged
+    campaign corner/sample exactly like a failed scalar one. ``dc_op`` is rebuilt as
+    a ``{node: V}`` map from the solved-order vector; ``latch_dV`` / ``irn_uV`` /
+    gains come straight from the row (the campaign computes them 1:1 with the frozen
+    reductions). ``noise_evaluated`` mirrors whether the ``"noise"`` analysis ran."""
+    if not row.get("ok"):
+        return None
+    dc_vec = row.get("dc_op") or []
+    return {
+        "gain_peak_dB": float(row["gain_peak_dB"]),
+        "bw_Hz": float(row["bw_Hz"]),
+        "dc_op": {node: float(v) for node, v in zip(solved, dc_vec)},
+        "latch_dV": float(row["latch_dV"]),
+        "irn_uV": float(row["irn_uV"]),
+        "_noise_evaluated": bool(noise_evaluated),
+    }
+
+
+def silicon_corner_names(model_types):
+    """Default card-corner sweep for a silicon circuit's model family.
+
+    The OTFT ``typical/slow/fast`` names have no silicon card; this maps a silicon
+    circuit to the process corners its cards actually carry — freepdk45
+    ``nom/ss/ff``; sky130/tsmc28 ``tt/ss`` (their ``ff/sf/fs`` bins are not bundled /
+    resolvable for every geometry, see rust/crates/co-pdk/PARITY.md). A caller that
+    wants a specific corner set passes ``corners=`` to :func:`corner_table` directly."""
+    from ._rust_campaign import _silicon_pdk_of
+
+    fam = _silicon_pdk_of(model_types)
+    return ("nom", "ss", "ff") if fam == "freepdk45" else ("tt", "ss")
+
+
+def _is_silicon_binding(binding) -> bool:
+    """True iff ``binding`` binds an all/any-silicon circuit (non-empty model_types).
+
+    The gate for the compiled-campaign / silicon-scalar arm. ``binding=None`` or an
+    empty ``model_types`` (the AFE OTFT / default-PDK family) stays on the legacy
+    scalar path, threaded **without** a binding so it is byte-for-byte unchanged
+    (a binding would inject its default DC seed and perturb the cold OTFT solve)."""
+    return binding is not None and bool(binding.model_types or {})
+
+
 def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
                  corners=("typical", "slow", "fast"), freqs=None, band=(0.05, 100.0),
-                 include_noise=True, workers=1):
-    """Evaluate a design across process corners -> {corner: metrics-or-None}."""
+                 include_noise=True, workers=1, *, binding=None):
+    """Evaluate a design across process corners -> {corner: metrics-or-None}.
+
+    ``binding`` (a :class:`CircuitBinding`): when it binds a silicon circuit the whole
+    corner batch runs through the compiled campaign (one Rayon pool, per-candidate
+    corner, ``workers`` scaled), with the frozen scalar :func:`metrics` path as the
+    per-corner fallback (any corner the campaign fails to converge rolls back to
+    scalar and is flagged). AFE / default-PDK (``binding=None`` or empty model_types)
+    keeps the legacy scalar path byte-for-byte — ``corners`` are then OTFT process
+    names (``typical/slow/fast``); for silicon they are card corners (``tt/ss/ff/...``)."""
     if workers is None or workers < 1:
         raise ValueError("workers must be a positive integer")
     corner_names = tuple(corners)
+
+    if _is_silicon_binding(binding):
+        freqs_eff = _DEFAULT_FREQS if freqs is None else freqs
+        camp = silicon_campaign_for(topo, sizes, bias, nf, binding, freqs_eff, band)
+        return _corner_table_silicon(camp, sizes, bias, nf, topo, corner_names,
+                                     freqs_eff, band, include_noise, workers, binding)
+
     corner_values = tuple(CORNERS[c] for c in corner_names)
 
     def evaluate_corner(corner):
@@ -167,6 +236,41 @@ def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
         with ThreadPoolExecutor(max_workers=workers) as executor:
             values = list(executor.map(evaluate_corner, corner_values))
     return dict(zip(corner_names, values))
+
+
+def _corner_table_silicon(camp, sizes, bias, nf, topo, corner_names, freqs, band,
+                          include_noise, workers, binding):
+    """Silicon corner sweep: compiled campaign (``camp``) or the scalar reference.
+
+    ``camp is None`` (campaign unavailable) evaluates every corner through the frozen
+    scalar :func:`metrics` path under ``binding`` — the reference the campaign is
+    validated against. With a campaign, the whole corner matrix runs in one batch;
+    any corner the campaign fails to converge rolls back to that same scalar path and
+    is flagged (no silent root substitution)."""
+    def scalar_corner(name):
+        return metrics(sizes, bias, nf=nf, corner=name, topo=topo, freqs=freqs,
+                       band=band, include_noise=include_noise, binding=binding)
+
+    if camp is None:
+        if workers == 1:
+            values = [scalar_corner(c) for c in corner_names]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                values = list(executor.map(scalar_corner, corner_names))
+        return dict(zip(corner_names, values))
+
+    analyses = ("dc", "ac", "noise") if include_noise else ("dc", "ac")
+    cands = [camp.candidate(sizes, corner=name) for name in corner_names]
+    rows = camp.evaluate_batch(cands, workers=workers, analyses=analyses)
+    solved = camp.solved
+    out = {}
+    for name, row in zip(corner_names, rows):
+        m = _metrics_from_campaign_row(row, solved, include_noise)
+        if m is None:                       # campaign did not converge -> scalar + flag
+            diagnostics.note("corners.corner_table_rollback", name)
+            m = scalar_corner(name)
+        out[name] = m
+    return out
 
 
 def _mc_summary(rows, latch_dV, noise_evaluated, *, stopped_early=False):
