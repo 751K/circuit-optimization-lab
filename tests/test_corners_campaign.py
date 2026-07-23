@@ -41,15 +41,18 @@ from circuitopt.circuit_loader import load_circuit_json
 _SI_FREQS = np.logspace(3, 7, 25)
 _SI_BAND = (1e3, 1e6)
 
-# 5T OTAs + a fully-differential OTA (2 outputs -> a meaningful latch_dV). sky130
-# and tsmc28 are restricted to card corners with bundled/​resolvable bins for the
-# example geometry (sky130 bundles ff only for a few widths; tsmc28 ff/sf/fs select
-# zero bins on some geometries — both documented in co-pdk/PARITY.md).
+# 5T OTAs + a fully-differential OTA (2 outputs -> a meaningful latch_dV). The
+# corner sets are the R10 expanded per-family defaults (:func:`silicon_corner_names`):
+# freepdk45 / tsmc28 sweep the full 5 (tt/nom, ss, ff, sf, fs) — the example OTA
+# geometries resolve a bin in every one — while sky130 stays tt/ss (the *bundled*
+# card set only ships tt/ss for the general geometry; see co-pdk/PARITY.md). A
+# geometry that selects zero bins in some corner is skipped per corner (None +
+# counted) rather than crashing the sweep — see ``test_corner_table_zero_bin_*``.
 _CASES = {
-    "freepdk45_5t": ("examples/freepdk45_5t_ota.json", ("nom", "ss", "ff")),
+    "freepdk45_5t": ("examples/freepdk45_5t_ota.json", ("nom", "ss", "ff", "sf", "fs")),
     "sky130_5t": ("examples/sky130_5t_ota.json", ("tt", "ss")),
-    "tsmc28_5t": ("examples/tsmc28hpcp_5t_ota.json", ("tt", "ss")),
-    "freepdk45_fd": ("examples/freepdk45_fd_ota.json", ("nom", "ss", "ff")),
+    "tsmc28_5t": ("examples/tsmc28hpcp_5t_ota.json", ("tt", "ss", "ff", "sf", "fs")),
+    "freepdk45_fd": ("examples/freepdk45_fd_ota.json", ("nom", "ss", "ff", "sf", "fs")),
 }
 
 
@@ -361,3 +364,53 @@ def test_corner_table_afe_stays_scalar():
             continue
         for k in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
             assert (a[k] == b[k] or (np.isnan(a[k]) and np.isnan(b[k]))), (c, k)
+
+
+# ---------------------------------------------------------------------------
+# R10 item (1): expanded per-family default corner sets + 0-bin per-corner skip.
+# ---------------------------------------------------------------------------
+
+def test_silicon_corner_names_default_sets():
+    """The expanded R10 defaults: freepdk45 / tsmc28 -> 5 corners, sky130 -> tt/ss.
+
+    freepdk45 adds the sf/fs cross corners (reusing the ss/ff per-polarity dirs);
+    tsmc28 adds ff/sf/fs (all sections of the core .l); sky130 stays the bundled-card
+    tt/ss boundary. OTFT names are never returned here (silicon families only)."""
+    assert C.silicon_corner_names({"M1": "freepdk45.nmos"}) == ("nom", "ss", "ff", "sf", "fs")
+    assert C.silicon_corner_names({"M1": "tsmc28hpcp.nmos"}) == ("tt", "ss", "ff", "sf", "fs")
+    assert C.silicon_corner_names({"M1": "sky130.nmos"}) == ("tt", "ss")
+
+
+def test_corner_table_zero_bin_skip_survives_and_counts():
+    """A geometry that selects zero bins is skipped (None) + counted, never crashing.
+
+    Forcing one device out of the tsmc28 bin grid (W=200 µm at NF=1 -> per-finger
+    width beyond the widest bin) makes every corner's card unresolvable. The sweep
+    must still return — one entry per corner, in order — with that geometry's corners
+    set to ``None`` and one ``corners.corner_zero_bin_skip`` event per skipped corner,
+    instead of raising the PDK bin error and sinking the whole table (不拖垮整表)."""
+    _require_rust()
+    path = "examples/tsmc28hpcp_5t_ota.json"
+    _ready(path)
+    from circuitopt import diagnostics
+    spec = load_circuit_json(path)
+    binding = spec.binding()
+    cs = ("tt", "ss", "ff", "sf", "fs")
+    victim = next(d for d, *_ in spec.topology.devices)
+    bad_sizes = {**spec.sizes, victim: (200.0, 0.03)}
+    bad_nf = {**(spec.nf if isinstance(spec.nf, dict) else {}), victim: 1}
+
+    diagnostics.reset()
+    table = C.corner_table(bad_sizes, spec.bias, nf=bad_nf, topo=spec.topology,
+                           corners=cs, freqs=_SI_FREQS, band=_SI_BAND, binding=binding)
+    # Table survives: one entry per corner, in the requested order, all skipped.
+    assert list(table) == list(cs)
+    assert all(table[c] is None for c in cs)
+    assert diagnostics.snapshot().get("corners.corner_zero_bin_skip") == len(cs)
+
+    # Control: the unmodified geometry resolves every corner (no false skips).
+    diagnostics.reset()
+    good = C.corner_table(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
+                          corners=cs, freqs=_SI_FREQS, band=_SI_BAND, binding=binding)
+    assert all(good[c] is not None for c in cs)
+    assert diagnostics.snapshot().get("corners.corner_zero_bin_skip", 0) == 0

@@ -192,14 +192,28 @@ def silicon_corner_names(model_types):
     """Default card-corner sweep for a silicon circuit's model family.
 
     The OTFT ``typical/slow/fast`` names have no silicon card; this maps a silicon
-    circuit to the process corners its cards actually carry — freepdk45
-    ``nom/ss/ff``; sky130/tsmc28 ``tt/ss`` (their ``ff/sf/fs`` bins are not bundled /
-    resolvable for every geometry, see rust/crates/co-pdk/PARITY.md). A caller that
-    wants a specific corner set passes ``corners=`` to :func:`corner_table` directly."""
+    circuit to the process corners its cards carry:
+
+      * freepdk45 → ``nom/ss/ff/sf/fs`` (5). ``sf``/``fs`` are the cross corners
+        (NMOS-slow/PMOS-fast and vice-versa) that reuse the per-polarity ``ss``/``ff``
+        model directories, so they always resolve.
+      * tsmc28 → ``tt/ss/ff/sf/fs`` (5). All five are sections of the core ``.l``
+        delivery; a geometry that selects zero bins in one of them is skipped per
+        corner by the :func:`corner_table` pre-probe (None + counted), never crashing
+        the sweep — see the 0-bin note in rust/crates/co-pdk/PARITY.md.
+      * sky130 → ``tt/ss`` (2). The *bundled* card set only ships tt/ss (+ ff for a
+        few widths); this stays the documented data boundary for the in-repo cards.
+
+    A caller that wants a specific corner set passes ``corners=`` to
+    :func:`corner_table` directly (as the parity gates do)."""
     from ._rust_campaign import _silicon_pdk_of
 
     fam = _silicon_pdk_of(model_types)
-    return ("nom", "ss", "ff") if fam == "freepdk45" else ("tt", "ss")
+    if fam == "freepdk45":
+        return ("nom", "ss", "ff", "sf", "fs")
+    if fam == "tsmc28":
+        return ("tt", "ss", "ff", "sf", "fs")
+    return ("tt", "ss")   # sky130: bundled-card data boundary
 
 
 def _is_silicon_binding(binding) -> bool:
@@ -256,10 +270,26 @@ def _corner_table_silicon(camp, sizes, bias, nf, topo, corner_names, freqs, band
     scalar :func:`metrics` path under ``binding`` — the reference the campaign is
     validated against. With a campaign, the whole corner matrix runs in one batch;
     any corner the campaign fails to converge rolls back to that same scalar path and
-    is flagged (no silent root substitution)."""
+    is flagged (no silent root substitution).
+
+    **Per-(corner, geometry) 0-bin skip.** A corner whose cards select zero bins for
+    this geometry (the tsmc28 ``ff/sf/fs`` sections on some geometries, or an
+    out-of-grid width) is recorded as ``None`` and counted rather than crashing the
+    whole sweep: both arms reject it identically (the campaign candidate as
+    ``{ok: False}``, the scalar path as a PDK ``*ModelError`` — a ``ValueError``
+    subclass; see the 0-bin note in rust/crates/co-pdk/PARITY.md). Corners that
+    resolve keep the exact prior evaluation path, so a sweep whose corners all resolve
+    is byte-for-byte unchanged."""
     def scalar_corner(name):
-        return metrics(sizes, bias, nf=nf, corner=name, topo=topo, freqs=freqs,
-                       band=band, include_noise=include_noise, binding=binding)
+        # 0-bin corner -> PDK *ModelError (ValueError): skip (None) + count so one
+        # unresolvable (corner, geometry) never sinks the sweep. Resolving corners
+        # never raise here, so this leaves their result byte-for-byte identical.
+        try:
+            return metrics(sizes, bias, nf=nf, corner=name, topo=topo, freqs=freqs,
+                           band=band, include_noise=include_noise, binding=binding)
+        except ValueError as exc:
+            diagnostics.note("corners.corner_zero_bin_skip", exc, detail=str(name))
+            return None
 
     if camp is None:
         if workers == 1:
@@ -278,7 +308,7 @@ def _corner_table_silicon(camp, sizes, bias, nf, topo, corner_names, freqs, band
         m = _metrics_from_campaign_row(row, solved, include_noise)
         if m is None:                       # campaign did not converge -> scalar + flag
             diagnostics.note("corners.corner_table_rollback", name)
-            m = scalar_corner(name)
+            m = scalar_corner(name)         # 0-bin here returns None (+ counted)
         out[name] = m
     return out
 
