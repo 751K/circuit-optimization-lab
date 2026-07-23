@@ -191,6 +191,148 @@ def test_corner_table_silicon_zero_python_device_frame(monkeypatch):
     assert trap.hits == 0, f"{trap.hits} Python PDK/device frames in the corner batch"
 
 
+# ---------------------------------------------------------------------------
+# mismatch_mc silicon arm.
+# ---------------------------------------------------------------------------
+
+_MC_CASES = {
+    "freepdk45": ("examples/freepdk45_5t_ota.json", "nom"),
+    "sky130": ("examples/sky130_5t_ota.json", "tt"),
+    "tsmc28": ("examples/tsmc28hpcp_5t_ota.json", "tt"),
+}
+
+
+def _mc(spec, binding, base, *, workers=1, n=40, force_scalar=False, monkeypatch=None):
+    if force_scalar:
+        monkeypatch.setattr(C, "silicon_campaign_for", lambda *a, **k: None)
+    return C.mismatch_mc(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
+                         base=base, n=n, seed=0, freqs=_SI_FREQS, band=_SI_BAND,
+                         workers=workers, binding=binding)
+
+
+@pytest.mark.parametrize("key", list(_MC_CASES))
+def test_mismatch_mc_silicon_matches_scalar_reference(key, monkeypatch):
+    """Silicon mismatch MC campaign arm vs the frozen scalar reference, sample-by-sample.
+
+    Both draw the same per-device ``delvto`` up front and seed from the same nominal
+    op; the campaign refines in Rust, the reference through ``ac_solve`` — bit-for-bit
+    (<=1e-12 relative) on every finite metric, and the same samples converge."""
+    _require_rust()
+    path, base = _MC_CASES[key]
+    _ready(path)
+    spec = load_circuit_json(path)
+    binding = spec.binding()
+    camp = _mc(spec, binding, base)
+    with pytest.MonkeyPatch.context() as mp:
+        scal = _mc(spec, binding, base, force_scalar=True, monkeypatch=mp)
+    assert camp["summary"]["n"] == scal["summary"]["n"] > 0
+    for k in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
+        a = np.asarray(camp["arrays"][k], float)
+        s = np.asarray(scal["arrays"][k], float)
+        assert a.shape == s.shape, (key, k)
+        m = np.isfinite(a) & np.isfinite(s)
+        assert np.array_equal(np.isfinite(a), np.isfinite(s)), (key, k, "nan mask")
+        if m.any():
+            rel = np.abs(a[m] - s[m]) / np.maximum(np.abs(s[m]), 1e-30)
+            assert float(rel.max()) <= 1e-12, (key, k, float(rel.max()))
+    # latch_rate is a headline robustness number — must agree exactly.
+    assert camp["summary"]["latch_rate"] == scal["summary"]["latch_rate"]
+
+
+@pytest.mark.parametrize("key", list(_MC_CASES))
+def test_mismatch_mc_silicon_deterministic_across_workers(key):
+    """Silicon mismatch MC is byte-identical for workers in {1, 2, 8}."""
+    _require_rust()
+    path, base = _MC_CASES[key]
+    _ready(path)
+    spec = load_circuit_json(path)
+    binding = spec.binding()
+    base_res = _mc(spec, binding, base, workers=1)
+    for w in (1, 2, 8):
+        got = _mc(spec, binding, base, workers=w)
+        assert got["summary"] == base_res["summary"], (key, w, "summary")
+        for k in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
+            assert np.array_equal(got["arrays"][k], base_res["arrays"][k],
+                                  equal_nan=True), (key, w, k)
+
+
+def test_mismatch_mc_silicon_zero_python_device_frame(monkeypatch):
+    """The mismatch sample batch makes no Python BSIM4/solver callback or frame.
+
+    The nominal seed op is solved first (one scalar solve); the trap wraps only the
+    mismatch batch, where a per-candidate Python device/solver call would break
+    ``workers`` scaling under the released GIL."""
+    _require_rust()
+    path, base = _MC_CASES["freepdk45"]
+    _ready(path)
+    spec = load_circuit_json(path)
+    binding = spec.binding()
+    camp = silicon_campaign_for(spec.topology, spec.sizes, spec.bias, spec.nf,
+                                binding, _SI_FREQS, _SI_BAND)
+    assert camp is not None
+    from circuitopt.ac_solver import ac_solve
+    nom = ac_solve(spec.sizes, spec.bias, _SI_FREQS, corner=base, nf=spec.nf,
+                   binding=binding)
+    seed = camp.seed_vector(nom["dc_op"])
+    devices = [d for d, *_ in spec.topology.devices]
+    rng = np.random.default_rng(0)
+    draws = [C._silicon_mismatch(rng, devices) for _ in range(6)]
+    cands = [camp.candidate(spec.sizes, corner=base, mismatch=mm, seed=seed,
+                            trust_seed_as_op=False) for mm in draws]
+
+    from circuitopt.compact_models.bsim4 import NativeBsim4Backend
+    import circuitopt.ac_solver as acmod
+    import circuitopt.noise_solver as nzmod
+
+    def boom(*_a, **_k):
+        raise AssertionError("python BSIM4/solver callback during mismatch batch")
+
+    monkeypatch.setattr(NativeBsim4Backend, "evaluate", boom)
+    monkeypatch.setattr(NativeBsim4Backend, "evaluate_batch", staticmethod(boom))
+    monkeypatch.setattr(NativeBsim4Backend, "noise_batch", staticmethod(boom))
+    monkeypatch.setattr(acmod, "ac_solve", boom)
+    monkeypatch.setattr(nzmod, "noise_analysis", boom)
+
+    with _FrameTrap(("compact_models.bsim4", "circuitopt.pdk",
+                     "circuitopt.ac_solver", "circuitopt.noise_solver")) as trap:
+        out = camp.evaluate_batch(cands, workers=4, analyses=("dc", "ac", "noise"))
+    assert all(r["ok"] for r in out)
+    assert trap.hits == 0, f"{trap.hits} Python PDK/device frames in the mismatch batch"
+
+
+def test_mismatch_mc_afe_latch_rate_not_underreported():
+    """The R5-D red line: an AFE circuit never routes to the campaign.
+
+    A latch-prone AFE design run through ``mismatch_mc`` with an AFE binding must
+    give the *same* (non-zero) latch rate as the no-binding scalar path — the cold
+    campaign cannot reproduce the multistable OTFT basin and would report 0, so AFE
+    must stay scalar. ``silicon_campaign_for`` returns None for the AFE family."""
+    _require_rust()
+    from circuitopt.device_factory import CircuitBinding
+    from circuitopt.topology import AFE_TOPO
+
+    sizes = {"M6": (4819, 63), "M7": (65426, 42), "M8": (65426, 42),
+             "M9": (2876, 333), "M10": (2876, 333), "M11": (739, 50),
+             "M12": (505, 134), "M13": (505, 134), "M14": (4553, 48),
+             "M15": (4553, 48)}
+    nf = {"M6": 4, "M7": 128, "M8": 128, "M9": 6, "M10": 6, "M11": 1, "M12": 2,
+          "M13": 2, "M14": 10, "M15": 10}
+    bias = {"VDD": 40.0, "VCM": 32.0, "VB": 7.5, "VC": 16.0}
+    afe_binding = CircuitBinding(topo=AFE_TOPO, model_types=None, nf=nf)
+    freqs = np.logspace(-2, 4, 41)
+
+    assert silicon_campaign_for(AFE_TOPO, sizes, bias, nf, afe_binding,
+                                freqs, (0.05, 100.0)) is None
+    kw = dict(nf=nf, base="slow", n=48, seed=0, freqs=freqs, latch_dV=5.0)
+    no_bind = C.mismatch_mc(sizes, bias, **kw)
+    with_bind = C.mismatch_mc(sizes, bias, binding=afe_binding, **kw)
+    assert no_bind["summary"]["latch_rate"] > 0.0            # the design does latch
+    assert with_bind["summary"]["latch_rate"] == no_bind["summary"]["latch_rate"]
+    for k in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
+        assert np.array_equal(with_bind["arrays"][k], no_bind["arrays"][k],
+                              equal_nan=True), k
+
+
 def test_corner_table_afe_stays_scalar():
     """AFE circuits never route to the campaign, and the AFE result is binding-invariant.
 

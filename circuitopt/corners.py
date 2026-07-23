@@ -16,6 +16,7 @@ corner / robustness work, so search, verification and MC all agree:
 This module drives the local Python solvers; Cadence/Spectre comparison should
 live in dedicated verification scripts instead of the core solver package.
 """
+import dataclasses
 import itertools
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import wraps
@@ -33,6 +34,15 @@ from . import diagnostics
 # Per-device mismatch sigmas: Vth (area-scaled inside the model) and beta (flat).
 SIGMA_MVT0 = 1.27e-5
 SIGMA_MBETA0 = 0.019
+# Silicon (BSIM4) per-device threshold-offset (``delvto`` volts) sigma. The silicon
+# mismatch draw is the structural mirror of the OTFT ``mvt0`` draw — the same fixed
+# threshold-offset sigma and per-device i.i.d. normal structure — applied to the
+# BSIM4 ``delvto`` instance knob instead of the OTFT ``mvt0`` model param. The OTFT
+# ``mbeta0`` beta-mismatch knob has no single-``delvto`` analog and is omitted. (A
+# physical Pelgrom area-law Vth model, for SAR static-linearity yield, lives in
+# ``sar_mc.draw_device_mismatch``; this corners-module draw stays aligned with the
+# frozen OTFT rule per the R9 brief — no new physics.)
+SIGMA_DELVTO = SIGMA_MVT0
 # AFE differential pairs — used to drive the latch screen.
 AFE_PAIRS = (("M7", "M8"), ("M9", "M10"), ("M12", "M13"), ("M14", "M15"))
 
@@ -302,7 +312,7 @@ def _mc_summary(rows, latch_dV, noise_evaluated, *, stopped_early=False):
 
 def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
                 latch_dV=5.0, freqs=None, band=(0.05, 100.0), include_noise=True,
-                progress=None, should_stop=None, workers=1):
+                progress=None, should_stop=None, workers=1, *, binding=None):
     """Per-device mismatch MC at one process corner, seeded from the nominal op.
 
     Returns {"arrays": {metric: ndarray}, "latched": bool ndarray, "summary": ...}.
@@ -326,11 +336,22 @@ def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
     Progress callbacks run on the caller thread with a monotonic completed count.
 
     With ``workers=1``, ``progress=None`` and ``should_stop=None`` the result is
-    byte-for-byte identical to the pre-hook behaviour."""
+    byte-for-byte identical to the pre-hook behaviour.
+
+    ``binding`` (a :class:`CircuitBinding`): a silicon circuit routes through the
+    compiled-campaign silicon arm (:func:`_mismatch_mc_silicon`) — per-device
+    ``delvto`` mismatch drawn up front, the whole sample batch in one Rayon pool
+    seeded from the shared nominal op, with the frozen scalar ``metrics`` path as
+    the reference/fallback. AFE / default-PDK (``binding=None`` or empty
+    model_types) keeps this OTFT ``mvt0``/``mbeta0`` path byte-for-byte."""
     if workers is None or workers < 1:
         raise ValueError("workers must be a positive integer")
     if freqs is None:
         freqs = _DEFAULT_FREQS
+    if _is_silicon_binding(binding):
+        return _mismatch_mc_silicon(sizes, bias, nf, topo, binding, base, n, seed,
+                                    latch_dV, freqs, band, include_noise, progress,
+                                    should_stop, workers)
     devices = [d for d, *_ in topo.devices]
     rng = np.random.default_rng(seed)
     nom = ac_solve(sizes, bias, freqs, corner=_base(base), nf=nf, topo=topo)
@@ -408,6 +429,167 @@ def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
                        stopped_early=stopped_early)
 
 
+# ── silicon (BSIM4) mismatch MC — compiled campaign arm + scalar reference ────
+_MC_KEYS = ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV")
+
+
+def _silicon_mismatch(rng, devices):
+    """Per-device ``delvto`` [V] draw for one sample (silicon mirror of
+    :func:`mismatch_corner`): each device gets an i.i.d. ``N(0, SIGMA_DELVTO)``
+    threshold offset — the OTFT ``mvt0`` draw's structure on the BSIM4 knob."""
+    return {d: float(rng.normal(0.0, SIGMA_DELVTO)) for d in devices}
+
+
+def _silicon_sample_binding(binding, base, delvto, devices):
+    """A per-sample binding: the base card corner baked on + per-device ``delvto``.
+
+    Composes frozen primitives only — ``delvto`` rides on ``device_kwargs`` (the
+    sky130/freepdk45/tsmc28 device ``delvto`` ctor knob) and ``at_corner`` bakes the
+    card corner exactly as every silicon path does — so the scalar reference applies
+    the identical offset the campaign candidate carries."""
+    base_dk = binding.device_kwargs or {}
+    dk = {d: {**base_dk.get(d, {}), "delvto": float(delvto.get(d, 0.0))}
+          for d in devices}
+    return dataclasses.replace(binding, device_kwargs=dk).at_corner(base)
+
+
+def _silicon_mc_row(m, latch_dV):
+    """One metrics dict -> (row, noise_counted) with the MC noise gate applied.
+
+    Mirrors the scalar ``noise_gate`` (no IRN for a latched sample) so the campaign
+    arrays match the reference sample-for-sample; ``noise_counted`` is 1 only for a
+    non-latched sample whose noise was actually evaluated."""
+    latched = m["latch_dV"] > latch_dV
+    counted = int((not latched) and bool(m.get("_noise_evaluated", False)))
+    row = {"gain_peak_dB": m["gain_peak_dB"], "bw_Hz": m["bw_Hz"],
+           "irn_uV": float("nan") if latched else m["irn_uV"],
+           "latch_dV": m["latch_dV"]}
+    return row, counted
+
+
+def _accumulate_mc(items, latch_dV):
+    """Reduce metrics dicts -> ``({key: [values]}, noise_evaluated)`` in order."""
+    rows = {k: [] for k in _MC_KEYS}
+    noise_evaluated = 0
+    for m in items:
+        if m is None:
+            continue
+        row, counted = _silicon_mc_row(m, latch_dV)
+        noise_evaluated += counted
+        for k in _MC_KEYS:
+            rows[k].append(row[k])
+    return rows, noise_evaluated
+
+
+def _mismatch_mc_silicon(sizes, bias, nf, topo, binding, base, n, seed, latch_dV,
+                         freqs, band, include_noise, progress, should_stop, workers):
+    """Silicon per-device mismatch MC — compiled campaign arm + scalar reference.
+
+    Draws all per-device ``delvto`` up front in sample order (seed-deterministic,
+    worker-count independent), seeds every sample from the shared nominal ``base``
+    op, and evaluates the batch through the compiled campaign (one Rayon pool, no
+    per-candidate Python callback) or — when the campaign is unavailable — the frozen
+    scalar ``metrics`` reference. Same summary/arrays shape as :func:`mismatch_mc`;
+    ``progress``/``should_stop`` mirror it (the campaign fires ``progress`` post-batch
+    in sample order, since no per-candidate Python frame runs during the detached
+    batch)."""
+    devices = [d for d, *_ in topo.devices]
+    rng = np.random.default_rng(seed)
+    draws = [_silicon_mismatch(rng, devices) for _ in range(n)]
+
+    nom = ac_solve(sizes, bias, freqs, corner=base, nf=nf, binding=binding)
+    if nom is None:
+        raise RuntimeError(f"nominal {base!r} DC solve failed; cannot seed silicon MC")
+    x0 = nom["dc_op"]
+    analyses = ("dc", "ac", "noise") if include_noise else ("dc", "ac")
+    camp = silicon_campaign_for(topo, sizes, bias, nf, binding, freqs, band)
+
+    if camp is not None:
+        if should_stop is not None and should_stop():
+            return _mc_summary({k: [] for k in _MC_KEYS}, latch_dV, 0,
+                               stopped_early=True)
+        seed_vec = camp.seed_vector(x0)
+        cands = [camp.candidate(sizes, corner=base, mismatch=mm, seed=seed_vec,
+                                trust_seed_as_op=False) for mm in draws]
+        results = camp.evaluate_batch(cands, workers=workers, analyses=analyses)
+        metrics_list = [_metrics_from_campaign_row(r, camp.solved, include_noise)
+                        for r in results]
+        if progress is not None:                # post-batch replay, sample order
+            for i in range(n):
+                rows, ne = _accumulate_mc(metrics_list[:i + 1], latch_dV)
+                progress(i + 1, n, _mc_summary(rows, latch_dV, ne)["summary"])
+        rows, noise_evaluated = _accumulate_mc(metrics_list, latch_dV)
+        return _mc_summary(rows, latch_dV, noise_evaluated)
+
+    # ── scalar silicon reference (campaign unavailable) ──────────────────────
+    def evaluate_sample(mm):
+        sb = _silicon_sample_binding(binding, base, mm, devices)
+        return metrics(sizes, bias, nf=nf, corner=None, topo=topo, x0_guess=x0,
+                       freqs=freqs, band=band, include_noise=include_noise,
+                       binding=sb, noise_gate=lambda out: out["latch_dV"] <= latch_dV)
+
+    if workers == 1:
+        collected = []
+        for i in range(n):
+            if should_stop is not None and should_stop():
+                rows, ne = _accumulate_mc(collected, latch_dV)
+                return _mc_summary(rows, latch_dV, ne, stopped_early=True)
+            collected.append(evaluate_sample(draws[i]))
+            if progress is not None:
+                rows, ne = _accumulate_mc(collected, latch_dV)
+                progress(i + 1, n, _mc_summary(rows, latch_dV, ne)["summary"])
+        rows, noise_evaluated = _accumulate_mc(collected, latch_dV)
+        return _mc_summary(rows, latch_dV, noise_evaluated)
+
+    results = [None] * n
+    completed = 0
+    next_index = 0
+    stopped_early = False
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = {}
+
+        def submit_available():
+            nonlocal next_index, stopped_early
+            while next_index < n and len(pending) < workers:
+                if should_stop is not None and should_stop():
+                    stopped_early = True
+                    return
+                fut = executor.submit(evaluate_sample, draws[next_index])
+                pending[fut] = next_index
+                next_index += 1
+
+        submit_available()
+        while pending:
+            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for fut in sorted(finished, key=lambda it: pending[it]):
+                index = pending.pop(fut)
+                results[index] = fut.result()
+                completed += 1
+                if progress is not None:
+                    done = [it for it in results if it is not None]
+                    prows, pnoise = _accumulate_mc(done, latch_dV)
+                    progress(completed, n, _mc_summary(prows, latch_dV, pnoise)["summary"])
+            if not stopped_early:
+                submit_available()
+    rows, noise_evaluated = _accumulate_mc(results, latch_dV)
+    stopped_early = stopped_early or next_index < n
+    return _mc_summary(rows, latch_dV, noise_evaluated, stopped_early=stopped_early)
+
+
+def _silicon_base_corner(model_types, name):
+    """Map a corner name to a silicon card corner for a silicon circuit.
+
+    The OTFT ``typical/slow/fast`` names have no silicon card; they map to the
+    family's ``nominal/ss/ff`` (freepdk45 nominal is ``nom``, sky130/tsmc28 ``tt``).
+    A name that is already a silicon corner (``tt/ss/ff/sf/fs``) passes through, so a
+    caller can request a specific card corner directly."""
+    from ._rust_campaign import _silicon_pdk_of
+
+    nominal = "nom" if _silicon_pdk_of(model_types) == "freepdk45" else "tt"
+    key = name.lower() if isinstance(name, str) else name
+    return {"typical": nominal, "slow": "ss", "fast": "ff", None: nominal}.get(key, key)
+
+
 def mismatch_mc_from_dict(data, n=300, seed=0, corner="typical", freqs=None,
                           band=(0.05, 100.0), progress=None, should_stop=None,
                           workers=1):
@@ -417,9 +599,19 @@ def mismatch_mc_from_dict(data, n=300, seed=0, corner="typical", freqs=None,
     The shared entry point for `circuit-opt mc` (via :meth:`__main__._cmd_mc`) and
     the service's ``POST /api/v1/jobs/mc`` — both parse the circuit and call
     :func:`mismatch_mc` through here, so the two surfaces can't drift. ``corner``
-    is the base process corner (typical/slow/fast). ``progress``/``should_stop``
-    are threaded straight through for the background-job hooks."""
+    is the base process corner (OTFT typical/slow/fast, or a silicon card corner).
+    ``progress``/``should_stop`` are threaded straight through for the background-job
+    hooks.
+
+    The circuit's model binding is threaded through, so an all-silicon circuit
+    auto-routes to the compiled-campaign silicon arm (its ``corner`` is mapped to the
+    matching card corner) while AFE circuits keep the OTFT ``mvt0``/``mbeta0`` path —
+    the result contract is unchanged."""
     spec = circuit_from_dict(data)
+    binding = spec.binding()
+    base = (_silicon_base_corner(binding.model_types, corner)
+            if binding.model_types else corner)
     return mismatch_mc(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
-                       base=corner, n=n, seed=seed, freqs=freqs, band=band,
-                       progress=progress, should_stop=should_stop, workers=workers)
+                       base=base, n=n, seed=seed, freqs=freqs, band=band,
+                       progress=progress, should_stop=should_stop, workers=workers,
+                       binding=binding)
