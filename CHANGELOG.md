@@ -19,6 +19,8 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+## [2.1.0] - 2026-07-24
+
 ### Changed / 性能
 
 - **Silicon corners / mismatch-MC / dataset route through the compiled campaign / 硅工艺 corners / 失配 MC / 数据集接入编译 campaign**
@@ -919,7 +921,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.2...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.1...v2.0.0
