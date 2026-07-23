@@ -19,6 +19,72 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Added / 新增
+
+- **PVT corner grid: full silicon corner sets + temperature & supply-scale axes on `corner_table` / PVT 网格：硅工艺全 corner 集 + `corner_table` 温度与电压轴**
+
+  **English:** `corners.corner_table` grows from a process-only sweep into a PVT
+  grid. (1) The per-family default silicon corner set (`silicon_corner_names`) is
+  now the full process set — freepdk45 `nom/ss/ff/sf/fs` and tsmc28
+  `tt/ss/ff/sf/fs` (five each; the freepdk45 `sf/fs` cross corners reuse the `ss/ff`
+  per-polarity dirs, tsmc28's added `ff/sf/fs` are core-`.l` sections), while sky130
+  stays `tt/ss` (the bundled-card data boundary). A geometry that selects **zero
+  bins** in some corner (tsmc28 `ff/sf/fs`, or an out-of-grid width) is recorded as
+  `None` and counted (`corners.corner_zero_bin_skip`) instead of raising the PDK bin
+  error and sinking the whole sweep — both arms reject it identically. (2) A new
+  `temps=` argument adds a **temperature axis** in °C; (3) a new `vdd_scale=`
+  argument adds a **supply-scale axis** that multiplies the whole bias dict
+  uniformly (the established `scale = vdd/VDD; bias = {k: v*scale}` convention). Both
+  are **silicon-only** (an OTFT/default-PDK binding rejects them) and reuse frozen
+  primitives with **no Rust change**: temperature rides the silicon-device
+  `temperature` ctor kwarg (Kelvin) onto `device_kwargs`, so both the compiled
+  campaign (`CompiledPdk::numeric_card` card selection + `co_bsim4::create`) and the
+  scalar reference see it. Each `(temp, vdd)` slice is one compiled campaign (the R9
+  dataset-layering precedent), the grid parallelises across its independent slices,
+  and every point inherits the 0-bin skip + non-convergence rollback. The result
+  nests under each corner in axis order `[temp_c, vdd_scale]` (`{corner: metrics}`
+  when neither is given). The `corners` CLI gains `--temps` / `--vdd-scale`
+  (comma-separated); **with neither flag the printed table and `-o` CSV are
+  byte-for-byte unchanged**, and with them the print groups by slice and the CSV adds
+  `temp_c`/`vdd_scale` columns for the active axes. `mismatch_mc` keeps its frozen
+  behaviour — the T/V *grid* is deferred (its per-slice nominal-seed recomputation is
+  a distinct change surface), though a single (temp, vdd) point is already reachable
+  by composing a temperature-baked binding + scaled bias. Default `corner_table` and
+  `mismatch_mc` are byte-for-byte identical to 2.1.0. Parity (compiled campaign vs
+  the frozen scalar reference, per corner × the temperature/supply axes, incl. the
+  tsmc28 ff/sf/fs bins and the −40/+125 °C extremes): worst rel ~2e-15 freepdk45,
+  ~1.4e-16 sky130, ≤~1.5e-9 tsmc28 (the cold Newton-vs-fsolve DC-root floor) — no
+  divergence, no rollback; byte-identical across workers {1, 2, 8}; golden corpus
+  reproduces bit-exactly (no re-freeze). 45-point grid (5 corner × 3 temp × 3 vdd)
+  speedup, `workers=1` → `8` (median of 3): freepdk45 5T OTA **3.5×**, tsmc28 5T OTA
+  **2.5×** (per-candidate macro-expansion-bound); 0-bin skips 0/45 for these OTA
+  geometries.
+
+  **中文：** `corners.corner_table` 由纯工艺 corner 扫描扩为 PVT 网格。①各族默认硅
+  corner 集（`silicon_corner_names`）改为完整工艺集——freepdk45 `nom/ss/ff/sf/fs`、
+  tsmc28 `tt/ss/ff/sf/fs`（各 5 个；freepdk45 `sf/fs` 交叉 corner 复用 `ss/ff` 逐极性
+  目录，tsmc28 新增 `ff/sf/fs` 为核心 `.l` section），sky130 维持 `tt/ss`（捆绑卡数据
+  边界）。某几何在某 corner **无 bin**（tsmc28 `ff/sf/fs` 或超网格宽度）时标 `None` 并
+  计数（`corners.corner_zero_bin_skip`），而非抛 PDK bin 错拖垮整表——两臂拒绝方式一致。
+  ②新增 `temps=` **温度轴**（°C）；③新增 `vdd_scale=` **电压轴**，对整个 bias 字典统一
+  缩放（沿用 `scale = vdd/VDD; bias = {k: v*scale}` 既有约定）。二者均**限硅族**
+  （OTFT/默认 PDK binding 报错），复用冻结原语且**不改 Rust**：温度经硅器件
+  `temperature` 构造参数（开尔文）落到 `device_kwargs`，编译 campaign
+  （`CompiledPdk::numeric_card` 选卡 + `co_bsim4::create`）与标量参考同见。每个
+  `(temp, vdd)` 切片为一个编译 campaign（R9 数据集分层先例），网格沿独立切片并行，每点
+  继承 0-bin 跳过 + 不收敛回退。结果按轴序 `[temp_c, vdd_scale]` 在各 corner 下嵌套
+  （均不传时为 `{corner: metrics}`）。`corners` CLI 新增 `--temps` / `--vdd-scale`
+  （逗号分隔）；**不传时打印表与 `-o` CSV 逐字节不变**，传入时按切片分组打印、CSV 为
+  启用的轴增列 `temp_c`/`vdd_scale`。`mismatch_mc` 保持冻结行为——其 T/V *网格*留待
+  下期（逐切片名义种子重算是独立改动面），但单个 (temp, vdd) 点已可经"温度 binding +
+  缩放 bias"组合达成。默认 `corner_table` 与 `mismatch_mc` 对 2.1.0 逐字节一致。Parity
+  （编译 campaign 对冻结标量参考，逐 corner × 温度/电压轴，含 tsmc28 ff/sf/fs bin 与
+  −40/+125 °C 极点）：最差相对 ~2e-15 freepdk45、~1.4e-16 sky130、≤~1.5e-9 tsmc28
+  （冷牛顿 vs fsolve 的 DC 根下限）——无分叉、无回退；workers {1, 2, 8} 逐字节一致；
+  golden 语料逐位复现（无重冻）。45 点网格（5 corner × 3 温 × 3 压）加速，`workers=1`
+  → `8`（3 次中位）：freepdk45 5T OTA **3.5×**、tsmc28 5T OTA **2.5×**（逐候选受宏
+  展开支配）；上述 OTA 几何 0-bin 跳过 0/45。
+
 ## [2.1.0] - 2026-07-24
 
 ### Changed / 性能
