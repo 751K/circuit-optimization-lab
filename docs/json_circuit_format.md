@@ -719,11 +719,14 @@ the DUT.
 }
 ```
 
-For phase margin, `injection_source` must name the sole non-zero voltage-source
-entry in `ac_drives`; `return_signal` is an explicit weighted sum of solved
-nodes. The measured response is the declared return ratio, with `polarity` and
-optional positive `return_scale`, so an ordinary amplifier transfer function
-cannot be mistaken for loop gain.
+For phase margin, `injection_source` must be a constant 0 V source breaking
+between two solved nodes and must be the sole non-zero voltage-source entry in
+`ac_drives`; `return_signal` is an explicit weighted sum of solved nodes. The
+loop gain is the declared return signal divided by the injection source's
+positive-terminal node voltage, with `polarity` and optional positive
+`return_scale`. The reference signal is therefore fixed by the physical loop
+break, so an ordinary amplifier transfer function cannot be mistaken for loop
+gain.
 
 Settling requires a fixed target and window. `tolerance` is either
 `{"absolute": <volts>}` or `{"relative": <ratio>, "reference": <volts>}`;
@@ -733,6 +736,12 @@ remains inside tolerance through `end_time`.
 
 Noise `band` must lie inside the simulated noise frequency grid. Saturation
 checks only the listed MOS devices and applies `minimum_headroom` in volts.
+For a transient saturation check, set `"analysis": "transient"` and declare
+named `checkpoints`, for example
+`[{"name": "static", "time": 0.0}, {"name": "settled", "time": 5e-9}]`.
+The runner interpolates every solved node at each declared time and re-evaluates
+the exact PDK-bound MOS operating regions; it does not reuse the initial AC
+operating point or infer a checkpoint from the last sample.
 Unknown nodes/devices, missing analyses, unsupported operating regions, and
 ambiguous loop injection are `signoff_configuration` invalid results.
 
@@ -751,6 +760,10 @@ The unified signoff result is:
 When no `signoff` block is present, the result has `status:
 "not_configured"`, `passed: null`, and still reports non-signoff gain, UGF, and
 source-power measurements when AC was run.
+
+For multi-testbench PVT aggregation, see
+[Signoff Campaigns](signoff_campaign.md). Campaign manifests have their own
+strict schema at `schemas/signoff_campaign.schema.json`.
 
 ### `explore`
 

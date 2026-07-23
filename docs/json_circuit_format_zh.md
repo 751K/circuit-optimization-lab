@@ -672,9 +672,11 @@ MOS 自动猜测这些 signoff 指标。
 }
 ```
 
-PM 的 `injection_source` 必须是 `ac_drives` 中唯一非零的电压源；
-`return_signal` 是 solved 节点的显式加权和。系统用声明的返回比、`polarity`
-和可选正数 `return_scale` 构造环路增益，因此普通放大器传递函数不能冒充环路增益。
+PM 的 `injection_source` 必须是断在两个 solved 节点之间的恒定 0 V 源，并且是
+`ac_drives` 中唯一非零的电压源；`return_signal` 是 solved 节点的显式加权和。
+环路增益等于声明的返回信号除以断环源正端节点电压，再应用 `polarity` 和可选正数
+`return_scale`。参考信号由物理断环位置固定，因此普通放大器传递函数不能冒充
+环路增益。
 
 建立时间必须固定目标和测量窗口。`tolerance` 可写成
 `{"absolute": <V>}`，也可写成
@@ -682,12 +684,20 @@ PM 的 `injection_source` 必须是 `ac_drives` 中唯一非零的电压源；
 参考。测量值是 `start_time` 之后首次进入容差带并一直保持到 `end_time` 的时间。
 
 噪声 `band` 必须位于实际仿真频率范围内。饱和检查只检查列出的 MOS，并使用单位为
-伏特的 `minimum_headroom`。错误节点/器件、缺失分析、不支持的工作区以及不明确的
-环路注入都会产生 `signoff_configuration` invalid。
+伏特的 `minimum_headroom`。瞬态饱和检查把 `analysis` 设为 `transient`，并显式声明
+命名检查点，例如
+`[{"name": "static", "time": 0.0}, {"name": "settled", "time": 5e-9}]`。
+系统会在每个指定时刻插值全部 solved 节点，并用该 PVT 点精确绑定的 PDK MOS
+重新计算工作区；不会复用初始 AC 工作点，也不会把最后一个采样点当作隐式检查点。
+错误节点/器件、缺失分析、不支持的工作区以及不明确的环路注入都会产生
+`signoff_configuration` invalid。
 
 统一输出固定包含 `status`、`measurements`、`constraints`、`passed` 和
 `worst_case`。未配置 `signoff` 时，`status` 为 `"not_configured"`、
 `passed` 为 `null`；如果运行了 AC，仍会返回普通 gain、UGF 和真实源支路功耗。
+
+多测试台 PVT 汇总见 [Signoff Campaign](signoff_campaign_zh.md)。campaign 使用独立
+严格 schema：`schemas/signoff_campaign.schema.json`。
 
 ### `explore`
 

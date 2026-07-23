@@ -15,6 +15,7 @@ returncode and a readable stderr message.
 Style follows tests/test_cli_numba_flag.py: subprocess, repo-root cwd, captured
 text output.
 """
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -102,6 +103,58 @@ def test_corners_pvt_axis_rejects_otft():
     proc = _run("corners", _CIRCUIT, "--freqs-num", "5", "--temps=27")
     assert proc.returncode != 0
     assert "silicon" in (proc.stderr + proc.stdout).lower()
+
+
+# ── signoff campaign ─────────────────────────────────────────────────────────
+
+def test_signoff_campaign_cli_smoke(tmp_path):
+    circuit = {
+        "name": "signoff_cli_fixture",
+        "solved": ["OUT"],
+        "rails": {"VIN": "VIN", "GND": 0.0},
+        "bias": {"VIN": 1.0},
+        "devices": [],
+        "resistors": [
+            {"name": "R1", "a": "VIN", "b": "OUT", "R": 1e3},
+            {"name": "R2", "a": "OUT", "b": "GND", "R": 1e3},
+        ],
+        "outputs": ["OUT"],
+        "ac_drives": {"VIN": 1.0},
+        "analyses": {
+            "ac": {
+                "freqs": {"start": 1.0, "stop": 10.0, "num": 2, "scale": "log"}
+            }
+        },
+        "signoff": {
+            "measurements": {},
+            "constraints": {"gain": {"min": -20.0}},
+        },
+    }
+    manifest = {
+        "name": "cli_smoke",
+        "pvt": {
+            "corners": ["tt"],
+            "temperatures_c": [27.0],
+            "supplies_v": [1.0],
+            "nominal_supply_v": 1.0,
+            "supply_bias_key": "VIN",
+        },
+        "cases": [
+            {"name": "ac", "circuit": "circuit.json", "overrides": {}},
+        ],
+    }
+    (tmp_path / "circuit.json").write_text(json.dumps(circuit), encoding="utf-8")
+    campaign = tmp_path / "campaign.json"
+    campaign.write_text(json.dumps(manifest), encoding="utf-8")
+    output = tmp_path / "result.json"
+
+    proc = _run("signoff", str(campaign), "--output", str(output))
+    assert proc.returncode == 0, proc.stderr
+    assert "status=pass" in proc.stdout
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert result["grid"]["total_points"] == 1
+    assert result["summary"]["total_case_runs"] == 1
+    assert result["worst_case"]["case"] == "ac"
 
 
 # ── mc (mismatch Monte Carlo) ─────────────────────────────────────────────────

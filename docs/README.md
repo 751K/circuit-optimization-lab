@@ -20,7 +20,9 @@ organized for three audiences:
    ADC, plotting, dataset, and service commands.
 3. [Circuit JSON Format](json_circuit_format.md): the maintained field-level
    reference for circuit descriptions.
-4. [PDK Support Matrix](pdk_support.md): model keys, prerequisites, supported
+4. [Signoff Campaigns](signoff_campaign.md): multi-testbench PVT execution and
+   strict worst-case aggregation.
+5. [PDK Support Matrix](pdk_support.md): model keys, prerequisites, supported
    analyses, corner names, and accuracy boundaries.
 
 ## Learn the Internals
@@ -57,6 +59,7 @@ accuracy guarantee.
 | [Getting Started](getting_started.md) | Installation and first run | Maintained |
 | [CLI Reference](cli_reference.md) | Current command-line interface | Maintained |
 | [Circuit JSON Format](json_circuit_format.md) | Circuit schema and examples | Maintained |
+| [Signoff Campaigns](signoff_campaign.md) | Multi-testbench PVT signoff manifests and output | Maintained |
 | [PDK Support Matrix](pdk_support.md) | Backend and process capability boundaries | Maintained |
 | [Core Solver Overview](module_overview.md) | Implementation architecture | Maintained |
 | [Local Service API](service_api.md) | HTTP and job API | Maintained |

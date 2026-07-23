@@ -188,6 +188,7 @@ def _signoff_fixture(*, final_output=1.0):
             "freqs": freqs,
             "response": response,
             "node_voltages": {
+                "INJ": np.ones(4, dtype=complex),
                 "RET": -loop_gain,
                 "OUTP": response / 2.0,
                 "OUTN": -response / 2.0,
@@ -224,8 +225,9 @@ def _signoff_fixture(*, final_output=1.0):
     }
     topology = SimpleNamespace(
         vsource_index={"Vinj": 3},
+        vsources=[("Vinj", "INJ", "RET", 0.0)],
         ac_drives={"Vinj": 1.0},
-        solved=["RET", "OUTP", "OUTN"],
+        solved=["INJ", "RET", "OUTP", "OUTN"],
         devices=[("M1", "OUTP", "RET", "GND")],
     )
     spec = SimpleNamespace(
@@ -270,6 +272,7 @@ def _signoff_fixture(*, final_output=1.0):
 
 def test_unified_signoff_is_explicit_unit_bearing_and_passes():
     spec, results = _signoff_fixture()
+    results["ac"]["ac_stimulus"]["drives"]["Vinj"] = 1.0 + 0.0j
     signoff = evaluate_signoff(spec, results)
     metrics = signoff["measurements"]
     assert metrics["gain"]["unit"] == "dB"
@@ -296,6 +299,83 @@ def test_unified_signoff_is_explicit_unit_bearing_and_passes():
         "phase_margin", "settling_time", "integrated_input_noise", "saturation",
     }
     assert signoff["worst_case"]["measurement"] in signoff["constraints"]
+
+
+def test_transient_saturation_recomputes_regions_at_declared_checkpoints(
+    monkeypatch,
+):
+    seen = []
+
+    def regions(_topology, _bias, node_values, _devices):
+        seen.append(node_values["OUTP"])
+        return {
+            "M1": {
+                "status": "valid",
+                "saturated": True,
+                "vds_v": node_values["OUTP"],
+                "vdsat_v": 0.2,
+                "headroom_v": node_values["OUTP"] - 0.2,
+            }
+        }
+
+    monkeypatch.setattr("circuitopt.dc_measurements.operating_regions", regions)
+    topology = SimpleNamespace(
+        vsource_index={},
+        ac_drives={},
+        solved=["OUTP"],
+        devices=[("M1", "OUTP", "OUTP", "GND")],
+    )
+    spec = SimpleNamespace(
+        topology=topology,
+        sizes={"M1": (1.0, 1.0)},
+        bias={},
+        binding=lambda: SimpleNamespace(
+            build=lambda _sizes: {"M1": object()}),
+        analyses={"transient": {}},
+        signoff={
+            "measurements": {
+                "saturation": {
+                    "analysis": "transient",
+                    "devices": ["M1"],
+                    "minimum_headroom": 0.05,
+                    "checkpoints": [
+                        {"name": "static", "time": 0.0},
+                        {"name": "settled", "time": 2e-9},
+                    ],
+                },
+            },
+            "constraints": {"saturation": {"equals": True}},
+        },
+    )
+    results = {
+        "transient": {
+            "t": np.array([0.0, 1e-9, 2e-9]),
+            "output": np.array([0.4, 0.5, 0.6]),
+            "nodes": {"OUTP": np.array([0.4, 0.5, 0.6])},
+        }
+    }
+
+    signoff = evaluate_signoff(spec, results)
+    saturation = signoff["measurements"]["saturation"]
+    assert seen == pytest.approx([0.4, 0.6])
+    assert saturation["analysis"] == "transient"
+    assert saturation["value"] is True
+    assert saturation["checkpoints"]["static"]["time"] == {
+        "value": 0.0, "unit": "s", "status": "valid"}
+    assert saturation["checkpoints"]["settled"]["devices"]["M1"][
+        "headroom"]["value"] == pytest.approx(0.4)
+
+
+def test_transient_saturation_checkpoint_must_lie_inside_simulation():
+    spec, results = _signoff_fixture()
+    spec.signoff["measurements"]["saturation"] = {
+        "analysis": "transient",
+        "devices": ["M1"],
+        "minimum_headroom": 0.05,
+        "checkpoints": [{"name": "late", "time": 10e-9}],
+    }
+    with pytest.raises(SignoffConfigurationError, match="outside transient range"):
+        evaluate_signoff(spec, results)
 
 
 def test_pm_saturation_noise_and_settling_are_not_inferred():
@@ -327,3 +407,5 @@ def test_settling_uses_declared_target_not_last_sample():
     assert settling["value"] is None
     assert signoff["status"] == "fail"
     assert signoff["constraints"]["settling_time"]["passed"] is False
+    assert signoff["constraints"]["settling_time"][
+        "normalized_margin"] == pytest.approx(-9.0)

@@ -55,7 +55,10 @@ from .service import add_cli_args as serve_add_cli_args
 from .service import run_cli as serve_run_cli
 
 _ANALYSIS_NAMES = ["ac", "noise", "transient", "pss", "pac", "pnoise"]
-_SUBCOMMANDS = ["run", "corners", "mc", "chopper", "adc", "explore", "plot", "dataset", "serve"]
+_SUBCOMMANDS = [
+    "run", "signoff", "corners", "mc", "chopper", "adc",
+    "explore", "plot", "dataset", "serve",
+]
 _CHOPPER_LEVELS = ["ideal", "pmos", "lptv", "pss", "pac", "pnoise", "transient"]
 
 
@@ -232,6 +235,63 @@ def _cmd_run(args):
         print(f"wrote {args.output}")
 
     return payload
+
+
+# ── subcommand: signoff campaign ─────────────────────────────────────────────
+
+def _add_signoff_parser(subparsers):
+    p = subparsers.add_parser(
+        "signoff",
+        help="Run a multi-testbench process/voltage/temperature signoff campaign",
+    )
+    p.add_argument("campaign", help="Path to signoff campaign JSON")
+    p.add_argument("--workers", type=int, default=1,
+                   help="PVT points evaluated concurrently (default: 1)")
+    _add_output_arg(p)
+    p.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    return p
+
+
+def _cmd_signoff(args):
+    from .signoff_campaign import run_signoff_campaign
+
+    if not os.path.exists(args.campaign):
+        raise SystemExit(f"file not found: {args.campaign}")
+
+    def progress(done, total):
+        if not args.quiet:
+            print(f"\r  evaluating PVT point {done}/{total}", end="", flush=True)
+
+    if not args.quiet:
+        print(f"Signoff campaign {args.campaign}  (workers={args.workers})")
+    result = run_signoff_campaign(
+        args.campaign,
+        workers=args.workers,
+        progress=progress,
+    )
+    if not args.quiet:
+        print()
+        points = result["summary"]["points"]
+        print(
+            f"  status={result['status']}  total={points['total']}  "
+            f"pass={points['pass']}  fail={points['fail']}  "
+            f"invalid={points['invalid']}"
+        )
+        worst = result["worst_case"]
+        if worst is not None:
+            print(
+                f"  worst: case={worst['case']} "
+                f"pvt={worst['corner']}/{worst['temperature_c']:g}C/"
+                f"{worst['supply_v']:g}V "
+                f"measurement={worst['measurement'] or 'invalid'}"
+            )
+    if args.output:
+        os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
+        with open(args.output, "w", encoding="utf-8") as handle:
+            json.dump(_jsonable(result), handle, indent=2, default=str)
+        if not args.quiet:
+            print(f"wrote {args.output}")
+    return result
 
 
 # ── subcommand: explore ──────────────────────────────────────────────────────
@@ -991,6 +1051,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="command", help="Subcommand")
 
     _add_run_parser(sub)
+    _add_signoff_parser(sub)
     _add_explore_parser(sub)
     _add_corners_parser(sub)
     _add_mc_parser(sub)
@@ -1030,6 +1091,7 @@ def main(argv=None):
     cmd = args.command
     handlers = {
         "run": _cmd_run,
+        "signoff": _cmd_signoff,
         "explore": _cmd_explore,
         "corners": _cmd_corners,
         "mc": _cmd_mc,

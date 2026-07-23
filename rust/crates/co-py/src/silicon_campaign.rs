@@ -21,7 +21,8 @@
 //!   requires (the evaluate-then-noise call order of `noise_solver`).
 //! * noise: per-device 4x4 total spectral density at each frequency,
 //!   `max(Re(z S z*), 0)` with the transposed-solve transimpedance vector,
-//!   plus resistor thermal noise `4 k T / R` at `T = 300.15 K`.
+//!   plus resistor thermal noise `4 k T / R` at the template's shared
+//!   PVT-bound MOS temperature.
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -41,9 +42,9 @@ use crate::{
     TermRecord, optional_field, optional_index, required, term,
 };
 
-/// Boltzmann constant + resistor noise temperature — `noise_solver._KB/_TEMP`.
+/// Boltzmann constant — `noise_solver._KB`.
 const KB: f64 = 1.380649e-23;
-const RES_TEMP: f64 = 300.15;
+const DEFAULT_TEMP: f64 = 300.15;
 
 /// Candidate-invariant static description of one device slot.
 #[derive(Clone, Debug)]
@@ -80,7 +81,8 @@ pub struct SiliconTemplate {
     pub devices: Vec<DeviceStatic>,
     /// LTI element base: everything except the per-candidate dense devices.
     pub lti_base: lti::Problem,
-    /// Resistor thermal-noise injections `(a_term, b_term, 4kT/R)`.
+    /// Resistor thermal-noise injections `(a_term, b_term, 4kT/R)` at the
+    /// template's shared device temperature.
     pub resistor_noise: Vec<(mna::Term, mna::Term, f64)>,
     pub output_weights: Vec<(usize, f64)>,
     pub sense: Vec<f64>,
@@ -637,6 +639,23 @@ pub(crate) fn build_silicon_template(
             noise_nodes: [node_of(ac_d), node_of(ac_g), node_of(ac_s), None],
         });
     }
+    let resistor_temperature = devices
+        .first()
+        .map(|device| device.temperature_k)
+        .unwrap_or(DEFAULT_TEMP);
+    if !resistor_temperature.is_finite() || resistor_temperature <= 0.0 {
+        return Err(PyValueError::new_err(
+            "MOS temperature must be positive finite kelvin",
+        ));
+    }
+    if devices.iter().skip(1).any(|device| {
+        !device.temperature_k.is_finite()
+            || (device.temperature_k - resistor_temperature).abs() > 1e-9
+    }) {
+        return Err(PyValueError::new_err(
+            "resistor thermal noise requires one shared circuit temperature",
+        ));
+    }
 
     let size: usize = required(spec, "n_aug")?;
     let capacitors: Vec<LtiBranchRecord> = required(spec, "ac_caps")?;
@@ -721,7 +740,13 @@ pub(crate) fn build_silicon_template(
     let resistor_noise: Vec<SilResNoiseRecord> = required(spec, "resistor_noise")?;
     let resistor_noise = resistor_noise
         .into_iter()
-        .map(|(a, b, resistance)| (term(a), term(b), 4.0 * KB * RES_TEMP / resistance))
+        .map(|(a, b, resistance)| {
+            (
+                term(a),
+                term(b),
+                4.0 * KB * resistor_temperature / resistance,
+            )
+        })
         .collect();
 
     let band: Vec<f64> = required(spec, "band")?;

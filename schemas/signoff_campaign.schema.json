@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/751K/circuit-optimization-lab/schemas/signoff_campaign.schema.json",
+  "title": "CircuitOpt multi-testbench signoff campaign",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "pvt", "cases"],
+  "properties": {
+    "name": {"type": "string", "minLength": 1},
+    "pvt": {"$ref": "#/$defs/pvt"},
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/case"}
+    }
+  },
+  "$defs": {
+    "pvt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "corners",
+        "temperatures_c",
+        "supplies_v",
+        "nominal_supply_v",
+        "supply_bias_key"
+      ],
+      "properties": {
+        "corners": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "temperatures_c": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "number"}
+        },
+        "supplies_v": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "number", "exclusiveMinimum": 0}
+        },
+        "nominal_supply_v": {"type": "number", "exclusiveMinimum": 0},
+        "supply_bias_key": {"type": "string", "minLength": 1}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "circuit", "overrides"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "circuit": {"type": "string", "minLength": 1},
+        "overrides": {"type": "object"}
+      }
+    }
+  }
+}

@@ -202,7 +202,7 @@ circuit JSON; marshalled once):
                 reference_width_um | None), ... ],   # extract_w card-bin width
   "ac_caps"/"ac_resistors"/"ac_vccs"/"ac_vsources"/"ac_vcvs"/"ac_cccs"/"ac_ccvs":
       LtiProblem-shaped element records (drives applied),
-  "resistor_noise": [ (a_term, b_term, R_ohms), ... ],          # 4kT/R at 300.15 K
+  "resistor_noise": [ (a_term, b_term, R_ohms), ... ],          # 4kT/R at shared device temperature
   "output_weights", "sense", "vin_norm", "freqs", "band",
   "dc_guesses": [[floats length n_aug], ...],
   "dc_options": [max_iterations, voltage_tolerance, step_limit, gmin],

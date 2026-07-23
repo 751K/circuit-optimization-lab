@@ -17,6 +17,7 @@ python -m circuitopt --help
 | 命令 | 用途 |
 |---|---|
 | `run` | 按 JSON 配置运行 AC、noise、transient、PSS、PAC、PNoise |
+| `signoff` | 在显式 PVT 网格上运行多个 signoff 测试台 |
 | `explore` | 从 `explore` 块采样、求解、筛约束并生成 Pareto 前沿 |
 | `corners` | AT4000TG 的 `typical/slow/fast` 固定工艺角扫描 |
 | `mc` | AT4000TG 逐器件 mismatch Monte Carlo |
@@ -69,6 +70,16 @@ circuit-opt run examples/tsmc28hpcp_5t_ota.json \
 `run` 的具体数值选项来自 JSON 顶层 `analyses` 块。字段见
 [JSON 电路格式](json_circuit_format_zh.md)。
 
+## `signoff`
+
+```bash
+circuit-opt signoff CAMPAIGN.json [--workers N] [--output RESULT.json]
+```
+
+该命令运行 PVT 笛卡尔积中的全部测试台，保留 invalid case，并输出顺序确定的逐点
+及全局最差点信息。配置和结果契约见
+[Signoff Campaign](signoff_campaign_zh.md)。
+
 ## `explore`
 
 ```bash
@@ -105,8 +116,8 @@ circuit-opt corners CIRCUIT.json [options]
 ```
 
 当前实现调用 `circuitopt.corners.corner_table`，固定扫描 AT4000TG 的
-`typical/slow/fast`。它不是通用硅 PVT campaign 驱动器。硅工艺可使用
-`run --corner`、`explore --corner` 或 `experiments/` 下的专用 campaign。
+`typical/slow/fast`。它不是通用硅 PVT campaign 驱动器。硅工艺多测试台 PVT
+应使用 `signoff`；单电路单 corner 可使用 `run --corner`。
 
 ```bash
 circuit-opt corners examples/afe_explore.json \

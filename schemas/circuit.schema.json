@@ -313,14 +313,38 @@
       "additionalProperties": false,
       "required": ["analysis", "devices", "minimum_headroom"],
       "properties": {
-        "analysis": {"const": "ac"},
+        "analysis": {"enum": ["ac", "transient"]},
         "devices": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
           "items": {"$ref": "#/$defs/name"}
         },
-        "minimum_headroom": {"type": "number"}
+        "minimum_headroom": {"type": "number"},
+        "checkpoints": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/saturationCheckpoint"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"analysis": {"const": "transient"}},
+            "required": ["analysis"]
+          },
+          "then": {"required": ["checkpoints"]},
+          "else": {"not": {"required": ["checkpoints"]}}
+        }
+      ]
+    },
+    "saturationCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "time"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "time": {"type": "number", "minimum": 0}
       }
     },
     "signalWeights": {

@@ -1,9 +1,8 @@
 # TSMC28HPC+ 14-bit Pipeline ADC 第一级 MDAC OTA
 
-> **文档状态：进行中的实验设计。** 仓库不版本化 `results/` campaign CSV；
-> 本次文档审计时，本机 `results/tsmc28_mdac_ota_pvt45.csv` 只有 7 个唯一点，
-> 且均为 TT。目标 45 点 campaign 尚未完成。文中的架构、尺寸和判据可复用，
-> 但不得把本页解读成已完成的 45 点 PVT 签核。
+> **文档状态：可复现 campaign，结果待跑。** 仓库已版本化完整 11-case、45 点
+> 原生 signoff 配置，但不版本化本地 licensed-PDK 运行结果。文中的架构、尺寸和
+> 判据可复用；在本机生成完整结果前，不得把本页解读成已通过 45 点 PVT 签核。
 
 本文给出 100 MS/s、14-bit pipeline ADC 第一级 4-bit 子 ADC / 增益 8 MDAC
 所用全差分 OTA 的指标推导、晶体管级实现和本地验证方法。许可模型只从本机
@@ -145,36 +144,38 @@ flowchart LR
 | `tsmc28hpcp_mdac_ota_dmloop.json` | 纯差分 Middlebrook 环路，PM > 60° |
 | `tsmc28hpcp_mdac_ota_cmfb1.json` | 在高阻感测栅断开的 CMFB1 环路，PM > 60° |
 | `tsmc28hpcp_mdac_ota_cmfb2.json` | 在高阻输出共模感测栅断开的 CMFB2 环路，PM > 60° |
-| `tsmc28hpcp_mdac_ota_noise.json` | 闭环差分输出噪声；10--50 MHz 为 Nyquist 带内签核，另报 10 MHz--20 GHz wideband stress |
+| `tsmc28hpcp_mdac_ota_noise.json` | 闭环差分输入/输出等效噪声；原生 campaign 明确积分 100 kHz--20 GHz |
 | `tsmc28hpcp_mdac_ota.json` | \(-FS/16,-FS/32,0,+FS/32,+FS/16\) 五档 residue 的 5 ns 建立 |
 | `tsmc28hpcp_mdac_ota_code_transition.json` | 8:4:2:1+dummy 分裂 CDAC 的同步互补 0111→1000 major-carry |
 
 建立误差按 \(|V_{OD}(5\,ns)-V_{ideal}|/0.45\) 归一化，必须小于 0.1%。
 输出共模在静态、全部五档 residue 建立后和最差码型转换后均须距 `VDD/2` 小于
-20 mV。饱和区检查
-直接保存 transient 最后一点的 foundry `vds`/`vdsat`，要求 M0/M0B/M0C、M1--M12
-及 M9B/M10B、M11B/M11C、M12B/M12C 在静态、最大
-正负 residue 和最差码型转换后满足 \(|V_{DS}|\ge|V_{DSAT}|\)。
+20 mV。饱和区检查在声明的 `t=0` 与 `t=5 ns` 检查点，从完整瞬态节点电压重新
+调用本地 foundry BSIM 模型计算 `vds`/`vdsat`。并联实例已经折叠为 `M`
+multiplicity，因此检查器件为 M0--M12；最大正负 residue 和最差码型转换后均要求
+\(|V_{DS}|\ge|V_{DSAT}|\)。
 
 PVT 网格为 `tt/ss/ff/sf/fs × -40/27/125 °C × 0.85/0.90/0.95 V`，共 45 点。
 运行命令：
 
 ```bash
-.venv/bin/python experiments/tsmc28_mdac_ngspice_oracle_campaign.py --workers 4
+circuit-opt signoff examples/tsmc28hpcp_mdac_ota_signoff.json \
+  --workers 4 --output results/tsmc28_mdac_ota_signoff.json
 ```
 
-CSV 会逐点落盘到 `results/tsmc28_mdac_ota_pvt45.csv`，中断后可续跑；`--force`
-用于清空并重跑。
+版本化 manifest 包含开环、差模环、两个 CMFB、宽带噪声、五档 residue 和
+0111→1000 major-carry 共 11 个 case，即 45 个 PVT 点、495 次 case 求解。
+输出保留逐点 pass/fail/invalid、带单位测量值和全局最差 case/P/V/T 定位。
 
 ## 6. 标称结果
 
-本节的最终数值应由本地生成的 `results/tsmc28_mdac_ota_pvt45.csv` 中
-TT / 27 °C / 0.90 V 一行自动核对后填写。该 CSV 不随仓库版本发布，因此任何
+本节的最终数值应由本地生成的 `results/tsmc28_mdac_ota_signoff.json` 中
+TT / 27 °C / 0.90 V 一点自动核对后填写。该结果不随仓库版本发布，因此任何
 对外报告都应同时保存 campaign 配置、提交号和汇总结果。
 
-噪声签核积分带宽为 ADC Nyquist 带内 10--50 MHz，输出差分积分噪声除以闭环增益 8
-得到 ADC 输入等效噪声；同一条 PSD 另积分 10 MHz--20 GHz 并作为 wideband stress
-报告。下限选在测试台 DC 辅助通路拐点以上；该通路只用于给
+当前原生 campaign 的噪声签核积分带宽明确为 100 kHz--20 GHz，同时报告闭环
+输入及输出等效积分噪声，限值分别为 56.5 µV rms 和 452 µV rms。下限选在测试台
+DC 辅助通路拐点以上；该通路只用于给
 浮置虚地求 DC 解，电容反馈在更低频开路，所以把保持相 LTI `.noise` 外推到 1 Hz
 会测到并不存在于 5 ns 保持窗口内的开环噪声。实测 1 Hz--20 GHz 的 69.8 mV
 正是这个测试台伪影，不能用于 ADC SNR。完整两相开关的低频、采样与折叠噪声仍需
@@ -184,6 +185,7 @@ Cadence PSS/PNoise；本文的数值是明确带宽下的 OTA 保持相闭环噪
 
 ## 7. PVT 汇总与最差角
 
-本节尚未完成。当前 CSV 只覆盖 TT 的 7 个电压/温度组合，不能推导 SS、FF、SF、
-FS 最差角，也不能给出全 45 点通过率。完整 campaign 完成后，应从 CSV 自动汇总
-通过范围、最差角和根因，避免在文档中手工复制 45 行数据。
+本节尚未完成。仓库已包含完整、可执行的 45 点原生 campaign 配置和自动最差点汇总，
+但不版本化本地 PDK 运行结果，因此这里不能宣称 45 点已经通过。完成本地运行后应以
+JSON 的 `summary` 和 `worst_case` 为数值来源，再补充最差角根因，避免手工复制
+45 行数据。

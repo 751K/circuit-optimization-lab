@@ -65,6 +65,7 @@ from .sar import (run_sar_conversion, run_sar_signal, run_sar_sweep,
 from .sar_mc import sar_mismatch_mc
 from .sar_explore import (apply_sar_variables, evaluate_sar,
                           load_sar_explore_json, sar_explore_from_dict)
+from .signoff_campaign import load_campaign_json, run_signoff_campaign
 
 # ``explore`` / ``sar_explore`` (the driver functions) are *not* re-exported here
 # because ``circuitopt.explore`` / ``circuitopt.sar_explore`` already refer to the
@@ -99,6 +100,8 @@ __all__ = [
     # analysis dispatch
     "run_analysis_suite",
     "run_json_analyses",
+    "load_campaign_json",
+    "run_signoff_campaign",
     # individual solvers
     "ac_solve",
     "noise_analysis",

@@ -19,6 +19,7 @@ The two entry points are equivalent. The rest of this document uses
 | Command | Purpose |
 |---|---|
 | `run` | Run AC, noise, transient, PSS, PAC, PNoise per the JSON config |
+| `signoff` | Run multiple signoff testbenches over an explicit PVT grid |
 | `explore` | Sample, solve, filter by constraints, and generate the Pareto front from an `explore` block |
 | `corners` | Fixed `typical/slow/fast` process-corner sweep for AT4000TG |
 | `mc` | Per-device mismatch Monte Carlo for AT4000TG |
@@ -77,6 +78,17 @@ integrated noise, and saturation appear only when the JSON has an explicit
 top-level `signoff.measurements` definition; acceptance limits live in
 `signoff.constraints`. See [Circuit JSON Format](json_circuit_format.md#signoff).
 
+## `signoff`
+
+```bash
+circuit-opt signoff CAMPAIGN.json [--workers N] [--output RESULT.json]
+```
+
+The command evaluates every configured testbench at every Cartesian PVT point,
+retains invalid cases, and emits deterministic per-point plus global worst-case
+metadata. See [Signoff Campaigns](signoff_campaign.md) for the manifest and
+result contracts.
+
 ## `explore`
 
 ```bash
@@ -116,8 +128,8 @@ circuit-opt corners CIRCUIT.json [options]
 
 The current implementation calls `circuitopt.corners.corner_table`, a fixed
 sweep over AT4000TG's `typical/slow/fast`. It is not a general-purpose
-silicon PVT campaign driver. For silicon PDKs, use `run --corner`,
-`explore --corner`, or a dedicated campaign under `experiments/`.
+silicon PVT campaign driver. For silicon PDKs, use `signoff` for a
+multi-testbench PVT grid, or `run --corner` for one circuit and corner.
 
 ```bash
 circuit-opt corners examples/afe_explore.json \

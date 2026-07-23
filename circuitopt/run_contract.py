@@ -286,6 +286,20 @@ def validate_signoff_config(
         if source not in topo.vsource_index:
             raise SignoffConfigurationError(
                 f"{path}.injection_source {source!r} is not a DUT voltage source")
+        probe = next(
+            (item for item in topo.vsources if item[0] == source),
+            None,
+        )
+        if probe is None:
+            raise SignoffConfigurationError(
+                f"{path}.injection_source {source!r} has no voltage-source element")
+        _, probe_p, probe_q, probe_dc = probe
+        if probe_p not in topo.solved or probe_q not in topo.solved:
+            raise SignoffConfigurationError(
+                f"{path}.injection_source must break between two solved nodes")
+        if isinstance(probe_dc, str) or float(probe_dc) != 0.0:
+            raise SignoffConfigurationError(
+                f"{path}.injection_source must be a constant 0 V loop break")
         active = sorted(
             name for name, value in topo.ac_drives.items()
             if float(value) != 0.0
@@ -374,10 +388,14 @@ def validate_signoff_config(
         path = "signoff.measurements.saturation"
         cfg = _require_mapping(measurements["saturation"], path)
         _reject_unknown(
-            cfg, {"analysis", "devices", "minimum_headroom"}, path)
-        _require_analysis(cfg, "ac", path)
-        if "ac" not in analyses:
-            raise SignoffConfigurationError(f"{path} requires analyses.ac")
+            cfg, {"analysis", "devices", "minimum_headroom", "checkpoints"}, path)
+        analysis = cfg.get("analysis")
+        if analysis not in {"ac", "transient"}:
+            raise SignoffConfigurationError(
+                f"{path}.analysis must explicitly be 'ac' or 'transient'")
+        if analysis not in analyses:
+            raise SignoffConfigurationError(
+                f"{path} requires analyses.{analysis}")
         devices = [str(name) for name in cfg.get("devices", ())]
         if not devices or len(set(devices)) != len(devices):
             raise SignoffConfigurationError(
@@ -392,6 +410,28 @@ def validate_signoff_config(
                 float(cfg["minimum_headroom"])):
             raise SignoffConfigurationError(
                 f"{path}.minimum_headroom must be finite")
+        checkpoints = cfg.get("checkpoints")
+        if analysis == "transient":
+            if not isinstance(checkpoints, list) or not checkpoints:
+                raise SignoffConfigurationError(
+                    f"{path}.checkpoints must be a non-empty array for transient")
+            names = set()
+            for index, checkpoint in enumerate(checkpoints):
+                cpath = f"{path}.checkpoints[{index}]"
+                checkpoint = _require_mapping(checkpoint, cpath)
+                _reject_unknown(checkpoint, {"name", "time"}, cpath)
+                name = str(checkpoint.get("name", "")).strip()
+                if not name or name in names:
+                    raise SignoffConfigurationError(
+                        f"{cpath}.name must be non-empty and unique")
+                names.add(name)
+                if "time" not in checkpoint or not np.isfinite(
+                        float(checkpoint["time"])):
+                    raise SignoffConfigurationError(
+                        f"{cpath}.time must be finite")
+        elif checkpoints is not None:
+            raise SignoffConfigurationError(
+                f"{path}.checkpoints is only valid for transient saturation")
         produced.add("saturation")
 
     for name, raw_limits in constraints.items():
@@ -422,13 +462,26 @@ def _phase_margin_measurement(spec, ac: Mapping[str, Any], cfg: Mapping[str, Any
     if source not in topo.vsource_index:
         raise SignoffConfigurationError(
             f"phase_margin injection_source {source!r} is not a DUT voltage source")
+    probe = next((item for item in topo.vsources if item[0] == source), None)
+    if probe is None:
+        raise SignoffConfigurationError(
+            f"phase_margin injection_source {source!r} has no source element")
+    _, reference_node, return_node, probe_dc = probe
+    if reference_node not in topo.solved or return_node not in topo.solved:
+        raise SignoffConfigurationError(
+            "phase-margin loop source must break between two solved nodes")
+    if isinstance(probe_dc, str) or float(probe_dc) != 0.0:
+        raise SignoffConfigurationError(
+            "phase-margin loop source must be a constant 0 V break")
 
     stimulus = _require_mapping(ac.get("ac_stimulus"), "ac.ac_stimulus")
     drives = _require_mapping(stimulus.get("drives"), "ac.ac_stimulus.drives")
-    if source not in drives or float(drives[source]) == 0.0:
+    drive = complex(drives.get(source, 0.0))
+    if source not in drives or abs(drive) == 0.0:
         raise SignoffConfigurationError(
             f"phase_margin injection_source {source!r} has no non-zero AC drive")
-    active = sorted(name for name, value in drives.items() if float(value) != 0.0)
+    active = sorted(name for name, value in drives.items()
+                    if abs(complex(value)) != 0.0)
     if active != [source]:
         raise SignoffConfigurationError(
             "phase_margin requires exactly one active AC loop injection source; "
@@ -445,6 +498,11 @@ def _phase_margin_measurement(spec, ac: Mapping[str, Any], cfg: Mapping[str, Any
         path="signoff.measurements.phase_margin.return_signal",
         dtype=complex,
     )
+    reference = np.asarray(node_voltages[reference_node], dtype=complex)
+    _require_finite(reference, "phase_margin.reference_signal", "signoff")
+    if np.any(np.abs(reference) <= np.finfo(float).tiny):
+        raise SignoffConfigurationError(
+            "phase-margin injection-side reference signal contains zero")
     polarity = float(cfg.get("polarity", -1.0))
     if polarity not in {-1.0, 1.0}:
         raise SignoffConfigurationError("phase_margin.polarity must be -1 or 1")
@@ -452,7 +510,7 @@ def _phase_margin_measurement(spec, ac: Mapping[str, Any], cfg: Mapping[str, Any
     if not np.isfinite(return_scale) or return_scale <= 0.0:
         raise SignoffConfigurationError(
             "phase_margin.return_scale must be a positive finite number")
-    loop_gain = polarity * return_scale * returned / complex(float(drives[source]))
+    loop_gain = polarity * return_scale * returned / reference
     _require_finite(loop_gain, "phase_margin.loop_gain", "signoff")
 
     from .frequency_metrics import phase_margin, unity_gain_freq
@@ -465,6 +523,7 @@ def _phase_margin_measurement(spec, ac: Mapping[str, Any], cfg: Mapping[str, Any
         "response_kind": "loop_gain",
         "injection_source": source,
         "return_signal": {str(k): float(v) for k, v in return_signal.items()},
+        "reference_signal": {reference_node: 1.0},
         "polarity": int(polarity),
         "return_scale": return_scale,
     }
@@ -638,21 +697,12 @@ def _integrated_noise_rms(freqs, psd, lo: float, hi: float) -> float:
     return float(np.sqrt(integral))
 
 
-def _saturation_measurement(ac: Mapping[str, Any], cfg: Mapping[str, Any]) -> dict:
-    cfg = _require_mapping(cfg, "signoff.measurements.saturation")
-    _require_analysis(cfg, "ac", "signoff.measurements.saturation")
-    if "minimum_headroom" not in cfg:
-        raise SignoffConfigurationError(
-            "signoff.measurements.saturation.minimum_headroom is required")
-    requested = [str(name) for name in cfg.get("devices", ())]
-    if not requested:
-        raise SignoffConfigurationError(
-            "signoff.measurements.saturation.devices must not be empty")
-    minimum = float(cfg.get("minimum_headroom", 0.0))
-    if not np.isfinite(minimum):
-        raise SignoffConfigurationError(
-            "saturation minimum_headroom must be finite")
-    regions = _require_mapping(ac.get("operating_regions"), "ac.operating_regions")
+def _saturation_from_regions(
+    regions: Mapping[str, Any],
+    requested: list[str],
+    minimum: float,
+) -> dict:
+    """Build one aggregate saturation metric from precomputed operating regions."""
     missing = [name for name in requested if name not in regions]
     if missing:
         raise SignoffConfigurationError(
@@ -679,12 +729,82 @@ def _saturation_measurement(ac: Mapping[str, Any], cfg: Mapping[str, Any]) -> di
             vdsat=metric(float(row["vdsat_v"]), "V"),
             headroom=metric(headroom, "V"),
         )
+    return metric(passed, "boolean", devices=devices)
+
+
+def _saturation_measurement(
+    spec,
+    results: Mapping[str, Mapping[str, Any]],
+    cfg: Mapping[str, Any],
+) -> dict:
+    cfg = _require_mapping(cfg, "signoff.measurements.saturation")
+    if "minimum_headroom" not in cfg:
+        raise SignoffConfigurationError(
+            "signoff.measurements.saturation.minimum_headroom is required")
+    requested = [str(name) for name in cfg.get("devices", ())]
+    if not requested:
+        raise SignoffConfigurationError(
+            "signoff.measurements.saturation.devices must not be empty")
+    minimum = float(cfg.get("minimum_headroom", 0.0))
+    if not np.isfinite(minimum):
+        raise SignoffConfigurationError(
+            "saturation minimum_headroom must be finite")
+    analysis = cfg.get("analysis")
+    if analysis == "ac":
+        ac = results.get("ac")
+        if ac is None:
+            raise SignoffConfigurationError(
+                "AC saturation requires the ac operating-point result")
+        regions = _require_mapping(
+            ac.get("operating_regions"), "ac.operating_regions")
+        result = _saturation_from_regions(regions, requested, minimum)
+        result.update({
+            "analysis": "ac",
+            "minimum_headroom": metric(minimum, "V"),
+        })
+        return result
+    if analysis != "transient":
+        raise SignoffConfigurationError(
+            "saturation.analysis must explicitly be 'ac' or 'transient'")
+
+    transient = results.get("transient")
+    if transient is None:
+        raise SignoffConfigurationError(
+            "transient saturation requires the transient analysis result")
+    t = np.asarray(transient["t"], float)
+    nodes = _require_mapping(transient.get("nodes"), "transient.nodes")
+    for checkpoint in cfg.get("checkpoints", ()):
+        name = str(checkpoint["name"])
+        time = float(checkpoint["time"])
+        if time < float(t[0]) or time > float(t[-1]):
+            raise SignoffConfigurationError(
+                f"saturation checkpoint {name!r} at {time:g} s is outside "
+                f"transient range [{float(t[0]):g}, {float(t[-1]):g}] s")
+    devices = spec.binding().build(spec.sizes)
+    from .dc_measurements import operating_regions
+
+    checkpoint_metrics = {}
+    passed = True
+    for checkpoint in cfg.get("checkpoints", ()):
+        name = str(checkpoint["name"])
+        time = float(checkpoint["time"])
+        node_values = {
+            node: float(np.interp(time, t, np.asarray(values, float)))
+            for node, values in nodes.items()
+        }
+        regions = operating_regions(
+            spec.topology, spec.bias, node_values, devices)
+        checkpoint_metric = _saturation_from_regions(
+            regions, requested, minimum)
+        checkpoint_metric["time"] = metric(time, "s")
+        checkpoint_metrics[name] = checkpoint_metric
+        passed = passed and bool(checkpoint_metric["value"])
     return metric(
         passed,
         "boolean",
-        analysis="ac",
+        analysis="transient",
         minimum_headroom=metric(minimum, "V"),
-        devices=devices,
+        checkpoints=checkpoint_metrics,
     )
 
 
@@ -726,11 +846,8 @@ def summarize_design_metrics(
                 "noise measurement requires the noise analysis result")
         out.update(_noise_measurements(noise, configured["noise"]))
     if "saturation" in configured:
-        if ac is None:
-            raise SignoffConfigurationError(
-                "saturation requires the ac operating-point result")
         out["saturation"] = _saturation_measurement(
-            ac, configured["saturation"])
+            spec, results, configured["saturation"])
     return out
 
 
@@ -779,6 +896,24 @@ def _constraint_result(name: str, observed: Mapping[str, Any], limits: Mapping[s
         }
         passed = passed and bool(check_passed)
         normalized_margins.append(1.0 if check_passed else -1.0)
+    if not normalized_margins and status == "not_settled":
+        final_error = observed.get("final_error", {}).get("value")
+        tolerance = observed.get("tolerance", {})
+        if tolerance.get("mode") == "relative":
+            tolerance_limit = tolerance.get("absolute_limit", {}).get("value")
+        else:
+            tolerance_limit = tolerance.get("value")
+        if (
+            final_error is not None
+            and tolerance_limit is not None
+            and np.isfinite(float(final_error))
+            and np.isfinite(float(tolerance_limit))
+            and float(tolerance_limit) > 0.0
+        ):
+            # A missing settling time is still rankable: zero margin occurs at
+            # the declared error-band edge and more negative means farther out.
+            normalized_margins.append(
+                1.0 - float(final_error) / float(tolerance_limit))
     if not checks:
         raise SignoffConfigurationError(
             f"signoff constraint {name!r} requires min, max, and/or equals")

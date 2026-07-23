@@ -19,6 +19,36 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Added / 新增
+
+- **Multi-testbench PVT signoff campaign / 多测试台 PVT 签核 campaign**
+
+  **English:** Added `circuit-opt signoff`, the strict
+  `schemas/signoff_campaign.schema.json` manifest, deterministic parallel PVT
+  execution, and case/point/global worst-case aggregation. Relative circuit
+  paths are resolved from the manifest and cannot escape its directory; affine
+  `$pvt` expressions bind supply-dependent stimuli without machine-specific
+  paths or generated netlists. Model failures, non-convergence, non-finite
+  results, and invalid signoff configurations remain explicit `invalid` cases.
+  Transient saturation can now declare named time checkpoints; every checkpoint
+  reconstructs the node state and re-evaluates the exact PDK-bound MOS operating
+  regions. Resistor thermal noise now follows the shared PVT-bound MOS
+  temperature instead of remaining fixed at 300.15 K. The TSMC28HPC+ MDAC
+  example supplies an 11-case, 45-point manifest
+  covering open-loop gain, differential/CMFB loops, wideband input/output noise,
+  five residue levels, and the 0111-to-1000 major-carry transition.
+
+  **中文：** 新增 `circuit-opt signoff`、严格
+  `schemas/signoff_campaign.schema.json` 配置、顺序确定的并行 PVT 执行，以及
+  case/逐点/全局最差点汇总。电路路径从 manifest 相对解析且不能逃出其目录；
+  仿射 `$pvt` 表达式可绑定随电源变化的激励，不需要机器相关路径或生成网表。
+  模型失败、不收敛、非有限结果和无效 signoff 配置都会保留为显式 `invalid`。
+  瞬态饱和检查现在可声明命名时刻；每个检查点都会重建节点状态，并用精确 PDK
+  绑定重新计算 MOS 工作区。电阻热噪声现在跟随 PVT 绑定的统一 MOS 温度，不再固定
+  为 300.15 K。TSMC28HPC+ MDAC 示例提供 11-case、45 点 manifest，
+  覆盖开环增益、差模/CMFB 环、宽带输入/输出噪声、五档 residue 和
+  0111→1000 主进位切换。
+
 ### Changed / 变更
 
 - **Strict simulation contract / 严格仿真契约**

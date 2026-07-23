@@ -14,7 +14,7 @@ project guarantee.
 | [FreePDK45 Fully Differential OTA](freepdk45_fd_ota_design.md) | FreePDK45 | Full OTA design and ngspice AC cross-check | Reproducible design snapshot; backend limitations apply |
 | [FreePDK45 SAR ADC](freepdk45_sar_design.md) | FreePDK45 | CDAC, StrongARM comparator, static/dynamic/MC workflow | Reproducible experiment; not a sign-off ADC flow |
 | [FreePDK45 MDAC OTA Derivation](mdac_ota_derivation.md) | FreePDK45 | ADC-to-OTA requirement derivation and testbench conventions | No complete versioned campaign; the local audit output covered 42 of 45 points |
-| [TSMC28HPC+ MDAC OTA](tsmc28_mdac_ota_design.md) | TSMC28HPC+ | 14-bit pipeline first-stage MDAC OTA architecture and tests | No complete versioned campaign; the local audit output covered 7 TT points |
+| [TSMC28HPC+ MDAC OTA](tsmc28_mdac_ota_design.md) | TSMC28HPC+ | 14-bit pipeline first-stage MDAC OTA architecture and tests | Reproducible native 11-case/45-point campaign config; no versioned local-PDK result |
 
 ## Reading Rules
 

@@ -15,7 +15,8 @@
 2. [CLI 参考手册](cli_reference_zh.md)：分析、探索、工艺角、失配、ADC、绘图、
    数据集和本地服务命令。
 3. [JSON 电路描述格式](json_circuit_format_zh.md)：电路描述的字段级维护文档。
-4. [PDK 支持矩阵](pdk_support_zh.md)：模型键、前置依赖、分析覆盖、工艺角和限制。
+4. [Signoff Campaign](signoff_campaign_zh.md)：多测试台 PVT 运行与严格最差点汇总。
+5. [PDK 支持矩阵](pdk_support_zh.md)：模型键、前置依赖、分析覆盖、工艺角和限制。
 
 ## 理解项目细节
 
@@ -45,6 +46,7 @@ Foundry 模型文件只是本地输入，不属于仓库内容，必须保持 Gi
 | [安装与快速上手](getting_started_zh.md) | 安装和第一次运行 | 持续维护 |
 | [CLI 参考手册](cli_reference_zh.md) | 当前命令行接口 | 持续维护 |
 | [JSON 电路描述格式](json_circuit_format_zh.md) | 电路 schema 与示例 | 持续维护 |
+| [Signoff Campaign](signoff_campaign_zh.md) | 多测试台 PVT 配置和输出 | 持续维护 |
 | [PDK 支持矩阵](pdk_support_zh.md) | 工艺和后端能力边界 | 持续维护 |
 | [核心求解器概览](module_overview_zh.md) | 实现架构 | 持续维护 |
 | [本地服务 API](service_api_zh.md) | HTTP 与任务 API | 持续维护 |

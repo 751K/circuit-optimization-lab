@@ -34,7 +34,7 @@ from .device_factory import (apply_silicon_corner, build_devices, dev_corner,
 from .topology import AFE_TOPO
 from .compiled_topology import CompiledTopology
 from . import diagnostics
-from .run_contract import ModelEvaluationError, ensure_analysis_valid
+from .run_contract import ModelEvaluationError, SimulationInvalid, ensure_analysis_valid
 
 if TYPE_CHECKING:
     from .device_factory import CircuitBinding
@@ -42,6 +42,32 @@ if TYPE_CHECKING:
 
 _KB = 1.380649e-23          # Boltzmann constant [J/K]
 _TEMP = 300.15              # physical temperature for resistor thermal noise [K]
+
+
+def _resistor_noise_temperature(devices) -> float:
+    """Infer the circuit ambient temperature from explicitly bound MOS models."""
+    temperatures = [
+        float(device.temperature)
+        for device in (devices or {}).values()
+        if hasattr(device, "temperature")
+    ]
+    if not temperatures:
+        return _TEMP
+    reference = temperatures[0]
+    if not np.isfinite(reference) or reference <= 0.0:
+        raise SimulationInvalid(
+            "invalid_temperature",
+            "MOS temperature must be positive finite kelvin",
+            analysis="noise",
+        )
+    if any(not np.isclose(value, reference, rtol=0.0, atol=1e-9)
+           for value in temperatures[1:]):
+        raise SimulationInvalid(
+            "inconsistent_temperature",
+            "resistor thermal noise requires one shared circuit temperature",
+            analysis="noise",
+        )
+    return reference
 
 
 def device_psd(W, L, Vs, Vd, Vg, freqs, corner=None, nf=1, model_type=None,
@@ -137,7 +163,8 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
     dev_psd = {name: np.zeros(len(freqs)) for name in bpts}  # per-device output V^2/Hz
     for rname, *_ in topo.resistors:                     # resistors are noise sources too
         dev_psd[rname] = np.zeros(len(freqs))
-    res_inj = [(rname, a, b, 4.0 * _KB * _TEMP / R)
+    ambient_temperature = _resistor_noise_temperature(dev_inst)
+    res_inj = [(rname, a, b, 4.0 * _KB * ambient_temperature / R)
                for rname, a, b, R, _ in ac_res]  # (name, term_a, term_b, S_th)
     sense = plan.output_sense(dtype=float)
 
