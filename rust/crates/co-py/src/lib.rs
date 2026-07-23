@@ -3060,8 +3060,11 @@ fn parse_candidate(item: &Bound<'_, PyAny>) -> PyResult<otft_campaign::OtftCandi
 }
 
 /// Family-normalized metrics tuple shared by the campaign result marshal:
-/// `(gain_peak_dB, bw_Hz, irn_uV, latch_dV, dc_op, dc_iterations, dc_from_seed)`.
-type CampaignMetrics = (f64, f64, f64, f64, Vec<f64>, usize, bool);
+/// `(gain_peak_dB, bw_Hz, irn_uV, latch_dV, dc_op, dc_iterations, dc_from_seed,
+/// gain_dB, ich)`. The last two are the silicon dataset labels (DC gain + per-device
+/// channel current); the AFE family, which the dataset arm never routes, fills them
+/// with `NaN` / an empty vector.
+type CampaignMetrics = (f64, f64, f64, f64, Vec<f64>, usize, bool, f64, Vec<f64>);
 
 enum CampaignKind {
     Otft(Arc<otft_campaign::OtftTemplate>),
@@ -3164,6 +3167,8 @@ impl PyCompiledCampaign {
                                         m.dc_op,
                                         m.dc_iterations,
                                         m.dc_from_seed,
+                                        f64::NAN,   // gain_dB — silicon-only label
+                                        Vec::new(), // ich — silicon-only label
                                     )
                                 })
                             })
@@ -3206,6 +3211,8 @@ impl PyCompiledCampaign {
                                         m.dc_op,
                                         m.dc_iterations,
                                         m.dc_from_seed,
+                                        m.av_dc_db,
+                                        m.ich,
                                     )
                                 })
                             })
@@ -3223,13 +3230,15 @@ impl PyCompiledCampaign {
                     dict.set_item("ok", false)?;
                     dict.set_item("cancelled", true)?;
                 }
-                Some(Ok((gain, bw, irn, latch, dc_op, iterations, from_seed))) => {
+                Some(Ok((gain, bw, irn, latch, dc_op, iterations, from_seed, gain_dc, ich))) => {
                     dict.set_item("ok", true)?;
                     dict.set_item("gain_peak_dB", gain)?;
+                    dict.set_item("gain_dB", gain_dc)?;
                     dict.set_item("bw_Hz", bw)?;
                     dict.set_item("irn_uV", irn)?;
                     dict.set_item("latch_dV", latch)?;
                     dict.set_item("dc_op", dc_op)?;
+                    dict.set_item("ich", ich)?;
                     dict.set_item("dc_iterations", iterations)?;
                     dict.set_item("dc_from_seed", from_seed)?;
                 }

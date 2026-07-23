@@ -429,6 +429,91 @@ def candidate_circuit(config_dict, topo, base_sizes, base_bias, nf,
     return topo, sizes, bias, cand_nf
 
 
+# Minimum size-candidates in one (bias, topology, corner) layer for the compiled
+# campaign to pay off — below this a layer is fragmented (e.g. a finely-swept bias
+# axis) and stays on the scalar path (the whole batch shares one Rayon pool, so a
+# too-small batch loses the GIL-free win to marshalling overhead).
+_MIN_CAMPAIGN_BATCH = 8
+
+
+def _hashable_nf(nf):
+    """A hashable layer key for a per-candidate ``nf`` (int / dict / None)."""
+    if isinstance(nf, dict):
+        return ("nf", tuple(sorted(nf.items())))
+    return ("nf", nf)
+
+
+def _campaign_dataset_metrics(row, binding, sizes, topo, bias, device_names):
+    """A silicon-campaign result row -> the :func:`explore.evaluate` metrics dict.
+
+    ``gain_dB`` / ``gain_peak_dB`` / ``bw_Hz`` / ``irn_uV`` come straight from the
+    campaign; ``power_uW`` is the frozen ``explore._supply_power_uW`` reduction over
+    the campaign's per-device channel currents (``ich``); ``area`` is the frozen
+    ``explore._area`` (a pure geometry sum, PVT-independent). ``None`` when the
+    candidate's DC did not converge (a kept, null-label row — never dropped)."""
+    from .explore import _area, _supply_power_uW
+
+    if not row.get("ok"):
+        return None
+    ss = {name: {"Ich": float(row["ich"][k])} for k, name in enumerate(device_names)}
+    try:
+        power_uW = float(_supply_power_uW(topo, bias, ss))
+    except Exception as exc:                       # match evaluate()'s guard
+        diagnostics.note("dataset.campaign_power_eval_fail", exc)
+        power_uW = float("nan")
+    return {
+        "gain_dB": float(row["gain_dB"]),
+        "gain_peak_dB": float(row["gain_peak_dB"]),
+        "bw_Hz": float(row["bw_Hz"]),
+        "irn_uV": float(row["irn_uV"]),
+        "power_uW": power_uW,
+        "area": float(_area(binding, sizes)),
+        "_noise_evaluated": True,               # the dataset always evaluates noise
+    }
+
+
+def _campaign_dataset_rows(samples, size_vars, size_names, base_sizes, base_bias, nf,
+                           topo, base_binding, si_corner, freqs, band, labels, workers):
+    """Campaign-evaluate the qualifying size-grid layers -> ``{i: row}``.
+
+    Slices the candidates into ``(bias, nf)`` layers (topology / corner are fixed on
+    this path — structural and corner axes are guarded out by the caller), and runs
+    each layer with at least :data:`_MIN_CAMPAIGN_BATCH` candidates through the
+    silicon compiled campaign in one Rayon pool. AC/DC metrics come from the batch;
+    ``power_uW`` / ``area`` are the frozen post-batch reductions. Layers below the
+    threshold, or any circuit the campaign cannot build, return no rows and are left
+    to the scalar path — the result is byte-identical either way."""
+    from ._campaign_sweep import silicon_campaign_for
+
+    layers: dict = {}
+    for i, var_values in enumerate(samples):
+        size_vals = {k: v for k, v in var_values.items() if k in size_names}
+        sizes, bias, cand_nf = apply_variables(size_vars, size_vals, base_sizes,
+                                               base_bias, base_nf=nf)
+        key = (tuple(sorted(bias.items())), _hashable_nf(cand_nf))
+        layers.setdefault(key, []).append((i, sizes, bias, cand_nf))
+
+    out: dict = {}
+    device_names = [name for name, *_ in topo.devices]
+    for members in layers.values():
+        if len(members) < _MIN_CAMPAIGN_BATCH:
+            continue                                # fragmented layer -> scalar
+        _, rep_sizes, rep_bias, rep_nf = members[0]
+        camp = silicon_campaign_for(topo, rep_sizes, rep_bias, rep_nf, base_binding,
+                                    freqs, band)
+        if camp is None:
+            continue                                # not campaign-able -> scalar
+        corner = si_corner or camp.nominal_corner
+        cands = [camp.candidate(sizes, corner=corner) for _, sizes, _, _ in members]
+        results = camp.evaluate_batch(cands, workers=workers,
+                                      analyses=("dc", "ac", "noise"))
+        for (i, sizes, bias, _), row in zip(members, results):
+            metrics = _campaign_dataset_metrics(row, base_binding, sizes, topo, bias,
+                                                device_names)
+            out[i] = _row(i, samples[i], metrics, None, labels)
+    return out
+
+
 def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
                   method="lhs", corner=None, label_groups=DEFAULT_GROUPS,
                   seed_fn=None, progress=None, config_dict=None, config_path=None,
@@ -533,19 +618,46 @@ def build_dataset(topo, base_sizes, base_bias, nf, cfg, *, n=200, seed=0,
         return _row(i, var_values, metrics, extra or None, labels)
 
     rows = [None] * n
+
+    # Silicon compiled-campaign arm: an all-silicon, fixed-topology size/bias grid
+    # with only the AC/noise label group (no periodic features, no per-candidate DC
+    # seed, no structural/PVT axis) batches its qualifying layers through the
+    # campaign; every other candidate keeps the scalar ``evaluate`` path byte-for-byte.
+    campaign_rows = {}
+    from ._campaign_sweep import campaign_enabled
+    if (campaign_enabled() and (base_binding.model_types or {}) and not struct_vars
+            and not corner_vars and seed_fn is None
+            and tuple(groups) == ("ac_noise",)):
+        try:
+            campaign_rows = _campaign_dataset_rows(
+                samples, size_vars, size_names, base_sizes, base_bias, nf, topo,
+                base_binding, si_corner, cfg.freqs, cfg.band, labels, workers)
+        except Exception as exc:  # noqa: BLE001 - fall back to the scalar path
+            diagnostics.note("dataset.campaign_build_fail", exc)
+            campaign_rows = {}
+
+    done = 0
+    for i, row in campaign_rows.items():
+        rows[i] = row
+        done += 1
+        if progress is not None:
+            progress(done, n)
+    scalar = [(i, samples[i]) for i in range(n) if rows[i] is None]
     if workers == 1:
-        for i, var_values in enumerate(samples):
+        for i, var_values in scalar:
             rows[i] = evaluate_candidate(i, var_values)
+            done += 1
             if progress is not None:
-                progress(i + 1, n)
+                progress(done, n)
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(evaluate_candidate, i, var_values): i
-                       for i, var_values in enumerate(samples)}
-            for completed, future in enumerate(as_completed(futures), start=1):
+                       for i, var_values in scalar}
+            for future in as_completed(futures):
                 rows[futures[future]] = future.result()
+                done += 1
                 if progress is not None:
-                    progress(completed, n)
+                    progress(done, n)
     rows = [row for row in rows if row is not None]
 
     counts = {

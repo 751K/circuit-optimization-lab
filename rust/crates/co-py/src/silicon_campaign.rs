@@ -112,7 +112,11 @@ pub struct SiliconCandidate {
     pub trust_seed_as_op: bool,
 }
 
-/// Metrics with the same key shape as the AFE family.
+/// Metrics with the same key shape as the AFE family, plus two dataset labels
+/// that are already computed in the pipeline (no extra math): the DC gain
+/// (``av_dc_db`` = gain at the lowest analysis frequency, the `gain_dB` label) and
+/// the per-device DC channel current (``ich`` = |drain terminal current|, the
+/// input to the frozen ``explore._supply_power_uW`` `power_uW` reduction).
 #[derive(Clone, Debug)]
 pub struct SiliconMetrics {
     pub gain_peak_db: f64,
@@ -122,6 +126,8 @@ pub struct SiliconMetrics {
     pub dc_op: Vec<f64>,
     pub dc_iterations: usize,
     pub dc_from_seed: bool,
+    pub av_dc_db: f64,
+    pub ich: Vec<f64>,
 }
 
 /// Owned native BSIM4 handle (freed on drop). Created, used, and destroyed on
@@ -370,6 +376,7 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
         //    bias comes from the DC terminal tokens (rails carry their true DC
         //    voltage there — the AC tokens are small-signal values).
         let mut problem = t.lti_base.clone();
+        let mut ich = Vec::with_capacity(t.devices.len());
         for (slot, (stat, handle)) in t.devices.iter().zip(&handles).enumerate() {
             let dc_terms = &t.dc_devices[slot].terms;
             let resolve = |term: &mna::Term| term.resolve(&dc_op, &[]).unwrap_or(term.value);
@@ -392,6 +399,10 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
                     "candidate {index}: BSIM4 evaluation failed at the operating point"
                 ));
             }
+            // Per-device DC channel current = |drain terminal current| — the exact
+            // `abs(result.terminal_currents[0])` the Python device get_ss_params
+            // reports as ``Ich`` (the KCL fix-up only touches the bulk terminal).
+            ich.push(evaluation.currents[0].abs());
             problem.dense_devices.push(lti::DenseDevice {
                 terms: vec![
                     stat.ac_d,
@@ -430,6 +441,9 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
         }
         let peak = gains.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let gain_peak_db = 20.0 * peak.max(1e-9).log10();
+        // DC gain (`gain_dB` label): the gain at the lowest analysis frequency,
+        // the same `20*log10(max(Av_dc, 1e-9))` reduction as `ac_solver.Av_dc_dB`.
+        let av_dc_db = 20.0 * gains.first().copied().unwrap_or(0.0).max(1e-9).log10();
         let bw_hz = bw_from_gain(&t.freqs, &gains);
 
         // 5. Noise: transposed solve + per-device BSIM4 noise matrices.
@@ -525,6 +539,8 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
             dc_op,
             dc_iterations,
             dc_from_seed,
+            av_dc_db,
+            ich,
         })
     }
 }

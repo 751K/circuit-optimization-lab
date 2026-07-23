@@ -273,10 +273,20 @@ BSIM4-backend/solver callbacks during the batch.
 
 ```
 {"ok": True, "gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV",
- "dc_op": [floats length n_aug], "dc_iterations": int, "dc_from_seed": bool}
+ "dc_op": [floats length n_aug], "dc_iterations": int, "dc_from_seed": bool,
+ "gain_dB": float, "ich": [floats, one per template device]}
 # or, for a candidate that could not be evaluated:
 {"ok": False, "error": str}          # a bad candidate never sinks the batch
 ```
+
+`gain_dB` is the DC gain (gain at the lowest analysis frequency, ==
+`ac_solver.Av_dc_dB` = `20*log10(max(Av_dc, 1e-9))`) and `ich` is each device's DC
+channel current (`|drain terminal current|`, == the Python device get_ss_params
+`Ich = abs(terminal_currents[0])`). Both are already computed in the pipeline (the
+AC solve and the operating-point `eval_vp`); they are the two silicon dataset labels
+the campaign did not previously surface — `gain_dB` directly and `power_uW` via the
+frozen `explore._supply_power_uW` reduction over `ich`. The **AFE** family fills
+`gain_dB` with `NaN` and `ich` with `[]` (the dataset arm never routes AFE).
 
 ### Differential gate (parity vs the frozen Python scalar path)
 
