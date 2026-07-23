@@ -385,22 +385,43 @@ def _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs, band,
     temperature/bias means a fresh :func:`silicon_campaign_for`. ``vdd_scale``
     multiplies the whole ``bias`` dict uniformly. Every slice runs all corners through
     :func:`_corner_table_silicon`, inheriting its 0-bin per-corner skip and
-    non-convergence rollback unchanged."""
+    non-convergence rollback unchanged.
+
+    ``workers`` parallelises the grid across its independent slices — the natural axis
+    for a multi-slice grid, since each slice's own corner batch (a handful of
+    candidates) is too small to overcome the Rayon-pool overhead. A multi-slice grid
+    therefore runs one slice per worker thread with each slice's batch single-threaded
+    (the two layers never oversubscribe); a single-slice grid instead spends
+    ``workers`` on that one slice's batch. Slices are independent and each runs
+    deterministically at one worker, and results are assembled in slice order, so the
+    grid is byte-identical for any ``workers`` (the determinism gate), with still no
+    per-candidate Python callback inside any batch."""
     devices = [d for d, *_ in topo.devices]
     temp_axis = tuple(temps) if temps is not None else (None,)
     vdd_axis = tuple(vdd_scale) if vdd_scale is not None else (None,)
+    slice_keys = [(tc, vs) for tc in temp_axis for vs in vdd_axis]
+    # One slice -> spend workers on its batch; many slices -> one worker per slice.
+    inner_workers = workers if len(slice_keys) == 1 else 1
+
+    def run_slice(key):
+        tc, vs = key
+        tbind = _temperature_binding(binding, tc, devices)
+        sbias = (bias if vs is None
+                 else {k: v * float(vs) for k, v in bias.items()})
+        camp = silicon_campaign_for(topo, sizes, sbias, nf, tbind, freqs, band)
+        return _corner_table_silicon(camp, sizes, sbias, nf, topo, corner_names,
+                                     freqs, band, include_noise, inner_workers, tbind)
+
+    if workers == 1 or len(slice_keys) == 1:
+        slice_tables = [run_slice(key) for key in slice_keys]
+    else:
+        with ThreadPoolExecutor(max_workers=min(workers, len(slice_keys))) as executor:
+            slice_tables = list(executor.map(run_slice, slice_keys))
 
     out = {c: {} for c in corner_names}
-    for tc in temp_axis:
-        tbind = _temperature_binding(binding, tc, devices)
-        for vs in vdd_axis:
-            sbias = (bias if vs is None
-                     else {k: v * float(vs) for k, v in bias.items()})
-            camp = silicon_campaign_for(topo, sizes, sbias, nf, tbind, freqs, band)
-            tbl = _corner_table_silicon(camp, sizes, sbias, nf, topo, corner_names,
-                                        freqs, band, include_noise, workers, tbind)
-            for c in corner_names:
-                _pvt_place(out[c], tc, vs, tbl[c])
+    for (tc, vs), tbl in zip(slice_keys, slice_tables):
+        for c in corner_names:
+            _pvt_place(out[c], tc, vs, tbl[c])
     return out
 
 
