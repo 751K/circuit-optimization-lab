@@ -48,7 +48,7 @@ from .dataset import run_cli as dataset_run_cli
 from .explore import add_cli_args as explore_add_cli_args
 from .explore import run_cli as explore_run_cli
 from .noise_solver import band_rms
-from .run_contract import summarize_design_metrics
+from .run_contract import evaluate_signoff
 # The service subpackage's CLI glue is fastapi-free (fastapi/uvicorn are imported
 # lazily inside serve_run_cli), so importing it here never pulls the serve extra.
 from .service import add_cli_args as serve_add_cli_args
@@ -219,12 +219,11 @@ def _cmd_run(args):
     if not args.quiet:
         print(_format_analysis_summary(results))
 
-    measurements = summarize_design_metrics(
-        spec, results, noise_band=(float(lo), float(hi)))
+    signoff = evaluate_signoff(spec, results)
     payload = {
         "status": "valid",
         "results": results,
-        "metrics": measurements,
+        "signoff": signoff,
     }
     if args.output:
         os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)

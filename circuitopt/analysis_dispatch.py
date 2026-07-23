@@ -24,7 +24,7 @@ from .pac_solver import pac_solve
 from .pnoise_solver import pnoise_solve
 from .pss_solver import pss_solve
 from .transient_solver import transient
-from .run_contract import ensure_analysis_valid
+from .run_contract import ensure_analysis_valid, validate_signoff_config
 
 
 ANALYSIS_ORDER = ("ac", "noise", "transient", "pss", "pac", "pnoise")
@@ -419,6 +419,7 @@ def run_analysis_suite(spec_or_path: CircuitSpec | str | Path,
     }
     if not analysis_cfg:
         raise ValueError("No analyses configured")
+    validate_signoff_config(spec, analysis_cfg)
     # Hard-reject unknown option keys before any solver runs: JSON is the only
     # entry point, so a residual key (typo like ``max_sidebands``) would otherwise
     # be silently ignored and run with the default -- a silent downgrade.
@@ -468,8 +469,10 @@ def run_analysis_suite(spec_or_path: CircuitSpec | str | Path,
         if name == "ac":
             freqs = _frequency_grid(cfg.get("freqs"))
             corner = _corner_from_cfg(cfg)
+            signoff_measurements = (spec.signoff or {}).get("measurements", {})
             results[name] = ac_solve(
                 spec.sizes, spec.bias, freqs, binding=binding, corner=corner,
+                record_node_voltages="phase_margin" in signoff_measurements,
             )
         elif name == "noise":
             freqs = _frequency_grid(cfg.get("freqs"))

@@ -118,6 +118,13 @@ def test_solve_ac(client):
     body = r.json()
     assert set(body["results"].keys()) == {"ac"}          # subset honored
     assert isinstance(body["elapsed_s"], (int, float))
+    assert set(body["signoff"]) == {
+        "status", "measurements", "constraints", "passed", "worst_case",
+    }
+    assert body["signoff"]["status"] == "not_configured"
+    assert body["signoff"]["passed"] is None
+    assert "gain" in body["signoff"]["measurements"]
+    assert "phase_margin" not in body["signoff"]["measurements"]
 
     ac = body["results"]["ac"]
     assert math.isfinite(ac["Av_dc_dB"])

@@ -46,6 +46,17 @@ class ModelBindingError(SimulationInvalid, ValueError):
         self.device = device
 
 
+class SignoffConfigurationError(SimulationInvalid, ValueError):
+    """A signoff request is ambiguous or cannot be evaluated from this DUT."""
+
+    def __init__(self, message: str):
+        super().__init__(
+            "signoff_configuration",
+            str(message),
+            analysis="signoff",
+        )
+
+
 def reraise_invalid(exc: Exception) -> None:
     """Keep broad numerical-recovery handlers from swallowing strict failures."""
     # A compact-model domain failure at an intermediate Newton trial point is a
@@ -192,76 +203,647 @@ def saturation_metric(regions: Mapping[str, Mapping[str, Any]]) -> dict:
     )
 
 
-def _settling_measurement(transient: Mapping[str, Any], tolerance: float = 1e-3) -> dict:
+def _require_mapping(value: Any, path: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise SignoffConfigurationError(f"{path} must be an object")
+    return value
+
+
+def _weighted_signal(
+    values: Mapping[str, Any],
+    weights: Mapping[str, Any],
+    *,
+    path: str,
+    dtype=float,
+):
+    if not weights:
+        raise SignoffConfigurationError(f"{path} must contain at least one node")
+    total = None
+    for node, raw_weight in weights.items():
+        if node not in values:
+            raise SignoffConfigurationError(
+                f"{path} references unavailable node {node!r}")
+        weight = float(raw_weight)
+        contribution = weight * np.asarray(values[node], dtype=dtype)
+        total = contribution if total is None else total + contribution
+    _require_finite(total, path, "signoff")
+    return total
+
+
+def _require_analysis(cfg: Mapping[str, Any], expected: str, path: str) -> None:
+    actual = cfg.get("analysis")
+    if actual != expected:
+        raise SignoffConfigurationError(
+            f"{path}.analysis must explicitly be {expected!r}")
+
+
+def _reject_unknown(cfg: Mapping[str, Any], allowed: set[str], path: str) -> None:
+    unknown = sorted(set(cfg) - allowed)
+    if unknown:
+        raise SignoffConfigurationError(
+            f"{path} has unknown key(s): {', '.join(unknown)}")
+
+
+def validate_signoff_config(
+    spec,
+    analyses: Mapping[str, Any] | None = None,
+) -> None:
+    """Validate signoff structure and DUT references before any solver work."""
+    if spec.signoff is None:
+        return
+    config = _require_mapping(spec.signoff, "signoff")
+    _reject_unknown(config, {"measurements", "constraints"}, "signoff")
+    measurements = _require_mapping(config.get("measurements"), "signoff.measurements")
+    constraints = _require_mapping(config.get("constraints"), "signoff.constraints")
+    if not constraints:
+        raise SignoffConfigurationError(
+            "signoff.constraints must contain at least one constraint")
+    _reject_unknown(
+        measurements,
+        {"phase_margin", "settling_time", "noise", "saturation"},
+        "signoff.measurements",
+    )
+
+    analyses = analyses if analyses is not None else (spec.analyses or {})
+    topo = spec.topology
+    produced = set()
+    if "ac" in analyses:
+        produced.update({"gain", "unity_gain_frequency", "dc_source_power"})
+
+    if "phase_margin" in measurements:
+        path = "signoff.measurements.phase_margin"
+        cfg = _require_mapping(measurements["phase_margin"], path)
+        _reject_unknown(
+            cfg,
+            {"analysis", "injection_source", "return_signal", "polarity",
+             "return_scale"},
+            path,
+        )
+        _require_analysis(cfg, "ac", path)
+        if "ac" not in analyses:
+            raise SignoffConfigurationError(f"{path} requires analyses.ac")
+        source = str(cfg.get("injection_source", "")).strip()
+        if source not in topo.vsource_index:
+            raise SignoffConfigurationError(
+                f"{path}.injection_source {source!r} is not a DUT voltage source")
+        active = sorted(
+            name for name, value in topo.ac_drives.items()
+            if float(value) != 0.0
+        )
+        if active != [source]:
+            raise SignoffConfigurationError(
+                f"{path} requires exactly injection source {source!r} to be "
+                f"non-zero in ac_drives; found {active}")
+        signal = _require_mapping(cfg.get("return_signal"), f"{path}.return_signal")
+        if not signal:
+            raise SignoffConfigurationError(f"{path}.return_signal must not be empty")
+        unknown_nodes = sorted(set(signal) - set(topo.solved))
+        if unknown_nodes:
+            raise SignoffConfigurationError(
+                f"{path}.return_signal references unsolved node(s): "
+                + ", ".join(unknown_nodes))
+        polarity = cfg.get("polarity")
+        if polarity not in {-1, 1}:
+            raise SignoffConfigurationError(f"{path}.polarity must be -1 or 1")
+        if "return_scale" in cfg and (
+            not np.isfinite(float(cfg["return_scale"]))
+            or float(cfg["return_scale"]) <= 0.0
+        ):
+            raise SignoffConfigurationError(
+                f"{path}.return_scale must be a positive finite number")
+        produced.update({
+            "phase_margin", "loop_unity_gain_frequency", "loop_gain_dc",
+        })
+
+    if "settling_time" in measurements:
+        path = "signoff.measurements.settling_time"
+        cfg = _require_mapping(measurements["settling_time"], path)
+        _reject_unknown(
+            cfg,
+            {"analysis", "signal", "target", "start_time", "end_time", "tolerance"},
+            path,
+        )
+        _require_analysis(cfg, "transient", path)
+        if "transient" not in analyses:
+            raise SignoffConfigurationError(f"{path} requires analyses.transient")
+        for required in ("signal", "target", "start_time", "tolerance"):
+            if required not in cfg:
+                raise SignoffConfigurationError(f"{path}.{required} is required")
+        signal = _require_mapping(cfg["signal"], f"{path}.signal")
+        if not signal:
+            raise SignoffConfigurationError(f"{path}.signal must not be empty")
+        unknown_nodes = sorted(set(signal) - set(topo.solved))
+        if unknown_nodes:
+            raise SignoffConfigurationError(
+                f"{path}.signal references unsolved node(s): "
+                + ", ".join(unknown_nodes))
+        if not np.isfinite(float(cfg["target"])):
+            raise SignoffConfigurationError(f"{path}.target must be finite")
+        if float(cfg["start_time"]) < 0.0:
+            raise SignoffConfigurationError(f"{path}.start_time must be non-negative")
+        _settling_tolerance(cfg)
+        produced.add("settling_time")
+
+    if "noise" in measurements:
+        path = "signoff.measurements.noise"
+        cfg = _require_mapping(measurements["noise"], path)
+        _reject_unknown(cfg, {"analysis", "band", "references"}, path)
+        _require_analysis(cfg, "noise", path)
+        if "noise" not in analyses:
+            raise SignoffConfigurationError(f"{path} requires analyses.noise")
+        if "band" not in cfg:
+            raise SignoffConfigurationError(f"{path}.band is required")
+        band = list(cfg["band"])
+        if len(band) != 2 or float(band[0]) < 0.0 or float(band[1]) <= float(band[0]):
+            raise SignoffConfigurationError(
+                f"{path}.band must be [low, high] with 0 <= low < high")
+        references = list(cfg.get("references", ()))
+        if not references or len(set(references)) != len(references):
+            raise SignoffConfigurationError(
+                f"{path}.references must contain unique input and/or output values")
+        unknown = sorted(set(references) - {"input", "output"})
+        if unknown:
+            raise SignoffConfigurationError(
+                f"{path}.references has unknown value(s): {', '.join(unknown)}")
+        if "input" in references:
+            produced.add("integrated_input_noise")
+        if "output" in references:
+            produced.add("integrated_output_noise")
+
+    if "saturation" in measurements:
+        path = "signoff.measurements.saturation"
+        cfg = _require_mapping(measurements["saturation"], path)
+        _reject_unknown(
+            cfg, {"analysis", "devices", "minimum_headroom"}, path)
+        _require_analysis(cfg, "ac", path)
+        if "ac" not in analyses:
+            raise SignoffConfigurationError(f"{path} requires analyses.ac")
+        devices = [str(name) for name in cfg.get("devices", ())]
+        if not devices or len(set(devices)) != len(devices):
+            raise SignoffConfigurationError(
+                f"{path}.devices must contain unique MOS device names")
+        known_devices = {name for name, *_ in topo.devices}
+        unknown = sorted(set(devices) - known_devices)
+        if unknown:
+            raise SignoffConfigurationError(
+                f"{path}.devices references unknown MOS device(s): "
+                + ", ".join(unknown))
+        if "minimum_headroom" not in cfg or not np.isfinite(
+                float(cfg["minimum_headroom"])):
+            raise SignoffConfigurationError(
+                f"{path}.minimum_headroom must be finite")
+        produced.add("saturation")
+
+    for name, raw_limits in constraints.items():
+        if name not in produced:
+            raise SignoffConfigurationError(
+                f"signoff constraint {name!r} has no configured measurement")
+        limits = _require_mapping(raw_limits, f"signoff.constraints.{name}")
+        _reject_unknown(limits, {"min", "max", "equals"},
+                        f"signoff.constraints.{name}")
+        if not limits:
+            raise SignoffConfigurationError(
+                f"signoff.constraints.{name} must not be empty")
+        for key in ("min", "max"):
+            if key in limits and not np.isfinite(float(limits[key])):
+                raise SignoffConfigurationError(
+                    f"signoff.constraints.{name}.{key} must be finite")
+
+
+def _phase_margin_measurement(spec, ac: Mapping[str, Any], cfg: Mapping[str, Any]) -> dict:
+    """Measure PM only from a declared voltage-source loop break and return signal."""
+    cfg = _require_mapping(cfg, "signoff.measurements.phase_margin")
+    _require_analysis(cfg, "ac", "signoff.measurements.phase_margin")
+    source = str(cfg.get("injection_source", "")).strip()
+    if not source:
+        raise SignoffConfigurationError(
+            "signoff.measurements.phase_margin.injection_source is required")
+    topo = spec.topology
+    if source not in topo.vsource_index:
+        raise SignoffConfigurationError(
+            f"phase_margin injection_source {source!r} is not a DUT voltage source")
+
+    stimulus = _require_mapping(ac.get("ac_stimulus"), "ac.ac_stimulus")
+    drives = _require_mapping(stimulus.get("drives"), "ac.ac_stimulus.drives")
+    if source not in drives or float(drives[source]) == 0.0:
+        raise SignoffConfigurationError(
+            f"phase_margin injection_source {source!r} has no non-zero AC drive")
+    active = sorted(name for name, value in drives.items() if float(value) != 0.0)
+    if active != [source]:
+        raise SignoffConfigurationError(
+            "phase_margin requires exactly one active AC loop injection source; "
+            f"found {active}")
+
+    return_signal = _require_mapping(
+        cfg.get("return_signal"),
+        "signoff.measurements.phase_margin.return_signal",
+    )
+    node_voltages = _require_mapping(ac.get("node_voltages"), "ac.node_voltages")
+    returned = _weighted_signal(
+        node_voltages,
+        return_signal,
+        path="signoff.measurements.phase_margin.return_signal",
+        dtype=complex,
+    )
+    polarity = float(cfg.get("polarity", -1.0))
+    if polarity not in {-1.0, 1.0}:
+        raise SignoffConfigurationError("phase_margin.polarity must be -1 or 1")
+    return_scale = float(cfg.get("return_scale", 1.0))
+    if not np.isfinite(return_scale) or return_scale <= 0.0:
+        raise SignoffConfigurationError(
+            "phase_margin.return_scale must be a positive finite number")
+    loop_gain = polarity * return_scale * returned / complex(float(drives[source]))
+    _require_finite(loop_gain, "phase_margin.loop_gain", "signoff")
+
+    from .frequency_metrics import phase_margin, unity_gain_freq
+
+    freqs = np.asarray(ac["freqs"], float)
+    ugf = float(unity_gain_freq(freqs, loop_gain))
+    pm = float(phase_margin(freqs, loop_gain))
+    metadata = {
+        "analysis": "ac",
+        "response_kind": "loop_gain",
+        "injection_source": source,
+        "return_signal": {str(k): float(v) for k, v in return_signal.items()},
+        "polarity": int(polarity),
+        "return_scale": return_scale,
+    }
+    return {
+        "phase_margin": metric(
+            pm if np.isfinite(pm) else None,
+            "deg",
+            status="valid" if np.isfinite(pm) else "no_crossing",
+            **metadata,
+        ),
+        "loop_unity_gain_frequency": metric(
+            ugf if np.isfinite(ugf) else None,
+            "Hz",
+            status="valid" if np.isfinite(ugf) else "no_crossing",
+            **metadata,
+        ),
+        "loop_gain_dc": metric(
+            float(20.0 * np.log10(max(abs(loop_gain[0]), 1e-300))),
+            "dB",
+            **metadata,
+        ),
+    }
+
+
+def _settling_tolerance(cfg: Mapping[str, Any]) -> tuple[float, dict]:
+    tolerance = _require_mapping(
+        cfg.get("tolerance"),
+        "signoff.measurements.settling_time.tolerance",
+    )
+    if "absolute" in tolerance:
+        if set(tolerance) != {"absolute"}:
+            raise SignoffConfigurationError(
+                "settling tolerance with absolute must not also define relative/reference")
+        limit = float(tolerance["absolute"])
+        metadata = {"mode": "absolute", "value": limit, "unit": "V"}
+    else:
+        if set(tolerance) != {"relative", "reference"}:
+            raise SignoffConfigurationError(
+                "relative settling tolerance requires exactly relative and reference")
+        relative = float(tolerance["relative"])
+        reference = float(tolerance["reference"])
+        limit = relative * reference
+        metadata = {
+            "mode": "relative",
+            "value": relative,
+            "unit": "ratio",
+            "reference": metric(reference, "V"),
+            "absolute_limit": metric(limit, "V"),
+        }
+    if not np.isfinite(limit) or limit <= 0.0:
+        raise SignoffConfigurationError(
+            "settling tolerance must resolve to a positive finite voltage")
+    return limit, metadata
+
+
+def _settling_measurement(
+    transient: Mapping[str, Any],
+    cfg: Mapping[str, Any],
+) -> dict:
+    cfg = _require_mapping(cfg, "signoff.measurements.settling_time")
+    _require_analysis(cfg, "transient", "signoff.measurements.settling_time")
+    for required in ("target", "start_time"):
+        if required not in cfg:
+            raise SignoffConfigurationError(
+                f"signoff.measurements.settling_time.{required} is required")
     t = np.asarray(transient["t"], float)
-    y = np.asarray(transient["output"], float)
-    initial = float(y[0])
-    final = float(y[-1])
-    span = max(abs(final - initial), abs(final), np.finfo(float).eps)
-    limit = float(tolerance) * span
-    outside = np.flatnonzero(np.abs(y - final) > limit)
-    if outside.size and int(outside[-1]) == len(y) - 1:
-        return metric(None, "s", status="not_settled", tolerance=float(tolerance))
-    index = int(outside[-1] + 1) if outside.size else 0
+    nodes = _require_mapping(transient.get("nodes"), "transient.nodes")
+    signal_cfg = _require_mapping(
+        cfg.get("signal"),
+        "signoff.measurements.settling_time.signal",
+    )
+    y = _weighted_signal(
+        nodes,
+        signal_cfg,
+        path="signoff.measurements.settling_time.signal",
+    )
+    target = float(cfg["target"])
+    start_time = float(cfg["start_time"])
+    end_time = float(cfg.get("end_time", t[-1]))
+    if not np.isfinite(target):
+        raise SignoffConfigurationError("settling target must be finite")
+    if start_time < t[0] or start_time > t[-1]:
+        raise SignoffConfigurationError(
+            "settling start_time is outside the transient time grid")
+    if end_time <= start_time or end_time > t[-1]:
+        raise SignoffConfigurationError(
+            "settling end_time must be after start_time and inside the time grid")
+    limit, tolerance = _settling_tolerance(cfg)
+    window = np.flatnonzero((t >= start_time) & (t <= end_time))
+    if window.size == 0:
+        raise SignoffConfigurationError(
+            "settling measurement window contains no transient samples")
+    errors = np.abs(y[window] - target)
+    outside = np.flatnonzero(errors > limit)
+    metadata = {
+        "analysis": "transient",
+        "signal": {str(k): float(v) for k, v in signal_cfg.items()},
+        "target": metric(target, "V"),
+        "tolerance": tolerance,
+        "window": {
+            "start": metric(start_time, "s"),
+            "end": metric(end_time, "s"),
+        },
+        "final_error": metric(float(errors[-1]), "V"),
+    }
+    if outside.size and int(outside[-1]) == len(window) - 1:
+        return metric(None, "s", status="not_settled", **metadata)
+    index = int(window[int(outside[-1] + 1)]) if outside.size else int(window[0])
     return metric(
-        float(t[index] - t[0]), "s", tolerance=float(tolerance),
-        final_value=final, final_value_unit="V",
+        float(t[index] - start_time),
+        "s",
+        **metadata,
+    )
+
+
+def _noise_measurements(noise: Mapping[str, Any], cfg: Mapping[str, Any]) -> dict:
+    cfg = _require_mapping(cfg, "signoff.measurements.noise")
+    _require_analysis(cfg, "noise", "signoff.measurements.noise")
+    if "band" not in cfg:
+        raise SignoffConfigurationError(
+            "signoff.measurements.noise.band is required")
+    lo, hi = map(float, cfg["band"])
+    freqs = np.asarray(noise["freqs"], float)
+    if lo < float(freqs[0]) or hi > float(freqs[-1]):
+        raise SignoffConfigurationError(
+            f"noise band [{lo}, {hi}] Hz is outside simulated range "
+            f"[{float(freqs[0])}, {float(freqs[-1])}] Hz")
+    references = list(cfg.get("references", ()))
+    if not references:
+        raise SignoffConfigurationError(
+            "signoff.measurements.noise.references must select input and/or output")
+    out = {}
+    metadata = {"analysis": "noise", "integration_band_hz": [lo, hi]}
+    for reference in references:
+        if reference == "input":
+            out["integrated_input_noise"] = metric(
+                _integrated_noise_rms(freqs, noise["irn_psd"], lo, hi),
+                "V_rms",
+                reference="input",
+                **metadata,
+            )
+        elif reference == "output":
+            out["integrated_output_noise"] = metric(
+                _integrated_noise_rms(freqs, noise["out_psd"], lo, hi),
+                "V_rms",
+                reference="output",
+                **metadata,
+            )
+        else:
+            raise SignoffConfigurationError(
+                f"unknown noise reference {reference!r}; expected input or output")
+    return out
+
+
+def _integrated_noise_rms(freqs, psd, lo: float, hi: float) -> float:
+    """Integrate PSD over exact declared endpoints, including interpolated edges."""
+    freqs = np.asarray(freqs, float)
+    psd = np.asarray(psd, float)
+    order = np.argsort(freqs)
+    freqs, psd = freqs[order], psd[order]
+    interior = (freqs > lo) & (freqs < hi)
+    grid = np.concatenate(([lo], freqs[interior], [hi]))
+    values = np.interp(grid, freqs, psd)
+    integral = float(np.trapezoid(values, grid))
+    if not np.isfinite(integral) or integral < 0.0:
+        raise SimulationInvalid(
+            "non_finite_result",
+            "noise integration produced an invalid power",
+            analysis="signoff",
+        )
+    return float(np.sqrt(integral))
+
+
+def _saturation_measurement(ac: Mapping[str, Any], cfg: Mapping[str, Any]) -> dict:
+    cfg = _require_mapping(cfg, "signoff.measurements.saturation")
+    _require_analysis(cfg, "ac", "signoff.measurements.saturation")
+    if "minimum_headroom" not in cfg:
+        raise SignoffConfigurationError(
+            "signoff.measurements.saturation.minimum_headroom is required")
+    requested = [str(name) for name in cfg.get("devices", ())]
+    if not requested:
+        raise SignoffConfigurationError(
+            "signoff.measurements.saturation.devices must not be empty")
+    minimum = float(cfg.get("minimum_headroom", 0.0))
+    if not np.isfinite(minimum):
+        raise SignoffConfigurationError(
+            "saturation minimum_headroom must be finite")
+    regions = _require_mapping(ac.get("operating_regions"), "ac.operating_regions")
+    missing = [name for name in requested if name not in regions]
+    if missing:
+        raise SignoffConfigurationError(
+            "saturation references unavailable MOS device(s): " + ", ".join(missing))
+    unsupported = [
+        name for name in requested
+        if regions[name].get("status") == "unsupported"
+    ]
+    if unsupported:
+        raise SignoffConfigurationError(
+            "saturation is unsupported for device(s): " + ", ".join(unsupported))
+
+    devices = {}
+    passed = True
+    for name in requested:
+        row = regions[name]
+        headroom = float(row["headroom_v"])
+        saturated = bool(row["saturated"]) and headroom >= minimum
+        passed = passed and saturated
+        devices[name] = metric(
+            saturated,
+            "boolean",
+            vds=metric(float(row["vds_v"]), "V"),
+            vdsat=metric(float(row["vdsat_v"]), "V"),
+            headroom=metric(headroom, "V"),
+        )
+    return metric(
+        passed,
+        "boolean",
+        analysis="ac",
+        minimum_headroom=metric(minimum, "V"),
+        devices=devices,
     )
 
 
 def summarize_design_metrics(
     spec,
     results: Mapping[str, Mapping[str, Any]],
-    *,
-    noise_band: tuple[float, float] | None = None,
 ) -> dict:
-    """Build the stable LLM-facing measurement surface from analysis results."""
+    """Build unit-bearing measurements, gating signoff-only metrics explicitly."""
     out: dict[str, dict] = {}
     ac = results.get("ac")
     if ac is not None:
-        from .frequency_metrics import phase_margin, unity_gain_freq
+        from .frequency_metrics import unity_gain_freq
 
         out["gain"] = metric(float(ac["Av_dc_dB"]), "dB")
         ugf = float(unity_gain_freq(ac["freqs"], ac["response"]))
-        pm = float(phase_margin(ac["freqs"], ac["response"]))
         out["unity_gain_frequency"] = metric(
             ugf if np.isfinite(ugf) else None, "Hz",
             status="valid" if np.isfinite(ugf) else "no_crossing",
         )
-        out["phase_margin"] = metric(
-            pm if np.isfinite(pm) else None, "deg",
-            status="valid" if np.isfinite(pm) else "no_crossing",
-        )
         out["dc_source_power"] = source_power_metric(ac["source_power"])
-        out["saturation"] = saturation_metric(ac.get("operating_regions", {}))
 
-    noise = results.get("noise")
-    if noise is not None:
-        cfg = (spec.analyses or {}).get("noise", {})
-        band = (
-            noise_band
-            if noise_band is not None
-            else cfg.get(
-                "band",
-                [float(noise["freqs"][0]), float(noise["freqs"][-1])],
-            )
-        )
-        from .noise_solver import band_rms
-
-        lo, hi = map(float, band)
-        out["integrated_output_noise"] = metric(
-            band_rms(noise["freqs"], noise["out_psd"], lo, hi), "V_rms",
-            integration_band_hz=[lo, hi],
-        )
-        out["integrated_input_noise"] = metric(
-            band_rms(noise["freqs"], noise["irn_psd"], lo, hi), "V_rms",
-            integration_band_hz=[lo, hi],
-        )
-
-    transient = results.get("transient")
-    if transient is not None:
-        cfg = (spec.analyses or {}).get("transient", {})
+    configured = dict((spec.signoff or {}).get("measurements", {}))
+    if "phase_margin" in configured:
+        if ac is None:
+            raise SignoffConfigurationError(
+                "phase_margin requires the ac analysis result")
+        out.update(_phase_margin_measurement(spec, ac, configured["phase_margin"]))
+    if "settling_time" in configured:
+        transient = results.get("transient")
+        if transient is None:
+            raise SignoffConfigurationError(
+                "settling_time requires the transient analysis result")
         out["settling_time"] = _settling_measurement(
-            transient, float(cfg.get("settling_tolerance", 1e-3))
-        )
+            transient, configured["settling_time"])
+    if "noise" in configured:
+        noise = results.get("noise")
+        if noise is None:
+            raise SignoffConfigurationError(
+                "noise measurement requires the noise analysis result")
+        out.update(_noise_measurements(noise, configured["noise"]))
+    if "saturation" in configured:
+        if ac is None:
+            raise SignoffConfigurationError(
+                "saturation requires the ac operating-point result")
+        out["saturation"] = _saturation_measurement(
+            ac, configured["saturation"])
     return out
+
+
+def _constraint_result(name: str, observed: Mapping[str, Any], limits: Mapping[str, Any]):
+    value = observed.get("value")
+    unit = str(observed.get("unit", ""))
+    status = str(observed.get("status", "invalid"))
+    valid = status == "valid" and value is not None
+    passed = valid
+    checks = {}
+    normalized_margins = []
+    if "min" in limits:
+        limit = float(limits["min"])
+        margin_value = float(value) - limit if valid else None
+        check_passed = valid and float(value) >= limit
+        checks["min"] = {
+            "limit": metric(limit, unit),
+            "passed": bool(check_passed),
+            "margin": metric(
+                margin_value, unit, status="valid" if margin_value is not None else status),
+        }
+        passed = passed and bool(check_passed)
+        if margin_value is not None:
+            normalized_margins.append(
+                margin_value / max(abs(limit), np.finfo(float).eps))
+    if "max" in limits:
+        limit = float(limits["max"])
+        margin_value = limit - float(value) if valid else None
+        check_passed = valid and float(value) <= limit
+        checks["max"] = {
+            "limit": metric(limit, unit),
+            "passed": bool(check_passed),
+            "margin": metric(
+                margin_value, unit, status="valid" if margin_value is not None else status),
+        }
+        passed = passed and bool(check_passed)
+        if margin_value is not None:
+            normalized_margins.append(
+                margin_value / max(abs(limit), np.finfo(float).eps))
+    if "equals" in limits:
+        expected = limits["equals"]
+        check_passed = valid and value == expected
+        checks["equals"] = {
+            "expected": metric(expected, unit),
+            "passed": bool(check_passed),
+        }
+        passed = passed and bool(check_passed)
+        normalized_margins.append(1.0 if check_passed else -1.0)
+    if not checks:
+        raise SignoffConfigurationError(
+            f"signoff constraint {name!r} requires min, max, and/or equals")
+    normalized_margin = min(normalized_margins) if normalized_margins else -np.inf
+    return {
+        "observed": dict(observed),
+        "checks": checks,
+        "passed": bool(passed),
+        "normalized_margin": (
+            float(normalized_margin) if np.isfinite(normalized_margin) else None
+        ),
+    }
+
+
+def evaluate_signoff(
+    spec,
+    results: Mapping[str, Mapping[str, Any]],
+) -> dict:
+    """Return the single stable signoff envelope used by CLI and service APIs."""
+    # Validate against analyses actually present in this result envelope. This keeps
+    # explicit ``run_analysis_suite(..., analyses=...)`` overrides correct and makes
+    # a selected subset fail clearly when it omits a required signoff analysis.
+    validate_signoff_config(spec, results)
+    measurements = summarize_design_metrics(spec, results)
+    config = spec.signoff or {}
+    constraints_cfg = dict(config.get("constraints", {}))
+    if not config:
+        return {
+            "status": "not_configured",
+            "measurements": measurements,
+            "constraints": {},
+            "passed": None,
+            "worst_case": None,
+        }
+    if not constraints_cfg:
+        raise SignoffConfigurationError(
+            "signoff.constraints must contain at least one constraint")
+
+    constraints = {}
+    for name, limits in constraints_cfg.items():
+        if name not in measurements:
+            raise SignoffConfigurationError(
+                f"signoff constraint {name!r} has no configured measurement")
+        constraints[name] = _constraint_result(
+            str(name),
+            measurements[name],
+            _require_mapping(limits, f"signoff.constraints.{name}"),
+        )
+    passed = all(item["passed"] for item in constraints.values())
+    worst_name, worst = min(
+        constraints.items(),
+        key=lambda item: (
+            item[1]["normalized_margin"]
+            if item[1]["normalized_margin"] is not None
+            else -np.inf
+        ),
+    )
+    return {
+        "status": "pass" if passed else "fail",
+        "measurements": measurements,
+        "constraints": constraints,
+        "passed": bool(passed),
+        "worst_case": {
+            "measurement": worst_name,
+            "passed": worst["passed"],
+            "normalized_margin": worst["normalized_margin"],
+        },
+    }

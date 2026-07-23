@@ -66,6 +66,7 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
              model_types: Mapping[str, str] | None = None,
              device_kwargs: Mapping[str, Mapping[str, Any]] | None = None, *,
              binding: CircuitBinding | None = None,
+             record_node_voltages: bool = False,
              _rust_reference_retry: bool = False) -> dict | None:
     """
     Full small-signal AC analysis — topology supplied by `topo` (default AFE_TOPO).
@@ -78,6 +79,8 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     binding: optional :class:`CircuitBinding` supplying defaults for
         topo/nf/corner/model_types/device_kwargs/x0_guess; explicit non-None kwargs
         override it (binding=None reproduces the legacy path exactly).
+    record_node_voltages: retain raw complex solved-node responses for an explicit
+        loop-return measurement. Disabled by default to keep ordinary AC sweeps lean.
 
     DC KCL, per-device bias mapping, and the AC terminal list are all DERIVED from
     `topo` (see topology.py) — no hand-written per-device wiring here.
@@ -117,9 +120,10 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
                 x0_guess=x0_guess,
                 topo=topo,
                 nf=nf,
-                model_types=model_types,
-                device_kwargs=device_kwargs,
-                _rust_reference_retry=True,
+                    model_types=model_types,
+                    device_kwargs=device_kwargs,
+                    record_node_voltages=record_node_voltages,
+                    _rust_reference_retry=True,
             )
         if result is not None:
             result["solver_fallback"] = "otft_reference"
@@ -463,8 +467,20 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
         "operating_regions": region_result,
         "ss": ss,
         "corner": corner,
+            "ac_stimulus": {
+                "drives": {
+                    str(name): complex(value)
+                    for name, value in ac_drives.items()
+                },
+            "normalization_v": float(vin_norm),
+        },
         "rust_lti_solver": True,
     })
+    if record_node_voltages:
+        result["node_voltages"] = {
+            node: V[:, plan.idx[node]].copy()
+            for node in plan.solved
+        }
     # Avoid a non-serializable public dictionary key while allowing an immediate
     # noise analysis to reuse already-elaborated foundry model cards.
     result._devices = _dev_inst

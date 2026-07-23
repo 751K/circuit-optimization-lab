@@ -221,7 +221,7 @@ ANALYSIS_OPTIONS = {
 DISPATCH_KEYS = {
     "ac": frozenset({"freqs", "corner"}),
     "noise": frozenset({"freqs", "corner", "band"}),
-    "transient": frozenset({"signed_devices", "settling_tolerance"}),
+    "transient": frozenset({"signed_devices"}),
     "pss": frozenset(),
     "pac": frozenset(),
     "pnoise": frozenset(),

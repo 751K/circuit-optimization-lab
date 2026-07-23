@@ -627,6 +627,68 @@ JSON dispatch 的 `pnoise` 入口目前是通用 HB 路径。Chopper 专用包�
 无 HB 截断的 chopper PNoise，应使用该包装器，或直接调用
 `circuitopt.pnoise_solver.pnoise_solve(..., time_domain=True)`。
 
+### `signoff`
+
+可选。显式定义测量方法与验收边界。相位裕度、建立时间、积分噪声和饱和检查只允许从
+这个块产生；系统不会再从任意 AC 响应、瞬态最后一个采样点、仿真噪声全频带或全部
+MOS 自动猜测这些 signoff 指标。
+
+```json
+"ac_drives": {"Vinj": 1.0},
+"signoff": {
+  "measurements": {
+    "phase_margin": {
+      "analysis": "ac",
+      "injection_source": "Vinj",
+      "return_signal": {"RETURN_P": 1.0, "RETURN_N": -1.0},
+      "polarity": -1,
+      "return_scale": 0.5
+    },
+    "settling_time": {
+      "analysis": "transient",
+      "signal": {"OUTP": 1.0, "OUTN": -1.0},
+      "target": 0.45,
+      "start_time": 5e-9,
+      "end_time": 10e-9,
+      "tolerance": {"relative": 0.001, "reference": 0.9}
+    },
+    "noise": {
+      "analysis": "noise",
+      "band": [1e3, 50e6],
+      "references": ["input", "output"]
+    },
+    "saturation": {
+      "analysis": "ac",
+      "devices": ["M1", "M2", "M3", "M4"],
+      "minimum_headroom": 0.02
+    }
+  },
+  "constraints": {
+    "phase_margin": {"min": 60.0},
+    "settling_time": {"max": 5e-9},
+    "integrated_input_noise": {"max": 40e-6},
+    "saturation": {"equals": true}
+  }
+}
+```
+
+PM 的 `injection_source` 必须是 `ac_drives` 中唯一非零的电压源；
+`return_signal` 是 solved 节点的显式加权和。系统用声明的返回比、`polarity`
+和可选正数 `return_scale` 构造环路增益，因此普通放大器传递函数不能冒充环路增益。
+
+建立时间必须固定目标和测量窗口。`tolerance` 可写成
+`{"absolute": <V>}`，也可写成
+`{"relative": <比例>, "reference": <V>}`；相对容差不会隐式使用目标值或末点值作为
+参考。测量值是 `start_time` 之后首次进入容差带并一直保持到 `end_time` 的时间。
+
+噪声 `band` 必须位于实际仿真频率范围内。饱和检查只检查列出的 MOS，并使用单位为
+伏特的 `minimum_headroom`。错误节点/器件、缺失分析、不支持的工作区以及不明确的
+环路注入都会产生 `signoff_configuration` invalid。
+
+统一输出固定包含 `status`、`measurements`、`constraints`、`passed` 和
+`worst_case`。未配置 `signoff` 时，`status` 为 `"not_configured"`、
+`passed` 为 `null`；如果运行了 AC，仍会返回普通 gain、UGF 和真实源支路功耗。
+
 ### `explore`
 
 可选。设计空间探索配置——待扫描的变量及范围、可行性约束（gain/BW/IRN/power/area）、

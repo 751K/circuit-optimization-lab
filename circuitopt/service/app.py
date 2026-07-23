@@ -41,7 +41,11 @@ from ..circuit_loader import circuit_from_dict
 from ..device_factory import CORNERS, SKY130_CORNERS
 from ..device_model import registered_models
 from ..freepdk45_model import FREEPDK45_CORNERS
-from ..run_contract import SimulationInvalid, summarize_design_metrics
+from ..run_contract import (
+    SimulationInvalid,
+    evaluate_signoff,
+    validate_signoff_config,
+)
 from .jobs import JOB_KINDS, JobManager
 from .serialize import serialize_results, to_jsonable
 
@@ -190,6 +194,10 @@ def create_app(job_workers: int = 1) -> FastAPI:
                     validate_analysis_cfg(name, cfg)
                 except Exception as exc:
                     errors.append(str(exc))
+        try:
+            validate_signoff_config(spec)
+        except Exception as exc:
+            errors.append(str(exc))
 
         if errors:
             return {"valid": False, "errors": errors}
@@ -216,7 +224,7 @@ def create_app(job_workers: int = 1) -> FastAPI:
         t0 = time.perf_counter()
         try:
             results = run_analysis_suite(spec, selected=req.selected, corner=req.corner)
-            metrics = summarize_design_metrics(spec, results)
+            signoff = evaluate_signoff(spec, results)
         except SimulationInvalid as exc:
             raise HTTPException(
                 status_code=422,
@@ -232,7 +240,7 @@ def create_app(job_workers: int = 1) -> FastAPI:
         return {
             "status": "valid",
             "results": serialize_results(results),
-            "metrics": to_jsonable(metrics),
+            "signoff": to_jsonable(signoff),
             "elapsed_s": to_jsonable(elapsed),
         }
 

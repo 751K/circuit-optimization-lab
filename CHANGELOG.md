@@ -26,17 +26,25 @@ release checklist.
   **English:** Every MOS now requires an explicit `pdk`/`model`/`section`/`bin`
   binding. Compact-model failures, non-convergence, and non-finite outputs mark a
   candidate invalid instead of substituting currents, noise, or waveforms. Solve
-  and exploration outputs now expose unit-bearing gain, phase margin, settling,
-  integrated noise, saturation, and DC source-power measurements; power is computed
-  from solved source branches and complete terminal currents. `circuit-opt run
-  --output` and the solve service share the same `{status, results, metrics}`
-  envelope.
+  outputs expose unit-bearing measurements; power is computed from solved source
+  branches and complete terminal currents. The new explicit `signoff` contract
+  requires PM to come from a declared voltage-source loop injection and return
+  ratio, settling to use a declared signal/target/window/tolerance, noise to name
+  its integration band and input/output reference, and saturation to name its MOS
+  set and minimum headroom. `circuit-opt run --output` and the solve service now
+  share `{status, results, signoff}`, where signoff always contains
+  `status/measurements/constraints/passed/worst_case`. Ordinary AC responses and
+  final transient samples are no longer silently interpreted as PM or targets.
 
   **中文：** 每个 MOS 现在都必须显式绑定 `pdk`/`model`/`section`/`bin`。紧凑模型
   求值失败、不收敛或非有限输出都会把候选标为 invalid，不再替代电流、噪声或波形。
-  求解与探索输出统一提供带单位的增益、相位裕度、建立时间、积分噪声、饱和状态和
-  DC 源功耗；功耗由已求解的真实源支路和完整端口电流计算。`circuit-opt run
-  --output` 与求解服务统一使用 `{status, results, metrics}` 输出结构。
+  输出提供带单位的测量值；功耗由已求解的真实源支路和完整端口电流计算。新增显式
+  `signoff` 契约：PM 必须来自声明的电压源环路注入与返回比，建立时间必须声明
+  signal/target/window/tolerance，噪声必须声明积分频带及输入/输出引用，饱和检查必须
+  声明 MOS 集合与最小余量。`circuit-opt run --output` 与求解服务统一使用
+  `{status, results, signoff}`，其中 signoff 固定包含
+  `status/measurements/constraints/passed/worst_case`。普通 AC 响应和瞬态末点不再被
+  静默解释为 PM 或建立目标。
 
 ## [2.1.5] - 2026-07-24
 

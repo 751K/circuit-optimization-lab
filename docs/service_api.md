@@ -192,46 +192,36 @@ Success (`200`):
   "results": {
     "ac": {"Av_dc_dB": 22.90, "bw_Hz": 562.3, "response": [{"re": 1.0, "im": 0.0}, "..."]}
   },
-  "metrics": {
-    "gain": {"value": 22.90, "unit": "dB", "status": "valid"},
-    "phase_margin": {"value": 71.2, "unit": "deg", "status": "valid"},
-    "dc_source_power": {
-      "value": 0.0018,
-      "unit": "W",
-      "status": "valid",
-      "branches": {
-        "VDD": {
-          "voltage": {"value": 0.9, "unit": "V", "status": "valid"},
-          "current": {"value": 0.002, "unit": "A", "status": "valid"},
-          "power": {"value": 0.0018, "unit": "W", "status": "valid"}
-        }
+  "signoff": {
+    "status": "pass",
+    "measurements": {
+      "gain": {"value": 22.90, "unit": "dB", "status": "valid"},
+      "phase_margin": {
+        "value": 71.2, "unit": "deg", "status": "valid",
+        "response_kind": "loop_gain", "injection_source": "Vinj"
       }
     },
-    "saturation": {
-      "value": true,
-      "unit": "boolean",
-      "status": "valid",
-      "devices": {
-        "M1": {
-          "value": true,
-          "unit": "boolean",
-          "status": "valid",
-          "vds": {"value": 0.42, "unit": "V", "status": "valid"},
-          "vdsat": {"value": 0.16, "unit": "V", "status": "valid"},
-          "headroom": {"value": 0.26, "unit": "V", "status": "valid"}
-        }
-      }
-    }
+    "constraints": {
+      "phase_margin": {"observed": {"value": 71.2, "unit": "deg"},
+                       "checks": {"min": {"passed": true}}, "passed": true,
+                       "normalized_margin": 0.187}
+    },
+    "passed": true,
+    "worst_case": {"measurement": "phase_margin", "passed": true,
+                   "normalized_margin": 0.187}
   },
   "elapsed_s": 0.0034
 }
 ```
 
-When noise or transient is selected, `metrics` also contains integrated input
-and output noise in `V_rms` with `integration_band_hz`, and settling time in
-seconds with its tolerance. Missing model bindings are parse errors. Compact-model
-failures, non-convergence, and non-finite results are solve-stage invalid results;
-they are never replaced by fallback values.
+`signoff` always has `status`, `measurements`, `constraints`, `passed`, and
+`worst_case`. PM requires an explicit loop injection/return ratio, settling an
+explicit target/window/tolerance, noise an explicit integration band/reference,
+and saturation an explicit MOS list/headroom. See
+[Circuit JSON Format](json_circuit_format.md#signoff). Missing model bindings are
+parse errors. Compact-model failures, non-convergence, non-finite results, and
+invalid signoff configuration are solve-stage invalid results; they are never
+replaced by fallback values.
 
 Failure (`422`) — a parse error (malformed circuit structure) or a solve error
 (e.g. DC non-convergence, a bad `analyses` option key) each carry a `stage` so

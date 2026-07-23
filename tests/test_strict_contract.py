@@ -11,8 +11,10 @@ from circuitopt.circuit_loader import circuit_from_dict, load_circuit_json
 from circuitopt.explore import explore, parse_explore
 from circuitopt.run_contract import (
     ModelBindingError,
+    SignoffConfigurationError,
     SimulationInvalid,
     ensure_analysis_valid,
+    evaluate_signoff,
     summarize_design_metrics,
 )
 from circuitopt.topology import Topology
@@ -158,14 +160,42 @@ def test_ac_reports_resolved_device_bindings():
     assert binding["bin_selector"] == "auto"
 
 
-def test_unified_metrics_are_unit_bearing():
-    freqs = np.array([1.0, 10.0, 100.0])
-    response = np.array([10.0 + 0j, 1.0 - 1j, 0.1 - 0.2j])
+def test_ac_exposes_raw_node_voltage_and_loop_injection_metadata():
+    topo = Topology(
+        solved=["RET"],
+        devices=[],
+        rails={"GND": 0.0},
+        outputs=("RET",),
+        vsources=[("Vinj", "RET", "GND", 0.0)],
+        ac_drives={"Vinj": 1.0},
+    )
+    result = ac_solve(
+        {}, {}, np.array([1.0, 10.0]), topo=topo,
+        record_node_voltages=True,
+    )
+    np.testing.assert_allclose(result["node_voltages"]["RET"], 1.0 + 0.0j)
+    assert result["ac_stimulus"]["drives"] == {"Vinj": 1.0}
+    assert result["ac_stimulus"]["normalization_v"] == pytest.approx(1.0)
+
+
+def _signoff_fixture(*, final_output=1.0):
+    freqs = np.array([1.0, 10.0, 100.0, 1000.0])
+    loop_gain = 10.0 / (1.0 + 1j * freqs / 10.0) ** 2
+    response = np.array([10.0 + 0j, 1.0 - 1j, 0.1 - 0.2j, 0.01j])
     results = {
         "ac": {
             "Av_dc_dB": 20.0,
             "freqs": freqs,
             "response": response,
+            "node_voltages": {
+                "RET": -loop_gain,
+                "OUTP": response / 2.0,
+                "OUTN": -response / 2.0,
+            },
+            "ac_stimulus": {
+                "drives": {"Vinj": 1.0},
+                "normalization_v": 1.0,
+            },
             "source_power": {
                 "total_w": 1.2e-3,
                 "per_source_w": {"VDD": 1.2e-3},
@@ -180,25 +210,79 @@ def test_unified_metrics_are_unit_bearing():
         },
         "noise": {
             "freqs": freqs,
-            "out_psd": np.full(3, 4e-18),
-            "irn_psd": np.full(3, 1e-18),
+            "out_psd": np.full(4, 4e-18),
+            "irn_psd": np.full(4, 1e-18),
         },
         "transient": {
-            "t": np.array([0.0, 1e-9, 2e-9]),
-            "output": np.array([0.0, 0.9995, 1.0]),
+            "t": np.array([0.0, 1e-9, 2e-9, 3e-9]),
+            "output": np.array([0.0, 0.9, 0.9995, final_output]),
+            "nodes": {
+                "OUTP": np.array([0.0, 0.45, 0.49975, final_output / 2.0]),
+                "OUTN": np.array([0.0, -0.45, -0.49975, -final_output / 2.0]),
+            },
         },
     }
-    spec = SimpleNamespace(analyses={
-        "noise": {"band": [1.0, 100.0]},
-        "transient": {"settling_tolerance": 1e-3},
-    })
-    metrics = summarize_design_metrics(spec, results)
+    topology = SimpleNamespace(
+        vsource_index={"Vinj": 3},
+        ac_drives={"Vinj": 1.0},
+        solved=["RET", "OUTP", "OUTN"],
+        devices=[("M1", "OUTP", "RET", "GND")],
+    )
+    spec = SimpleNamespace(
+        topology=topology,
+        analyses={"ac": {}, "noise": {}, "transient": {}},
+        signoff={
+            "measurements": {
+                "phase_margin": {
+                    "analysis": "ac",
+                    "injection_source": "Vinj",
+                    "return_signal": {"RET": 1.0},
+                    "polarity": -1,
+                },
+                "settling_time": {
+                    "analysis": "transient",
+                    "signal": {"OUTP": 1.0, "OUTN": -1.0},
+                    "target": 1.0,
+                    "start_time": 0.0,
+                    "tolerance": {"relative": 1e-3, "reference": 1.0},
+                },
+                "noise": {
+                    "analysis": "noise",
+                    "band": [2.0, 50.0],
+                    "references": ["input", "output"],
+                },
+                "saturation": {
+                    "analysis": "ac",
+                    "devices": ["M1"],
+                    "minimum_headroom": 0.05,
+                },
+            },
+            "constraints": {
+                "phase_margin": {"min": 20.0},
+                "settling_time": {"max": 3e-9},
+                "integrated_input_noise": {"max": 1e-6},
+                "saturation": {"equals": True},
+            },
+        },
+    )
+    return spec, results
+
+
+def test_unified_signoff_is_explicit_unit_bearing_and_passes():
+    spec, results = _signoff_fixture()
+    signoff = evaluate_signoff(spec, results)
+    metrics = signoff["measurements"]
     assert metrics["gain"]["unit"] == "dB"
     assert metrics["phase_margin"]["unit"] == "deg"
+    assert metrics["phase_margin"]["response_kind"] == "loop_gain"
+    assert metrics["phase_margin"]["injection_source"] == "Vinj"
     assert metrics["settling_time"]["unit"] == "s"
+    assert metrics["settling_time"]["target"]["value"] == pytest.approx(1.0)
     assert metrics["integrated_input_noise"]["unit"] == "V_rms"
     assert metrics["integrated_output_noise"]["integration_band_hz"] == [
-        1.0, 100.0]
+        2.0, 50.0]
+    assert metrics["integrated_input_noise"]["value"] == pytest.approx(
+        np.sqrt(48e-18))
     assert metrics["saturation"]["value"] is True
     assert metrics["dc_source_power"]["value"] == pytest.approx(1.2e-3)
     branch = metrics["dc_source_power"]["branches"]["VDD"]
@@ -206,3 +290,40 @@ def test_unified_metrics_are_unit_bearing():
     assert branch["current"]["unit"] == "A"
     assert branch["power"]["unit"] == "W"
     assert metrics["saturation"]["devices"]["M1"]["headroom"]["unit"] == "V"
+    assert signoff["status"] == "pass"
+    assert signoff["passed"] is True
+    assert set(signoff["constraints"]) == {
+        "phase_margin", "settling_time", "integrated_input_noise", "saturation",
+    }
+    assert signoff["worst_case"]["measurement"] in signoff["constraints"]
+
+
+def test_pm_saturation_noise_and_settling_are_not_inferred():
+    spec, results = _signoff_fixture()
+    spec.signoff = None
+    metrics = summarize_design_metrics(spec, results)
+    assert "phase_margin" not in metrics
+    assert "settling_time" not in metrics
+    assert "integrated_input_noise" not in metrics
+    assert "integrated_output_noise" not in metrics
+    assert "saturation" not in metrics
+    signoff = evaluate_signoff(spec, results)
+    assert signoff["status"] == "not_configured"
+    assert signoff["passed"] is None
+
+
+def test_phase_margin_rejects_ordinary_ac_drive():
+    spec, results = _signoff_fixture()
+    spec.topology.ac_drives = {"OUTP": 1.0}
+    with pytest.raises(SignoffConfigurationError, match="exactly injection source"):
+        evaluate_signoff(spec, results)
+
+
+def test_settling_uses_declared_target_not_last_sample():
+    spec, results = _signoff_fixture(final_output=0.99)
+    signoff = evaluate_signoff(spec, results)
+    settling = signoff["measurements"]["settling_time"]
+    assert settling["status"] == "not_settled"
+    assert settling["value"] is None
+    assert signoff["status"] == "fail"
+    assert signoff["constraints"]["settling_time"]["passed"] is False

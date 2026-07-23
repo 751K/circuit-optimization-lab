@@ -48,11 +48,10 @@ from .noise_solver import band_rms, noise_analysis
 from .run_contract import (
     SimulationInvalid,
     metric as unit_metric,
-    saturation_metric,
     source_power_metric,
 )
 from .circuit_loader import circuit_from_dict, models_from_config
-from .frequency_metrics import phase_margin, unity_gain_freq
+from .frequency_metrics import unity_gain_freq
 
 
 METRICS = ("gain_dB", "gain_peak_dB", "bw_Hz", "irn_uV", "power_uW", "area")
@@ -319,7 +318,6 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
     irn_uV = float("nan")
     power_uW = float(ac["source_power"]["total_w"]) * 1e6
     ugf = float(unity_gain_freq(ac["freqs"], ac["response"]))
-    pm = float(phase_margin(ac["freqs"], ac["response"]))
     metrics = {
         "gain_dB": float(ac["Av_dc_dB"]),          # gain at the lowest analysis freq
         "gain_peak_dB": float(ac["peak_dB"]),      # passband peak (the spec gain for a bandpass)
@@ -334,12 +332,7 @@ def evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None,
                 ugf if np.isfinite(ugf) else None, "Hz",
                 status="valid" if np.isfinite(ugf) else "no_crossing",
             ),
-            "phase_margin": unit_metric(
-                pm if np.isfinite(pm) else None, "deg",
-                status="valid" if np.isfinite(pm) else "no_crossing",
-            ),
             "dc_source_power": source_power_metric(ac["source_power"]),
-            "saturation": saturation_metric(ac.get("operating_regions", {})),
         },
     }
     if (_needs_noise(constraints, objectives, require_noise) and

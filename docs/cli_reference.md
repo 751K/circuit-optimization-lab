@@ -63,17 +63,19 @@ Flags:
 | `-a`, `--analysis` | Comma-separated subset of analyses: `ac,noise,transient,pss,pac,pnoise` |
 | `--corner` | Process-corner override; `typical/slow/fast` for AT4000TG, silicon PDKs use their own supported corners |
 | `--noise-band LO HI` | Noise integration band for the CLI summary, default `0.05 100.0` Hz |
-| `-o`, `--output` | Write `{status, results, metrics}` JSON; `metrics` uses the common unit-bearing measurement contract |
+| `-o`, `--output` | Write `{status, results, signoff}` JSON; `signoff` is the common unit-bearing acceptance contract |
 | `--engine {rust}` | Compute engine; only `rust` as of v2.0.0 (omitting the flag defaults to `rust`) |
 | `--no-numba` | **Removed in v2.0.0 (errors out)**: the numba engine no longer exists; use `--engine rust` instead |
 | `--quiet` | Suppress progress and summary output |
 
 `run`'s specific numeric options come from the JSON top-level `analyses`
 block. See [Circuit JSON Format](json_circuit_format.md) for the fields.
-The output `metrics` object reports gain (`dB`), phase margin (`deg`), settling
-time (`s`), integrated input/output noise (`V_rms` plus its integration band),
-per-device saturation state, and total/per-source branch power (`W`) whenever
-the corresponding analyses are selected.
+The output `signoff` object always contains `status`, `measurements`,
+`constraints`, `passed`, and `worst_case`. Gain, UGF, and total/per-source
+branch power are reported when AC is selected. Phase margin, settling,
+integrated noise, and saturation appear only when the JSON has an explicit
+top-level `signoff.measurements` definition; acceptance limits live in
+`signoff.constraints`. See [Circuit JSON Format](json_circuit_format.md#signoff).
 
 ## `explore`
 

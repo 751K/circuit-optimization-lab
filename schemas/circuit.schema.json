@@ -206,6 +206,10 @@
       "$ref": "#/$defs/analyses",
       "description": "Optional analysis dispatch configuration."
     },
+    "signoff": {
+      "$ref": "#/$defs/signoff",
+      "description": "Explicit measurement and acceptance contract. PM, settling, noise integration, and saturation are never inferred from analysis outputs."
+    },
     "adc": {
       "$ref": "#/$defs/adc",
       "description": "Optional ADC conversion workflow configuration."
@@ -220,6 +224,127 @@
     }
   },
   "$defs": {
+    "signoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measurements", "constraints"],
+      "properties": {
+        "measurements": {"$ref": "#/$defs/signoffMeasurements"},
+        "constraints": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"$ref": "#/$defs/signoffConstraint"}
+        }
+      }
+    },
+    "signoffMeasurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "phase_margin": {"$ref": "#/$defs/phaseMarginMeasurement"},
+        "settling_time": {"$ref": "#/$defs/settlingMeasurement"},
+        "noise": {"$ref": "#/$defs/noiseMeasurement"},
+        "saturation": {"$ref": "#/$defs/saturationMeasurement"}
+      }
+    },
+    "phaseMarginMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analysis", "injection_source", "return_signal", "polarity"],
+      "properties": {
+        "analysis": {"const": "ac"},
+        "injection_source": {"$ref": "#/$defs/name"},
+        "return_signal": {"$ref": "#/$defs/signalWeights"},
+        "polarity": {"type": "integer", "enum": [-1, 1]},
+        "return_scale": {"$ref": "#/$defs/positiveNumber"}
+      }
+    },
+    "settlingMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analysis", "signal", "target", "start_time", "tolerance"],
+      "properties": {
+        "analysis": {"const": "transient"},
+        "signal": {"$ref": "#/$defs/signalWeights"},
+        "target": {"type": "number"},
+        "start_time": {"type": "number", "minimum": 0},
+        "end_time": {"type": "number", "exclusiveMinimum": 0},
+        "tolerance": {"$ref": "#/$defs/settlingTolerance"}
+      }
+    },
+    "settlingTolerance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["absolute"],
+          "properties": {
+            "absolute": {"$ref": "#/$defs/positiveNumber"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["relative", "reference"],
+          "properties": {
+            "relative": {"$ref": "#/$defs/positiveNumber"},
+            "reference": {"$ref": "#/$defs/positiveNumber"}
+          }
+        }
+      ]
+    },
+    "noiseMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analysis", "band", "references"],
+      "properties": {
+        "analysis": {"const": "noise"},
+        "band": {"$ref": "#/$defs/band"},
+        "references": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["input", "output"]}
+        }
+      }
+    },
+    "saturationMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analysis", "devices", "minimum_headroom"],
+      "properties": {
+        "analysis": {"const": "ac"},
+        "devices": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/name"}
+        },
+        "minimum_headroom": {"type": "number"}
+      }
+    },
+    "signalWeights": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "number"}
+    },
+    "signoffConstraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "min": {"type": "number"},
+        "max": {"type": "number"},
+        "equals": {
+          "oneOf": [
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "string"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
     "adc": {
       "type": "object",
       "additionalProperties": false,

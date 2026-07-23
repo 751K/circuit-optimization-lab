@@ -64,8 +64,18 @@ export interface ValidateResponse {
 }
 
 /** `POST /api/v1/solve` success (HTTP 200). Results are JSON-safe per to_jsonable. */
+export interface SignoffResponse {
+  status: "pass" | "fail" | "not_configured";
+  measurements: Record<string, unknown>;
+  constraints: Record<string, unknown>;
+  passed: boolean | null;
+  worst_case: Record<string, unknown> | null;
+}
+
 export interface SolveResponse {
+  status: "valid";
   results: Record<string, unknown>;
+  signoff: SignoffResponse;
   elapsed_s: number;
 }
 

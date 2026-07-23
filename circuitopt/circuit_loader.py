@@ -28,6 +28,7 @@ class CircuitSpec:
     nf: dict | int | None = None
     periodic: dict | None = None
     analyses: dict | None = None
+    signoff: dict | None = None
     model_types: dict | None = None      # device name -> model-registry key (e.g. "sky130.nmos")
     device_kwargs: dict | None = None    # device name -> extra ctor kwargs (vb, corner, ...)
     adc: dict | None = None              # optional ADC conversion workflow configuration
@@ -513,6 +514,9 @@ def circuit_from_dict(data):
     analyses = data.get("analyses")
     if analyses is not None and not isinstance(analyses, dict):
         raise ValueError("analyses must be an object")
+    signoff = data.get("signoff")
+    if signoff is not None and not isinstance(signoff, dict):
+        raise ValueError("signoff must be an object")
     adc = data.get("adc")
     if adc is not None and not isinstance(adc, dict):
         raise ValueError("adc must be an object")
@@ -520,6 +524,7 @@ def circuit_from_dict(data):
         name=name, topology=topo, sizes=sizes, bias=bias, nf=nf,
         periodic=dict(periodic) if periodic is not None else None,
         analyses=dict(analyses) if analyses is not None else None,
+        signoff=dict(signoff) if signoff is not None else None,
         model_types=model_types or None, device_kwargs=device_kwargs or None,
         adc=dict(adc) if adc is not None else None,
     )

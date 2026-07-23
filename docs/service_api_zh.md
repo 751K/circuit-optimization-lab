@@ -179,44 +179,34 @@ curl -X POST http://127.0.0.1:8341/api/v1/solve \
   "results": {
     "ac": {"Av_dc_dB": 22.90, "bw_Hz": 562.3, "response": [{"re": 1.0, "im": 0.0}, "..."]}
   },
-  "metrics": {
-    "gain": {"value": 22.90, "unit": "dB", "status": "valid"},
-    "phase_margin": {"value": 71.2, "unit": "deg", "status": "valid"},
-    "dc_source_power": {
-      "value": 0.0018,
-      "unit": "W",
-      "status": "valid",
-      "branches": {
-        "VDD": {
-          "voltage": {"value": 0.9, "unit": "V", "status": "valid"},
-          "current": {"value": 0.002, "unit": "A", "status": "valid"},
-          "power": {"value": 0.0018, "unit": "W", "status": "valid"}
-        }
+  "signoff": {
+    "status": "pass",
+    "measurements": {
+      "gain": {"value": 22.90, "unit": "dB", "status": "valid"},
+      "phase_margin": {
+        "value": 71.2, "unit": "deg", "status": "valid",
+        "response_kind": "loop_gain", "injection_source": "Vinj"
       }
     },
-    "saturation": {
-      "value": true,
-      "unit": "boolean",
-      "status": "valid",
-      "devices": {
-        "M1": {
-          "value": true,
-          "unit": "boolean",
-          "status": "valid",
-          "vds": {"value": 0.42, "unit": "V", "status": "valid"},
-          "vdsat": {"value": 0.16, "unit": "V", "status": "valid"},
-          "headroom": {"value": 0.26, "unit": "V", "status": "valid"}
-        }
-      }
-    }
+    "constraints": {
+      "phase_margin": {"observed": {"value": 71.2, "unit": "deg"},
+                       "checks": {"min": {"passed": true}}, "passed": true,
+                       "normalized_margin": 0.187}
+    },
+    "passed": true,
+    "worst_case": {"measurement": "phase_margin", "passed": true,
+                   "normalized_margin": 0.187}
   },
   "elapsed_s": 0.0034
 }
 ```
 
-选择 noise 或 transient 时，`metrics` 还会返回带 `integration_band_hz` 的输入/输出
-积分噪声（`V_rms`）和带容差的建立时间（秒）。模型绑定缺失属于解析错误；紧凑模型
-失败、不收敛和非有限结果属于求解阶段 invalid，绝不会用替代值继续。
+`signoff` 固定包含 `status`、`measurements`、`constraints`、`passed` 和
+`worst_case`。PM 必须显式配置环路注入与返回比，建立时间必须显式配置目标/窗口/容差，
+噪声必须显式配置积分频带与引用端，饱和检查必须显式配置 MOS 列表与最小余量。详见
+[Circuit JSON 格式](json_circuit_format_zh.md#signoff)。模型绑定缺失属于解析错误；
+紧凑模型失败、不收敛、非有限结果和 signoff 配置错误属于求解阶段 invalid，绝不会用
+替代值继续。
 
 失败（`422`）——解析错误（电路结构不合法）和求解错误（如 DC 不收敛、`analyses`
 选项键拼错）各带一个 `stage`，客户端可据此判断是哪个阶段失败。绝不泄漏 traceback。

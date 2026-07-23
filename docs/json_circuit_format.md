@@ -672,6 +672,86 @@ alignment; use that wrapper, or call `circuitopt.pnoise_solver.pnoise_solve(...,
 time_domain=True)` directly, when the truncation-free chopper PNoise path is
 required.
 
+### `signoff`
+
+Optional. Defines measurements and acceptance limits explicitly. This block is
+the only path that produces phase margin, settling time, integrated-noise, and
+saturation signoff measurements. They are not inferred from an arbitrary AC
+response, the last transient sample, the simulated noise span, or every MOS in
+the DUT.
+
+```json
+"ac_drives": {"Vinj": 1.0},
+"signoff": {
+  "measurements": {
+    "phase_margin": {
+      "analysis": "ac",
+      "injection_source": "Vinj",
+      "return_signal": {"RETURN_P": 1.0, "RETURN_N": -1.0},
+      "polarity": -1,
+      "return_scale": 0.5
+    },
+    "settling_time": {
+      "analysis": "transient",
+      "signal": {"OUTP": 1.0, "OUTN": -1.0},
+      "target": 0.45,
+      "start_time": 5e-9,
+      "end_time": 10e-9,
+      "tolerance": {"relative": 0.001, "reference": 0.9}
+    },
+    "noise": {
+      "analysis": "noise",
+      "band": [1e3, 50e6],
+      "references": ["input", "output"]
+    },
+    "saturation": {
+      "analysis": "ac",
+      "devices": ["M1", "M2", "M3", "M4"],
+      "minimum_headroom": 0.02
+    }
+  },
+  "constraints": {
+    "phase_margin": {"min": 60.0},
+    "settling_time": {"max": 5e-9},
+    "integrated_input_noise": {"max": 40e-6},
+    "saturation": {"equals": true}
+  }
+}
+```
+
+For phase margin, `injection_source` must name the sole non-zero voltage-source
+entry in `ac_drives`; `return_signal` is an explicit weighted sum of solved
+nodes. The measured response is the declared return ratio, with `polarity` and
+optional positive `return_scale`, so an ordinary amplifier transfer function
+cannot be mistaken for loop gain.
+
+Settling requires a fixed target and window. `tolerance` is either
+`{"absolute": <volts>}` or `{"relative": <ratio>, "reference": <volts>}`;
+relative tolerance never silently uses the target or final sample as its
+reference. The signal is settled at the earliest sample after `start_time` that
+remains inside tolerance through `end_time`.
+
+Noise `band` must lie inside the simulated noise frequency grid. Saturation
+checks only the listed MOS devices and applies `minimum_headroom` in volts.
+Unknown nodes/devices, missing analyses, unsupported operating regions, and
+ambiguous loop injection are `signoff_configuration` invalid results.
+
+The unified signoff result is:
+
+```json
+{
+  "status": "pass",
+  "measurements": {"phase_margin": {"value": 72.1, "unit": "deg", "status": "valid"}},
+  "constraints": {"phase_margin": {"observed": {}, "checks": {}, "passed": true}},
+  "passed": true,
+  "worst_case": {"measurement": "phase_margin", "passed": true, "normalized_margin": 0.201}
+}
+```
+
+When no `signoff` block is present, the result has `status:
+"not_configured"`, `passed: null`, and still reports non-signoff gain, UGF, and
+source-power measurements when AC was run.
+
 ### `explore`
 
 Optional. Design-space exploration configuration — variables to sweep with ranges,
