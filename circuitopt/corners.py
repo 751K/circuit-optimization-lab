@@ -228,7 +228,8 @@ def _is_silicon_binding(binding) -> bool:
 
 def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
                  corners=("typical", "slow", "fast"), freqs=None, band=(0.05, 100.0),
-                 include_noise=True, workers=1, *, binding=None, temps=None):
+                 include_noise=True, workers=1, *, binding=None, temps=None,
+                 vdd_scale=None):
     """Evaluate a design across process corners -> {corner: metrics-or-None}.
 
     ``binding`` (a :class:`CircuitBinding`): when it binds a silicon circuit the whole
@@ -239,30 +240,45 @@ def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
     keeps the legacy scalar path byte-for-byte — ``corners`` are then OTFT process
     names (``typical/slow/fast``); for silicon they are card corners (``tt/ss/ff/...``).
 
-    ``temps`` (silicon only) adds a **temperature axis** in °C. ``temps=None`` is the
-    frozen behaviour — a flat ``{corner: metrics}`` at the device-default 300.15 K,
-    byte-for-byte identical to the pre-R10 path. A sequence (e.g. ``(-40, 27, 125)``)
-    nests the result as ``{corner: {temp_c: metrics}}``; the temperature rides on the
-    frozen silicon-device ``temperature`` ctor kwarg (Kelvin), so both the compiled
-    campaign and the scalar reference see it. An OTFT / default-PDK circuit rejects
-    ``temps`` (its model has no defined temperature axis)."""
+    ``temps`` / ``vdd_scale`` (silicon only) add the **temperature** (°C) and
+    **supply-scale** PVT axes. Both ``None`` is the frozen behaviour — a flat
+    ``{corner: metrics}`` at the device-default 300.15 K and the given bias,
+    byte-for-byte identical to the pre-R10 path. When one or both are sequences the
+    result nests under each corner in the fixed axis order ``[temp_c, vdd_scale]``:
+
+      * ``temps`` only        -> ``{corner: {temp_c: metrics}}``
+      * ``vdd_scale`` only    -> ``{corner: {vdd_scale: metrics}}``
+      * both                  -> ``{corner: {temp_c: {vdd_scale: metrics}}}``
+
+    ``temps`` rides on the frozen silicon-device ``temperature`` ctor kwarg (Kelvin).
+    ``vdd_scale`` multiplies the **entire** ``bias`` dict uniformly — every rail
+    ratioed to the supply — the established repo convention (``scale = vdd/VDD;
+    bias = {k: v*scale}`` in
+    ``tests/test_pvt_semantics.test_ac_ngspice_gain_tracks_supply``); it is a
+    supply-ratioed scaling, **not** an independent-VDD-with-regenerated-bias sweep.
+    Both axes are silicon-only: an OTFT / default-PDK circuit rejects them (no defined
+    temperature or supply-scale semantics)."""
     if workers is None or workers < 1:
         raise ValueError("workers must be a positive integer")
     corner_names = tuple(corners)
 
-    if temps is not None:
-        # The temperature axis is silicon-only: the OTFT / default-PDK model has no
-        # defined temperature semantics, so it rejects the axis rather than silently
-        # ignoring it (and injecting a binding would perturb the cold OTFT solve).
+    if temps is not None or vdd_scale is not None:
+        # The PVT axes (temperature °C / supply scale) are silicon-only: the OTFT /
+        # default-PDK model has no defined temperature or supply-scale semantics, so it
+        # rejects the axis rather than silently ignoring it (and injecting a binding
+        # would perturb the cold OTFT solve).
         if not _is_silicon_binding(binding):
             raise ValueError(
-                "temps requires an all-silicon binding (BSIM4); the OTFT / default-PDK "
-                "family has no defined temperature axis")
-        if len(tuple(temps)) == 0:
+                "temps / vdd_scale require an all-silicon binding (BSIM4); the OTFT / "
+                "default-PDK family has no defined temperature or supply-scale axis")
+        if temps is not None and len(tuple(temps)) == 0:
             raise ValueError("temps must be a non-empty sequence of °C values, or None")
+        if vdd_scale is not None and len(tuple(vdd_scale)) == 0:
+            raise ValueError(
+                "vdd_scale must be a non-empty sequence of factors, or None")
         freqs_eff = _DEFAULT_FREQS if freqs is None else freqs
         return _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs_eff, band,
-                                 include_noise, workers, binding, temps)
+                                 include_noise, workers, binding, temps, vdd_scale)
 
     if _is_silicon_binding(binding):
         freqs_eff = _DEFAULT_FREQS if freqs is None else freqs
@@ -356,18 +372,20 @@ def _temperature_binding(binding, temp_c, devices):
 
 def _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs, band,
                       include_noise, workers, binding, temps, vdd_scale=None):
-    """PVT grid: nest the silicon corner sweep over the temperature (°C) axis.
+    """PVT grid: nest the silicon corner sweep over the temperature (°C) and
+    supply-scale axes.
 
     Result shape (documented on :func:`corner_table`): each active axis nests under
-    the corner in the fixed order ``[temp_c, vdd_scale]``. With only ``temps`` active
-    the shape is ``{corner: {temp_c: metrics}}``.
+    the corner in the fixed order ``[temp_c, vdd_scale]`` (an inactive axis is
+    collapsed, see :func:`_pvt_place`).
 
-    Each ``(temp, vdd)`` slice is one compiled campaign over the (scaled) bias and the
+    Each ``(temp, vdd)`` slice is one compiled campaign over the scaled bias and the
     baked device temperature — the R9 dataset-layering precedent: temperature and bias
     are template-baked (only the corner is per-candidate), so a distinct
-    temperature/bias means a fresh :func:`silicon_campaign_for`. Every slice runs all
-    corners through :func:`_corner_table_silicon`, inheriting its 0-bin per-corner skip
-    and non-convergence rollback unchanged."""
+    temperature/bias means a fresh :func:`silicon_campaign_for`. ``vdd_scale``
+    multiplies the whole ``bias`` dict uniformly. Every slice runs all corners through
+    :func:`_corner_table_silicon`, inheriting its 0-bin per-corner skip and
+    non-convergence rollback unchanged."""
     devices = [d for d, *_ in topo.devices]
     temp_axis = tuple(temps) if temps is not None else (None,)
     vdd_axis = tuple(vdd_scale) if vdd_scale is not None else (None,)

@@ -289,6 +289,17 @@ def _cmd_serve(args):
 
 # ── subcommand: corners ──────────────────────────────────────────────────────
 
+def _csv_floats(text):
+    """Parse a comma-separated float list (a CLI PVT axis); empty -> None.
+
+    Use the ``--flag=-40,27,125`` form for negative values so argparse does not read
+    the leading ``-`` as another option."""
+    items = [s.strip() for s in str(text).split(",") if s.strip()]
+    if not items:
+        return None
+    return tuple(float(s) for s in items)
+
+
 def _add_corners_parser(subparsers):
     p = subparsers.add_parser("corners", help="Run process-corner sweep (typ/slow/fast)")
     p.add_argument("circuit", help="Path to circuit JSON file")
@@ -297,6 +308,12 @@ def _add_corners_parser(subparsers):
     _add_output_arg(p)
     p.add_argument("--workers", type=int, default=1,
                    help="Parallel corner workers (default: 1)")
+    p.add_argument("--temps", type=_csv_floats, default=None,
+                   help="Silicon only: comma-separated temperature axis in °C, e.g. "
+                        "--temps=-40,27,125 (default: single 27 °C, output unchanged)")
+    p.add_argument("--vdd-scale", type=_csv_floats, default=None, dest="vdd_scale",
+                   help="Silicon only: comma-separated supply-scale factors applied to "
+                        "the whole bias, e.g. --vdd-scale=0.9,1.0,1.1 (default: 1.0)")
     p.add_argument("--no-numba", action="store_true",
                    help="Removed in v2.0.0 (errors): the numba engine no longer exists")
     _add_engine_arg(p)
@@ -304,11 +321,75 @@ def _add_corners_parser(subparsers):
     return p
 
 
+def _corner_row_line(corner_name, metrics, indent):
+    """One formatted corner row (or a (failed) marker) at the given indent."""
+    pad = " " * indent
+    if metrics is None:
+        return f"{pad}{corner_name:>7s}:  (failed)"
+    return (f"{pad}{corner_name:>7s}:  "
+            f"gain={metrics['gain_peak_dB']:.2f} dB  "
+            f"BW={metrics['bw_Hz']:.0f} Hz  "
+            f"IRN={metrics['irn_uV']:.2f} µVrms")
+
+
+def _corner_grid_rows(table, temps, vdd_scale):
+    """Yield ``(corner, temp_c|None, vdd_scale|None, metrics)`` over a nested table."""
+    for corner_name, node in table.items():
+        if temps is not None and vdd_scale is not None:
+            for temp_c, vnode in node.items():
+                for scale, m in vnode.items():
+                    yield corner_name, temp_c, scale, m
+        elif temps is not None:
+            for temp_c, m in node.items():
+                yield corner_name, temp_c, None, m
+        else:                                   # vdd_scale only
+            for scale, m in node.items():
+                yield corner_name, None, scale, m
+
+
+def _print_corner_grid(table, temps, vdd_scale):
+    """Print a PVT corner grid grouped by ``(temp, vdd)`` slice."""
+    slices = {}
+    for corner_name, temp_c, scale, m in _corner_grid_rows(table, temps, vdd_scale):
+        slices.setdefault((temp_c, scale), []).append((corner_name, m))
+    for (temp_c, scale), rows in slices.items():
+        parts = ([f"T={temp_c:g} °C"] if temp_c is not None else []) + \
+                ([f"Vdd×{scale:g}"] if scale is not None else [])
+        print(f"  [{'  '.join(parts)}]")
+        for corner_name, m in rows:
+            print(_corner_row_line(corner_name, m, indent=6))
+
+
+def _write_corner_csv(output, table, temps, vdd_scale):
+    """Write the corner table as CSV. The (corner, gain, bw, irn) columns are the
+    frozen default; ``temp_c`` / ``vdd_scale`` columns are added only for the axes
+    that are active, so a default (no-axis) sweep is byte-for-byte unchanged."""
+    axis_cols = (["temp_c"] if temps is not None else []) + \
+                (["vdd_scale"] if vdd_scale is not None else [])
+    lines = [",".join(["corner", *axis_cols, "gain_peak_dB", "bw_Hz", "irn_uV"])]
+    if temps is None and vdd_scale is None:
+        rows = ((c, None, None, m) for c, m in table.items())
+    else:
+        rows = _corner_grid_rows(table, temps, vdd_scale)
+    for corner_name, temp_c, scale, m in rows:
+        if m is None:
+            continue
+        axis_vals = ([f"{temp_c:g}"] if temps is not None else []) + \
+                    ([f"{scale:g}"] if vdd_scale is not None else [])
+        lines.append(",".join([corner_name, *axis_vals,
+                               f"{m['gain_peak_dB']:.4f}", f"{m['bw_Hz']:.1f}",
+                               f"{m['irn_uV']:.3f}"]))
+    os.makedirs(os.path.dirname(os.path.abspath(output)) or ".", exist_ok=True)
+    with open(output, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def _cmd_corners(args):
 
     spec = _load_spec(args.circuit)
     freqs = _freqs_from_args(args)
     lo, hi = args.noise_band
+    temps, vdd_scale = args.temps, args.vdd_scale
 
     # Carry the per-device model binding so a silicon circuit keeps its BSIM4 cards
     # (and routes through the compiled campaign) instead of silently reverting to the
@@ -317,36 +398,37 @@ def _cmd_corners(args):
     corners = (silicon_corner_names(binding.model_types) if binding.model_types
                else ("typical", "slow", "fast"))
 
+    # The PVT axes are silicon-only (corner_table enforces the same guard); fail early
+    # and cleanly here so an OTFT circuit gets a message, not a partial table + trace.
+    if (temps is not None or vdd_scale is not None) and not binding.model_types:
+        raise SystemExit(
+            "corners: --temps/--vdd-scale require an all-silicon circuit; this "
+            "OTFT/default-PDK circuit has no temperature or supply-scale axis")
+
     if not args.quiet:
         print(f"Corner sweep for {args.circuit}")
         print(f"  freqs: {args.freqs_start:.2g}–{args.freqs_stop:.2g} Hz ({args.freqs_num} pts)")
         print(f"  band:  {lo}–{hi} Hz")
         print(f"  corners: {', '.join(corners)}")
         print(f"  workers: {args.workers}")
+        if temps is not None:
+            print(f"  temps: {', '.join(f'{t:g}' for t in temps)} °C")
+        if vdd_scale is not None:
+            print(f"  vdd_scale: {', '.join(f'{v:g}' for v in vdd_scale)}")
 
     table = corner_table(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
                          corners=corners, freqs=freqs, workers=args.workers,
-                         binding=binding)
-    for corner_name, metrics in table.items():
-        if metrics is None:
-            print(f"  {corner_name:>7s}:  (failed)")
-            continue
-        print(f"  {corner_name:>7s}:  "
-              f"gain={metrics['gain_peak_dB']:.2f} dB  "
-              f"BW={metrics['bw_Hz']:.0f} Hz  "
-              f"IRN={metrics['irn_uV']:.2f} µVrms")
+                         binding=binding, temps=temps, vdd_scale=vdd_scale)
+
+    if temps is None and vdd_scale is None:
+        # Frozen default output: the flat per-corner rows, byte-for-byte unchanged.
+        for corner_name, metrics in table.items():
+            print(_corner_row_line(corner_name, metrics, indent=2))
+    else:
+        _print_corner_grid(table, temps, vdd_scale)
 
     if args.output:
-        csv_lines = ["corner,gain_peak_dB,bw_Hz,irn_uV"]
-        for corner_name, metrics in table.items():
-            if metrics is None:
-                continue
-            csv_lines.append(
-                f"{corner_name},{metrics['gain_peak_dB']:.4f},"
-                f"{metrics['bw_Hz']:.1f},{metrics['irn_uV']:.3f}")
-        os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
-        with open(args.output, "w") as f:
-            f.write("\n".join(csv_lines) + "\n")
+        _write_corner_csv(args.output, table, temps, vdd_scale)
         print(f"wrote {args.output}")
 
     return table

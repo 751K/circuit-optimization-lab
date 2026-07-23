@@ -19,9 +19,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CIRCUIT = "examples/afe_explore.json"
 _MISSING = "examples/__does_not_exist__.json"
+
+
+def _freepdk45_ready():
+    try:
+        from circuitopt.toolchain import pdk_root
+        return (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
+    except Exception:
+        return False
+
+
+_FREEPDK45 = _freepdk45_ready()
 
 
 def _run(*args, timeout=90):
@@ -53,6 +66,42 @@ def test_corners_missing_file_fails():
     proc = _run("corners", _MISSING, "--freqs-num", "5")
     assert proc.returncode != 0
     assert "not found" in (proc.stderr + proc.stdout).lower()
+
+
+def test_corners_default_output_format_frozen(tmp_path):
+    """Default corners (no PVT axes) keeps the frozen flat output + CSV header.
+
+    The default surface is a red line: no ``temps:``/``vdd_scale:`` header lines, no
+    ``[T=…]`` slice grouping, and the CSV header stays exactly the four frozen columns
+    — opting into an axis is the only thing that changes the shape."""
+    out = tmp_path / "corners.csv"
+    proc = _run("corners", _CIRCUIT, "--freqs-num", "5", "-o", str(out))
+    assert proc.returncode == 0, proc.stderr
+    assert "temps:" not in proc.stdout and "vdd_scale:" not in proc.stdout
+    assert "[T=" not in proc.stdout and "Vdd×" not in proc.stdout
+    assert out.read_text().splitlines()[0] == "corner,gain_peak_dB,bw_Hz,irn_uV"
+
+
+def test_corners_pvt_grid_groups_and_adds_csv_columns(tmp_path):
+    """--temps/--vdd-scale group the print by slice and add the CSV axis columns."""
+    if not _FREEPDK45:
+        pytest.skip("FreePDK45 cards not present")
+    out = tmp_path / "grid.csv"
+    proc = _run("corners", "examples/freepdk45_5t_ota.json", "--freqs-num", "5",
+                "--temps=27,125", "--vdd-scale=1.0,1.1", "-o", str(out))
+    assert proc.returncode == 0, proc.stderr
+    assert "temps: 27, 125 °C" in proc.stdout
+    assert "vdd_scale: 1, 1.1" in proc.stdout
+    assert "[T=27 °C  Vdd×1]" in proc.stdout          # grouped slice header
+    assert out.read_text().splitlines()[0] == \
+        "corner,temp_c,vdd_scale,gain_peak_dB,bw_Hz,irn_uV"
+
+
+def test_corners_pvt_axis_rejects_otft():
+    """--temps on an OTFT circuit fails cleanly (non-zero, no partial table)."""
+    proc = _run("corners", _CIRCUIT, "--freqs-num", "5", "--temps=27")
+    assert proc.returncode != 0
+    assert "silicon" in (proc.stderr + proc.stdout).lower()
 
 
 # ── mc (mismatch Monte Carlo) ─────────────────────────────────────────────────

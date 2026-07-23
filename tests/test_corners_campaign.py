@@ -526,3 +526,94 @@ def test_corner_table_temps_rejects_otft_and_empty():
     with pytest.raises(ValueError, match="non-empty"):
         C.corner_table(sspec.sizes, sspec.bias, nf=sspec.nf, topo=sspec.topology,
                        corners=cs, binding=binding, temps=())
+
+
+# ---------------------------------------------------------------------------
+# R10 item (3): supply-scale axis (vdd_scale) + combined PVT grid.
+# ---------------------------------------------------------------------------
+
+_VDD = (0.9, 1.0, 1.1)
+
+
+@pytest.mark.parametrize("key", ["freepdk45_5t", "sky130_5t", "tsmc28_5t"])
+def test_corner_table_vdd_scale_axis_parity_and_shape(key, monkeypatch):
+    """Supply-scale axis: nested {corner: {vdd_scale: metrics}} and campaign==scalar.
+
+    ``vdd_scale`` multiplies the whole bias dict uniformly (the ngspice-oracle supply
+    convention); the compiled point agrees with the frozen scalar reference at the same
+    scale within the cold-DC floor, and the supply visibly moves the gain."""
+    _require_rust()
+    path, cs = _CASES[key]
+    _ready(path)
+    spec, binding = _load(path)
+    kw = dict(nf=spec.nf, topo=spec.topology, corners=cs, freqs=_SI_FREQS,
+              band=_SI_BAND, binding=binding, vdd_scale=_VDD)
+    camp = C.corner_table(spec.sizes, spec.bias, **kw)
+    scal = _pvt_scalar(lambda: C.corner_table(spec.sizes, spec.bias, **kw), monkeypatch)
+
+    for c in cs:
+        assert set(camp[c]) == set(_VDD), (key, c, "vdd keys")
+        for v in _VDD:
+            a, s = camp[c][v], scal[c][v]
+            assert (a is None) == (s is None), (key, c, v, "convergence")
+            if a is None:
+                continue
+            assert _rel(a["gain_peak_dB"], s["gain_peak_dB"]) <= 1e-7, (key, c, v, "gain")
+            assert _rel(a["bw_Hz"], s["bw_Hz"]) <= 1e-7, (key, c, v, "bw")
+    c0 = cs[0]
+    assert abs(camp[c0][0.9]["gain_peak_dB"] - camp[c0][1.1]["gain_peak_dB"]) > 0.1
+
+
+def test_corner_table_vdd_scale_unity_reproduces_unscaled():
+    """``vdd_scale=(1.0,)`` reproduces the unscaled-bias result bit-for-bit.
+
+    Scaling by 1.0 is the identity on the bias dict, so the inner metrics at scale 1.0
+    must equal the flat (no-axis) sweep exactly — a clean check that the axis machinery
+    perturbs nothing but the bias it is told to scale."""
+    _require_rust()
+    path, cs = _CASES["freepdk45_5t"]
+    _ready(path)
+    spec, binding = _load(path)
+    kw = dict(nf=spec.nf, topo=spec.topology, corners=cs, freqs=_SI_FREQS,
+              band=_SI_BAND, binding=binding)
+    flat = C.corner_table(spec.sizes, spec.bias, **kw)
+    scaled = C.corner_table(spec.sizes, spec.bias, vdd_scale=(1.0,), **kw)
+    for c in cs:
+        for k in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
+            assert (flat[c][k] == scaled[c][1.0][k]
+                    or (np.isnan(flat[c][k]) and np.isnan(scaled[c][1.0][k]))), (c, k)
+
+
+def test_corner_table_pvt_combined_grid_shape_and_parity(monkeypatch):
+    """Both axes -> {corner: {temp_c: {vdd_scale: metrics}}}, campaign==scalar per point."""
+    _require_rust()
+    path, cs = _CASES["freepdk45_5t"]
+    _ready(path)
+    spec, binding = _load(path)
+    temps, vdd = (-40.0, 125.0), (0.9, 1.1)
+    kw = dict(nf=spec.nf, topo=spec.topology, corners=cs, freqs=_SI_FREQS,
+              band=_SI_BAND, binding=binding, temps=temps, vdd_scale=vdd)
+    camp = C.corner_table(spec.sizes, spec.bias, **kw)
+    scal = _pvt_scalar(lambda: C.corner_table(spec.sizes, spec.bias, **kw), monkeypatch)
+    n_points = 0
+    for c in cs:
+        assert set(camp[c]) == set(temps), (c, "temp keys")
+        for t in temps:
+            assert set(camp[c][t]) == set(vdd), (c, t, "vdd keys")
+            for v in vdd:
+                a, s = camp[c][t][v], scal[c][t][v]
+                assert (a is None) == (s is None), (c, t, v)
+                if a is None:
+                    continue
+                assert _rel(a["gain_peak_dB"], s["gain_peak_dB"]) <= 1e-7, (c, t, v)
+                n_points += 1
+    assert n_points == len(cs) * len(temps) * len(vdd)   # full grid evaluated
+
+
+def test_corner_table_vdd_scale_rejects_otft():
+    """``vdd_scale`` is silicon-only: an AFE binding raises ValueError."""
+    _require_rust()
+    spec = load_circuit_json("examples/afe_explore.json")
+    with pytest.raises(ValueError, match="silicon"):
+        C.corner_table(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
+                       vdd_scale=(1.0,))
