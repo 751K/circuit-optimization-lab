@@ -43,6 +43,6 @@ PVT 点、495 次 case 求解。覆盖开环、差模环、两个 CMFB 环、闭
 状态优先级是 `invalid > fail > pass`；不同 worker 数下输出点顺序保持确定。
 
 配置 schema 为
-[`schemas/signoff_campaign.schema.json`](../schemas/signoff_campaign.schema.json)，
+[`schemas/signoff_campaign.schema.json`](https://github.com/751K/circuit-optimization-lab/blob/main/schemas/signoff_campaign.schema.json)，
 各测试台仍使用
-[`schemas/circuit.schema.json`](../schemas/circuit.schema.json)。
+[`schemas/circuit.schema.json`](https://github.com/751K/circuit-optimization-lab/blob/main/schemas/circuit.schema.json)。

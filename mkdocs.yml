@@ -41,6 +41,8 @@ nav:
       - JSON Circuit Format: json_circuit_format.md
       - PDK Support Matrix: pdk_support.md
       - Service API: service_api.md
+      - MCP Server: mcp_server.md
+      - Signoff Campaign: signoff_campaign.md
   - Architecture:
       - Module Overview: module_overview.md
       - Developer Handoff: development.md
@@ -65,6 +67,8 @@ nav:
       - JSON 电路描述格式: json_circuit_format_zh.md
       - 本地服务 API: service_api_zh.md
       - CLI 参考手册: cli_reference_zh.md
+      - MCP 服务: mcp_server_zh.md
+      - 签核 Campaign: signoff_campaign_zh.md
       - 许可证与第三方软件: third_party_licenses.md
 
 markdown_extensions:

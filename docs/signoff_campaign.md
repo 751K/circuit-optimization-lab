@@ -76,6 +76,6 @@ Each point reports its case results and `worst_case`. The campaign-level
 dominates `pass`. Point ordering is deterministic for every worker count.
 
 The manifest schema is
-[`schemas/signoff_campaign.schema.json`](../schemas/signoff_campaign.schema.json).
+[`schemas/signoff_campaign.schema.json`](https://github.com/751K/circuit-optimization-lab/blob/main/schemas/signoff_campaign.schema.json).
 The referenced testbenches continue to use
-[`schemas/circuit.schema.json`](../schemas/circuit.schema.json).
+[`schemas/circuit.schema.json`](https://github.com/751K/circuit-optimization-lab/blob/main/schemas/circuit.schema.json).
