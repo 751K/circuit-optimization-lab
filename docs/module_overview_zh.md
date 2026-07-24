@@ -579,12 +579,17 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 
 建立在 AC 和噪声求解器之上的设计空间探索/优化驱动——即项目名称所指的"优化"。给定一个电路及 `explore` 配置（带范围的设计变量、可行性约束和一个或多个目标），它对候选方案进行采样，通过求解器评估每个候选，按约束过滤，并 Pareto 选择权衡前沿。
 
-- `explore(topo, base_sizes, base_bias, nf, cfg, n=, seed=, method=, corner=)`——运行一次扫描。
+- `explore(topo, base_sizes, base_bias, nf, cfg, n=, seed=, method=, corner=,
+  workers=)`——运行一次扫描。
   `corner` 对每次评估施加工艺偏移（如 `CORNERS["slow"]`），实现在不修改配置的情况下进行 corner 感知搜索。
+  满足条件的固定拓扑 BSIM4 电路走 `CompiledCampaign`：geometry/NF/bias 候选分块
+  进入一个释放 GIL 的 Rayon 线程池。多稳态 OTFT AFE 只有在 `seed_fn` 提供一致
+  DC 种子时才走编译路径；冷启动 AFE 保留标量参考，避免改变物理根。
 - `evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None)`——单候选求解器评估，
   新增可选的 corner/mismatch 参数。在 `explore` 中评价流程为 AC-first：先计算
   gain/BW/power/area，非噪声约束失败的候选会立即淘汰；只有幸存候选的约束或目标
-  需要 `irn_uV` 时才运行 `noise_analysis`。
+  需要 `irn_uV` 时才运行噪声。编译路径用 AC-only batch 筛选，再只对幸存候选
+  运行 noise batch，保持相同的 lazy-noise 语义。
 - `load_explore_json(path)`——从完整电路 JSON 中读取 `explore` 块。拓扑、器件尺寸、
   偏置和可选 NF 都走同一条 JSON 路径；探索层不再接受旧的 `builtin_topology` 配置。
 - 采样方式为 `lhs`（拉丁超立方）或 `random`，使用带种子的 RNG 保证可重复性。
@@ -596,11 +601,13 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - `add_cli_args(parser)` / `run_cli(args)` 是 CLI 参数定义的单一来源——`python -m circuitopt explore`
   子命令和独立的 `python -m circuitopt.explore` 入口都调用同一对函数，两个入口不会再互相漂移
   （见 [`cli_reference_zh.md`](cli_reference_zh.md)）。
-- `explore_from_dict(data, n=, seed=, method=, corner=, progress=None, should_stop=None)`——
+- `explore_from_dict(data, n=, seed=, method=, corner=, workers=,
+  progress=None, should_stop=None)`——
   `explore` 子命令和服务层 `POST /api/v1/jobs/explore` 共用的单一入口：解析 `explore` 块、
   绑定硅 `models`、再调用 `explore()`。`progress(done, total)` / `should_stop()` 是可选钩子，
   原样透传给 `explore()`，供需要实时进度或协作式取消的调用者使用（如服务层的后台任务
-  管理器，见 `service/jobs.py`）；两者默认 `None`，此时行为与加钩子之前逐字节一致。提前
+  管理器，见 `service/jobs.py`）；两者默认 `None`，结果保持确定性。标量路径在每个
+  候选前检查取消，编译路径在有界 native chunk 之间检查。提前
   停止时 `results["stopped_early"]` 和 `results["summary"]["stopped_early"]` 为 `True`，
   `summary["evaluated"]` 记录实际跑完的候选数（`summary["n"]` 仍是最初请求的数量）。
 

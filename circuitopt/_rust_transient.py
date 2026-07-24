@@ -39,19 +39,28 @@ def _term_record(value):
     return int(kind), 0, float(reference)
 
 
-def passive_problem_spec(plan, dynamic_sources=()):
-    """Serialize linear/source MNA data shared by OTFT and BSIM4 grids."""
+def passive_problem_spec(plan, dynamic_sources=(), term_record=None):
+    """Serialize linear/source MNA data shared by OTFT and BSIM4 grids.
+
+    ``term_record(node_name, compiled_term)`` may override terminal encoding.
+    Compiled campaigns use this hook to preserve symbolic rail-to-bias slots;
+    ordinary transient callers keep the fixed-value encoding.
+    """
+    encode = (
+        (lambda _node, value: _term_record(value))
+        if term_record is None else term_record
+    )
     return {
         "node_count": int(plan.n),
         "size": int(plan.n_aug),
         "devices": [],
         "resistors": [
-            (_term_record(item.a), _term_record(item.b),
+            (encode(item.a_node, item.a), encode(item.b_node, item.b),
              _optional_index(item.ai), _optional_index(item.bi), float(item.g))
             for item in plan.resistors
         ],
         "capacitors": [
-            (_term_record(item.a), _term_record(item.b),
+            (encode(item.a_node, item.a), encode(item.b_node, item.b),
              _optional_index(item.ai), _optional_index(item.bi), float(item.value))
             for item in plan.capacitors
         ],
@@ -65,19 +74,19 @@ def passive_problem_spec(plan, dynamic_sources=()):
         ],
         "vccs": [
             (_optional_index(item.pi), _optional_index(item.qi),
-             _term_record(item.cp), _term_record(item.cn),
+             encode(item.cp_node, item.cp), encode(item.cn_node, item.cn),
              _optional_index(item.cpi), _optional_index(item.cni), float(item.gm))
             for item in plan.vccs
         ],
         "voltage_sources": [
-            (_term_record(item.p), _term_record(item.q),
+            (encode(item.p_node, item.p), encode(item.q_node, item.q),
              _optional_index(item.pi), _optional_index(item.qi), int(item.bi),
              float(item.e_const), int(item.e_input_idx))
             for item in plan.vsources
         ],
         "vcvs": [
-            (_term_record(item.p), _term_record(item.q),
-             _term_record(item.cp), _term_record(item.cn),
+            (encode(item.p_node, item.p), encode(item.q_node, item.q),
+             encode(item.cp_node, item.cp), encode(item.cn_node, item.cn),
              _optional_index(item.pi), _optional_index(item.qi),
              _optional_index(item.cpi), _optional_index(item.cni),
              int(item.bi), float(item.mu))
@@ -89,7 +98,7 @@ def passive_problem_spec(plan, dynamic_sources=()):
             for item in plan.cccs
         ],
         "ccvs": [
-            (_term_record(item.p), _term_record(item.q),
+            (encode(item.p_node, item.p), encode(item.q_node, item.q),
              _optional_index(item.pi), _optional_index(item.qi), int(item.bi),
              int(item.ctrl_bi), float(item.gamma))
             for item in plan.ccvs

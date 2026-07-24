@@ -272,11 +272,14 @@ def create_mcp_server(
         n: int = 32,
         seed: int = 0,
         corner: str | None = None,
+        workers: int = 1,
     ) -> dict[str, Any]:
         """Submit design-space exploration as a cancellable background job."""
-        if n < 1:
-            raise ToolError("n must be at least 1")
-        params: dict[str, Any] = {"circuit": circuit, "n": n, "seed": seed}
+        if n < 1 or workers < 1:
+            raise ToolError("n and workers must be at least 1")
+        params: dict[str, Any] = {
+            "circuit": circuit, "n": n, "seed": seed, "workers": workers
+        }
         if corner is not None:
             params["corner"] = corner
         job = ctx.request_context.lifespan_context.jobs.submit("explore", params)

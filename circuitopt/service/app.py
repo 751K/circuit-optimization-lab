@@ -68,11 +68,13 @@ class ExploreJobRequest(BaseModel):
 
     ``circuit`` is a full circuit-JSON object carrying an ``explore`` block; ``n``
     is the candidate count, ``seed`` the RNG seed, ``corner`` an optional process
-    corner. All but ``circuit`` are optional (server defaults apply)."""
+    corner, and ``workers`` sizes the Rust campaign pool. All but ``circuit`` are
+    optional (server defaults apply)."""
     circuit: dict[str, Any] = Field(..., description="Circuit JSON with an 'explore' block")
     n: Optional[int] = Field(None, description="Number of candidates to sample")
     seed: Optional[int] = Field(None, description="RNG seed")
     corner: Optional[str] = Field(None, description="Process-corner override")
+    workers: Optional[int] = Field(None, ge=1, description="Rust campaign workers")
 
 
 class McJobRequest(BaseModel):
@@ -189,6 +191,8 @@ def create_app(job_workers: int = 1) -> FastAPI:
             params["seed"] = req.seed
         if req.corner is not None:
             params["corner"] = req.corner
+        if req.workers is not None:
+            params["workers"] = req.workers
         return _submit("explore", params, response)
 
     @app.post("/api/v1/jobs/mc", status_code=202)

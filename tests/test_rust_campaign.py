@@ -85,7 +85,7 @@ def _scaled_sizes(factor):
     return out
 
 
-def _cold_reference(sizes, corner_map, freqs=FREQS, band=BAND):
+def _cold_reference(sizes, corner_map, freqs=FREQS, band=BAND, bias=BIAS):
     """A cold-consistent Python AC+noise reference for one design.
 
     Builds fresh (cold) ``PMOS_TFT`` instances, extracts small-signal params at
@@ -96,11 +96,11 @@ def _cold_reference(sizes, corner_map, freqs=FREQS, band=BAND):
     ``corner_map`` is either a process-corner name/dict (global shift) or a
     per-device mismatch map (``{name: {pvt0,pbeta0,mvt0,mbeta0}}``).
     """
-    ac = ac_solve(sizes, BIAS, corner=corner_map, freqs=freqs)
+    ac = ac_solve(sizes, bias, corner=corner_map, freqs=freqs)
     if ac is None:
         return None
     dc = ac["dc_op"]
-    plan = CompiledTopology(AFE_TOPO, BIAS)
+    plan = CompiledTopology(AFE_TOPO, bias)
     nv = {n: dc[n] for n in plan.solved}
     bpts = plan.bias_points(nv)
 
@@ -270,6 +270,77 @@ def test_determinism_across_worker_counts():
             for key in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
                 assert a[key] == b[key], f"workers={workers} candidate={i} {key}"
             assert a["dc_op"] == b["dc_op"], f"workers={workers} candidate={i} dc_op"
+
+
+def test_afe_candidate_bias_partial_override_matches_scalar_and_is_deterministic():
+    camp = _campaign()
+    varied = {**BIAS, "VCM": BIAS["VCM"] - 0.2, "VB": BIAS["VB"] + 0.1}
+    ref_default = _cold_reference(BASE_SIZES, "typical")
+    ref_varied = _cold_reference(BASE_SIZES, "typical", bias=varied)
+    assert ref_default is not None and ref_varied is not None
+    cands = [
+        camp.candidate(
+            BASE_SIZES,
+            corner="typical",
+            seed=camp.seed_vector(ref_default[3]),
+            trust_seed_as_op=False,
+        ),
+        camp.candidate(
+            BASE_SIZES,
+            corner="typical",
+            bias={"VCM": varied["VCM"], "VB": varied["VB"]},
+            seed=camp.seed_vector(ref_varied[3]),
+            trust_seed_as_op=False,
+        ),
+    ]
+    baseline = camp.evaluate_batch(cands, workers=1)
+    parallel = camp.evaluate_batch(cands, workers=8)
+    for result, repeated, ref in zip(baseline, parallel, (ref_default, ref_varied)):
+        assert result["ok"] and repeated["ok"]
+        for key in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV", "dc_op"):
+            assert repeated[key] == result[key]
+        for key, expected in zip(
+            ("gain_peak_dB", "bw_Hz", "irn_uV"), ref[:3]
+        ):
+            assert _rel(result[key], expected) <= 1e-12
+    assert baseline[0]["dc_op"] != baseline[1]["dc_op"]
+
+
+def test_afe_candidate_bias_rejects_unknown_and_nonfinite_values():
+    camp = _campaign()
+    with pytest.raises(ValueError, match="unknown candidate bias"):
+        camp.candidate(BASE_SIZES, bias={"NOT_A_BIAS": 1.0})
+    with pytest.raises(ValueError, match="finite"):
+        camp.candidate(BASE_SIZES, bias={"VCM": float("nan")})
+
+
+def test_afe_campaign_terminal_currents_reproduce_power_and_area():
+    from circuitopt.device_factory import CircuitBinding
+    from circuitopt.explore import _area
+
+    camp = _campaign()
+    ac = ac_solve(BASE_SIZES, BIAS, corner="typical", freqs=FREQS)
+    assert ac is not None
+    row = camp.evaluate_batch([
+        camp.candidate(
+            BASE_SIZES,
+            corner="typical",
+            seed=camp.seed_vector(ac["dc_op"]),
+            trust_seed_as_op=True,
+        )
+    ], analyses=("dc", "ac"))[0]
+    reduced = camp.reduce_result(row, BASE_SIZES, BIAS)
+    assert reduced["source_power"]["total_w"] == pytest.approx(
+        ac["source_power"]["total_w"], rel=2e-9)
+    for name, value in ac["source_power"]["per_source_w"].items():
+        assert reduced["source_power"]["per_source_w"][name] == pytest.approx(
+            value, rel=2e-9, abs=1e-18)
+    binding = CircuitBinding(
+        topo=AFE_TOPO,
+        model_types=AFE_TOPO.model_types,
+        device_kwargs=AFE_TOPO.device_kwargs,
+    )
+    assert reduced["area"] == _area(binding, BASE_SIZES)
 
 
 def test_results_are_candidate_index_ordered():
@@ -602,6 +673,28 @@ def test_silicon_determinism_across_worker_counts():
             for key in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
                 assert a[key] == b[key], f"workers={workers} candidate={i} {key}"
             assert a["dc_op"] == b["dc_op"], f"workers={workers} candidate={i} dc_op"
+
+
+def test_silicon_candidate_bias_partial_override_matches_scalar():
+    spec, _corners, camp = _si_load("sky130")
+    kwargs = _si_reference_kwargs(spec)
+    varied = {**spec.bias, "VCM": float(spec.bias["VCM"]) - 0.02,
+              "VB": float(spec.bias["VB"]) - 0.02}
+    ac = ac_solve(dict(spec.sizes), varied, _SI_FREQS, corner="tt", **kwargs)
+    assert ac is not None
+    cand = camp.candidate(
+        dict(spec.sizes),
+        "tt",
+        bias={"VCM": varied["VCM"], "VB": varied["VB"]},
+        seed=camp.seed_vector(ac["dc_op"]),
+        trust_seed_as_op=False,
+    )
+    result = camp.evaluate_batch([cand], workers=2, analyses=("dc", "ac"))[0]
+    assert result["ok"], result
+    assert _rel(result["gain_peak_dB"], float(ac["peak_dB"])) <= 1e-12
+    assert _rel(result["bw_Hz"], float(ac["bw_Hz"])) <= 1e-12
+    expected_op = [float(ac["dc_op"][name]) for name in camp.solved]
+    assert max(_rel(a, b) for a, b in zip(result["dc_op"], expected_op)) <= 1e-12
 
 
 def test_silicon_no_python_callback_during_batch(monkeypatch):

@@ -12,7 +12,9 @@
 //! makes it the reference vertical for parity. Silicon PDK families plug the
 //! same engine in from `co-py` where the BSIM4 host is available.
 
-use crate::campaign::{CandidateEvaluator, CandidateOutcome, band_rms, bw_from_gain};
+use crate::campaign::{
+    CandidateEvaluator, CandidateOutcome, band_rms, bw_from_gain, unity_gain_freq,
+};
 use crate::{lti, mna, otft};
 
 /// AT4000TG fixed model constants (the `PMOS_TFT` construction defaults). Only
@@ -52,20 +54,22 @@ impl Default for OtftConstants {
 }
 
 /// A compiled DC/bias terminal token: `Solved(index)` reads a node voltage,
-/// `Rail(value)` is a fixed bias. Mirrors `compiled_topology` TERM_SOLVED /
-/// TERM_RAIL (TERM_INPUT is transient-only and unused here).
+/// `Rail(value)` is a fixed literal, and `Candidate(index)` reads a candidate
+/// bias slot. Mirrors `compiled_topology` TERM_SOLVED / TERM_RAIL / TERM_INPUT.
 #[derive(Clone, Copy, Debug)]
 pub enum BiasTerm {
     Solved(usize),
     Rail(f64),
+    Candidate(usize),
 }
 
 impl BiasTerm {
     #[inline]
-    fn eval(self, x: &[f64]) -> f64 {
+    fn eval(self, x: &[f64], bias: &[f64]) -> Option<f64> {
         match self {
-            BiasTerm::Solved(i) => x[i],
-            BiasTerm::Rail(v) => v,
+            BiasTerm::Solved(i) => x.get(i).copied(),
+            BiasTerm::Rail(v) => Some(v),
+            BiasTerm::Candidate(i) => bias.get(i).copied(),
         }
     }
 }
@@ -96,6 +100,8 @@ pub struct OtftTemplate {
     pub n_aug: usize,
     pub n_nodes: usize,
     pub consts: OtftConstants,
+    pub bias_names: Vec<String>,
+    pub bias_defaults: Vec<f64>,
     pub devices: Vec<DeviceTemplate>,
     /// AC load capacitors `(a_term, b_term, value)`.
     pub ac_caps: Vec<(mna::Term, mna::Term, f64)>,
@@ -133,6 +139,8 @@ pub struct DeviceGeom {
 #[derive(Clone, Debug)]
 pub struct OtftCandidate {
     pub devices: Vec<DeviceGeom>,
+    pub bias: Vec<f64>,
+    pub dc_guesses: Option<Vec<Vec<f64>>>,
     pub seed: Option<Vec<f64>>,
     pub trust_seed_as_op: bool,
 }
@@ -140,10 +148,14 @@ pub struct OtftCandidate {
 /// The scalar metrics for one candidate — keys mirror `corners.metrics`.
 #[derive(Clone, Debug)]
 pub struct OtftMetrics {
+    pub av_dc_db: f64,
     pub gain_peak_db: f64,
     pub bw_hz: f64,
+    pub ugf_hz: f64,
     pub irn_uv: f64,
+    pub orn_v: f64,
     pub latch_dv: f64,
+    pub terminal_currents: Vec<[f64; 4]>,
     pub dc_op: Vec<f64>,
     pub dc_iterations: usize,
     pub dc_from_seed: bool,
@@ -302,7 +314,7 @@ fn ss_params(
     vs: f64,
     vd: f64,
     vg: f64,
-) -> Option<(f64, f64, f64, f64, f64, f64)> {
+) -> Option<(f64, f64, f64, f64, f64, f64, f64)> {
     let (vs1, vd1) = solve_internal(bd, vs, vd, vg)?;
     let currents = otft::eval_currents(&bd.params, vs, vd, vg, vs1, vd1);
     let idc0 = -currents[2];
@@ -313,7 +325,7 @@ fn ss_params(
         let h = 1e-3;
         let gm = (get_idc(bd, vs, vd, vg + h)? - get_idc(bd, vs, vd, vg - h)?) / (2.0 * h);
         let gds = (get_idc(bd, vs, vd + h, vg)? - get_idc(bd, vs, vd - h, vg)?) / (2.0 * h);
-        return Some((gm, gds, cgs, cgd, vs1, vd1));
+        return Some((gm, gds, cgs, cgd, vs1, vd1, idc0));
     }
     let jac = otft::residual_pair_jac_internal(&bd.params, vs, vd, vg, vs1, vd1);
     let idc0b = jac[1] - (vs1 - vd1) / 0.1;
@@ -334,12 +346,12 @@ fn ss_params(
         1e-3,
     );
     if ok && gm_neg.is_finite() && gds_neg.is_finite() {
-        return Some((-gm_neg, -gds_neg, cgs, cgd, vs1, vd1));
+        return Some((-gm_neg, -gds_neg, cgs, cgd, vs1, vd1, idc0));
     }
     let h = 1e-3;
     let gm = (get_idc(bd, vs, vd, vg + h)? - get_idc(bd, vs, vd, vg - h)?) / (2.0 * h);
     let gds = (get_idc(bd, vs, vd + h, vg)? - get_idc(bd, vs, vd - h, vg)?) / (2.0 * h);
-    Some((gm, gds, cgs, cgd, vs1, vd1))
+    Some((gm, gds, cgs, cgd, vs1, vd1, idc0))
 }
 
 /// The AFE OTFT batch evaluator.
@@ -353,13 +365,13 @@ pub struct OtftEvaluator<'a> {
 
 impl<'a> OtftEvaluator<'a> {
     /// KCL residual (length `n_aug`) at node vector `x`, gmin on node rows.
-    fn residual(&self, built: &[BuiltDevice], x: &[f64]) -> Vec<f64> {
+    fn residual(&self, built: &[BuiltDevice], x: &[f64], bias: &[f64]) -> Option<Vec<f64>> {
         let t = self.template;
         let mut res = vec![0.0; t.n_aug];
         for (dev, bd) in t.devices.iter().zip(built) {
-            let vs = dev.dc_s.eval(x);
-            let vd = dev.dc_d.eval(x);
-            let vg = dev.dc_g.eval(x);
+            let vs = dev.dc_s.eval(x, bias)?;
+            let vd = dev.dc_d.eval(x, bias)?;
+            let vg = dev.dc_g.eval(x, bias)?;
             // Id = kcl_sign(+1) * abs(get_Idc); a failed internal solve -> 1e-18.
             let i = match get_idc(bd, vs, vd, vg) {
                 Some(v) => v.abs(),
@@ -375,18 +387,18 @@ impl<'a> OtftEvaluator<'a> {
         for k in 0..t.n_nodes {
             res[k] -= x[k] * t.gmin;
         }
-        res
+        Some(res)
     }
 
     /// Damped Newton on the node system from one guess. Returns `(x, iters)` on
     /// convergence (∞-norm residual < `dc_tol`).
-    fn newton(&self, built: &[BuiltDevice], x0: &[f64]) -> Option<(Vec<f64>, usize)> {
+    fn newton(&self, built: &[BuiltDevice], x0: &[f64], bias: &[f64]) -> Option<(Vec<f64>, usize)> {
         let t = self.template;
         let n = t.n_aug;
         let mut x = x0.to_vec();
         let maxit = 200usize;
         for it in 0..maxit {
-            let r = self.residual(built, &x);
+            let r = self.residual(built, &x, bias)?;
             let rnorm = inf_norm(&r);
             if rnorm < t.dc_tol {
                 return Some((x, it));
@@ -397,7 +409,7 @@ impl<'a> OtftEvaluator<'a> {
                 let h = 1e-6 * x[col].abs().max(1.0);
                 let mut xp = x.clone();
                 xp[col] += h;
-                let rp = self.residual(built, &xp);
+                let rp = self.residual(built, &xp, bias)?;
                 for row in 0..n {
                     jac[row * n + col] = (rp[row] - r[row]) / h;
                 }
@@ -412,7 +424,7 @@ impl<'a> OtftEvaluator<'a> {
             for _ in 0..24 {
                 let xt: Vec<f64> = x.iter().zip(&rhs).map(|(xi, d)| xi + alpha * d).collect();
                 if xt.iter().all(|v| v.is_finite()) {
-                    let rt = self.residual(built, &xt);
+                    let rt = self.residual(built, &xt, bias)?;
                     if inf_norm(&rt) < rnorm {
                         x = xt;
                         accepted = true;
@@ -430,7 +442,7 @@ impl<'a> OtftEvaluator<'a> {
                 }
             }
         }
-        let r = self.residual(built, &x);
+        let r = self.residual(built, &x, bias)?;
         if inf_norm(&r) < t.dc_tol {
             Some((x, maxit))
         } else {
@@ -458,11 +470,12 @@ impl<'a> OtftEvaluator<'a> {
             }
             guesses.push(seed.clone());
         }
-        for g in &t.dc_guesses {
+        let default_guesses = cand.dc_guesses.as_ref().unwrap_or(&t.dc_guesses);
+        for g in default_guesses {
             guesses.push(g.clone());
         }
         for (gi, g) in guesses.iter().enumerate() {
-            if let Some((x, iters)) = self.newton(built, g) {
+            if let Some((x, iters)) = self.newton(built, g, &cand.bias) {
                 let from_seed = gi == 0 && cand.seed.is_some();
                 return Ok((x, iters, from_seed));
             }
@@ -487,6 +500,25 @@ impl CandidateEvaluator for OtftEvaluator<'_> {
                 t.devices.len()
             ));
         }
+        if cand.bias.len() != t.bias_defaults.len()
+            || cand.bias.iter().any(|value| !value.is_finite())
+        {
+            return Err(format!(
+                "candidate {index} has invalid bias vector length {} (expected {})",
+                cand.bias.len(),
+                t.bias_defaults.len()
+            ));
+        }
+        if cand.dc_guesses.as_ref().is_some_and(|guesses| {
+            guesses
+                .iter()
+                .any(|guess| guess.len() != t.n_aug || guess.iter().any(|value| !value.is_finite()))
+        }) {
+            return Err(format!(
+                "candidate {index} has an invalid DC guess; expected finite vectors of length {}",
+                t.n_aug
+            ));
+        }
         // 1. Build device instances (geometry + corner/mismatch -> ABI params).
         let built: Vec<BuiltDevice> = cand
             .devices
@@ -500,11 +532,21 @@ impl CandidateEvaluator for OtftEvaluator<'_> {
         // 3. Per-device small-signal params at the DC bias.
         let mut mos = Vec::with_capacity(t.devices.len());
         let mut internal = Vec::with_capacity(t.devices.len());
+        let mut terminal_currents = Vec::with_capacity(t.devices.len());
         for (dev, bd) in t.devices.iter().zip(&built) {
-            let vs = dev.dc_s.eval(&dc_op);
-            let vd = dev.dc_d.eval(&dc_op);
-            let vg = dev.dc_g.eval(&dc_op);
-            let (gm, gds, cgs, cgd, vs1, vd1) = ss_params(bd, vs, vd, vg)
+            let vs = dev
+                .dc_s
+                .eval(&dc_op, &cand.bias)
+                .ok_or_else(|| format!("candidate {index}: source bias is missing"))?;
+            let vd = dev
+                .dc_d
+                .eval(&dc_op, &cand.bias)
+                .ok_or_else(|| format!("candidate {index}: drain bias is missing"))?;
+            let vg = dev
+                .dc_g
+                .eval(&dc_op, &cand.bias)
+                .ok_or_else(|| format!("candidate {index}: gate bias is missing"))?;
+            let (gm, gds, cgs, cgd, vs1, vd1, idc) = ss_params(bd, vs, vd, vg)
                 .ok_or_else(|| format!("candidate {index}: small-signal solve failed"))?;
             mos.push(lti::MosDevice {
                 drain: dev.ac_d,
@@ -516,6 +558,8 @@ impl CandidateEvaluator for OtftEvaluator<'_> {
                 cgd,
             });
             internal.push((vs, vd, vg, vs1, vd1));
+            let current = idc.abs();
+            terminal_currents.push([-current, 0.0, current, 0.0]);
         }
 
         // 4. Assemble and solve the small-signal MNA (AC).
@@ -564,11 +608,13 @@ impl CandidateEvaluator for OtftEvaluator<'_> {
         }
         let peak = gains.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let gain_peak_db = 20.0 * peak.max(1e-9).log10();
+        let av_dc_db = 20.0 * gains.first().copied().unwrap_or(0.0).max(1e-9).log10();
         let bw_hz = bw_from_gain(&t.freqs, &gains);
+        let ugf_hz = unity_gain_freq(&t.freqs, &gains);
 
         // 5. Noise: transposed LTI solve reused from the same system. Skipped on
         // the AC-only prefilter path (irn_uV = NaN).
-        let irn_uv = if self.compute_noise {
+        let (irn_uv, orn_v) = if self.compute_noise {
             let tvec = if inner_parallel {
                 system.solve_transpose_parallel(&t.freqs, &t.sense)
             } else {
@@ -617,9 +663,12 @@ impl CandidateEvaluator for OtftEvaluator<'_> {
                 let h2 = (gains[fi] * gains[fi]).max(1e-300);
                 irn_psd[fi] = out_psd[fi] / h2;
             }
-            band_rms(&t.freqs, &irn_psd, t.band_lo, t.band_hi) * 1e6
+            (
+                band_rms(&t.freqs, &irn_psd, t.band_lo, t.band_hi) * 1e6,
+                band_rms(&t.freqs, &out_psd, t.band_lo, t.band_hi),
+            )
         } else {
-            f64::NAN
+            (f64::NAN, f64::NAN)
         };
 
         // 6. Latch metric.
@@ -629,10 +678,14 @@ impl CandidateEvaluator for OtftEvaluator<'_> {
         };
 
         Ok(OtftMetrics {
+            av_dc_db,
             gain_peak_db,
             bw_hz,
+            ugf_hz,
             irn_uv,
+            orn_v,
             latch_dv,
+            terminal_currents,
             dc_op,
             dc_iterations,
             dc_from_seed,
@@ -656,10 +709,12 @@ mod tests {
             n_aug: 1,
             n_nodes: 1,
             consts: OtftConstants::default(),
+            bias_names: vec!["VG".to_string(), "VS".to_string()],
+            bias_defaults: vec![20.0, 40.0],
             devices: vec![DeviceTemplate {
                 dc_d: BiasTerm::Solved(0),
-                dc_g: BiasTerm::Rail(20.0),
-                dc_s: BiasTerm::Rail(40.0),
+                dc_g: BiasTerm::Candidate(0),
+                dc_s: BiasTerm::Candidate(1),
                 di: Some(0),
                 si: None,
                 ac_d: mna::Term {
@@ -741,6 +796,8 @@ mod tests {
                     w: 1000.0 + k as f64,
                     ..geom()
                 }],
+                bias: vec![20.0, 40.0],
+                dc_guesses: None,
                 seed: Some(vec![30.0]),
                 trust_seed_as_op: true,
             })

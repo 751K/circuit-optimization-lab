@@ -423,6 +423,14 @@ workers 1/2/8 逐字节；硅 4.94×/AFE 3.88× 加速；batch 期零 Python 回
 乘法臂由单测钉死）。已裁决偏差：`band_rms` 朴素求和 vs numpy pairwise（irn
 门放至 1e-11）。
 
+**候选 bias 扩展（2026-07-25）**：`CompiledCampaign` 模板现在声明稳定的
+`bias_names`/`bias_defaults`，DC symbolic rail 编译为候选输入槽；OTFT 与
+FreePDK45/SKY130/TSMC28 BSIM4 候选均可独立提供部分命名 bias 覆盖或完整 bias
+向量。Python 在 detach 前完成补全、有限值/未知键校验，并按合并后的 bias 生成
+候选专属 `dc_guesses`；Rust DC、工作点线性化和器件端电压解析统一消费同一向量。
+这消除了后续把 `explore()` 接入 compiled campaign 时“模板 bias 固化”的阻塞，
+但 `explore()` 自身的批量接线仍属于 R5-D 后续工作。
+
 **R5-C 暴露的缺口（R5-D 前置项）**：
 1. **sky130 `extract_w`**：冻结 loader 支持 `reference_width_um` 钉卡（实宽
    连续偏离网点），`CompiledPdk::numeric_card` 无此参数——sky130 explore 类
@@ -444,6 +452,15 @@ workers 1/2/8 逐字节；硅 4.94×/AFE 3.88× 加速；batch 期零 Python 回
 - **门**：8 线程 SAR MC 扩展效率 ≥0.7；TSMC28 与 FreePDK45 `bench_sweep`
   8 线程候选/秒均 ≥2× 单线程；采样 profiler 证明 batch 计算期间无 Python PDK/
   device frame；三 PDK 卡展开 parity 过门；TSan 干净；全套默认 pytest 绿。
+
+**design-space sweep 接入注记（2026-07-25）**：通用模拟 `explore()` 已接
+`CompiledCampaign`。固定拓扑 BSIM4 候选的 geometry/NF/corner/bias 分块后在单
+Rayon pool 内执行；AC-only 预筛与 survivor-only noise batch 保留 lazy-noise，
+完整四端电流和增广 DC 状态用于真实源支路功耗归约。CLI、HTTP job 与 MCP 均透传
+`workers`。多稳态 OTFT AFE 继续执行 R5-C 冷根裁决：有 `seed_fn` 才可进入
+campaign，无 seed 时回退标量。SKY130 100-candidate 本机 warm 样例约为
+0.447 s（1 worker）、0.118 s（8 workers）、0.477 s（标量）；8-worker 相对
+标量约 4.0×，该数字仅作当前机器的回归参考。
 
 ### R6 — 翻转与拆除（2–3 天，出 v2.0.0-rc）
 - 默认 `CIRCUIT_ENGINE=rust`；主包硬依赖 pin `circuitopt-core`；

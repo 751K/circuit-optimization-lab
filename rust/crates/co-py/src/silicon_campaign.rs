@@ -33,13 +33,16 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use co_bsim4::CoBsim4;
-use co_core::campaign::{CandidateEvaluator, CandidateOutcome, band_rms, bw_from_gain};
+use co_core::campaign::{
+    CandidateEvaluator, CandidateOutcome, band_rms, bw_from_gain, unity_gain_freq,
+};
 use co_core::{bsim_transient, lti, mna, transient};
 use co_pdk::CompiledPdk as PdkCompiled;
 
 use crate::{
     LtiBranchRecord, LtiCccsRecord, LtiCcvsRecord, LtiVccsRecord, LtiVcvsRecord, LtiVoltageRecord,
-    TermRecord, optional_field, optional_index, required, term,
+    TermRecord, campaign_bias_schema, optional_field, optional_index, parse_campaign_bias,
+    required, term,
 };
 
 /// Boltzmann constant — `noise_solver._KB`.
@@ -74,6 +77,8 @@ pub struct DeviceStatic {
 /// Immutable silicon campaign template.
 pub struct SiliconTemplate {
     pub pdk: Arc<PdkCompiled>,
+    pub bias_names: Vec<String>,
+    pub bias_defaults: Vec<f64>,
     /// True for TSMC28: apply the `mulu0 -> u0` fold when building cards.
     pub fold_mulu0: bool,
     pub circuit: transient::Problem,
@@ -110,6 +115,8 @@ pub struct SiliconGeom {
 pub struct SiliconCandidate {
     pub devices: Vec<SiliconGeom>,
     pub corner: String,
+    pub bias: Vec<f64>,
+    pub dc_guesses: Option<Vec<Vec<f64>>>,
     pub seed: Option<Vec<f64>>,
     pub trust_seed_as_op: bool,
 }
@@ -123,13 +130,16 @@ pub struct SiliconCandidate {
 pub struct SiliconMetrics {
     pub gain_peak_db: f64,
     pub bw_hz: f64,
+    pub ugf_hz: f64,
     pub irn_uv: f64,
+    pub orn_v: f64,
     pub latch_dv: f64,
     pub dc_op: Vec<f64>,
     pub dc_iterations: usize,
     pub dc_from_seed: bool,
     pub av_dc_db: f64,
     pub ich: Vec<f64>,
+    pub terminal_currents: Vec<[f64; 4]>,
 }
 
 /// Owned native BSIM4 handle (freed on drop). Created, used, and destroyed on
@@ -320,7 +330,8 @@ impl SiliconEvaluator<'_> {
             }
             guesses.push(seed.as_slice());
         }
-        for guess in &t.dc_guesses {
+        let default_guesses = cand.dc_guesses.as_ref().unwrap_or(&t.dc_guesses);
+        for guess in default_guesses {
             guesses.push(guess.as_slice());
         }
         for (gi, guess) in guesses.iter().enumerate() {
@@ -330,7 +341,7 @@ impl SiliconEvaluator<'_> {
                 &t.dc_devices,
                 &mut evaluator,
                 guess,
-                &[],
+                &cand.bias,
                 t.dc_options,
             );
             if result.converged {
@@ -360,6 +371,25 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
                 t.devices.len()
             ));
         }
+        if cand.bias.len() != t.bias_defaults.len()
+            || cand.bias.iter().any(|value| !value.is_finite())
+        {
+            return Err(format!(
+                "candidate {index} has invalid bias vector length {} (expected {})",
+                cand.bias.len(),
+                t.bias_defaults.len()
+            ));
+        }
+        if cand.dc_guesses.as_ref().is_some_and(|guesses| {
+            guesses.iter().any(|guess| {
+                guess.len() != t.circuit.size || guess.iter().any(|value| !value.is_finite())
+            })
+        }) {
+            return Err(format!(
+                "candidate {index} has an invalid DC guess; expected finite vectors of length {}",
+                t.circuit.size
+            ));
+        }
 
         // 1. Device build: numeric cards -> native handles (fresh per candidate).
         let mut handles = Vec::with_capacity(t.devices.len());
@@ -379,12 +409,17 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
         //    voltage there — the AC tokens are small-signal values).
         let mut problem = t.lti_base.clone();
         let mut ich = Vec::with_capacity(t.devices.len());
+        let mut terminal_currents = Vec::with_capacity(t.devices.len());
         for (slot, (stat, handle)) in t.devices.iter().zip(&handles).enumerate() {
             let dc_terms = &t.dc_devices[slot].terms;
-            let resolve = |term: &mna::Term| term.resolve(&dc_op, &[]).unwrap_or(term.value);
-            let vd = resolve(&dc_terms[0]);
-            let vg = resolve(&dc_terms[1]);
-            let vs = resolve(&dc_terms[2]);
+            let resolve = |term: &mna::Term, terminal: &str| {
+                term.resolve(&dc_op, &cand.bias).ok_or_else(|| {
+                    format!("candidate {index}: device {slot} {terminal} bias is missing")
+                })
+            };
+            let vd = resolve(&dc_terms[0], "drain")?;
+            let vg = resolve(&dc_terms[1], "gate")?;
+            let vs = resolve(&dc_terms[2], "source")?;
             let mut evaluation = bsim_transient::Evaluation::default();
             let status = unsafe {
                 co_bsim4::eval_vp(
@@ -405,6 +440,7 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
             // `abs(result.terminal_currents[0])` the Python device get_ss_params
             // reports as ``Ich`` (the KCL fix-up only touches the bulk terminal).
             ich.push(evaluation.currents[0].abs());
+            terminal_currents.push(evaluation.currents);
             problem.dense_devices.push(lti::DenseDevice {
                 terms: vec![
                     stat.ac_d,
@@ -447,9 +483,10 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
         // the same `20*log10(max(Av_dc, 1e-9))` reduction as `ac_solver.Av_dc_dB`.
         let av_dc_db = 20.0 * gains.first().copied().unwrap_or(0.0).max(1e-9).log10();
         let bw_hz = bw_from_gain(&t.freqs, &gains);
+        let ugf_hz = unity_gain_freq(&t.freqs, &gains);
 
         // 5. Noise: transposed solve + per-device BSIM4 noise matrices.
-        let irn_uv = if self.compute_noise {
+        let (irn_uv, orn_v) = if self.compute_noise {
             let tvec = if inner_parallel {
                 system.solve_transpose_parallel(&t.freqs, &t.sense)
             } else {
@@ -523,9 +560,12 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
                 let h2 = (gains[fi] * gains[fi]).max(1e-300);
                 irn_psd[fi] = out_psd[fi] / h2;
             }
-            band_rms(&t.freqs, &irn_psd, t.band_lo, t.band_hi) * 1e6
+            (
+                band_rms(&t.freqs, &irn_psd, t.band_lo, t.band_hi) * 1e6,
+                band_rms(&t.freqs, &out_psd, t.band_lo, t.band_hi),
+            )
         } else {
-            f64::NAN
+            (f64::NAN, f64::NAN)
         };
 
         let latch_dv = match t.latch_nodes {
@@ -536,13 +576,16 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
         Ok(SiliconMetrics {
             gain_peak_db,
             bw_hz,
+            ugf_hz,
             irn_uv,
+            orn_v,
             latch_dv,
             dc_op,
             dc_iterations,
             dc_from_seed,
             av_dc_db,
             ich,
+            terminal_currents,
         })
     }
 }
@@ -760,8 +803,12 @@ pub(crate) fn build_silicon_template(
         ));
     }
 
+    let (bias_names, bias_defaults) = campaign_bias_schema(spec)?;
+
     Ok(SiliconTemplate {
         pdk: Arc::new(pdk),
+        bias_names,
+        bias_defaults,
         fold_mulu0,
         circuit,
         dc_devices,
@@ -785,7 +832,10 @@ pub(crate) fn build_silicon_template(
     })
 }
 
-pub(crate) fn parse_silicon_candidate(item: &Bound<'_, PyAny>) -> PyResult<SiliconCandidate> {
+pub(crate) fn parse_silicon_candidate(
+    item: &Bound<'_, PyAny>,
+    template: &SiliconTemplate,
+) -> PyResult<SiliconCandidate> {
     let dict = item.cast::<PyDict>()?;
     let corner: String = required(dict, "corner")?;
     let geoms: Vec<Vec<f64>> = required(dict, "devices")?;
@@ -804,11 +854,15 @@ pub(crate) fn parse_silicon_candidate(item: &Bound<'_, PyAny>) -> PyResult<Silic
             delvto: geom[4],
         });
     }
+    let bias = parse_campaign_bias(dict, &template.bias_names, &template.bias_defaults)?;
+    let dc_guesses: Option<Vec<Vec<f64>>> = optional_field(dict, "dc_guesses")?;
     let seed: Option<Vec<f64>> = optional_field(dict, "seed")?;
     let trust_seed_as_op: bool = optional_field(dict, "trust_seed_as_op")?.unwrap_or(false);
     Ok(SiliconCandidate {
         devices,
         corner,
+        bias,
+        dc_guesses,
         seed,
         trust_seed_as_op,
     })

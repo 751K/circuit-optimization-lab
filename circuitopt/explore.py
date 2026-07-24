@@ -164,7 +164,7 @@ def load_explore_json(path):
 
 
 def explore_from_dict(data, n=200, seed=0, method="lhs", corner=None,
-                      progress=None, should_stop=None):
+                      progress=None, should_stop=None, workers=1):
     """Run a full exploration from a parsed circuit-JSON *dict*. Returns the
     results dict (same shape as :func:`explore`).
 
@@ -179,7 +179,8 @@ def explore_from_dict(data, n=200, seed=0, method="lhs", corner=None,
     model_types, device_kwargs = models_from_config(data)
     return explore(topo, sizes, bias, nf, cfg, n=n, seed=seed, method=method,
                    progress=progress, corner=corner, model_types=model_types,
-                   device_kwargs=device_kwargs, should_stop=should_stop)
+                   device_kwargs=device_kwargs, should_stop=should_stop,
+                   workers=workers)
 
 
 # ── sampling ──────────────────────────────────────────────────────────────
@@ -392,10 +393,187 @@ def pareto_front(rows, objectives):
     return front
 
 
+def _campaign_metrics(campaign, row, sizes, bias, nf, noise_evaluated):
+    """Convert one native campaign row to the public :func:`evaluate` metric shape."""
+    if not row.get("ok"):
+        return None
+    reduced = campaign.reduce_result(row, sizes, bias, nf)
+    source_power = reduced["source_power"]
+    ugf = float(row["ugf_Hz"])
+    metrics = {
+        "gain_dB": float(row["gain_dB"]),
+        "gain_peak_dB": float(row["gain_peak_dB"]),
+        "bw_Hz": float(row["bw_Hz"]),
+        "irn_uV": float(row["irn_uV"]) if noise_evaluated else float("nan"),
+        "power_uW": float(source_power["total_w"]) * 1e6,
+        "area": float(reduced["area"]),
+        "_noise_evaluated": bool(noise_evaluated),
+        "measurements": {
+            "gain": unit_metric(float(row["gain_dB"]), "dB"),
+            "unity_gain_frequency": unit_metric(
+                ugf if np.isfinite(ugf) else None,
+                "Hz",
+                status="valid" if np.isfinite(ugf) else "no_crossing",
+            ),
+            "dc_source_power": source_power_metric(source_power),
+        },
+    }
+    required = ("gain_dB", "gain_peak_dB", "bw_Hz", "power_uW", "area")
+    if not _has_finite_metrics(metrics, required):
+        raise SimulationInvalid(
+            "non_finite_result",
+            "compiled campaign returned non-finite exploration metrics",
+            analysis="explore",
+        )
+    if noise_evaluated:
+        orn_v = float(row["orn_V"])
+        if not np.isfinite(metrics["irn_uV"]) or not np.isfinite(orn_v):
+            raise SimulationInvalid(
+                "non_finite_result",
+                "compiled campaign returned non-finite integrated noise",
+                analysis="noise",
+            )
+        metrics["measurements"]["integrated_input_noise"] = unit_metric(
+            metrics["irn_uV"] * 1e-6,
+            "V_rms",
+            integration_band_hz=[
+                float(campaign.band[0]), float(campaign.band[1])
+            ],
+        )
+        metrics["measurements"]["integrated_output_noise"] = unit_metric(
+            orn_v,
+            "V_rms",
+            integration_band_hz=[
+                float(campaign.band[0]), float(campaign.band[1])
+            ],
+        )
+    return metrics
+
+
+def _campaign_invalid(row):
+    message = str(row.get("error") or "compiled campaign evaluation failed")
+    lowered = message.lower()
+    if "did not converge" in lowered or "singular" in lowered:
+        code = "not_converged"
+    elif "card" in lowered or "model" in lowered or "bin" in lowered:
+        code = "model_binding_failed"
+    else:
+        code = "compiled_campaign_failed"
+    return {"code": code, "message": message, "analysis": "compiled_campaign"}
+
+
+def _campaign_candidates(campaign, samples, base_sizes, base_bias, nf, cfg,
+                         seed_fn, corner, workers, progress, should_stop):
+    """Evaluate sampled candidates in cancellable native batches."""
+    need_noise = _needs_noise(cfg.constraints, cfg.objectives)
+    prefilter_noise = need_noise and bool(_non_noise_constraints(cfg.constraints))
+    chunk_size = max(8, min(64, int(workers) * 4))
+    completed = []
+    stopped_early = False
+
+    for start in range(0, len(samples), chunk_size):
+        if should_stop is not None and should_stop():
+            stopped_early = True
+            break
+        records = []
+        for offset, var_values in enumerate(samples[start:start + chunk_size]):
+            index = start + offset
+            sizes, bias, cand_nf = apply_variables(
+                cfg.variables, var_values, base_sizes, base_bias, base_nf=nf)
+            x0 = seed_fn(sizes, bias) if seed_fn is not None else None
+            chosen_corner = campaign.nominal_corner if corner is None else corner
+            native = campaign.candidate(
+                sizes,
+                corner=chosen_corner,
+                bias=bias,
+                nf=cand_nf,
+                seed=x0,
+                trust_seed_as_op=False,
+            )
+            records.append({
+                "idx": index,
+                "vars": var_values,
+                "sizes": sizes,
+                "bias": bias,
+                "nf": cand_nf,
+                "native": native,
+            })
+
+        first_analyses = (
+            ("dc", "ac")
+            if (prefilter_noise or not need_noise)
+            else ("dc", "ac", "noise")
+        )
+        first = campaign.evaluate_batch(
+            [record["native"] for record in records],
+            workers=workers,
+            analyses=first_analyses,
+        )
+        final_rows = list(first)
+        noise_indices = set()
+        if prefilter_noise:
+            survivors = []
+            for local, (record, row) in enumerate(zip(records, first)):
+                try:
+                    metrics = _campaign_metrics(
+                        campaign, row, record["sizes"], record["bias"],
+                        record["nf"], noise_evaluated=False)
+                except SimulationInvalid:
+                    metrics = None
+                if metrics is not None and is_feasible(
+                        metrics, _non_noise_constraints(cfg.constraints)):
+                    survivors.append(local)
+            if survivors:
+                noisy = campaign.evaluate_batch(
+                    [records[local]["native"] for local in survivors],
+                    workers=workers,
+                    analyses=("dc", "ac", "noise"),
+                )
+                for local, row in zip(survivors, noisy):
+                    final_rows[local] = row
+                    noise_indices.add(local)
+        elif need_noise:
+            noise_indices.update(range(len(records)))
+
+        for local, (record, row) in enumerate(zip(records, final_rows)):
+            invalid = None if row.get("ok") else _campaign_invalid(row)
+            try:
+                metrics = _campaign_metrics(
+                    campaign, row, record["sizes"], record["bias"], record["nf"],
+                    noise_evaluated=local in noise_indices and row.get("ok", False),
+                )
+            except SimulationInvalid as exc:
+                metrics = None
+                invalid = exc.as_dict()
+            complete = bool(
+                metrics is not None and _has_finite_metrics(metrics, cfg.objectives))
+            completed.append({
+                "idx": record["idx"],
+                "vars": record["vars"],
+                "metrics": metrics,
+                "converged": metrics is not None,
+                "feasible": bool(
+                    metrics is not None and complete
+                    and is_feasible(metrics, cfg.constraints)
+                ),
+                "pareto": False,
+                "noise_evaluated": bool(
+                    metrics and metrics.get("_noise_evaluated", False)
+                ),
+                "status": (
+                    {"state": "invalid", **invalid}
+                    if invalid is not None else {"state": "valid"}
+                ),
+            })
+            if progress is not None:
+                progress(len(completed), len(samples))
+    return completed, stopped_early
+
+
 # ── driver ──────────────────────────────────────────────────────────────────
 def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
             progress=None, seed_fn=None, corner=None, model_types=None,
-            device_kwargs=None, should_stop=None):
+            device_kwargs=None, should_stop=None, workers=1):
     """Sample, evaluate, constrain, and Pareto-select. Returns a results dict.
 
     seed_fn(sizes, bias) -> x0_guess optionally provides a per-candidate DC seed
@@ -406,12 +584,17 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
 
     ``progress(done, total)`` — the existing 2-arg callback, fired after each
     candidate finishes (``done`` 1-based, ``total`` == ``n``). ``should_stop()`` —
-    optional zero-arg predicate checked *before* each candidate; returning ``True``
-    finishes early over the candidates already evaluated and adds
-    ``"stopped_early": True`` to the results (and its ``summary``). Cancellation is
-    cooperative — a candidate already in flight runs to completion first. Both
-    default ``None``; with both ``None`` the result is unchanged from the pre-hook
-    behaviour (same seed → same candidates)."""
+    optional zero-arg predicate checked before each scalar candidate or bounded
+    compiled-campaign chunk; returning ``True`` finishes early over the candidates
+    already evaluated and adds ``"stopped_early": True`` to the results (and its
+    ``summary``). Cancellation is cooperative: in-flight work completes first.
+    Both default ``None``; with both ``None`` the result is unchanged from the
+    pre-hook behaviour (same seed → same candidates). ``workers`` sizes the single
+    Rayon pool used by eligible compiled campaigns; unsupported or unsafe circuit
+    families retain the scalar reference path."""
+    if workers is None or int(workers) < 1:
+        raise ValueError("workers must be a positive integer")
+    workers = int(workers)
     # One binding carries topo + the per-device model map to every candidate, so a
     # silicon config never silently falls back to the default OTFT PDK. ``at_corner``
     # bakes a silicon corner onto the device kwargs and clears the solver corner; an
@@ -423,39 +606,50 @@ def explore(topo, base_sizes, base_bias, nf, cfg, n=200, seed=0, method="lhs",
     samples = sample(cfg.variables, n, seed=seed, method=method)
     candidates = []
     stopped_early = False
-    for i, var_values in enumerate(samples):
-        if should_stop is not None and should_stop():
-            stopped_early = True
-            break
-        sizes, bias, cand_nf = apply_variables(cfg.variables, var_values,
-                                               base_sizes, base_bias, base_nf=nf)
-        x0 = seed_fn(sizes, bias) if seed_fn is not None else None
-        invalid = None
-        try:
-            metrics = evaluate(
-                topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
-                binding=binding, x0_guess=x0, corner=corner,
-                constraints=cfg.constraints, objectives=cfg.objectives)
-        except SimulationInvalid as exc:
-            metrics = None
-            invalid = exc.as_dict()
-        complete = bool(metrics is not None and _has_finite_metrics(metrics, cfg.objectives))
-        candidates.append({
-            "idx": i,
-            "vars": var_values,
-            "metrics": metrics,
-            "converged": metrics is not None,
-            "feasible": bool(metrics is not None and complete and
-                             is_feasible(metrics, cfg.constraints)),
-            "pareto": False,
-            "noise_evaluated": bool(metrics and metrics.get("_noise_evaluated", False)),
-            "status": (
-                {"state": "invalid", **invalid}
-                if invalid is not None else {"state": "valid"}
-            ),
-        })
-        if progress is not None:
-            progress(i + 1, n)
+    from ._campaign_sweep import campaign_for
+
+    campaign = campaign_for(
+        topo, base_sizes, base_bias, nf, binding, cfg.freqs, cfg.band)
+    if campaign is not None and (not campaign.needs_seed or seed_fn is not None):
+        candidates, stopped_early = _campaign_candidates(
+            campaign, samples, base_sizes, base_bias, nf, cfg,
+            seed_fn, corner, workers, progress, should_stop)
+    else:
+        for i, var_values in enumerate(samples):
+            if should_stop is not None and should_stop():
+                stopped_early = True
+                break
+            sizes, bias, cand_nf = apply_variables(cfg.variables, var_values,
+                                                   base_sizes, base_bias, base_nf=nf)
+            x0 = seed_fn(sizes, bias) if seed_fn is not None else None
+            invalid = None
+            try:
+                metrics = evaluate(
+                    topo, sizes, bias, cand_nf, cfg.freqs, cfg.band,
+                    binding=binding, x0_guess=x0, corner=corner,
+                    constraints=cfg.constraints, objectives=cfg.objectives)
+            except SimulationInvalid as exc:
+                metrics = None
+                invalid = exc.as_dict()
+            complete = bool(
+                metrics is not None and _has_finite_metrics(metrics, cfg.objectives))
+            candidates.append({
+                "idx": i,
+                "vars": var_values,
+                "metrics": metrics,
+                "converged": metrics is not None,
+                "feasible": bool(metrics is not None and complete and
+                                 is_feasible(metrics, cfg.constraints)),
+                "pareto": False,
+                "noise_evaluated": bool(
+                    metrics and metrics.get("_noise_evaluated", False)),
+                "status": (
+                    {"state": "invalid", **invalid}
+                    if invalid is not None else {"state": "valid"}
+                ),
+            })
+            if progress is not None:
+                progress(i + 1, n)
 
     feasible = [c for c in candidates if c["feasible"]]
     front_local = pareto_front([c["metrics"] for c in feasible], cfg.objectives)
@@ -565,6 +759,8 @@ def add_cli_args(parser):
     parser.add_argument("--corner", default=None,
                         help="Process corner: OTFT typical|slow|fast, or silicon "
                              "tt|ss|ff|sf|fs (SKY130) / nom|ss|ff (FreePDK45)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Rust campaign worker threads (default: 1)")
     parser.add_argument("-o", "--out", "--output", dest="output", default=None,
                         help="Output path prefix (writes <prefix>.csv/.jsonl)")
     parser.add_argument("--quiet", action="store_true",
@@ -586,7 +782,8 @@ def run_cli(args):
     # explore_from_dict is the shared CLI/service entry: it parses the explore
     # block + binds silicon models once, so both surfaces stay in lock-step.
     results = explore_from_dict(data, n=args.n, seed=args.seed, method=args.method,
-                                corner=args.corner, progress=progress)
+                                corner=args.corner, progress=progress,
+                                workers=args.workers)
     if not args.quiet:
         print()
     print(_format_summary(results))

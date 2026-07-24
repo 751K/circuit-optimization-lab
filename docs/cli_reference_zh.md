@@ -91,7 +91,7 @@ circuit-opt explore CONFIG.json [options]
 
 ```bash
 circuit-opt explore examples/afe_explore.json -n 500 --seed 1
-circuit-opt explore examples/sky130_5t_ota.json -n 200 --corner ss
+circuit-opt explore examples/sky130_5t_ota.json -n 200 --corner ss --workers 8
 circuit-opt explore examples/tsmc28hpcp_5t_ota.json -n 200 --corner ff
 ```
 
@@ -103,6 +103,7 @@ circuit-opt explore examples/tsmc28hpcp_5t_ota.json -n 200 --corner ff
 | `--seed` | `0` | 随机种子 |
 | `--method` | `lhs` | `lhs` 或 `random` |
 | `--corner` | 无覆盖 | 求解时使用的工艺角 |
+| `--workers` | `1` | 满足条件的 Rust `CompiledCampaign` batch 所用 Rayon worker 数 |
 | `-o`, `--out`, `--output` | 无 | 输出前缀，写 `<prefix>.csv` 和 `<prefix>.jsonl` |
 | `--quiet` | 关闭 | 不打印逐候选进度 |
 | `--engine {rust}` | `rust` | v2.0.0 起仅 `rust`（省略即默认 `rust`） |

@@ -91,6 +91,30 @@ def test_make_sweep_campaign_none_off_rust(monkeypatch):
     assert cs.make_sweep_campaign(spec, _AFE_FREQS, _AFE_BAND) is None
 
 
+def test_evaluate_sizes_forwards_candidate_biases_and_rejects_length_mismatch():
+    class RecordingCampaign:
+        def __init__(self):
+            self.candidates = []
+
+        def candidate(self, sizes, **kwargs):
+            candidate = {"sizes": sizes, **kwargs}
+            self.candidates.append(candidate)
+            return candidate
+
+        def evaluate_batch(self, candidates, workers, analyses):
+            return candidates
+
+    camp = RecordingCampaign()
+    biases = [{"VDD": 0.85}, {"VCM": 0.44}]
+    out = evaluate_sizes(camp, [{"W": 1.0}, {"W": 2.0}], biases=biases)
+    assert [candidate["bias"] for candidate in out] == biases
+    assert all(candidate["seed"] is None for candidate in out)
+    with pytest.raises(ValueError, match="biases length"):
+        evaluate_sizes(camp, [{"W": 1.0}, {"W": 2.0}], biases=[{}])
+    with pytest.raises(ValueError, match="seeds length"):
+        evaluate_sizes(camp, [{"W": 1.0}], seeds=[])
+
+
 # ---------------------------------------------------------------------------
 # Zero Python PDK/device frame gate.
 # ---------------------------------------------------------------------------

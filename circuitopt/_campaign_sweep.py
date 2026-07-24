@@ -66,7 +66,7 @@ class SweepCampaign:
         self.nominal_corner = nominal_corner
         self.needs_seed = needs_seed
 
-    def candidate(self, sizes, *, corner=_NOMINAL, seed=None,
+    def candidate(self, sizes, *, corner=_NOMINAL, bias=None, seed=None,
                   trust_seed_as_op: bool = False, mismatch=None, nf=None) -> dict:
         """One marshalled candidate.
 
@@ -74,16 +74,22 @@ class SweepCampaign:
         pass an explicit corner name to place the candidate at a specific process
         corner (the silicon ``corner_table`` / ``mismatch_mc`` arms). For the
         silicon family ``mismatch`` is a ``{device: delvto_volts}`` map; for AFE it
-        is the ``{device: {mvt0, mbeta0}}`` map (see the respective core)."""
+        is the ``{device: {mvt0, mbeta0}}`` map. ``bias`` may partially override
+        any named template bias for this candidate."""
         chosen = self.nominal_corner if corner is _NOMINAL else corner
         return self._core.candidate(sizes, chosen, mismatch=mismatch,
-                                    nf=nf, seed=seed,
+                                    nf=nf, bias=bias, seed=seed,
                                     trust_seed_as_op=trust_seed_as_op)
 
     @property
     def solved(self) -> tuple:
         """Solved-node names in DC/seed vector order (for ``dc_op`` reconstruction)."""
         return self._core.solved
+
+    @property
+    def band(self) -> tuple[float, float]:
+        """Integrated-noise band carried by the immutable analysis template."""
+        return self._core.band
 
     def seed_vector(self, dc_op) -> list[float]:
         """Solved-order DC seed vector from a ``{node: V}`` operating point."""
@@ -93,6 +99,10 @@ class SweepCampaign:
                        analyses: Sequence[str] = ("dc", "ac", "noise")) -> list[dict]:
         """Run the compiled batch; results are candidate-index ordered."""
         return self._core.evaluate_batch(list(candidates), workers, list(analyses))
+
+    def reduce_result(self, row, sizes, bias, nf=None) -> dict:
+        """Exact Python-side topology reductions over native campaign outputs."""
+        return self._core.reduce_result(row, sizes, bias, nf)
 
 
 def make_sweep_campaign(spec, freqs, band) -> SweepCampaign | None:
@@ -122,6 +132,10 @@ def make_sweep_campaign(spec, freqs, band) -> SweepCampaign | None:
             return None
         from ._rust_campaign import AfeOtftCampaign
 
+        # The compact Rust OTFT evaluator has one physical model implementation;
+        # validate every explicit section/bin selector once before compiling so a
+        # malformed binding cannot be silently ignored by the fast path.
+        binding.build(spec.sizes)
         core = AfeOtftCampaign(spec.bias, freqs, band=tuple(band),
                                topo=spec.topology)
         return SweepCampaign(core, "afe_otft", None, needs_seed=True)
@@ -166,19 +180,60 @@ def silicon_campaign_for(topo, sizes, bias, nf, binding, freqs, band
     return camp
 
 
+def campaign_for(topo, sizes, bias, nf, binding, freqs, band) -> SweepCampaign | None:
+    """Build a compiled campaign for a loose fixed-topology circuit cluster.
+
+    Unlike :func:`silicon_campaign_for`, this accepts both all-silicon BSIM4 and
+    explicitly bound AT4000TG OTFT circuits. Callers must still honor
+    ``campaign.needs_seed`` before routing a multistable AFE batch.
+    """
+    if binding is None or not campaign_enabled():
+        return None
+    try:
+        from .circuit_loader import CircuitSpec
+
+        spec = CircuitSpec(
+            name="_campaign",
+            topology=topo,
+            sizes=dict(sizes),
+            bias=dict(bias),
+            nf=nf,
+            model_types=binding.model_types or getattr(topo, "model_types", None),
+            device_kwargs=(
+                binding.device_kwargs or getattr(topo, "device_kwargs", None)
+            ),
+        )
+        return make_sweep_campaign(spec, freqs, band)
+    except Exception as exc:  # noqa: BLE001 - caller keeps its scalar fallback
+        diagnostics.note("campaign_sweep.generic_build_fail", exc)
+        return None
+
+
 def evaluate_sizes(campaign: SweepCampaign, size_dicts: Sequence[Any], *,
                    workers: int = 1, analyses: Sequence[str] = ("dc", "ac", "noise"),
-                   seeds: Sequence[Any] | None = None) -> list[dict]:
+                   seeds: Sequence[Any] | None = None,
+                   biases: Sequence[Any] | None = None) -> list[dict]:
     """Evaluate a list of size dicts through ``campaign`` -> index-ordered results.
 
     ``seeds`` (optional, one per size dict) supplies a ``{node: V}`` DC seed used
     verbatim as the operating point (``trust_seed_as_op=True``) — the mode that
     keeps the multistable AFE on the reference branch and isolates bit-exact
-    AC/noise. When ``seeds`` is ``None`` the batch runs cold.
+    AC/noise. ``biases`` optionally supplies one partial named bias mapping per
+    candidate. When ``seeds`` is ``None`` the batch runs cold.
     """
-    if seeds is None:
-        cands = [campaign.candidate(sizes) for sizes in size_dicts]
-    else:
-        cands = [campaign.candidate(sizes, seed=seed, trust_seed_as_op=True)
-                 for sizes, seed in zip(size_dicts, seeds)]
+    count = len(size_dicts)
+    if seeds is not None and len(seeds) != count:
+        raise ValueError(f"seeds length {len(seeds)} != candidate count {count}")
+    if biases is not None and len(biases) != count:
+        raise ValueError(f"biases length {len(biases)} != candidate count {count}")
+    cands = []
+    for index, sizes in enumerate(size_dicts):
+        seed = None if seeds is None else seeds[index]
+        bias = None if biases is None else biases[index]
+        cands.append(campaign.candidate(
+            sizes,
+            bias=bias,
+            seed=seed,
+            trust_seed_as_op=seed is not None,
+        ))
     return campaign.evaluate_batch(cands, workers=workers, analyses=analyses)

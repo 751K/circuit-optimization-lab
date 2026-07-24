@@ -3233,10 +3233,10 @@ type CampDeviceRecord = (
 type CampCapRecord = (TermRecord, TermRecord, f64);
 
 fn bias_term(record: TermRecord) -> otft_campaign::BiasTerm {
-    if record.0 == 0 {
-        otft_campaign::BiasTerm::Solved(record.1)
-    } else {
-        otft_campaign::BiasTerm::Rail(record.2)
+    match record.0 {
+        0 => otft_campaign::BiasTerm::Solved(record.1),
+        1 => otft_campaign::BiasTerm::Candidate(record.1),
+        _ => otft_campaign::BiasTerm::Rail(record.2),
     }
 }
 
@@ -3252,6 +3252,74 @@ where
         Some(value) if !value.is_none() => Ok(Some(value.extract::<T>().map_err(Into::into)?)),
         _ => Ok(None),
     }
+}
+
+pub(crate) fn campaign_bias_schema(spec: &Bound<'_, PyDict>) -> PyResult<(Vec<String>, Vec<f64>)> {
+    let names: Vec<String> = optional_field(spec, "bias_names")?.unwrap_or_default();
+    let defaults: Vec<f64> = optional_field(spec, "bias_defaults")?.unwrap_or_default();
+    if names.len() != defaults.len() {
+        return Err(PyValueError::new_err(format!(
+            "bias_names length {} != bias_defaults length {}",
+            names.len(),
+            defaults.len()
+        )));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(names.len());
+    for name in &names {
+        if name.is_empty() || !seen.insert(name.as_str()) {
+            return Err(PyValueError::new_err(format!(
+                "bias_names must contain unique non-empty names; invalid entry {name:?}"
+            )));
+        }
+    }
+    if defaults.iter().any(|value| !value.is_finite()) {
+        return Err(PyValueError::new_err(
+            "bias_defaults must contain only finite values",
+        ));
+    }
+    Ok((names, defaults))
+}
+
+pub(crate) fn parse_campaign_bias(
+    candidate: &Bound<'_, PyDict>,
+    names: &[String],
+    defaults: &[f64],
+) -> PyResult<Vec<f64>> {
+    let Some(value) = candidate.get_item("bias")? else {
+        return Ok(defaults.to_vec());
+    };
+    if value.is_none() {
+        return Ok(defaults.to_vec());
+    }
+    let mut bias = if let Ok(mapping) = value.cast::<PyDict>() {
+        let mut merged = defaults.to_vec();
+        for (key, raw) in mapping.iter() {
+            let name: String = key.extract()?;
+            let Some(index) = names.iter().position(|known| known == &name) else {
+                return Err(PyValueError::new_err(format!(
+                    "unknown candidate bias {name:?}; expected one of {names:?}"
+                )));
+            };
+            merged[index] = raw.extract()?;
+        }
+        merged
+    } else {
+        value.extract::<Vec<f64>>()?
+    };
+    if bias.len() != defaults.len() {
+        return Err(PyValueError::new_err(format!(
+            "candidate bias length {} != template bias length {}",
+            bias.len(),
+            defaults.len()
+        )));
+    }
+    if bias.iter().any(|entry| !entry.is_finite()) {
+        return Err(PyValueError::new_err(
+            "candidate bias must contain only finite values",
+        ));
+    }
+    bias.shrink_to_fit();
+    Ok(bias)
 }
 
 fn build_otft_template(spec: &Bound<'_, PyDict>) -> PyResult<otft_campaign::OtftTemplate> {
@@ -3305,10 +3373,13 @@ fn build_otft_template(spec: &Bound<'_, PyDict>) -> PyResult<otft_campaign::Otft
         return Err(PyValueError::new_err("band must be [f_lo, f_hi]"));
     }
 
+    let (bias_names, bias_defaults) = campaign_bias_schema(spec)?;
     Ok(otft_campaign::OtftTemplate {
         n_aug,
         n_nodes,
         consts,
+        bias_names,
+        bias_defaults,
         devices,
         ac_caps,
         output_weights: required(spec, "output_weights")?,
@@ -3324,7 +3395,10 @@ fn build_otft_template(spec: &Bound<'_, PyDict>) -> PyResult<otft_campaign::Otft
     })
 }
 
-fn parse_candidate(item: &Bound<'_, PyAny>) -> PyResult<otft_campaign::OtftCandidate> {
+fn parse_candidate(
+    item: &Bound<'_, PyAny>,
+    template: &otft_campaign::OtftTemplate,
+) -> PyResult<otft_campaign::OtftCandidate> {
     let dict = item.cast::<PyDict>()?;
     let geoms: Vec<Vec<f64>> = required(dict, "devices")?;
     let mut devices = Vec::with_capacity(geoms.len());
@@ -3344,21 +3418,34 @@ fn parse_candidate(item: &Bound<'_, PyAny>) -> PyResult<otft_campaign::OtftCandi
             mbeta0: g[6],
         });
     }
+    let bias = parse_campaign_bias(dict, &template.bias_names, &template.bias_defaults)?;
+    let dc_guesses: Option<Vec<Vec<f64>>> = optional_field(dict, "dc_guesses")?;
     let seed: Option<Vec<f64>> = optional_field(dict, "seed")?;
     let trust_seed_as_op: bool = optional_field(dict, "trust_seed_as_op")?.unwrap_or(false);
     Ok(otft_campaign::OtftCandidate {
         devices,
+        bias,
+        dc_guesses,
         seed,
         trust_seed_as_op,
     })
 }
 
-/// Family-normalized metrics tuple shared by the campaign result marshal:
-/// `(gain_peak_dB, bw_Hz, irn_uV, latch_dV, dc_op, dc_iterations, dc_from_seed,
-/// gain_dB, ich)`. The last two are the silicon dataset labels (DC gain + per-device
-/// channel current); the AFE family, which the dataset arm never routes, fills them
-/// with `NaN` / an empty vector.
-type CampaignMetrics = (f64, f64, f64, f64, Vec<f64>, usize, bool, f64, Vec<f64>);
+/// Family-normalized metrics shared by the campaign result marshal.
+struct CampaignMetrics {
+    gain_peak_db: f64,
+    gain_dc_db: f64,
+    bw_hz: f64,
+    ugf_hz: f64,
+    irn_uv: f64,
+    orn_v: f64,
+    latch_dv: f64,
+    dc_op: Vec<f64>,
+    terminal_currents: Vec<[f64; 4]>,
+    dc_iterations: usize,
+    dc_from_seed: bool,
+    ich: Vec<f64>,
+}
 
 enum CampaignKind {
     Otft(Arc<otft_campaign::OtftTemplate>),
@@ -3405,7 +3492,8 @@ impl PyCompiledCampaign {
     }
 
     /// Evaluate a candidate matrix in one GIL-free batch. `candidates` is a list
-    /// of family-specific dicts (`{devices, seed?, trust_seed_as_op?}` for AFE;
+    /// of family-specific dicts (`{devices, bias?, dc_guesses?, seed?,
+    /// trust_seed_as_op?}` for AFE;
     /// plus `corner` for silicon); results come back in candidate-index order as
     /// `{ok, gain_peak_dB, bw_Hz, irn_uV, latch_dV, dc_op, dc_iterations,
     /// dc_from_seed}` (or `{ok: False, error}`).
@@ -3429,7 +3517,7 @@ impl PyCompiledCampaign {
             CampaignKind::Otft(template) => {
                 let mut parsed = Vec::with_capacity(n);
                 for item in candidates.iter() {
-                    parsed.push(parse_candidate(&item)?);
+                    parsed.push(parse_candidate(&item, template)?);
                 }
                 let ndev = template.devices.len();
                 for (index, candidate) in parsed.iter().enumerate() {
@@ -3452,18 +3540,19 @@ impl PyCompiledCampaign {
                         .into_iter()
                         .map(|slot| {
                             slot.map(|outcome| {
-                                outcome.map(|m| {
-                                    (
-                                        m.gain_peak_db,
-                                        m.bw_hz,
-                                        m.irn_uv,
-                                        m.latch_dv,
-                                        m.dc_op,
-                                        m.dc_iterations,
-                                        m.dc_from_seed,
-                                        f64::NAN,   // gain_dB — silicon-only label
-                                        Vec::new(), // ich — silicon-only label
-                                    )
+                                outcome.map(|m| CampaignMetrics {
+                                    gain_peak_db: m.gain_peak_db,
+                                    gain_dc_db: m.av_dc_db,
+                                    bw_hz: m.bw_hz,
+                                    ugf_hz: m.ugf_hz,
+                                    irn_uv: m.irn_uv,
+                                    orn_v: m.orn_v,
+                                    latch_dv: m.latch_dv,
+                                    dc_op: m.dc_op,
+                                    terminal_currents: m.terminal_currents,
+                                    dc_iterations: m.dc_iterations,
+                                    dc_from_seed: m.dc_from_seed,
+                                    ich: Vec::new(),
                                 })
                             })
                         })
@@ -3473,7 +3562,7 @@ impl PyCompiledCampaign {
             CampaignKind::Silicon(template) => {
                 let mut parsed = Vec::with_capacity(n);
                 for item in candidates.iter() {
-                    parsed.push(silicon_campaign::parse_silicon_candidate(&item)?);
+                    parsed.push(silicon_campaign::parse_silicon_candidate(&item, template)?);
                 }
                 let ndev = template.devices.len();
                 for (index, candidate) in parsed.iter().enumerate() {
@@ -3496,18 +3585,19 @@ impl PyCompiledCampaign {
                         .into_iter()
                         .map(|slot| {
                             slot.map(|outcome| {
-                                outcome.map(|m| {
-                                    (
-                                        m.gain_peak_db,
-                                        m.bw_hz,
-                                        m.irn_uv,
-                                        m.latch_dv,
-                                        m.dc_op,
-                                        m.dc_iterations,
-                                        m.dc_from_seed,
-                                        m.av_dc_db,
-                                        m.ich,
-                                    )
+                                outcome.map(|m| CampaignMetrics {
+                                    gain_peak_db: m.gain_peak_db,
+                                    gain_dc_db: m.av_dc_db,
+                                    bw_hz: m.bw_hz,
+                                    ugf_hz: m.ugf_hz,
+                                    irn_uv: m.irn_uv,
+                                    orn_v: m.orn_v,
+                                    latch_dv: m.latch_dv,
+                                    dc_op: m.dc_op,
+                                    terminal_currents: m.terminal_currents,
+                                    dc_iterations: m.dc_iterations,
+                                    dc_from_seed: m.dc_from_seed,
+                                    ich: m.ich,
                                 })
                             })
                         })
@@ -3524,17 +3614,20 @@ impl PyCompiledCampaign {
                     dict.set_item("ok", false)?;
                     dict.set_item("cancelled", true)?;
                 }
-                Some(Ok((gain, bw, irn, latch, dc_op, iterations, from_seed, gain_dc, ich))) => {
+                Some(Ok(metrics)) => {
                     dict.set_item("ok", true)?;
-                    dict.set_item("gain_peak_dB", gain)?;
-                    dict.set_item("gain_dB", gain_dc)?;
-                    dict.set_item("bw_Hz", bw)?;
-                    dict.set_item("irn_uV", irn)?;
-                    dict.set_item("latch_dV", latch)?;
-                    dict.set_item("dc_op", dc_op)?;
-                    dict.set_item("ich", ich)?;
-                    dict.set_item("dc_iterations", iterations)?;
-                    dict.set_item("dc_from_seed", from_seed)?;
+                    dict.set_item("gain_peak_dB", metrics.gain_peak_db)?;
+                    dict.set_item("gain_dB", metrics.gain_dc_db)?;
+                    dict.set_item("bw_Hz", metrics.bw_hz)?;
+                    dict.set_item("ugf_Hz", metrics.ugf_hz)?;
+                    dict.set_item("irn_uV", metrics.irn_uv)?;
+                    dict.set_item("orn_V", metrics.orn_v)?;
+                    dict.set_item("latch_dV", metrics.latch_dv)?;
+                    dict.set_item("dc_op", metrics.dc_op)?;
+                    dict.set_item("terminal_currents", metrics.terminal_currents)?;
+                    dict.set_item("ich", metrics.ich)?;
+                    dict.set_item("dc_iterations", metrics.dc_iterations)?;
+                    dict.set_item("dc_from_seed", metrics.dc_from_seed)?;
                 }
                 Some(Err(message)) => {
                     dict.set_item("ok", false)?;

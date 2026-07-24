@@ -1,15 +1,15 @@
-"""Thin, non-wired bridge to ``circuitopt_core.CompiledCampaign`` (rewrite R5-C).
+"""Python bridge to ``circuitopt_core.CompiledCampaign`` (rewrite R5-C/R5-D).
 
 Marshals the frozen AFE OTFT topology + analysis plan into the Rust compiled
 campaign and expands a candidate matrix into the flat, index-ordered candidate
-list the executor consumes. Random mismatch draws are made **up front** (numpy,
-same rule as :func:`corners.mismatch_corner`) so the detached Rust batch never
-calls back into Python.
+list the executor consumes. Each candidate may override any named topology bias;
+symbolic rails remain candidate-input slots through the Rust DC solve. Random
+mismatch draws and candidate-specific DC guesses are prepared **up front** so
+the detached Rust batch never calls back into Python.
 
-This module is **not** wired into any production path. It exists only for the
-R5-C parity/determinism tests and the later R5-D workflow integration; the
-Python analysis paths (``ac_solver`` / ``noise_solver`` / ``corners``) stay the
-single source of truth.
+The shared :mod:`circuitopt._campaign_sweep` dispatcher wires this bridge into
+eligible dataset, corner, mismatch, and benchmark batches. Scalar Python
+analysis paths remain the compatibility reference and fallback.
 """
 from __future__ import annotations
 
@@ -32,6 +32,159 @@ def _dc_term(token) -> tuple[int, int, float]:
     if kind == TERM_SOLVED:  # 0 -> solved node index
         return (0, int(payload), 0.0)
     return (2, 0, float(payload))  # TERM_RAIL (TERM_INPUT is transient-only)
+
+
+def _bias_schema(topo, bias):
+    """Return stable candidate-bias names/defaults and their slot lookup."""
+    names = tuple(str(name) for name in bias)
+    defaults = [float(bias[name]) for name in names]
+    if not all(np.isfinite(defaults)):
+        raise ValueError("campaign bias defaults must be finite")
+    slots = {name: index for index, name in enumerate(names)}
+    for rail, reference in topo.rails.items():
+        if isinstance(reference, str) and reference not in slots:
+            raise ValueError(
+                f"symbolic rail {rail!r} references missing bias {reference!r}")
+    return names, defaults, slots
+
+
+def _candidate_dc_term(topo, slots, node, token) -> tuple[int, int, float]:
+    """Encode symbolic rails as candidate-input slots for the Rust DC solver."""
+    if token[0] == TERM_SOLVED:
+        return _dc_term(token)
+    reference = topo.rails.get(node)
+    if isinstance(reference, str):
+        return (1, int(slots[reference]), 0.0)
+    return _dc_term(token)
+
+
+def _candidate_bias(base, override):
+    """Merge and validate one named candidate-bias override."""
+    if override is None:
+        return None
+    unknown = sorted(set(override) - set(base))
+    if unknown:
+        raise ValueError(f"unknown candidate bias key(s): {unknown}")
+    merged = dict(base)
+    merged.update({str(name): float(value) for name, value in override.items()})
+    if not all(np.isfinite(tuple(merged.values()))):
+        raise ValueError("candidate bias values must be finite")
+    return merged
+
+
+def _campaign_source_power(topo, plan, bias, row, bulk_metadata=None):
+    """Reduce native terminal/branch currents into the scalar source-power contract."""
+    from .run_contract import SimulationInvalid
+
+    state = [float(value) for value in row["dc_op"]]
+    if len(state) != plan.n_aug:
+        raise SimulationInvalid(
+            "invalid_result_shape",
+            f"compiled campaign returned {len(state)} DC values; expected {plan.n_aug}",
+            analysis="dc_power",
+        )
+    terminal_currents = row.get("terminal_currents") or ()
+    if len(terminal_currents) != len(topo.devices):
+        raise SimulationInvalid(
+            "invalid_result_shape",
+            "compiled campaign returned an incomplete terminal-current matrix",
+            analysis="dc_power",
+        )
+    node_values = {name: state[index] for index, name in enumerate(plan.solved)}
+    rail_values = {name: float(value) for name, value in topo.rail_values(bias).items()}
+    delivered = {name: 0.0 for name in rail_values}
+
+    def add(node, current):
+        if node in delivered:
+            delivered[node] += float(current)
+
+    def node_v(node):
+        return float(node_values[node]) if node in node_values else rail_values[node]
+
+    for index, ((name, drain, gate, source), currents) in enumerate(
+            zip(topo.devices, terminal_currents)):
+        values = np.asarray(currents, dtype=float)
+        if values.shape != (4,) or not np.all(np.isfinite(values)):
+            raise SimulationInvalid(
+                "non_finite_result",
+                f"{name}: compiled campaign returned invalid terminal currents",
+                analysis="dc_power",
+            )
+        add(drain, values[0])
+        add(gate, values[1])
+        add(source, values[2])
+        if bulk_metadata is None:
+            continue
+        meta = bulk_metadata[index]
+        matches = [
+            rail for rail, voltage in rail_values.items()
+            if np.isclose(voltage, meta["vb"], rtol=0.0, atol=1e-12)
+        ]
+        explicit = meta["explicit"]
+        if explicit is not None:
+            if explicit not in matches:
+                raise SimulationInvalid(
+                    "invalid_bulk_supply",
+                    f"{name}: bulk rail {explicit!r} does not match vb={meta['vb']:g} V",
+                    analysis="dc_power",
+                )
+            bulk_rail = explicit
+        elif meta["source"] in matches:
+            bulk_rail = meta["source"]
+        else:
+            preferred = (
+                ("GND", "VSS", "VSSA", "VSSD")
+                if meta["polarity"] == "nmos"
+                else ("VDD", "VCC", "VDDA", "VDDD")
+            )
+            named = [rail for rail in preferred if rail in matches]
+            bulk_rail = named[0] if len(named) == 1 else (
+                matches[0] if len(matches) == 1 else None)
+        if bulk_rail is None and values[3] != 0.0:
+            raise SimulationInvalid(
+                "unresolved_bulk_supply",
+                f"{name}: non-zero bulk current cannot be assigned to one explicit rail",
+                analysis="dc_power",
+            )
+        if bulk_rail is not None:
+            add(bulk_rail, values[3])
+
+    for _name, a, b, resistance in topo.resistors:
+        current = (node_v(a) - node_v(b)) / float(resistance)
+        add(a, current)
+        add(b, -current)
+    for _name, p, q, current in topo.isources:
+        add(p, current)
+        add(q, -current)
+    for _name, p, q, cp, cn, gm in topo.vccs:
+        current = float(gm) * (node_v(cp) - node_v(cn))
+        add(p, -current)
+        add(q, current)
+
+    branch_currents = {}
+    for item in (*plan.vsources, *plan.vcvs, *plan.ccvs):
+        branch_currents[item.name] = state[item.bi]
+        add(item.p_node, state[item.bi])
+        add(item.q_node, -state[item.bi])
+    for item in plan.cccs:
+        current = float(item.beta) * branch_currents[item.ctrl_name]
+        add(item.p_node, -current)
+        add(item.q_node, current)
+
+    per_source = {
+        name: rail_values[name] * current for name, current in delivered.items()
+    }
+    if not all(np.isfinite(tuple(per_source.values()))):
+        raise SimulationInvalid(
+            "non_finite_result", "compiled campaign source power is non-finite",
+            analysis="dc_power",
+        )
+    return {
+        "per_source_w": per_source,
+        "source_currents_a": delivered,
+        "source_voltages_v": rail_values,
+        "total_w": float(sum(per_source.values())),
+    }
 
 
 def _ac_term(token) -> tuple[int, int, float]:
@@ -77,6 +230,7 @@ class AfeOtftCampaign:
         self.bias = dict(bias)
         self.plan = CompiledTopology(topo, bias)
         self.solved = tuple(self.plan.solved)
+        self.bias_names, bias_defaults, bias_slots = _bias_schema(topo, self.bias)
         self.freqs = [float(f) for f in np.asarray(freqs, float)]
         self.band = (float(band[0]), float(band[1]))
         self.default_guess = float(topo.default_guess_value(bias))
@@ -91,7 +245,9 @@ class AfeOtftCampaign:
         for dp in self.plan.devices:
             acd, acg, acs = ac_devs[dp.name]
             devices.append((
-                _dc_term(dp.d), _dc_term(dp.g), _dc_term(dp.s),
+                _candidate_dc_term(topo, bias_slots, dp.d_node, dp.d),
+                _candidate_dc_term(topo, bias_slots, dp.g_node, dp.g),
+                _candidate_dc_term(topo, bias_slots, dp.s_node, dp.s),
                 -1 if dp.di is None else int(dp.di),
                 -1 if dp.si is None else int(dp.si),
                 _ac_term(acd), _ac_term(acg), _ac_term(acs),
@@ -110,6 +266,8 @@ class AfeOtftCampaign:
             "n_aug": int(self.plan.n_aug),
             "n_nodes": int(self.plan.n),
             "consts": list(_OTFT_CONSTS),
+            "bias_names": list(self.bias_names),
+            "bias_defaults": bias_defaults,
             "devices": devices,
             "ac_caps": ac_caps,
             "output_weights": output_weights,
@@ -130,7 +288,8 @@ class AfeOtftCampaign:
 
     def candidate(self, sizes: Mapping[str, tuple[float, float]], corner=None,
                   mismatch: Mapping[str, Mapping[str, float]] | None = None,
-                  nf=None, seed=None, trust_seed_as_op: bool = False) -> dict:
+                  nf=None, seed=None, trust_seed_as_op: bool = False,
+                  bias: Mapping[str, float] | None = None) -> dict:
         """Build one marshalled candidate for the given sizes/corner/mismatch."""
         base = CORNERS[corner] if isinstance(corner, str) else dict(corner or {})
         pvt0 = float(base.get("pvt0", 0.0))
@@ -146,6 +305,13 @@ class AfeOtftCampaign:
                 pbeta0, float(mm.get("mbeta0", 0.0)),
             ])
         out = {"devices": devices, "trust_seed_as_op": bool(trust_seed_as_op)}
+        candidate_bias = _candidate_bias(self.bias, bias)
+        if candidate_bias is not None:
+            out["bias"] = candidate_bias
+            out["dc_guesses"] = [
+                [float(value) for value in guess]
+                for guess in self.topo.dc_guess_vectors(candidate_bias)
+            ]
         if seed is not None:
             out["seed"] = (self.seed_vector(seed) if isinstance(seed, Mapping)
                            else [float(v) for v in seed])
@@ -155,6 +321,32 @@ class AfeOtftCampaign:
                        analyses: Sequence[str] = ("dc", "ac", "noise")) -> list[dict]:
         """Run the compiled batch; results are candidate-index ordered."""
         return self.core.evaluate_batch(list(candidates), workers, list(analyses))
+
+    def reduce_result(self, row, sizes, bias, nf=None):
+        """Return exact topology-level area and source power without device rebuilds."""
+        c1, c2, c3, c4, kv, kh = 37.5, 50.0, 35.0, 35.0, 1.0, 1.0
+        area = 0.0
+        for name in self.device_names:
+            width, length = sizes[name]
+            fingers = float(dev_nf(nf, name))
+            fw = float(width) / fingers
+            osc_o1 = c2 - c3 + c4
+            edge_x_expr = (
+                (10.0 + float(length)) * fingers + 10.0
+                + 2 * osc_o1 + kv * c2
+            )
+            edge_ox = 2 * c3 + 2 * c1 * np.ceil(
+                np.ceil(edge_x_expr / c1) / 2
+            )
+            edge_oy = 2 * c3 + 2 * c1 * np.ceil(
+                np.ceil((fw + 2 * osc_o1 + (kh - 1) * c2) / c1) / 2
+            )
+            area += (edge_ox + 2 * c1) * (edge_oy + 2 * c1)
+        return {
+            "area": float(area),
+            "source_power": _campaign_source_power(
+                self.topo, self.plan, bias, row),
+        }
 
 
 def _silicon_pdk_of(model_types: Mapping[str, str]) -> str:
@@ -217,6 +409,7 @@ class SiliconCampaign:
         self.pdk = _silicon_pdk_of(self.model_types)
         self.plan = CompiledTopology(topo, bias)
         self.solved = tuple(self.plan.solved)
+        self.bias_names, bias_defaults, bias_slots = _bias_schema(topo, self.bias)
         self.freqs = [float(f) for f in np.asarray(freqs, float)]
         self.band = (float(band[0]), float(band[1]))
         self.default_guess = float(topo.default_guess_value(bias))
@@ -229,6 +422,16 @@ class SiliconCampaign:
                               device_kwargs=self.device_kwargs)
         self._mult = {name: int(getattr(built[name], "mult", 1))
                       for name in self.device_names}
+        self._bulk_metadata = [
+            {
+                "vb": float(built[dp.name].vb),
+                "polarity": str(built[dp.name].POLARITY).lower(),
+                "source": dp.s_node,
+                "explicit": (getattr(built[dp.name], "binding", {}) or {}).get(
+                    "bulk_rail"),
+            }
+            for dp in self.plan.devices
+        ]
         # The corner a ``corner=None`` scalar build resolves to (device-class
         # default: freepdk45 ``nom``, sky130/tsmc28 ``tt``) — what a nominal
         # size-sweep candidate must stamp so the campaign matches the scalar path.
@@ -245,7 +448,9 @@ class SiliconCampaign:
         for dp in self.plan.devices:
             dev = built[dp.name]
             dc_devices.append((
-                [_dc_term(dp.d), _dc_term(dp.g), _dc_term(dp.s),
+                [_candidate_dc_term(topo, bias_slots, dp.d_node, dp.d),
+                 _candidate_dc_term(topo, bias_slots, dp.g_node, dp.g),
+                 _candidate_dc_term(topo, bias_slots, dp.s_node, dp.s),
                  (2, 0, float(dev.vb))],
                 [-1 if dp.di is None else int(dp.di),
                  -1 if dp.gi is None else int(dp.gi),
@@ -269,8 +474,14 @@ class SiliconCampaign:
             "pdk": self.pdk,
             "root": silicon_pdk_root(self.pdk),
             "circuit": circuitopt_core.OtftTransientProblem(
-                passive_problem_spec(self.plan)),
+                passive_problem_spec(
+                    self.plan,
+                    term_record=lambda node, token: _candidate_dc_term(
+                        topo, bias_slots, node, token),
+                )),
             "n_aug": int(self.plan.n_aug),
+            "bias_names": list(self.bias_names),
+            "bias_defaults": bias_defaults,
             "dc_devices": dc_devices,
             "devices": devices,
             "ac_caps": [(_ac_term(a), _ac_term(b), float(v))
@@ -312,7 +523,8 @@ class SiliconCampaign:
 
     def candidate(self, sizes: Mapping[str, tuple[float, float]], corner: str,
                   mismatch: Mapping[str, float] | None = None, nf=None,
-                  seed=None, trust_seed_as_op: bool = False) -> dict:
+                  seed=None, trust_seed_as_op: bool = False,
+                  bias: Mapping[str, float] | None = None) -> dict:
         """One marshalled candidate. ``mismatch`` maps device -> delvto volts."""
         nf = self.nf if nf is None else nf
         mismatch = mismatch or {}
@@ -325,6 +537,13 @@ class SiliconCampaign:
             ])
         out = {"devices": devices, "corner": str(corner).lower(),
                "trust_seed_as_op": bool(trust_seed_as_op)}
+        candidate_bias = _candidate_bias(self.bias, bias)
+        if candidate_bias is not None:
+            out["bias"] = candidate_bias
+            out["dc_guesses"] = [
+                [float(value) for value in guess]
+                for guess in self.topo.dc_guess_vectors(candidate_bias)
+            ]
         if seed is not None:
             out["seed"] = (self.seed_vector(seed) if isinstance(seed, Mapping)
                            else [float(v) for v in seed])
@@ -334,3 +553,15 @@ class SiliconCampaign:
                        analyses: Sequence[str] = ("dc", "ac", "noise")) -> list[dict]:
         """Run the compiled batch; results are candidate-index ordered."""
         return self.core.evaluate_batch(list(candidates), workers, list(analyses))
+
+    def reduce_result(self, row, sizes, bias, nf=None):
+        """Return exact topology-level area and source power without device rebuilds."""
+        area = sum(
+            float(sizes[name][0]) * float(sizes[name][1]) * self._mult[name]
+            for name in self.device_names
+        )
+        return {
+            "area": float(area),
+            "source_power": _campaign_source_power(
+                self.topo, self.plan, bias, row, self._bulk_metadata),
+        }

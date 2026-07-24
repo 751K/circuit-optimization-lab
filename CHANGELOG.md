@@ -21,6 +21,49 @@ release checklist.
 
 ### Added / 新增
 
+- **Rust-compiled analog exploration / Rust 编译式模拟电路探索**
+
+  **English:** Wired eligible fixed-topology `explore()` runs into
+  `CompiledCampaign`. Candidate geometry, NF, process corner, and arbitrary
+  named bias values are marshalled in cancellable chunks and evaluated under
+  one GIL-free Rayon pool. Lazy noise remains a two-stage operation: an AC-only
+  batch applies non-noise constraints first, then only survivors enter the
+  noise batch. Campaign results now expose low-frequency gain, UGF, integrated
+  input/output noise, full four-terminal DC currents, and the augmented DC
+  state, allowing exact topology-level source-power and area reductions without
+  rebuilding Python PDK devices. CLI, HTTP jobs, and MCP exploration accept
+  `workers`. Monostable BSIM4 circuits run cold; multistable OTFT AFE circuits
+  require an explicit `seed_fn`, otherwise they retain the scalar reference
+  path to prevent silent DC-root changes.
+
+  **中文：** 将满足条件的固定拓扑 `explore()` 接入 `CompiledCampaign`。候选
+  geometry、NF、工艺角和任意命名 bias 以可取消分块送入同一个释放 GIL 的 Rayon
+  线程池。lazy noise 保持两阶段语义：先用 AC-only batch 应用非噪声约束，再只让
+  幸存候选进入 noise batch。Campaign 结果新增低频增益、UGF、输入/输出积分噪声、
+  完整四端 DC 电流和增广 DC 状态，因此可在不重建 Python PDK 器件的情况下精确
+  归约拓扑源功耗与面积。CLI、HTTP job 和 MCP exploration 均支持 `workers`。
+  单稳态 BSIM4 电路可冷启动；多稳态 OTFT AFE 必须显式提供 `seed_fn`，否则继续
+  使用标量参考路径，避免静默改变 DC 根。
+
+- **Per-candidate bias in compiled campaigns / compiled campaign 候选级 bias**
+
+  **English:** Extended the Rust `CompiledCampaign` template and candidate
+  schemas with stable named bias slots. OTFT and FreePDK45/SKY130/TSMC28 BSIM4
+  batches can now evaluate different arbitrary bias values in one detached
+  batch. Candidate mappings may partially override template defaults; Python
+  regenerates topology DC guesses for the merged bias, while Rust uses the same
+  normalized vector for passive MNA terms, MOS DC terminals, and operating-point
+  linearization. Unknown names, non-finite values, wrong vector lengths, and
+  malformed candidate guesses fail explicitly. Existing candidates that omit
+  `bias` retain the template defaults.
+
+  **中文：** 扩展 Rust `CompiledCampaign` 模板与候选 schema，加入稳定的命名
+  bias 槽。OTFT 以及 FreePDK45/SKY130/TSMC28 BSIM4 批处理现在可在同一次
+  detached batch 中评估各自不同的任意 bias 值。候选字典可只覆盖模板默认值的一部分；
+  Python 会按合并后的 bias 重新生成拓扑 DC guesses，Rust 则让无源 MNA 端子、
+  MOS DC 端子和工作点线性化统一使用同一归一化向量。未知名称、非有限值、错误向量
+  长度和非法候选 guesses 都会显式失败；未提供 `bias` 的旧候选继续使用模板默认值。
+
 - **Model Context Protocol server / Model Context Protocol 服务**
 
   **English:** Added the optional `mcp>=1.27,<2` adapter with

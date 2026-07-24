@@ -116,13 +116,15 @@ def _run_explore(params: dict, emit: Callable[[dict], None],
     n = int(params.get("n", 32))
     seed = int(params.get("seed", 0))
     corner = params.get("corner")
+    workers = int(params.get("workers", 1))
 
     def progress(done: int, total: int) -> None:
         emit({"type": "progress", "done": done, "total": total,
               "frac": (done / total) if total else 1.0})
 
     results = explore_from_dict(circuit, n=n, seed=seed, corner=corner,
-                               progress=progress, should_stop=should_stop)
+                               progress=progress, should_stop=should_stop,
+                               workers=workers)
     return to_jsonable(results)
 
 

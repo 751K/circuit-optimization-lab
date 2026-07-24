@@ -69,6 +69,42 @@ pub fn bw_from_gain(freqs: &[f64], gains: &[f64]) -> f64 {
     bw
 }
 
+/// First descending unity-gain crossing above the response peak.
+///
+/// Port of `circuitopt.frequency_metrics.unity_gain_freq`; sorting is retained
+/// so low-level callers are not required to submit an ordered frequency grid.
+pub fn unity_gain_freq(freqs: &[f64], gains: &[f64]) -> f64 {
+    if freqs.len() != gains.len() || freqs.is_empty() {
+        return f64::NAN;
+    }
+    let mut pairs: Vec<(f64, f64)> = freqs.iter().copied().zip(gains.iter().copied()).collect();
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut peak = 0usize;
+    for index in 1..pairs.len() {
+        if pairs[index].1 > pairs[peak].1 {
+            peak = index;
+        }
+    }
+    if pairs[peak].1 < 1.0 {
+        return f64::NAN;
+    }
+    for index in peak + 1..pairs.len() {
+        if pairs[index].1 <= 1.0 {
+            let (f0, g0_raw) = pairs[index - 1];
+            let (f1, g1_raw) = pairs[index];
+            let g0 = g0_raw.max(1e-300).log10();
+            let g1 = g1_raw.max(1e-300).log10();
+            if f0 <= 0.0 || f1 <= 0.0 || g1 == g0 {
+                return f1;
+            }
+            let (x0, x1) = (f0.log10(), f1.log10());
+            let crossing = x0 - g0 * (x1 - x0) / (g1 - g0);
+            return 10f64.powf(crossing.clamp(x0.min(x1), x0.max(x1)));
+        }
+    }
+    f64::NAN
+}
+
 /// Band-limited RMS of a PSD via trapezoid integration over `[f_lo, f_hi]`.
 ///
 /// Port of `circuitopt.noise_solver.band_rms`: keep the grid points with
@@ -264,6 +300,17 @@ mod tests {
         let freqs = [1.0, 10.0, 100.0, 1000.0];
         let gains = [1.0, 1.0, 1.0, 1.0];
         assert_eq!(bw_from_gain(&freqs, &gains), 1000.0);
+    }
+
+    #[test]
+    fn unity_gain_crossing_matches_log_interpolation_and_handles_no_crossing() {
+        let freqs = [1.0, 10.0, 100.0];
+        let gains = [10.0, 2.0, 0.5];
+        let crossing = unity_gain_freq(&freqs, &gains);
+        let expected = 10f64.powf(1.0 - 2.0f64.log10() / (0.5f64.log10() - 2.0f64.log10()));
+        assert!((crossing - expected).abs() <= expected * 1e-15);
+        assert!(unity_gain_freq(&freqs, &[0.9, 0.8, 0.7]).is_nan());
+        assert!(unity_gain_freq(&freqs, &[2.0, 1.5, 1.1]).is_nan());
     }
 
     #[test]

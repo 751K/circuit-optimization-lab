@@ -101,7 +101,7 @@ block.
 
 ```bash
 circuit-opt explore examples/afe_explore.json -n 500 --seed 1
-circuit-opt explore examples/sky130_5t_ota.json -n 200 --corner ss
+circuit-opt explore examples/sky130_5t_ota.json -n 200 --corner ss --workers 8
 circuit-opt explore examples/tsmc28hpcp_5t_ota.json -n 200 --corner ff
 ```
 
@@ -113,6 +113,7 @@ Flags:
 | `--seed` | `0` | RNG seed |
 | `--method` | `lhs` | `lhs` or `random` |
 | `--corner` | no override | Process corner used for solving |
+| `--workers` | `1` | Rayon workers for eligible Rust `CompiledCampaign` batches |
 | `-o`, `--out`, `--output` | none | Output prefix; writes `<prefix>.csv` and `<prefix>.jsonl` |
 | `--quiet` | off | Don't print per-candidate progress |
 | `--engine {rust}` | `rust` | Only `rust` as of v2.0.0 (omitting the flag defaults to `rust`) |

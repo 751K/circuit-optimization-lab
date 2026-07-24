@@ -670,14 +670,21 @@ solvers — the "optimization" the project is named for. Given a circuit plus an
 and one or more objectives), it samples candidates, evaluates each through the
 solvers, filters by constraints, and Pareto-selects the trade-off front.
 
-- `explore(topo, base_sizes, base_bias, nf, cfg, n=, seed=, method=, corner=)` — run a sweep.
+- `explore(topo, base_sizes, base_bias, nf, cfg, n=, seed=, method=, corner=,
+  workers=)` — run a sweep.
   `corner` applies a process shift (e.g. `CORNERS["slow"]`) to every evaluation, enabling
-  corner-aware search without modifying the config.
+  corner-aware search without modifying the config. Eligible fixed-topology
+  BSIM4 circuits use `CompiledCampaign`: geometry/NF/bias candidates execute in
+  cancellable chunks under one GIL-free Rayon pool. A multistable OTFT AFE uses
+  the compiled path only when `seed_fn` supplies a consistent DC seed; cold AFE
+  exploration stays on the scalar reference to avoid changing physical roots.
 - `evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None)` — single-candidate
   solver evaluation, now with optional corner/mismatch argument. During `explore`,
   evaluation is AC-first: gain/BW/power/area are computed before noise, failed
-  candidates are rejected immediately, and `noise_analysis` runs only when
-  `irn_uV` is required by a surviving candidate's constraints or objectives.
+  candidates are rejected immediately, and noise runs only when `irn_uV` is
+  required by a surviving candidate's constraints or objectives. The compiled
+  path preserves this with an AC-only batch followed by a noise batch containing
+  only survivors.
 - `load_explore_json(path)` — read an `explore` block from a full circuit JSON.
   The topology, device sizes, bias, and optional NF data are all loaded through
   the same JSON path; legacy `builtin_topology` configs are no longer accepted
@@ -695,13 +702,15 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
   both the `python -m circuitopt explore` subcommand and the standalone `python -m circuitopt.explore` entry
   point call the same two functions, so the two surfaces cannot drift apart (see
   [`cli_reference.md`](cli_reference.md)).
-- `explore_from_dict(data, n=, seed=, method=, corner=, progress=None, should_stop=None)` — the
+- `explore_from_dict(data, n=, seed=, method=, corner=, workers=,
+  progress=None, should_stop=None)` — the
   single shared entry point for the `explore` subcommand and the service layer's
   `POST /api/v1/jobs/explore`: parses the `explore` block, binds any silicon `models`, and calls
   `explore()`. `progress(done, total)` / `should_stop()` are optional hooks threaded straight
   through to `explore()` for a caller that needs live progress or cooperative cancellation (e.g.
   the service's background-job manager, see `service/jobs.py`); both default to `None`, in which
-  case behavior is byte-identical to the pre-hook code path. On early stop, `results["stopped_early"]`
+  case behavior is deterministic. Scalar runs check cancellation before every
+  candidate; compiled runs check between bounded native chunks. On early stop, `results["stopped_early"]`
   and `results["summary"]["stopped_early"]` are `True` and `summary["evaluated"]` records how many
   candidates actually ran (`summary["n"]` stays the originally requested count).
 

@@ -127,7 +127,11 @@ progress + cooperative cancel that never feed a reduction, and the
 `bw_from_gain` / `band_rms` metric reductions). Two device families are wired:
 the AFE OTFT evaluator (`co_core::otft_campaign`) and the silicon BSIM4
 evaluator (`co-py/src/silicon_campaign.rs`, families freepdk45 / sky130 /
-tsmc28). Not connected to any production workflow (that is R5-D).
+tsmc28). Eligible dataset, corner, mismatch, and benchmark batches use this
+executor through `circuitopt._campaign_sweep`. Eligible fixed-topology analog
+`explore()` runs use it as well, including arbitrary candidate bias and a
+two-stage AC-prefilter/noise-survivor flow. Scalar paths remain the compatibility
+reference/fallback; multistable AFE exploration requires a consistent seed.
 
 ```python
 class circuitopt_core.CompiledCampaign:
@@ -143,8 +147,10 @@ class circuitopt_core.CompiledCampaign:
 
 Built by `circuitopt._rust_campaign.AfeOtftCampaign` from
 `CompiledTopology(AFE_TOPO, bias)` + the analysis plan. All terminal tokens are
-`(kind, ref, value)` triples: **kind 0** = solved-node index (`ref`), **kind 2**
-= fixed rail/AC value (`value`).
+`(kind, ref, value)` triples: **kind 0** = solved-node index (`ref`), **kind 1**
+= candidate bias slot (`ref`), and **kind 2** = fixed literal/AC value (`value`).
+Only DC symbolic rails use kind 1; AC rail terms retain small-signal ground or
+drive semantics.
 
 ```
 {
@@ -152,6 +158,8 @@ Built by `circuitopt._rust_campaign.AfeOtftCampaign` from
   "template": {
     "n_aug": int, "n_nodes": int,
     "consts": [vt, ci, roff, reg, c1, c2, c3, c4, kv, kh, temperature],  # 11 AT4000TG defaults
+    "bias_names": ["VDD", "VCM", ...],                  # stable slot order
+    "bias_defaults": [40.0, 30.65, ...],                # finite defaults
     "devices": [ (dc_d, dc_g, dc_s, di, si, ac_d, ac_g, ac_s), ... ],    # 8-tuples per device
     #   dc_* / ac_* are (kind, ref, value) tuples; di/si are int KCL rows (-1 = none)
     "ac_caps": [ (a_term, b_term, value), ... ],
@@ -172,6 +180,8 @@ Built by `circuitopt._rust_campaign.AfeOtftCampaign` from
 ```
 {
   "devices": [ [w, l, nf, pvt0, mvt0, pbeta0, mbeta0], ... ],  # one row per template device
+  "bias": {"VCM": 30.4, ...} | [full slot vector] | absent,     # partial named override or full vector
+  "dc_guesses": [[floats length n_aug], ...] | absent,          # guesses for this candidate's bias
   "seed": [floats length n_aug] | absent,                      # optional DC operating-point seed
   "trust_seed_as_op": bool,                                    # default False
 }
@@ -180,7 +190,12 @@ Built by `circuitopt._rust_campaign.AfeOtftCampaign` from
 `trust_seed_as_op=True` uses `seed` verbatim as the DC operating point (no
 re-solve) — the mode that isolates bit-exact AC/noise parity from DC-root
 behaviour. `False` refines the seed (or the template guesses, cold) with the
-Rust circuit Newton. Random mismatch (`mvt0`/`mbeta0`) is drawn **up front** on
+Rust circuit Newton. A missing `bias` uses `bias_defaults`; a named mapping may
+override any subset and is normalized to a full vector before the GIL is
+released. Unknown names, wrong vector lengths, non-finite values, and malformed
+candidate DC guesses fail explicitly. The Python wrappers generate
+`dc_guesses` from `topo.dc_guess_vectors(merged_bias)` whenever a candidate
+overrides bias. Random mismatch (`mvt0`/`mbeta0`) is drawn **up front** on
 the Python side in candidate/device order (same rule as
 `corners.mismatch_corner`) and baked into the candidate, so the detached batch
 carries no RNG. `analyses` gates the noise stage (drop `"noise"` for the
@@ -197,6 +212,8 @@ circuit JSON; marshalled once):
   "root": <CompiledPdk root, see the PDK table above>,
   "circuit": OtftTransientProblem(passive_problem_spec(plan)),  # passive MNA circuit
   "n_aug": int,
+  "bias_names": ["VDD", "VCM", "VB", ...],
+  "bias_defaults": [floats in matching slot order],
   "dc_devices": [ ([d, g, s, (2, 0, vb)], [di, gi, si, -1]), ... ],  # solve_dc records
   "devices": [ (polarity, vb, temperature_k, temp_c, ac_d, ac_g, ac_s,
                 reference_width_um | None), ... ],   # extract_w card-bin width
@@ -212,10 +229,13 @@ circuit JSON; marshalled once):
 ```
 
 Candidate: `{"devices": [[w_um, l_um, nf, mult, delvto], ...], "corner": str,
+"bias"?: {name: value} | [full slot vector], "dc_guesses"?: [[...], ...],
 "seed"?: [...], "trust_seed_as_op"?: bool}` — the process corner is
 per-candidate (the `apply_silicon_corner` semantics: one name stamped on every
 device), `delvto` is the per-device mismatch volts (`0.0` mirrors the Python
-`mismatch_v=0.0` default).
+`mismatch_v=0.0` default). Bias normalization and validation are identical to
+the OTFT family; the full vector feeds both passive MNA terms and MOS terminal
+resolution during DC and operating-point linearization.
 
 Per-candidate pipeline (each step 1:1 with the frozen path):
 `CompiledPdk::numeric_card` → `Bsim4ModelCard`-equivalent normalization
@@ -272,21 +292,24 @@ BSIM4-backend/solver callbacks during the batch.
 ### Result dicts (candidate-index ordered)
 
 ```
-{"ok": True, "gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV",
+{"ok": True, "gain_dB", "gain_peak_dB", "bw_Hz", "ugf_Hz",
+ "irn_uV", "orn_V", "latch_dV",
  "dc_op": [floats length n_aug], "dc_iterations": int, "dc_from_seed": bool,
- "gain_dB": float, "ich": [floats, one per template device]}
+ "terminal_currents": [[Id, Ig, Is, Ib], ...],
+ "ich": [floats, one per template device]}
 # or, for a candidate that could not be evaluated:
 {"ok": False, "error": str}          # a bad candidate never sinks the batch
 ```
 
-`gain_dB` is the DC gain (gain at the lowest analysis frequency, ==
-`ac_solver.Av_dc_dB` = `20*log10(max(Av_dc, 1e-9))`) and `ich` is each device's DC
+`gain_dB` is the low-frequency gain (gain at the lowest analysis frequency, ==
+`ac_solver.Av_dc_dB` = `20*log10(max(Av_dc, 1e-9))`), `ugf_Hz` is the first
+descending unity crossing, and `orn_V` is output RMS noise over the template
+band. `ich` is each silicon device's DC
 channel current (`|drain terminal current|`, == the Python device get_ss_params
-`Ich = abs(terminal_currents[0])`). Both are already computed in the pipeline (the
-AC solve and the operating-point `eval_vp`); they are the two silicon dataset labels
-the campaign did not previously surface — `gain_dB` directly and `power_uW` via the
-frozen `explore._supply_power_uW` reduction over `ich`. The **AFE** family fills
-`gain_dB` with `NaN` and `ich` with `[]` (the dataset arm never routes AFE).
+`Ich = abs(terminal_currents[0])`). `terminal_currents` carries the complete
+four-terminal operating-point current for exact topology source-power reduction;
+power is never reconstructed from `ich`. The OTFT family reports equivalent
+drain/source terminal currents and an empty diagnostic-only `ich` vector.
 
 ### Differential gate (parity vs the frozen Python scalar path)
 
