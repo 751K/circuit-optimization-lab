@@ -517,6 +517,16 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   worker 串行求值，不同 handle 仍可并行，避免并发进入同一可变 compact-model
   状态；盖章顺序仍保持确定。关闭
   profile 时不累计这些计数，也不返回该字段；原 `eval_batch` ABI 作为兼容包装保留。
+- 接受状态的器件电流和电荷历史直接复用最后一轮收敛 Newton 的 `Evaluation`
+  数组。收敛分支不会写回小于容差的 correction，因此这些 I/G/Q/C 已与接受状态
+  对应；失败步仍会在最后一次状态更新后刷新 batch。由此，成功 transient 只需要
+  一次初始历史 batch 和每轮 Newton 各一次 batch，不再逐步重放接受状态求值。
+- Gear2 会在每次原生 BSIM Newton 求解前使用受保护的变步长状态预测：
+  `x[n] + h[n+1]/h[n] * (x[n] - x[n-1])`。它要求前两个状态连续收敛，拒绝超过
+  4 倍的步长增长，并在检测到输入斜率突变时禁用，因此时钟和 DAC 边沿仍以上一
+  接受状态为初值，同时加速平滑建立段。transient profile 的
+  `gear2_predictor_steps` 记录实际启用步数；设置
+  `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` 可关闭并进行回归对比。
 - 对 PSS 常用的非 robust 模式（`fallback_least_squares=False` 且
   `fallback_full_jacobian=False`），compiled grid solver 会留在 Rust 内跑完整周期。
   失败 substep 会记为失败 interval，并从最后接受的状态继续，这与非抛错的

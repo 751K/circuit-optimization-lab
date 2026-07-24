@@ -83,6 +83,7 @@ pub struct Profile {
     pub newton_iterations: usize,
     pub bsim_evaluations: usize,
     pub bsim_batches: usize,
+    pub gear2_predictor_steps: usize,
     pub failed_steps: Vec<usize>,
 }
 
@@ -564,6 +565,76 @@ pub fn solve_dc<E: Evaluator>(
     }
 }
 
+const GEAR2_PREDICTOR_MAX_STEP_RATIO: f64 = 4.0;
+const GEAR2_PREDICTOR_INPUT_CURVATURE: f64 = 0.25;
+
+fn gear2_predictor_enabled() -> bool {
+    std::env::var("CIRCUITOPT_BSIM_GEAR2_PREDICTOR")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off"
+            )
+        })
+        .unwrap_or(true)
+}
+
+/// Seed one variable-step Gear2 solve by linearly extrapolating accepted state.
+///
+/// A visible input-slope discontinuity disables prediction for the edge and the
+/// following sample. This avoids carrying a pre-edge state slope across clock
+/// or DAC-code transitions while retaining the predictor on smooth waveforms.
+#[allow(clippy::too_many_arguments)]
+fn predict_gear2_state(
+    state: &mut [f64],
+    previous: &[f64],
+    previous2: &[f64],
+    input_now: &[f64],
+    input_previous: &[f64],
+    input_previous2: &[f64],
+    h: f64,
+    h_previous: f64,
+) -> bool {
+    if state.len() != previous.len()
+        || state.len() != previous2.len()
+        || input_now.len() != input_previous.len()
+        || input_now.len() != input_previous2.len()
+        || !h.is_finite()
+        || !h_previous.is_finite()
+        || h <= 0.0
+        || h_previous <= 0.0
+    {
+        return false;
+    }
+    let ratio = h / h_previous;
+    if !ratio.is_finite() || ratio > GEAR2_PREDICTOR_MAX_STEP_RATIO {
+        return false;
+    }
+    for ((&now, &previous_input), &previous2_input) in
+        input_now.iter().zip(input_previous).zip(input_previous2)
+    {
+        let actual_delta = now - previous_input;
+        let predicted_delta = ratio * (previous_input - previous2_input);
+        let curvature = (actual_delta - predicted_delta).abs();
+        let activity = actual_delta.abs() + predicted_delta.abs();
+        if !curvature.is_finite()
+            || curvature > GEAR2_PREDICTOR_INPUT_CURVATURE * activity.max(1e-12)
+        {
+            return false;
+        }
+    }
+    for ((output, &previous_value), &previous2_value) in
+        state.iter_mut().zip(previous).zip(previous2)
+    {
+        *output = previous_value + ratio * (previous_value - previous2_value);
+        if !output.is_finite() {
+            state.copy_from_slice(previous);
+            return false;
+        }
+    }
+    true
+}
+
 pub fn solve_fixed_grid<E: Evaluator>(
     circuit: &CircuitProblem,
     devices: &[Device],
@@ -644,6 +715,8 @@ pub fn solve_fixed_grid<E: Evaluator>(
     let mut system = DenseSystem::new(circuit.size);
     let mut failures = 0usize;
     let mut first_failure = None;
+    let mut converged_streak = 1usize;
+    let predictor_enabled = options.gear2 && gear2_predictor_enabled();
 
     for sample in 1..times.len() {
         let h = times[sample] - times[sample - 1];
@@ -698,6 +771,23 @@ pub fn solve_fixed_grid<E: Evaluator>(
             };
         };
         state.clone_from(&states[sample - 1]);
+        if predictor_enabled
+            && sample >= 2
+            && converged_streak >= 2
+            && predict_gear2_state(
+                &mut state,
+                &states[sample - 1],
+                &states[sample - 2],
+                &input_now,
+                &input_previous,
+                &input_previous2,
+                h,
+                times[sample - 1] - times[sample - 2],
+            )
+            && options.profile
+        {
+            profile.gear2_predictor_steps += 1;
+        }
         let mut converged = false;
         for _iteration in 0..options.max_iterations {
             if options.profile {
@@ -791,22 +881,31 @@ pub fn solve_fixed_grid<E: Evaluator>(
         if !converged {
             failures += 1;
             first_failure.get_or_insert(sample);
+            converged_streak = 0;
             if options.profile {
                 profile.failed_steps.push(sample);
             }
+        } else {
+            converged_streak = converged_streak.saturating_add(1);
         }
         states[sample].copy_from_slice(&state);
-        if !evaluate_devices(
-            evaluator,
-            devices,
-            &evaluator_indices,
-            &state,
-            &input_now,
-            &mut terminal_batch,
-            &mut evaluation_batch,
-            &mut profile,
-            options.profile,
-        ) {
+        // A converged Newton round does not apply its already-sub-tolerance
+        // correction, so evaluation_batch is exactly the accepted-state I/G/Q/C.
+        // Failed rounds may have updated state after their last evaluation and
+        // must refresh before recording history.
+        if !converged
+            && !evaluate_devices(
+                evaluator,
+                devices,
+                &evaluator_indices,
+                &state,
+                &input_now,
+                &mut terminal_batch,
+                &mut evaluation_batch,
+                &mut profile,
+                options.profile,
+            )
+        {
             if options.profile && profile.failed_steps.last().copied() != Some(sample) {
                 profile.failed_steps.push(sample);
             }
@@ -961,8 +1060,8 @@ mod tests {
         assert!(result.completed);
         assert_eq!(result.failures, 0);
         assert_eq!(result.profile.newton_iterations, 2);
-        assert_eq!(result.profile.bsim_evaluations, 4);
-        assert_eq!(result.profile.bsim_batches, 4);
+        assert_eq!(result.profile.bsim_evaluations, 3);
+        assert_eq!(result.profile.bsim_batches, 3);
         assert!(result.profile.failed_steps.is_empty());
     }
 
@@ -971,6 +1070,8 @@ mod tests {
         let (circuit, devices) = linear_problem();
         let waveforms = Waveforms::new(&[], 0, 2).unwrap();
         let mut evaluator = BatchOnlyEvaluator { calls: 0 };
+        let mut solve_options = options(4, true);
+        solve_options.record_device_history = true;
         let result = solve_fixed_grid(
             &circuit,
             &devices,
@@ -978,13 +1079,17 @@ mod tests {
             &[1.0],
             &[0.0, 1.0],
             waveforms,
-            options(4, true),
+            solve_options,
         );
 
         assert!(result.completed);
-        assert_eq!(evaluator.calls, 4);
+        assert_eq!(evaluator.calls, 3);
         assert_eq!(result.profile.bsim_batches, evaluator.calls);
         assert_eq!(result.profile.bsim_evaluations, evaluator.calls);
+        assert_eq!(
+            result.device_currents,
+            vec![[1.0, 0.0, -1.0, 0.0], [0.0; 4]]
+        );
     }
 
     #[test]
@@ -1019,5 +1124,52 @@ mod tests {
         assert_eq!(disabled.profile.bsim_evaluations, 0);
         assert_eq!(disabled.profile.bsim_batches, 0);
         assert!(disabled.profile.failed_steps.is_empty());
+    }
+
+    #[test]
+    fn gear2_predictor_extrapolates_variable_step_state() {
+        let mut state = [0.0, 0.0];
+        assert!(predict_gear2_state(
+            &mut state,
+            &[2.0, -1.0],
+            &[1.0, -0.5],
+            &[0.6],
+            &[0.4],
+            &[0.3],
+            2.0,
+            1.0,
+        ));
+        assert_eq!(state, [4.0, -2.0]);
+    }
+
+    #[test]
+    fn gear2_predictor_rejects_input_edges_and_extreme_step_growth() {
+        let previous = [2.0];
+        let previous2 = [1.0];
+        let mut edge_state = previous;
+        assert!(!predict_gear2_state(
+            &mut edge_state,
+            &previous,
+            &previous2,
+            &[1.0],
+            &[0.0],
+            &[0.0],
+            1.0,
+            1.0,
+        ));
+        assert_eq!(edge_state, previous);
+
+        let mut growth_state = previous;
+        assert!(!predict_gear2_state(
+            &mut growth_state,
+            &previous,
+            &previous2,
+            &[],
+            &[],
+            &[],
+            5.0,
+            1.0,
+        ));
+        assert_eq!(growth_state, previous);
     }
 }

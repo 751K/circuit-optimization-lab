@@ -82,6 +82,7 @@ def solve_bsim4_rust(
             newton_iterations,
             bsim_evaluations,
             bsim_batches,
+            gear2_predictor_steps,
             failed_steps,
         ) = problem.solve_fixed_grid(
             np.asarray(x0, dtype=float),
@@ -124,6 +125,7 @@ def solve_bsim4_rust(
                 "newton_iters_total": int(newton_iterations),
                 "bsim_evaluations": int(bsim_evaluations),
                 "bsim_batch_calls": int(bsim_batches),
+                "gear2_predictor_steps": int(gear2_predictor_steps),
                 "failed_step_indices": [int(index) for index in failed_steps],
             } if profile else None,
         )

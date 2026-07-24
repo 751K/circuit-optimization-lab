@@ -21,6 +21,11 @@
 > 并行度与 10 的较小值。实测 12 线程会因调度开销慢于 10 线程，因此可用
 > `CIRCUITOPT_BSIM_BATCH_THREADS=1..10` 显式降低并行度；该值高于 10 时仍会限制为
 > 10。线程池在进程内首次使用时建立一次，之后修改环境变量不会重建。
+>
+> 原生 BSIM Gear2 transient 默认启用状态外推 predictor。需要进行数值回归 A/B 时，
+> 可设置 `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` 关闭；profile 中的
+> `gear2_predictor_steps` 表示实际使用预测初值的步数。该开关按每次 solve 读取，
+> 不需要重启 Python 进程。
 
 > **文档状态：带日期的性能快照。** 本页记录特定机器、Python/Numba 版本和缓存状态
 > 下的历史测量，用于定位性能数量级，不是当前版本的固定 SLA。功能和命令以维护中

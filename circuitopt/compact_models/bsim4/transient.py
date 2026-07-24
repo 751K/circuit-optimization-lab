@@ -399,6 +399,7 @@ def transient_native_bsim4(
             ),
             "bsim_evaluations": native_profile["bsim_evaluations"],
             "bsim_batch_calls": native_profile["bsim_batch_calls"],
+            "gear2_predictor_steps": native_profile["gear2_predictor_steps"],
             "bsim_evaluations_avg_per_solver_step": (
                 native_profile["bsim_evaluations"] / solver_steps
                 if solver_steps

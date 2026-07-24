@@ -590,6 +590,19 @@ Solves the time-domain response of the topology-defined system using backward Eu
   mutable compact-model state is never entered concurrently. Stamping remains deterministic.
   Profiling disabled leaves these counters and the result field absent. The
   original `eval_batch` ABI remains as a compatibility wrapper.
+- Accepted-state device-current and charge history reuses the final converged
+  Newton `Evaluation` array. The convergence branch does not apply its
+  sub-tolerance correction, so those I/G/Q/C values already match the accepted
+  state. A failed step still refreshes the batch after its last state update.
+  Consequently, a successful transient uses one initial-history batch plus one
+  batch per Newton iteration, with no per-step accepted-state replay.
+- Gear2 uses a guarded variable-step state predictor before each native BSIM
+  Newton solve: `x[n] + h[n+1]/h[n] * (x[n] - x[n-1])`. It requires two
+  consecutive converged states, rejects step growth above 4x, and suppresses
+  prediction across detected input-slope discontinuities. This keeps clock and
+  DAC edges on the previous accepted-state seed while accelerating smooth
+  settling. `gear2_predictor_steps` records actual use in the transient profile;
+  `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` disables it for regression comparison.
 - For PSS-style non-robust runs (`fallback_least_squares=False` and
   `fallback_full_jacobian=False`), the compiled grid solver stays in Rust across
   the full period. Failed substeps are counted as failed intervals and the

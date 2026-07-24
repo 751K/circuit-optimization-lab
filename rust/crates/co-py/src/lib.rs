@@ -1674,6 +1674,7 @@ impl Bsim4TransientProblem {
         usize,
         usize,
         usize,
+        usize,
         Vec<usize>,
     )> {
         let gear2 = match integration_method {
@@ -1764,6 +1765,7 @@ impl Bsim4TransientProblem {
             result.profile.newton_iterations,
             result.profile.bsim_evaluations,
             result.profile.bsim_batches,
+            result.profile.gear2_predictor_steps,
             result.profile.failed_steps,
         ))
     }

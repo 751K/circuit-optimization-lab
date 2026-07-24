@@ -255,11 +255,12 @@ def test_native_5t_ota_rust_grid_transient(monkeypatch):
     assert profile["nsubsteps"] == 0
     assert profile["newton_iters_total"] > 0
     assert profile["bsim_batch_calls"] == (
-        profile["newton_iters_total"] + len(time)
+        profile["newton_iters_total"] + 1
     )
     assert profile["bsim_evaluations"] == (
         profile["bsim_batch_calls"]
     ) * len(spec.sizes)
+    assert profile["gear2_predictor_steps"] == 0
     assert profile["failed_steps"] == 0
     assert profile["failed_step_indices"] == []
     assert profile["first_failed_step"] is None

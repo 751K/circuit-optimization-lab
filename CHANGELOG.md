@@ -70,6 +70,50 @@ release checklist.
 
 ### Changed / 变更
 
+- **Converged-state BSIM result reuse / 收敛状态 BSIM 结果复用**
+
+  **English:** Native BSIM transient now records accepted-state device-current
+  and charge history directly from the final converged Newton batch. Because a
+  sub-tolerance correction is not applied, that batch already corresponds
+  exactly to the accepted state; only failed rounds refresh I/G/Q/C after their
+  last state update. On the reference TSMC28 MDAC `residue_plus_fs16` case this
+  removed 500 batches and 19,000 MOS evaluations (`5,360 -> 4,860` batches,
+  `203,680 -> 184,680` evaluations), reducing warm solver median from about
+  0.2558 s to 0.2333 s while preserving 4,859 Newton iterations, 497 predictor
+  steps, and zero failures. Final differential output changed by only 2.3 pV.
+
+  **中文：** 原生 BSIM transient 现在直接使用最后一轮收敛 Newton batch 记录
+  接受状态的器件电流和电荷历史。小于容差的 correction 不会写回状态，因此该 batch
+  已与接受状态精确对应；只有失败轮次在最后一次状态更新后重新计算 I/G/Q/C。在参考
+  TSMC28 MDAC `residue_plus_fs16` case 上，这消除了 500 次 batch 和 19,000 次
+  MOS 求值（batch `5,360 -> 4,860`，求值 `203,680 -> 184,680`），热 solver
+  中位时间由约 0.2558 s 降至 0.2333 s，同时保持 4,859 次 Newton、497 个
+  predictor 步及零失败；最终差分输出仅变化 2.3 pV。
+
+- **Guarded Gear2 state predictor / 受保护的 Gear2 状态预测器**
+
+  **English:** Native BSIM Gear2 transient now seeds Newton with the
+  variable-step linear extrapolation
+  `x[n] + h[n+1]/h[n] * (x[n] - x[n-1])`. Prediction starts only after two
+  consecutive converged states, rejects step growth above 4x, and detects input
+  slope discontinuities so clock and DAC-code edges still start from the last
+  accepted state. Set `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` for regression A/B;
+  profiles report `gear2_predictor_steps`. On the reference TSMC28 MDAC
+  `residue_plus_fs16` case, predictor on/off reduced Newton iterations from
+  9,970 to 4,859 and warm solver time from about 0.4945 s to 0.2558 s, with
+  zero failed steps in both runs. The maximum A/B node-waveform difference was
+  75.9 uV and the differential-output difference was 63.8 uV.
+
+  **中文：** 原生 BSIM Gear2 transient 现在使用变步长线性外推
+  `x[n] + h[n+1]/h[n] * (x[n] - x[n-1])` 作为 Newton 初值。仅在连续两个状态
+  收敛后启用；步长增长超过 4 倍时禁用；输入斜率出现突变时也会禁用，因此时钟和
+  DAC 码型边沿仍从上一接受状态启动。回归 A/B 可设置
+  `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0`，profile 会报告
+  `gear2_predictor_steps`。在参考 TSMC28 MDAC `residue_plus_fs16` case 上，
+  predictor on/off 将 Newton 次数从 9,970 降至 4,859，热 solver 时间由约
+  0.4945 s 降至 0.2558 s，两边均无失败步；A/B 全节点波形最大差 75.9 uV，
+  差分输出最大差 63.8 uV。
+
 - **Batched native BSIM transient Newton / 原生 BSIM 瞬态 Newton 批量求值**
 
   **English:** Each native BSIM transient Newton iteration now resolves all MOS
@@ -83,9 +127,10 @@ release checklist.
   `CIRCUITOPT_BSIM_BATCH_THREADS=1..10` to tune it. Cached devices can repeat a
   native handle: those slots are grouped onto one worker and evaluated serially,
   while distinct handles remain parallel, avoiding concurrent mutation of one
-  BSIM instance. Residual/Jacobian stamping retains deterministic device order,
-  and initial/accepted-state history uses the same batch route. The existing
-  `eval_batch` ABI remains available as a compatibility wrapper.
+  BSIM instance. Residual/Jacobian stamping retains deterministic device order;
+  initial history and failed-state refreshes use the same batch route, while a
+  converged state reuses its final Newton result. The existing `eval_batch` ABI
+  remains available as a compatibility wrapper.
   Native transient profiles expose `bsim_batch_calls` so scalar fallback cannot
   remain hidden. On the reference TSMC28 MDAC `residue_plus_fs16` case, the
   500-step Rust solver time fell from about 1.377 s to about 0.493 s while preserving
@@ -98,8 +143,9 @@ release checklist.
   会跟随请求的机器并行度，但默认最多使用 10 个 worker，以避开实测的 12 线程调度
   反噬；可用 `CIRCUITOPT_BSIM_BATCH_THREADS=1..10` 调节。缓存设备可能重复使用同一
   native handle：这些槽会归到同一 worker 内串行求值，不同 handle 仍可并行，从而
-  避免并发修改同一 BSIM 实例。residual/Jacobian 仍按确定的器件顺序盖章，初始与
-  接受状态的历史采集也走相同批量路径；既有 `eval_batch` ABI 保留为兼容包装。原生
+  避免并发修改同一 BSIM 实例。residual/Jacobian 仍按确定的器件顺序盖章；初始历史
+  和失败状态刷新走相同批量路径，收敛状态则复用最后一轮 Newton 结果；既有
+  `eval_batch` ABI 保留为兼容包装。原生
   transient profile 新增 `bsim_batch_calls`，避免标量回退被静默隐藏。在参考 TSMC28
   MDAC `residue_plus_fs16` case 上，500 步 Rust solver 时间由约 1.377 s 降至约
   0.493 s，同时保持 9,970 次 Newton、
