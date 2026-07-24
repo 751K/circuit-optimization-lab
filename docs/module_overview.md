@@ -574,6 +574,22 @@ Solves the time-domain response of the topology-defined system using backward Eu
   dense Newton step, and steps substep-to-substep entirely inside Rust; Python
   owns marshalling, dispatch, and result assembly only (`transient_solver.py`
   carries no per-step numeric loop of its own).
+- With `profile=True`, native BSIM transient runs return
+  `result["transient_profile"]` populated by counters inside the Rust hot loop:
+  total Newton iterations, native BSIM evaluations and batch calls,
+  solver/inserted step counts, failed-step count and expanded-grid indices, and
+  measured solver wall time. Each Newton iteration resolves every MOS terminal
+  tuple and calls `co_bsim4::eval_batch_into` once. Its persistent
+  `EvalBatchWorkspace` reuses handle and status storage for the whole transient;
+  the solver likewise reuses terminal rows and its I/G/Q/C evaluation slots.
+  Rayon workers write those disjoint solver slots directly, with no temporary
+  batch-result vector or adapter copy. The dedicated pool defaults to
+  at most 10 workers and can be reduced with
+  `CIRCUITOPT_BSIM_BATCH_THREADS=1..10`. Repeated cached handles are grouped
+  onto one worker and evaluated serially; distinct handles remain parallel, so
+  mutable compact-model state is never entered concurrently. Stamping remains deterministic.
+  Profiling disabled leaves these counters and the result field absent. The
+  original `eval_batch` ABI remains as a compatibility wrapper.
 - For PSS-style non-robust runs (`fallback_least_squares=False` and
   `fallback_full_jacobian=False`), the compiled grid solver stays in Rust across
   the full period. Failed substeps are counted as failed intervals and the

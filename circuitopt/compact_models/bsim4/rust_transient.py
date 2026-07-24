@@ -1,6 +1,8 @@
 """Marshalling for the native BSIM4 fixed-grid Rust transient kernel."""
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from ..._rust_transient import (
@@ -51,6 +53,7 @@ def solve_bsim4_rust(
     newton_vtol,
     newton_step_limit,
     gmin,
+    profile=False,
 ):
     """Run BSIM4 model evaluation, MNA stamp, Newton, and grid in Rust."""
     wrappers = [devices[item.name] for item in plan.devices]
@@ -68,6 +71,7 @@ def solve_bsim4_rust(
     try:
         problem = build_bsim4_problem(
             plan, devices, handles, dynamic_sources)
+        started = time.perf_counter() if profile else 0.0
         (
             completed,
             states,
@@ -75,6 +79,10 @@ def solve_bsim4_rust(
             device_charges,
             failures,
             first_failure,
+            newton_iterations,
+            bsim_evaluations,
+            bsim_batches,
+            failed_steps,
         ) = problem.solve_fixed_grid(
             np.asarray(x0, dtype=float),
             np.asarray(tgrid, dtype=float),
@@ -84,7 +92,9 @@ def solve_bsim4_rust(
             voltage_tolerance=float(newton_vtol),
             step_limit=float(newton_step_limit),
             gmin=float(gmin),
+            profile=bool(profile),
         )
+        wall_time_s = time.perf_counter() - started if profile else 0.0
         if not completed:
             raise Bsim4NativeError(
                 f"Rust BSIM4 transient failed at step {int(first_failure)}")
@@ -109,6 +119,13 @@ def solve_bsim4_rust(
             device_charges,
             int(failures),
             int(first_failure),
+            {
+                "wall_time_s": float(wall_time_s),
+                "newton_iters_total": int(newton_iterations),
+                "bsim_evaluations": int(bsim_evaluations),
+                "bsim_batch_calls": int(bsim_batches),
+                "failed_step_indices": [int(index) for index in failed_steps],
+            } if profile else None,
         )
     finally:
         for handle in handles:

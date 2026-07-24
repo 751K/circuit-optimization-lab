@@ -205,6 +205,7 @@ def test_native_5t_ota_transient_without_ngspice(monkeypatch):
     assert "numba_grid_solver" not in result
     assert "bsim4_numba_transient" not in result
     assert result["bsim4_rust_transient"] is True
+    assert "transient_profile" not in result
     assert result["nfail"] == 0
     assert result["nodes"]["vout"][-1] > result["nodes"]["vout"][0] + 0.2
     assert np.all(np.isfinite(result["nodes"]["vout"]))
@@ -240,11 +241,29 @@ def test_native_5t_ota_rust_grid_transient(monkeypatch):
         V0=np.asarray((0.1, 0.45, 0.45)),
         integration_method="be",
         max_step=0.2e-9,
+        profile=True,
     )
 
     assert result["bsim4_rust_transient"] is True
     assert "bsim4_numba_transient" not in result
     assert result["nfail"] == 0
+    profile = result["transient_profile"]
+    assert profile["enabled"] is True
+    assert profile["backend"] == "bsim4_native"
+    assert profile["rust_grid_solver"] is True
+    assert profile["solver_steps"] == len(time) - 1
+    assert profile["nsubsteps"] == 0
+    assert profile["newton_iters_total"] > 0
+    assert profile["bsim_batch_calls"] == (
+        profile["newton_iters_total"] + len(time)
+    )
+    assert profile["bsim_evaluations"] == (
+        profile["bsim_batch_calls"]
+    ) * len(spec.sizes)
+    assert profile["failed_steps"] == 0
+    assert profile["failed_step_indices"] == []
+    assert profile["first_failed_step"] is None
+    assert profile["wall_time_s"] > 0.0
 
 
 def test_native_transient_uses_rust_terminal_history_without_scalar_replay(monkeypatch):
@@ -283,10 +302,11 @@ def test_native_transient_uses_rust_terminal_history_without_scalar_replay(monke
         -3.310677162408139e-05,
         -3.3344422110229174e-05,
         -3.335697816084398e-05,
-        -3.3357628546930804e-05,
-        -3.3357402639062885e-05,
+        -3.3357580817985198e-05,
+        -3.3357399055487818e-05,
     ))
     assert result["nfail"] == 0
+    assert result["nsubsteps"] == 0
     np.testing.assert_allclose(
         result["branch_currents"]["rail:VDD"], expected_vdd, rtol=1e-12, atol=1e-15)
     assert np.all(np.isfinite(result["branch_currents"]["gate:M1"]))

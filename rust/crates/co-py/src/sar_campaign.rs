@@ -30,7 +30,7 @@ use co_core::campaign::{
 use co_core::sar::{ClockConfig, ExpandedGrid, Role, SarConfig};
 use co_core::transient;
 
-use crate::{TermRecord, optional_index, required, term};
+use crate::{RustBsimEvaluator, TermRecord, optional_index, required, term};
 
 /// Per-device frozen card: create/setup parameters for one native handle.
 #[derive(Clone, Debug)]
@@ -78,7 +78,8 @@ impl Drop for HandleGuard {
 /// and resets its per-handle scratch, so reuse is bit-identical to a fresh
 /// handle). Created, used, and dropped on one worker thread.
 struct GuardEvaluator {
-    handles: Vec<HandleGuard>,
+    _handles: Vec<HandleGuard>,
+    evaluator: RustBsimEvaluator,
 }
 
 impl GuardEvaluator {
@@ -87,7 +88,14 @@ impl GuardEvaluator {
         for (card, &delvto) in cards.iter().zip(delvto) {
             handles.push(build_handle(card, delvto)?);
         }
-        Ok(Self { handles })
+        let raw_handles = handles.iter().map(|handle| handle.0 as usize).collect();
+        // Each guard owns one freshly created non-null handle and keeps it alive
+        // for the evaluator's complete lifetime.
+        let evaluator = unsafe { RustBsimEvaluator::new(raw_handles) };
+        Ok(Self {
+            _handles: handles,
+            evaluator,
+        })
     }
 }
 
@@ -97,19 +105,25 @@ impl bsim_transient::Evaluator for GuardEvaluator {
         index: usize,
         terminals: [f64; 4],
     ) -> Option<bsim_transient::Evaluation> {
-        let handle = self.handles.get(index)?.0;
-        let mut evaluation = bsim_transient::Evaluation::default();
-        let status = unsafe {
-            co_bsim4::eval_vp(
-                handle,
-                terminals.as_ptr(),
-                evaluation.currents.as_mut_ptr(),
-                evaluation.conductance.as_mut_ptr(),
-                evaluation.charges.as_mut_ptr(),
-                evaluation.capacitance.as_mut_ptr(),
-            )
-        };
-        (status == 0).then_some(evaluation)
+        <RustBsimEvaluator as bsim_transient::Evaluator>::evaluate(
+            &mut self.evaluator,
+            index,
+            terminals,
+        )
+    }
+
+    fn evaluate_batch(
+        &mut self,
+        indices: &[usize],
+        terminals: &[[f64; 4]],
+        evaluations: &mut [bsim_transient::Evaluation],
+    ) -> bsim_transient::BatchStatus {
+        <RustBsimEvaluator as bsim_transient::Evaluator>::evaluate_batch(
+            &mut self.evaluator,
+            indices,
+            terminals,
+            evaluations,
+        )
     }
 }
 
@@ -394,6 +408,7 @@ fn build_sar_template(spec: &Bound<'_, PyDict>) -> PyResult<SarTemplate> {
         step_limit: newton[3],
         gmin: newton[4],
         record_device_history: false,
+        profile: false,
     };
 
     let clock: Option<Vec<f64>> = crate::optional_field(spec, "clock")?;

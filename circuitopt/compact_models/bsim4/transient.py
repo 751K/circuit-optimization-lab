@@ -9,6 +9,19 @@ from ...compiled_topology import CompiledTopology, TERM_SOLVED
 from ...device_factory import build_devices
 
 
+_STEP_RATIO_RTOL = 1e-12
+
+
+def _subdivision_count(interval, max_step):
+    """Ceil an interval/limit ratio without splitting roundoff-only excess."""
+    ratio = float(interval) / float(max_step)
+    nearest = round(ratio)
+    tolerance = _STEP_RATIO_RTOL * max(1.0, abs(ratio))
+    if nearest >= 1 and abs(ratio - nearest) <= tolerance:
+        return nearest
+    return max(1, int(np.ceil(ratio)))
+
+
 def _expanded_grid(tgrid, inputs, max_step):
     if max_step is None:
         return tgrid, inputs, np.arange(len(tgrid))
@@ -18,7 +31,7 @@ def _expanded_grid(tgrid, inputs, max_step):
     times = [float(tgrid[0])]
     requested = [0]
     for k in range(1, len(tgrid)):
-        count = max(1, int(np.ceil((tgrid[k] - tgrid[k - 1]) / max_step)))
+        count = _subdivision_count(tgrid[k] - tgrid[k - 1], max_step)
         times.extend(np.linspace(tgrid[k - 1], tgrid[k], count + 1)[1:])
         requested.append(len(times) - 1)
     expanded = np.asarray(times, dtype=float)
@@ -49,6 +62,7 @@ def transient_native_bsim4(
     newton_step_limit=0.25,
     max_step=None,
     gmin=1e-12,
+    profile=False,
 ):
     """Integrate native BSIM4 terminal currents and conserved terminal charges.
 
@@ -175,7 +189,14 @@ def transient_native_bsim4(
     near_residuals = []
     from .rust_transient import solve_bsim4_rust
 
-    xhist, device_currents, device_charges, nfail, first_fail = solve_bsim4_rust(
+    (
+        xhist,
+        device_currents,
+        device_charges,
+        nfail,
+        first_fail,
+        native_profile,
+    ) = solve_bsim4_rust(
         plan,
         devices,
         V0,
@@ -187,6 +208,7 @@ def transient_native_bsim4(
         newton_vtol=newton_vtol,
         newton_step_limit=newton_step_limit,
         gmin=gmin,
+        profile=profile,
     )
     rail_values = topo.rail_values(bias)
     rail_currents = {
@@ -358,6 +380,34 @@ def transient_native_bsim4(
             for name, values in waveform_currents.items()
         },
     }
+    if profile:
+        solver_steps = len(tgrid) - 1
+        failed_steps = native_profile["failed_step_indices"]
+        result["transient_profile"] = {
+            "enabled": True,
+            "backend": "bsim4_native",
+            "rust_grid_solver": True,
+            "wall_time_s": native_profile["wall_time_s"],
+            "intervals": len(requested_t) - 1,
+            "solver_steps": solver_steps,
+            "nsubsteps": int(len(tgrid) - len(requested_t)),
+            "newton_iters_total": native_profile["newton_iters_total"],
+            "newton_iters_avg": (
+                native_profile["newton_iters_total"] / solver_steps
+                if solver_steps
+                else 0.0
+            ),
+            "bsim_evaluations": native_profile["bsim_evaluations"],
+            "bsim_batch_calls": native_profile["bsim_batch_calls"],
+            "bsim_evaluations_avg_per_solver_step": (
+                native_profile["bsim_evaluations"] / solver_steps
+                if solver_steps
+                else 0.0
+            ),
+            "failed_steps": len(failed_steps),
+            "failed_step_indices": failed_steps,
+            "first_failed_step": int(first_fail) if first_fail >= 0 else None,
+        }
     for legacy in ("VOP", "VON"):
         if legacy in nodes:
             result[legacy.lower()] = nodes[legacy]

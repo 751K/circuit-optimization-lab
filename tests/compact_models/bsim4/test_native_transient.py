@@ -6,6 +6,36 @@ import numpy as np
 import pytest
 
 
+def test_expanded_grid_does_not_split_mdac_exact_step_multiples():
+    from circuitopt.compact_models.bsim4.transient import _expanded_grid
+
+    requested = np.linspace(0.0, 5e-9, 501)
+    waveform = np.linspace(0.1, 0.9, len(requested))
+    expanded, inputs, indices = _expanded_grid(
+        requested, {"vin": waveform}, 1e-11)
+
+    np.testing.assert_array_equal(expanded, requested)
+    np.testing.assert_array_equal(inputs["vin"], waveform)
+    np.testing.assert_array_equal(indices, np.arange(len(requested)))
+
+
+def test_expanded_grid_preserves_integer_subdivision_and_real_excess():
+    from circuitopt.compact_models.bsim4.transient import _expanded_grid
+
+    exact, _, exact_indices = _expanded_grid(
+        np.asarray([0.0, 3e-11]), {}, 1e-11)
+    assert len(exact) == 4
+    assert exact_indices.tolist() == [0, 3]
+
+    within_tolerance, _, _ = _expanded_grid(
+        np.asarray([0.0, 1.0 + 5e-13]), {}, 1.0)
+    above_tolerance, _, above_indices = _expanded_grid(
+        np.asarray([0.0, 1.0 + 2e-12]), {}, 1.0)
+    assert len(within_tolerance) == 2
+    assert len(above_tolerance) == 3
+    assert above_indices.tolist() == [0, 2]
+
+
 def _model_available():
     from circuitopt.toolchain import tsmc28_model_dir
 

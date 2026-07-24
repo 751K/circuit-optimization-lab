@@ -26,6 +26,20 @@
 use crate::bsim_transient::{self, Device, Evaluator, Options};
 use crate::transient::{Problem as CircuitProblem, Waveforms};
 
+const STEP_RATIO_RTOL: f64 = 1e-12;
+
+fn subdivision_count(interval: f64, max_step: f64) -> usize {
+    let ratio = interval / max_step;
+    let nearest = ratio.round();
+    let tolerance = STEP_RATIO_RTOL * ratio.abs().max(1.0);
+    let adjusted = if nearest >= 1.0 && (ratio - nearest).abs() <= tolerance {
+        nearest
+    } else {
+        ratio.ceil()
+    };
+    adjusted.max(1.0) as usize
+}
+
 /// The role a single marshalled input row plays in the SAR stimulus, in the
 /// exact insertion order `sar_input_waveforms` emits its dict keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,7 +304,7 @@ impl ExpandedGrid {
         for k in 1..tgrid.len() {
             let a = tgrid[k - 1];
             let b = tgrid[k];
-            let count = ((b - a) / max_step).ceil().max(1.0) as usize;
+            let count = subdivision_count(b - a, max_step);
             let step = (b - a) / count as f64;
             for i in 1..=count {
                 // numpy.linspace sets only the final point exactly to `b`.
@@ -428,5 +442,23 @@ mod tests {
         assert_eq!(grid.times[0], 0.0);
         assert_eq!(*grid.times.last().unwrap(), 1.0);
         assert_eq!(grid.requested_index, vec![0, 3]);
+    }
+
+    #[test]
+    fn expanded_grid_does_not_split_mdac_exact_step_multiples() {
+        let stop = 5e-9;
+        let tgrid: Vec<f64> = (0..=500).map(|index| stop * index as f64 / 500.0).collect();
+        let grid = ExpandedGrid::build(&tgrid, 1e-11);
+        assert_eq!(grid.times, tgrid);
+        assert_eq!(grid.requested_index, (0..=500).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn expanded_grid_splits_only_above_ratio_tolerance() {
+        let within = ExpandedGrid::build(&[0.0, 1.0 + 5e-13], 1.0);
+        let above = ExpandedGrid::build(&[0.0, 1.0 + 2e-12], 1.0);
+        assert_eq!(within.times.len(), 2);
+        assert_eq!(above.times.len(), 3);
+        assert_eq!(above.requested_index, vec![0, 2]);
     }
 }

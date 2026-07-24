@@ -505,6 +505,18 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   完成 PMOS 工作点/电容计算、residual/Jacobian stamp、稠密 Newton step 求解，
   以及逐 substep 递推，全部在 Rust 内完成；Python 只负责编组、派发和结果组装
   （`transient_solver.py` 自身不再带任何逐步数值循环）。
+- 设置 `profile=True` 时，原生 BSIM transient 会返回
+  `result["transient_profile"]`；其中 Newton 总迭代数、原生 BSIM 求值及 batch
+  调用次数、solver/插入步数、失败步数量及其展开网格索引均由 Rust 热循环直接
+  统计，并附带实测 solver wall time。每轮 Newton 会解析全部 MOS 端口并调用一次
+  `co_bsim4::eval_batch_into`。持久的 `EvalBatchWorkspace` 在整个 transient 中复用
+  handle 与 status，求解器同时复用端口行和 I/G/Q/C evaluation 槽；Rayon worker
+  直接写入这些互不重叠的求解器结果槽，不再需要临时结果向量或适配层复制。专用
+  线程池默认最多使用 10 个 worker，可通过
+  `CIRCUITOPT_BSIM_BATCH_THREADS=1..10` 向下调节。重复的缓存 handle 会归入同一
+  worker 串行求值，不同 handle 仍可并行，避免并发进入同一可变 compact-model
+  状态；盖章顺序仍保持确定。关闭
+  profile 时不累计这些计数，也不返回该字段；原 `eval_batch` ABI 作为兼容包装保留。
 - 对 PSS 常用的非 robust 模式（`fallback_least_squares=False` 且
   `fallback_full_jacobian=False`），compiled grid solver 会留在 Rust 内跑完整周期。
   失败 substep 会记为失败 interval，并从最后接受的状态继续，这与非抛错的

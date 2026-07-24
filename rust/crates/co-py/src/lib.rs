@@ -1387,8 +1387,31 @@ struct OtftTransientProblem {
     problem: transient::Problem,
 }
 
-struct RustBsimEvaluator {
-    handles: Vec<usize>,
+pub(crate) struct RustBsimEvaluator {
+    workspace: co_bsim4::EvalBatchWorkspace,
+}
+
+const _: () = {
+    assert!(
+        std::mem::size_of::<bsim_transient::Evaluation>()
+            == std::mem::size_of::<co_bsim4::EvalBatchResult>()
+    );
+    assert!(
+        std::mem::align_of::<bsim_transient::Evaluation>()
+            == std::mem::align_of::<co_bsim4::EvalBatchResult>()
+    );
+};
+
+impl RustBsimEvaluator {
+    /// # Safety
+    ///
+    /// Handles must be non-zero and live for this evaluator's lifetime. Repeated
+    /// handles are permitted; the workspace serializes each repeated group.
+    pub(crate) unsafe fn new(handles: Vec<usize>) -> Self {
+        Self {
+            workspace: unsafe { co_bsim4::EvalBatchWorkspace::new(handles) },
+        }
+    }
 }
 
 impl bsim_transient::Evaluator for RustBsimEvaluator {
@@ -1397,7 +1420,7 @@ impl bsim_transient::Evaluator for RustBsimEvaluator {
         index: usize,
         terminals: [f64; 4],
     ) -> Option<bsim_transient::Evaluation> {
-        let handle = *self.handles.get(index)? as *mut CoBsim4;
+        let handle = self.workspace.handle(index)? as *mut CoBsim4;
         let mut currents = [0.0; 4];
         let mut conductance = [0.0; 16];
         let mut charges = [0.0; 4];
@@ -1420,6 +1443,55 @@ impl bsim_transient::Evaluator for RustBsimEvaluator {
         })
     }
 
+    fn evaluate_batch(
+        &mut self,
+        indices: &[usize],
+        terminals: &[[f64; 4]],
+        evaluations: &mut [bsim_transient::Evaluation],
+    ) -> bsim_transient::BatchStatus {
+        let count = indices.len();
+        if count != terminals.len()
+            || count != evaluations.len()
+            || count != self.workspace.len()
+            || indices
+                .iter()
+                .copied()
+                .enumerate()
+                .any(|(position, index)| position != index)
+        {
+            return bsim_transient::BatchStatus::default();
+        }
+        if count == 0 {
+            return bsim_transient::BatchStatus {
+                completed: true,
+                attempted: 0,
+            };
+        }
+        // The problem constructor rejects null handles, and the Python wrappers
+        // retain ownership until this detached solve returns. The workspace
+        // serializes repeated cached handles within one worker.
+        // Both structs are repr(C) with the same four array fields in the same
+        // order, so the solver's persistent result array is a valid output view.
+        let result_slots = unsafe {
+            std::slice::from_raw_parts_mut(
+                evaluations.as_mut_ptr().cast::<co_bsim4::EvalBatchResult>(),
+                evaluations.len(),
+            )
+        };
+        let status =
+            unsafe { co_bsim4::eval_batch_into(&mut self.workspace, terminals, result_slots) };
+        if status != OK {
+            return bsim_transient::BatchStatus {
+                completed: false,
+                attempted: count,
+            };
+        }
+        bsim_transient::BatchStatus {
+            completed: true,
+            attempted: count,
+        }
+    }
+
     /// DC-Newton eval (D6 acLoad-skip): skip the small-signal capacitance/charge
     /// extraction unless `CIRCUIT_BSIM4_FULL_EVAL` forces the full path. `solve_dc`
     /// consumes only currents+conductance, which are bit-for-bit identical.
@@ -1428,7 +1500,7 @@ impl bsim_transient::Evaluator for RustBsimEvaluator {
         index: usize,
         terminals: [f64; 4],
     ) -> Option<bsim_transient::Evaluation> {
-        let handle = *self.handles.get(index)? as *mut CoBsim4;
+        let handle = self.workspace.handle(index)? as *mut CoBsim4;
         let mut currents = [0.0; 4];
         let mut conductance = [0.0; 16];
         let mut charges = [0.0; 4];
@@ -1515,7 +1587,7 @@ impl Bsim4TransientProblem {
         });
         if !circuit.validate() || !valid_devices || handles.contains(&0) {
             return Err(PyValueError::new_err(
-                "invalid BSIM4 transient topology or handle",
+                "invalid BSIM4 transient topology or null handle",
             ));
         }
         Ok(Self {
@@ -1550,7 +1622,9 @@ impl Bsim4TransientProblem {
         let devices = self.devices.clone();
         let handles = self.handles.clone();
         let result = py.detach(move || {
-            let mut evaluator = RustBsimEvaluator { handles };
+            // Bsim4TransientProblem validates that every handle is non-zero;
+            // Python owns them through this solve.
+            let mut evaluator = unsafe { RustBsimEvaluator::new(handles) };
             bsim_transient::solve_dc(
                 &circuit,
                 &devices,
@@ -1575,7 +1649,7 @@ impl Bsim4TransientProblem {
 
     #[pyo3(signature = (
         initial, times, inputs, integration_method="be", max_iterations=40,
-        voltage_tolerance=1e-8, step_limit=0.25, gmin=1e-12
+        voltage_tolerance=1e-8, step_limit=0.25, gmin=1e-12, profile=false
     ))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn solve_fixed_grid<'py>(
@@ -1589,6 +1663,7 @@ impl Bsim4TransientProblem {
         voltage_tolerance: f64,
         step_limit: f64,
         gmin: f64,
+        profile: bool,
     ) -> PyResult<(
         bool,
         Bound<'py, PyArray2<f64>>,
@@ -1596,6 +1671,10 @@ impl Bsim4TransientProblem {
         Bound<'py, PyArray3<f64>>,
         usize,
         i64,
+        usize,
+        usize,
+        usize,
+        Vec<usize>,
     )> {
         let gear2 = match integration_method {
             "be" => false,
@@ -1639,7 +1718,9 @@ impl Bsim4TransientProblem {
         let sample_count = times.len();
         let device_count = devices.len();
         let result = py.detach(move || {
-            let mut evaluator = RustBsimEvaluator { handles };
+            // Bsim4TransientProblem validates that every handle is non-zero;
+            // Python owns them through this solve.
+            let mut evaluator = unsafe { RustBsimEvaluator::new(handles) };
             bsim_transient::solve_fixed_grid(
                 &circuit,
                 &devices,
@@ -1654,6 +1735,7 @@ impl Bsim4TransientProblem {
                     step_limit,
                     gmin,
                     record_device_history: true,
+                    profile,
                 },
             )
         });
@@ -1679,6 +1761,10 @@ impl Bsim4TransientProblem {
             device_charges,
             result.failures,
             result.first_failure.map_or(-1, |value| value as i64),
+            result.profile.newton_iterations,
+            result.profile.bsim_evaluations,
+            result.profile.bsim_batches,
+            result.profile.failed_steps,
         ))
     }
 }

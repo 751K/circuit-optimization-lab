@@ -70,6 +70,41 @@ release checklist.
 
 ### Changed / 变更
 
+- **Batched native BSIM transient Newton / 原生 BSIM 瞬态 Newton 批量求值**
+
+  **English:** Each native BSIM transient Newton iteration now resolves all MOS
+  terminal voltages first and submits them through a persistent
+  `EvalBatchWorkspace` with `co_bsim4::eval_batch_into`. Handles, terminal rows,
+  I/G/Q/C result slots, and status storage are allocated once per transient;
+  Rayon workers write directly to disjoint result slots without a temporary
+  `BatchResult` vector or second internal copy. The dedicated pool follows the
+  requested machine parallelism but caps its default at 10 workers to avoid the
+  measured 12-thread scheduling regression. Set
+  `CIRCUITOPT_BSIM_BATCH_THREADS=1..10` to tune it. Cached devices can repeat a
+  native handle: those slots are grouped onto one worker and evaluated serially,
+  while distinct handles remain parallel, avoiding concurrent mutation of one
+  BSIM instance. Residual/Jacobian stamping retains deterministic device order,
+  and initial/accepted-state history uses the same batch route. The existing
+  `eval_batch` ABI remains available as a compatibility wrapper.
+  Native transient profiles expose `bsim_batch_calls` so scalar fallback cannot
+  remain hidden. On the reference TSMC28 MDAC `residue_plus_fs16` case, the
+  500-step Rust solver time fell from about 1.377 s to about 0.493 s while preserving
+  9,970 Newton iterations, 397,898 device evaluations, and zero failed steps.
+
+  **中文：** 原生 BSIM 瞬态的每轮 Newton 现在会先解析全部 MOS 端口电压，再通过
+  持久的 `EvalBatchWorkspace` 和 `co_bsim4::eval_batch_into` 提交。handle、端口行、
+  I/G/Q/C 结果槽及 status 存储在每次 transient 中只分配一次；Rayon worker 直接写入
+  互不重叠的结果槽，不再创建临时 `BatchResult` 向量或执行内部二次复制。专用线程池
+  会跟随请求的机器并行度，但默认最多使用 10 个 worker，以避开实测的 12 线程调度
+  反噬；可用 `CIRCUITOPT_BSIM_BATCH_THREADS=1..10` 调节。缓存设备可能重复使用同一
+  native handle：这些槽会归到同一 worker 内串行求值，不同 handle 仍可并行，从而
+  避免并发修改同一 BSIM 实例。residual/Jacobian 仍按确定的器件顺序盖章，初始与
+  接受状态的历史采集也走相同批量路径；既有 `eval_batch` ABI 保留为兼容包装。原生
+  transient profile 新增 `bsim_batch_calls`，避免标量回退被静默隐藏。在参考 TSMC28
+  MDAC `residue_plus_fs16` case 上，500 步 Rust solver 时间由约 1.377 s 降至约
+  0.493 s，同时保持 9,970 次 Newton、
+  397,898 次器件求值及零失败步。
+
 - **Shared native BSIM4 card cache / 公共原生 BSIM4 card 缓存**
 
   **English:** TSMC28, FreePDK45, and SKY130 now reuse immutable
@@ -114,6 +149,39 @@ release checklist.
   `{status, results, signoff}`，其中 signoff 固定包含
   `status/measurements/constraints/passed/worst_case`。普通 AC 响应和瞬态末点不再被
   静默解释为 PM 或建立目标。
+
+### Fixed / 修复
+
+- **Native BSIM transient profiling / 原生 BSIM 瞬态性能统计**
+
+  **English:** `transient(..., profile=True)` now reaches the native BSIM
+  execution path instead of being dropped during dispatch. The Rust fixed-grid
+  kernel directly counts Newton iterations, native BSIM evaluations, and failed
+  expanded-grid steps; Python exposes those counters, step indices, solver work,
+  and wall time through `result["transient_profile"]`. Profiling disabled keeps
+  the counters and result field off.
+
+  **中文：** `transient(..., profile=True)` 现在会真正传入原生 BSIM 执行路径，
+  不再在分派时丢失。Rust 固定网格内核直接统计 Newton 迭代次数、原生 BSIM
+  求值次数及失败的展开网格步；Python 通过 `result["transient_profile"]` 返回
+  这些计数、失败步索引、solver 工作量和 wall time。关闭 profile 时不启用计数，
+  也不返回该结果字段。
+
+- **Exact `max_step` grid subdivision / 精确 `max_step` 网格分段**
+
+  **English:** Native BSIM4 and compiled SAR grid expansion now snap an
+  interval-to-`max_step` ratio to its nearest integer within a `1e-12` relative
+  tolerance before applying `ceil`. This prevents decimal `linspace` roundoff
+  from splitting intervals that already equal the requested maximum step, while
+  genuinely oversized intervals still subdivide. The 501-point, 10 ps TSMC28
+  MDAC transient no longer creates 207 spurious internal steps; its warm runtime
+  on the reference development machine fell from about 1.92 s to 1.42 s.
+
+  **中文：** 原生 BSIM4 与编译 SAR 的网格展开现在会先在 `1e-12` 相对容差内，
+  将“区间长度/`max_step`”吸附到最近整数，再执行 `ceil`。这避免十进制
+  `linspace` 舍入误差把已经等于最大步长的区间再次切分，同时仍会切分真正超限
+  的区间。TSMC28 MDAC 的 501 点、10 ps 瞬态不再产生 207 个伪内部步；在参考
+  开发机上，热运行时间由约 1.92 s 降至 1.42 s。
 
 ## [2.1.5] - 2026-07-24
 

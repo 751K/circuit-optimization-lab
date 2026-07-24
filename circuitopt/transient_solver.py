@@ -985,6 +985,7 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
             newton_vtol=newton_vtol,
             newton_step_limit=min(float(newton_step_limit), 0.25),
             max_step=max_step,
+            profile=profile,
         )
     if ngspice_model_names(model_types):
         from .ngspice_transient import transient_ngspice
