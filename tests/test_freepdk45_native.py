@@ -211,6 +211,99 @@ def test_native_5t_ota_transient_without_ngspice(monkeypatch):
     assert np.all(np.isfinite(result["nodes"]["vout"]))
 
 
+def test_native_5t_ota_adaptive_gear2_uses_nonuniform_grid(monkeypatch):
+    from circuitopt.transient_solver import transient
+
+    monkeypatch.setenv("NGSPICE_BIN", "/definitely/not/ngspice")
+    spec, _ = _spec(driven=True)
+    source_time = np.linspace(0.0, 20e-9, 101)
+    vip = np.where(source_time < 5e-9, 0.55, 0.56)
+    vin = np.where(source_time < 5e-9, 0.55, 0.54)
+    result = transient(
+        spec.sizes,
+        spec.bias,
+        source_time,
+        binding=spec.binding(),
+        inputs={"vip": vip, "vin": vin},
+        V0=np.asarray((0.1, 0.45, 0.45)),
+        integration_method="gear2",
+        adaptive=True,
+        adaptive_reltol=1e-4,
+        adaptive_vabstol=1e-6,
+        max_step=1e-9,
+        profile=True,
+    )
+
+    accepted_time = result["t"]
+    assert result["backend"] == "bsim4_native"
+    assert result["adaptive"] is True
+    assert result["nfail"] == 0
+    assert accepted_time[0] == pytest.approx(source_time[0])
+    assert accepted_time[-1] == pytest.approx(source_time[-1])
+    assert np.all(np.diff(accepted_time) > 0.0)
+    assert not np.allclose(
+        np.diff(accepted_time),
+        np.diff(accepted_time)[0],
+        rtol=1e-10,
+        atol=0.0,
+    )
+    assert np.any(np.isclose(accepted_time, 5e-9, rtol=0.0, atol=1e-18))
+    assert result["adaptive_accepted_steps"] == len(accepted_time) - 1
+    assert result["transient_profile"]["trial_solves"] == (
+        result["adaptive_accepted_steps"] + result["adaptive_rejected_steps"]
+    )
+    assert result["transient_profile"]["solver_steps"] == (
+        result["transient_profile"]["trial_solves"]
+    )
+    assert result["transient_profile"]["lte_estimates"] > 0
+    assert result["transient_profile"]["lte_linear_solves"] == (
+        result["transient_profile"]["lte_estimates"]
+    )
+    assert result["nodes"]["vout"][-1] > result["nodes"]["vout"][0] + 0.2
+    assert np.all(np.isfinite(result["nodes"]["vout"]))
+
+
+def test_native_mdac_adaptive_lte_ignores_algebraic_branch_currents(monkeypatch):
+    from circuitopt.circuit_loader import load_circuit_json
+    from circuitopt.transient_solver import transient
+
+    monkeypatch.setenv("NGSPICE_BIN", "/definitely/not/ngspice")
+    spec = load_circuit_json(
+        os.path.join(_ROOT, "examples", "freepdk45_mdac_ota.json"))
+    seed = spec.topology.dc_guesses[0]
+    initial = np.asarray([
+        seed.get(node, 0.0) for node in spec.topology.solved
+    ])
+    source_time = np.linspace(0.0, 5e-9, 501)
+    common_mode = spec.bias["VDD"] / 2.0
+    residue = -0.9 / 16.0
+    bp1 = np.full_like(source_time, common_mode + residue / 2.0)
+    bp2 = np.full_like(source_time, common_mode - residue / 2.0)
+    bp1[0] = common_mode
+    bp2[0] = common_mode
+
+    result = transient(
+        spec.sizes,
+        spec.bias,
+        source_time,
+        binding=spec.binding(),
+        V0=initial,
+        inputs={"bp1": bp1, "bp2": bp2},
+        integration_method="gear2",
+        adaptive=True,
+        max_step=0.5e-9,
+        profile=True,
+    )
+
+    steps = np.diff(result["t"])
+    assert result["nfail"] == 0
+    assert result["adaptive_accepted_steps"] < 200
+    assert result["adaptive_rejected_steps"] > 0
+    assert steps.min() < 2e-12
+    assert steps.max() > 100e-12
+    assert result["output"][-1] == pytest.approx(0.45, abs=2e-3)
+
+
 # (v2.0.0) test_native_5t_ota_rust_grid_matches_numba was removed: it did a live
 # rust-grid vs numba-grid A/B, and the numba grid solver (compact_models/bsim4/
 # numba_transient.py) was deleted with the numba engine. The rust BSIM4 transient

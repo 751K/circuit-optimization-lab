@@ -26,6 +26,16 @@
 > 可设置 `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` 关闭；profile 中的
 > `gear2_predictor_steps` 表示实际使用预测初值的步数。该开关按每次 solve 读取，
 > 不需要重启 Python 进程。
+>
+> 原生 BSIM transient 现支持 Rust 内 LTE 自适应 Gear2。2026-07-25 本机
+> FreePDK45 MDAC 单次热测中，默认容差与 `max_step=500 ps` 将 5 ns 轨道从
+> 500 个固定 10 ps 步降为 146 个接受步（1 次拒步），热端到端时间中位数约
+> `167 ms -> 56.6 ms`。该路径每个 trial 只做一次非线性 Gear2 求解，再用
+> BDF3−BDF2 的 BSIM 端电荷历史 defect 做一次线性 Jacobian 投影，并由 PI
+> controller 调节下一步。相对具有相同 10 ps 线性输入边沿的 0.5 ps、10,000 步
+> 固定网格参考，默认容差的峰值/最终差分输出误差约为 `2.04 mV / 50 uV`；
+> 把 `adaptive_reltol`/`adaptive_vabstol` 收紧至 `1e-5`/`1e-7 V` 后约为
+> `0.42 mV / 12 uV`。这是特定电路的快照，不是固定 SLA。
 
 > **文档状态：带日期的性能快照。** 本页记录特定机器、Python/Numba 版本和缓存状态
 > 下的历史测量，用于定位性能数量级，不是当前版本的固定 SLA。功能和命令以维护中

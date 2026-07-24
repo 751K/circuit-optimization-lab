@@ -429,8 +429,9 @@ Array form: `["V1", "IN", "GND", 2.0]`. At least one of `p`, `q` must be a solve
 - **Transient** supports constant or waveform‑keyed `E(t)`. The compiled Rust fixed‑grid
   kernel handles the augmented `n_aug = n + m` system directly — a circuit with vsource
   (or VCVS/CCVS) branch‑current unknowns still reports `result["rust_grid_solver"] is True`.
-  The adaptive Gear2 path (`adaptive=True`) is currently the OTFT/`n_aug == n` case only;
-  requesting it on a circuit with branch unknowns raises rather than silently falling back.
+  Native BSIM adaptive Gear2 also handles the augmented system; its LTE norm controls
+  dynamic node voltages and deliberately excludes algebraic ideal-source branch currents.
+  The generic OTFT adaptive path still requires `n_aug == n`.
   There is no Python numeric fallback in production; the retired `numba_grid_solver` result
   key no longer exists (tests assert its absence).
 - **PSS / PAC / PNoise** are supported too: the shooting monodromy and the harmonic‑balance

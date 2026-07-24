@@ -46,7 +46,8 @@ def _model_available():
 
 
 @pytest.mark.skipif(not _model_available(), reason="TSMC28 model deck not configured")
-def test_native_inverter_charge_transient_without_ngspice(monkeypatch):
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_native_inverter_charge_transient_without_ngspice(monkeypatch, adaptive):
     from circuitopt.circuit_loader import circuit_from_dict
     from circuitopt.transient_solver import transient
 
@@ -82,9 +83,11 @@ def test_native_inverter_charge_transient_without_ngspice(monkeypatch):
         corner="tt",
         integration_method="gear2",
         max_step=1e-12,
+        adaptive=adaptive,
     )
     output = result["nodes"]["OUT"]
     assert result["backend"] == "bsim4_native"
+    assert result["adaptive"] is adaptive
     assert result["nfail"] == 0
     assert output[0] > 0.85
     assert output[-1] < 0.05

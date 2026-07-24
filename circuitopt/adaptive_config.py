@@ -54,18 +54,20 @@ class AdaptiveConfig:
         object.__setattr__(
             self, "h0", None if self.h0 is None else float(self.h0))
         object.__setattr__(self, "freeze_factor", float(self.freeze_factor))
-        if self.reltol <= 0.0:
-            raise ValueError("adaptive reltol must be positive")
-        if self.vabstol <= 0.0:
-            raise ValueError("adaptive vabstol must be positive")
-        if self.iabstol <= 0.0:
-            raise ValueError("adaptive iabstol must be positive")
+        if self.reltol <= 0.0 or not math.isfinite(self.reltol):
+            raise ValueError("adaptive reltol must be positive and finite")
+        if self.vabstol <= 0.0 or not math.isfinite(self.vabstol):
+            raise ValueError("adaptive vabstol must be positive and finite")
+        if self.iabstol <= 0.0 or not math.isfinite(self.iabstol):
+            raise ValueError("adaptive iabstol must be positive and finite")
         if self.max_steps < 1:
             raise ValueError("adaptive max_steps must be >= 1")
-        if self.h0 is not None and self.h0 <= 0.0:
-            raise ValueError("adaptive h0 must be positive when provided")
-        if self.freeze_factor <= 0.0:
-            raise ValueError("adaptive freeze_factor must be positive")
+        if self.h0 is not None and (
+            self.h0 <= 0.0 or not math.isfinite(self.h0)
+        ):
+            raise ValueError("adaptive h0 must be positive and finite when provided")
+        if self.freeze_factor <= 0.0 or not math.isfinite(self.freeze_factor):
+            raise ValueError("adaptive freeze_factor must be positive and finite")
 
     @classmethod
     def coerce(cls, value=None):

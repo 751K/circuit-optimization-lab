@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
+from ...adaptive_config import resolve_adaptive_config
 from ...compiled_topology import CompiledTopology, TERM_SOLVED
 from ...device_factory import build_devices
 
@@ -62,6 +63,13 @@ def transient_native_bsim4(
     newton_step_limit=0.25,
     max_step=None,
     gmin=1e-12,
+    adaptive=False,
+    adaptive_reltol=1e-4,
+    adaptive_vabstol=1e-6,
+    adaptive_iabstol=1e-12,
+    adaptive_max_steps=200000,
+    adaptive_h0=None,
+    adaptive_config=None,
     profile=False,
 ):
     """Integrate native BSIM4 terminal currents and conserved terminal charges.
@@ -76,11 +84,25 @@ def transient_native_bsim4(
     if method not in {"be", "gear2", "bdf2"}:
         raise ValueError(
             f"integration_method must be 'be' or 'gear2', got {integration_method!r}")
+    if adaptive and method not in {"gear2", "bdf2"}:
+        raise ValueError("adaptive transient requires integration_method='gear2'")
+    adaptive_config = resolve_adaptive_config(
+        adaptive_config,
+        adaptive_reltol=adaptive_reltol,
+        adaptive_vabstol=adaptive_vabstol,
+        adaptive_iabstol=adaptive_iabstol,
+        adaptive_max_steps=adaptive_max_steps,
+        adaptive_h0=adaptive_h0,
+    )
     requested_t = np.asarray(tgrid, dtype=float)
     if requested_t.ndim != 1 or len(requested_t) < 2:
         raise ValueError("tgrid must contain at least two time points")
     if not np.all(np.diff(requested_t) > 0.0):
         raise ValueError("tgrid must be strictly increasing")
+    if max_step is not None and (
+        not np.isfinite(float(max_step)) or float(max_step) <= 0.0
+    ):
+        raise ValueError("max_step must be positive and finite")
 
     raw_inputs = {
         key: np.asarray(value, dtype=float)
@@ -91,8 +113,13 @@ def transient_native_bsim4(
             raise ValueError(
                 f"Input waveform {key!r} shape {value.shape} != tgrid shape "
                 f"{requested_t.shape}")
-    tgrid, inputs, requested_index = _expanded_grid(
-        requested_t, raw_inputs, max_step)
+    if adaptive:
+        tgrid = requested_t
+        inputs = raw_inputs
+        requested_index = np.arange(len(requested_t))
+    else:
+        tgrid, inputs, requested_index = _expanded_grid(
+            requested_t, raw_inputs, max_step)
     input_keys = tuple(inputs)
     input_matrix = (
         np.vstack([inputs[key] for key in input_keys])
@@ -171,6 +198,8 @@ def transient_native_bsim4(
             matrix[row, term[1]] += value
 
     def coefficients(sample):
+        if integration_coefficients is not None:
+            return tuple(integration_coefficients[sample])
         h = float(tgrid[sample] - tgrid[sample - 1])
         if method == "be" or sample == 1:
             return (1.0 / h, -1.0 / h, 0.0)
@@ -190,6 +219,9 @@ def transient_native_bsim4(
     from .rust_transient import solve_bsim4_rust
 
     (
+        solved_times,
+        solved_inputs,
+        integration_coefficients,
         xhist,
         device_currents,
         device_charges,
@@ -208,8 +240,16 @@ def transient_native_bsim4(
         newton_vtol=newton_vtol,
         newton_step_limit=newton_step_limit,
         gmin=gmin,
+        adaptive=adaptive,
+        adaptive_config=adaptive_config,
+        max_step=max_step,
         profile=profile,
     )
+    if adaptive:
+        tgrid = solved_times
+        input_matrix = solved_inputs
+        requested_t = solved_times
+        requested_index = np.arange(len(solved_times))
     rail_values = topo.rail_values(bias)
     rail_currents = {
         name: np.zeros(len(tgrid), dtype=float)
@@ -363,7 +403,8 @@ def transient_native_bsim4(
             float(max(near_residuals)) if near_residuals else 0.0
         ),
         "nretry": 0,
-        "nsubsteps": int(len(tgrid) - len(requested_t)),
+        "nsubsteps": 0 if adaptive else int(len(tgrid) - len(requested_t)),
+        "adaptive": bool(adaptive),
         "bsim4_native_transient": True,
         "bsim4_rust_transient": True,
         "backend": "bsim4_native",
@@ -380,8 +421,20 @@ def transient_native_bsim4(
             for name, values in waveform_currents.items()
         },
     }
+    if adaptive:
+        result.update({
+            "adaptive_reltol": float(adaptive_config.reltol),
+            "adaptive_vabstol": float(adaptive_config.vabstol),
+            "adaptive_iabstol": float(adaptive_config.iabstol),
+            "adaptive_accepted_steps": int(native_profile["accepted_steps"]),
+            "adaptive_rejected_steps": int(native_profile["rejected_steps"]),
+        })
     if profile:
-        solver_steps = len(tgrid) - 1
+        solver_steps = (
+            native_profile["trial_solves"]
+            if adaptive
+            else native_profile["accepted_steps"]
+        )
         failed_steps = native_profile["failed_step_indices"]
         result["transient_profile"] = {
             "enabled": True,
@@ -390,7 +443,15 @@ def transient_native_bsim4(
             "wall_time_s": native_profile["wall_time_s"],
             "intervals": len(requested_t) - 1,
             "solver_steps": solver_steps,
-            "nsubsteps": int(len(tgrid) - len(requested_t)),
+            "nsubsteps": 0 if adaptive else int(len(tgrid) - len(requested_t)),
+            "adaptive": bool(adaptive),
+            "accepted_steps": native_profile["accepted_steps"],
+            "rejected_steps": native_profile["rejected_steps"],
+            "trial_solves": native_profile["trial_solves"],
+            "lte_estimates": native_profile["lte_estimates"],
+            "lte_linear_solves": native_profile["lte_linear_solves"],
+            "lte_rejections": native_profile["lte_rejections"],
+            "newton_rejections": native_profile["newton_rejections"],
             "newton_iters_total": native_profile["newton_iters_total"],
             "newton_iters_avg": (
                 native_profile["newton_iters_total"] / solver_steps

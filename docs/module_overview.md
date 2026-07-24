@@ -603,6 +603,17 @@ Solves the time-domain response of the topology-defined system using backward Eu
   DAC edges on the previous accepted-state seed while accelerating smooth
   settling. `gear2_predictor_steps` records actual use in the transient profile;
   `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` disables it for regression comparison.
+- Native BSIM dispatch also implements `adaptive=True` entirely in Rust. Each
+  trial performs one nonlinear Gear2 solve. A variable-step BDF3-minus-BDF2
+  defect is formed from the accepted BSIM terminal-charge history and projected
+  through the converged BDF2 Jacobian with one linear solve. A PI controller
+  shrinks on LTE or Newton rejection, caps growth at 2x, suppresses growth
+  immediately after rejection, and restarts conservatively at input-slope
+  breakpoints. LTE is formed over dynamic node voltages; ideal-source MNA branch
+  currents are algebraic multipliers and are deliberately excluded. The
+  returned `t` is the accepted non-uniform grid, and profiles add
+  `accepted_steps`, `rejected_steps`, `trial_solves`, `lte_estimates`,
+  `lte_linear_solves`, `lte_rejections`, and `newton_rejections`.
 - For PSS-style non-robust runs (`fallback_least_squares=False` and
   `fallback_full_jacobian=False`), the compiled grid solver stays in Rust across
   the full period. Failed substeps are counted as failed intervals and the

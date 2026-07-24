@@ -481,6 +481,21 @@ def test_adaptive_step_policy_sanity():
     assert adaptive_next_h(1e-6, 7.0) < adaptive_next_h(1e-6, 0.2)  # monotone
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"reltol": np.nan},
+        {"vabstol": np.inf},
+        {"iabstol": np.nan},
+        {"h0": np.inf},
+        {"freeze_factor": np.nan},
+    ],
+)
+def test_adaptive_config_rejects_nonfinite_values(kwargs):
+    with pytest.raises(ValueError, match="finite"):
+        AdaptiveConfig(**kwargs)
+
+
 def test_adaptive_pss_inputs_match_orbit_grid():
     period = 1e-3
     t = np.linspace(0.0, period, 101)

@@ -527,6 +527,14 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   接受状态为初值，同时加速平滑建立段。transient profile 的
   `gear2_predictor_steps` 记录实际启用步数；设置
   `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` 可关闭并进行回归对比。
+- 原生 BSIM 派发也会在 Rust 内完整执行 `adaptive=True`。每个候选步只执行一次
+  Gear2 非线性求解。Rust 核从已接受的 BSIM 端电荷历史构造变步长
+  BDF3−BDF2 defect，再通过收敛的 BDF2 Jacobian 做一次线性投影。PI controller
+  在 LTE 超差或 Newton 不收敛时缩步，增长最多 2 倍，拒步后禁止立即增步，并在
+  输入斜率断点保守重启。LTE 只对动态节点电压形成；理想源的 MNA 支路电流是代数
+  乘子，不进入误差范数。返回的 `t` 是接受后的非均匀网格，profile 额外报告
+  `accepted_steps`、`rejected_steps`、`trial_solves`、`lte_estimates`、
+  `lte_linear_solves`、`lte_rejections` 和 `newton_rejections`。
 - 对 PSS 常用的非 robust 模式（`fallback_least_squares=False` 且
   `fallback_full_jacobian=False`），compiled grid solver 会留在 Rust 内跑完整周期。
   失败 substep 会记为失败 interval，并从最后接受的状态继续，这与非抛错的

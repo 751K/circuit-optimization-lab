@@ -84,6 +84,10 @@ pub struct Profile {
     pub bsim_evaluations: usize,
     pub bsim_batches: usize,
     pub gear2_predictor_steps: usize,
+    pub lte_estimates: usize,
+    pub lte_linear_solves: usize,
+    pub lte_rejections: usize,
+    pub newton_rejections: usize,
     pub failed_steps: Vec<usize>,
 }
 
@@ -635,6 +639,450 @@ fn predict_gear2_state(
     true
 }
 
+const ADAPTIVE_ACCEPT_WRMS: f64 = 1.0;
+const ADAPTIVE_DONE_ABS: f64 = 1e-18;
+const ADAPTIVE_DONE_REL: f64 = 1e-13;
+const ADAPTIVE_ERR_FLOOR: f64 = 1e-12;
+const ADAPTIVE_GROWTH_MAX: f64 = 2.0;
+const ADAPTIVE_GROWTH_MIN: f64 = 0.2;
+const ADAPTIVE_INITIAL_MIN_DENOM: usize = 16;
+const ADAPTIVE_INPUT_SLOPE_BREAK_FRACTION: f64 = 0.1;
+const ADAPTIVE_MIN_H_ABS: f64 = 1e-18;
+const ADAPTIVE_MIN_H_REL: f64 = 1e-15;
+const ADAPTIVE_NEWTON_REJECT_FACTOR: f64 = 0.25;
+const ADAPTIVE_PI_INTEGRAL: f64 = 0.4 / ADAPTIVE_STEP_ORDER;
+const ADAPTIVE_PI_PROPORTIONAL: f64 = 0.7 / ADAPTIVE_STEP_ORDER;
+const ADAPTIVE_POST_REJECT_GROWTH_MAX: f64 = 1.0;
+const ADAPTIVE_REJECT_GROWTH_MAX: f64 = 0.8;
+const ADAPTIVE_SAFETY: f64 = 0.9;
+const ADAPTIVE_SCALE_FLOOR: f64 = 1e-30;
+const ADAPTIVE_STARTUP_FRACTION: f64 = 0.25;
+const ADAPTIVE_STEP_ORDER: f64 = 3.0;
+
+#[derive(Clone, Copy, Debug)]
+pub struct AdaptiveOptions {
+    pub newton: Options,
+    pub max_step: f64,
+    pub reltol: f64,
+    pub voltage_abstol: f64,
+    /// Reserved for future dynamic current states such as inductor currents.
+    /// Algebraic MNA voltage-source branch currents are not LTE states.
+    pub current_abstol: f64,
+    pub max_steps: usize,
+    pub initial_step: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct AdaptiveResult {
+    pub completed: bool,
+    pub times: Vec<f64>,
+    pub states: Vec<Vec<f64>>,
+    pub inputs: Vec<Vec<f64>>,
+    pub device_currents: Vec<[f64; 4]>,
+    pub device_charges: Vec<[f64; 4]>,
+    pub coefficients: Vec<[f64; 3]>,
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
+    pub trial_solves: usize,
+    pub profile: Profile,
+}
+
+fn adaptive_inputs_at_time(times: &[f64], inputs: Waveforms<'_>, time: f64) -> Vec<f64> {
+    if time <= times[0] {
+        return inputs.sample(0).unwrap_or_default();
+    }
+    let last = times.len() - 1;
+    if time >= times[last] {
+        return inputs.sample(last).unwrap_or_default();
+    }
+    let upper = times.partition_point(|value| *value < time);
+    let interval = upper.saturating_sub(1).min(last - 1);
+    let fraction = (time - times[interval]) / (times[interval + 1] - times[interval]);
+    (0..inputs.rows())
+        .map(|row| {
+            let values = inputs.row(row).unwrap_or_default();
+            values[interval] + (values[interval + 1] - values[interval]) * fraction
+        })
+        .collect()
+}
+
+fn adaptive_critical_times(times: &[f64], inputs: Waveforms<'_>) -> Vec<f64> {
+    if inputs.rows() == 0 || times.len() < 3 {
+        return Vec::new();
+    }
+    let mut global_slope = 1.0f64;
+    for interval in 0..times.len() - 1 {
+        let dt = times[interval + 1] - times[interval];
+        for row in 0..inputs.rows() {
+            let values = inputs.row(row).unwrap_or_default();
+            global_slope = global_slope.max(((values[interval + 1] - values[interval]) / dt).abs());
+        }
+    }
+    let mut critical = Vec::new();
+    for position in 1..times.len() - 1 {
+        let dt0 = times[position] - times[position - 1];
+        let dt1 = times[position + 1] - times[position];
+        let mut jump = 0.0f64;
+        for row in 0..inputs.rows() {
+            let values = inputs.row(row).unwrap_or_default();
+            let slope0 = (values[position] - values[position - 1]) / dt0;
+            let slope1 = (values[position + 1] - values[position]) / dt1;
+            jump = jump.max((slope1 - slope0).abs());
+        }
+        if jump > ADAPTIVE_INPUT_SLOPE_BREAK_FRACTION * global_slope {
+            critical.push(times[position]);
+        }
+    }
+    critical
+}
+
+fn first_derivative_weights_at_zero(nodes: [f64; 4]) -> Option<[f64; 4]> {
+    let mut weights = [0.0; 4];
+    for (index, &node) in nodes.iter().enumerate() {
+        let mut denominator = 1.0;
+        for (other, &other_node) in nodes.iter().enumerate() {
+            if other != index {
+                denominator *= node - other_node;
+            }
+        }
+        if denominator == 0.0 || !denominator.is_finite() {
+            return None;
+        }
+        let mut numerator = 0.0;
+        for (omitted, _) in nodes.iter().enumerate() {
+            if omitted == index {
+                continue;
+            }
+            let mut product = 1.0;
+            for (other, &other_node) in nodes.iter().enumerate() {
+                if other != index && other != omitted {
+                    product *= -other_node;
+                }
+            }
+            numerator += product;
+        }
+        weights[index] = numerator / denominator;
+        if !weights[index].is_finite() {
+            return None;
+        }
+    }
+    Some(weights)
+}
+
+fn charge_defect_weights(
+    step: f64,
+    previous_step: f64,
+    previous2_step: f64,
+    bdf2: [f64; 3],
+) -> Option<[f64; 4]> {
+    if step <= 0.0 || previous_step <= 0.0 || previous2_step <= 0.0 {
+        return None;
+    }
+    let ratio1 = previous_step / step;
+    let ratio2 = previous2_step / step;
+    let nodes = [0.0, -1.0, -(1.0 + ratio1), -(1.0 + ratio1 + ratio2)];
+    let mut bdf3 = first_derivative_weights_at_zero(nodes)?;
+    for weight in &mut bdf3 {
+        *weight /= step;
+    }
+    Some([
+        bdf3[0] - bdf2[0],
+        bdf3[1] - bdf2[1],
+        bdf3[2] - bdf2[2],
+        bdf3[3],
+    ])
+}
+
+fn projected_lte_wrms(
+    correction: &[f64],
+    state: &[f64],
+    previous: &[f64],
+    node_count: usize,
+    reltol: f64,
+    voltage_abstol: f64,
+) -> f64 {
+    let controlled_count = node_count
+        .min(correction.len())
+        .min(state.len())
+        .min(previous.len());
+    if controlled_count == 0 {
+        return f64::INFINITY;
+    }
+    let mut sum = 0.0;
+    for index in 0..controlled_count {
+        let scale = (reltol * state[index].abs().max(previous[index].abs()) + voltage_abstol)
+            .max(ADAPTIVE_SCALE_FLOOR);
+        let normalized = correction[index] / scale;
+        sum += normalized * normalized;
+    }
+    (sum / controlled_count as f64).sqrt()
+}
+
+fn adaptive_pi_accepted_step(
+    step: f64,
+    error: f64,
+    previous_accepted_error: Option<f64>,
+    follows_rejection: bool,
+) -> f64 {
+    let error = error.max(ADAPTIVE_ERR_FLOOR);
+    let previous = previous_accepted_error
+        .unwrap_or(error)
+        .max(ADAPTIVE_ERR_FLOOR);
+    let mut factor = ADAPTIVE_SAFETY
+        * error.powf(-ADAPTIVE_PI_PROPORTIONAL)
+        * previous.powf(ADAPTIVE_PI_INTEGRAL);
+    factor = factor.clamp(ADAPTIVE_GROWTH_MIN, ADAPTIVE_GROWTH_MAX);
+    if follows_rejection {
+        factor = factor.min(ADAPTIVE_POST_REJECT_GROWTH_MAX);
+    }
+    step * factor
+}
+
+fn adaptive_rejected_step(step: f64, error: f64, newton_failure: bool) -> f64 {
+    let factor = if newton_failure || !error.is_finite() {
+        ADAPTIVE_NEWTON_REJECT_FACTOR
+    } else {
+        (ADAPTIVE_SAFETY * error.powf(-1.0 / ADAPTIVE_STEP_ORDER))
+            .clamp(ADAPTIVE_GROWTH_MIN, ADAPTIVE_REJECT_GROWTH_MAX)
+    };
+    step * factor
+}
+
+fn adaptive_coefficients(step: f64, previous_step: f64) -> [f64; 3] {
+    if previous_step > 0.0 && step / previous_step <= 2.0 {
+        [
+            (2.0 * step + previous_step) / (step * (step + previous_step)),
+            -(step + previous_step) / (step * previous_step),
+            step / (previous_step * (step + previous_step)),
+        ]
+    } else {
+        [1.0 / step, -1.0 / step, 0.0]
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stamp_adaptive_candidate_system(
+    circuit: &CircuitProblem,
+    devices: &[Device],
+    state: &[f64],
+    input_now: &[f64],
+    evaluations: &[Evaluation],
+    previous_charges: &[[f64; 4]],
+    previous2_charges: &[[f64; 4]],
+    coefficients: [f64; 3],
+    history: &HistoryTerms,
+    history2: &HistoryTerms,
+    gmin: f64,
+    system: &mut DenseSystem,
+) -> bool {
+    system.residual.fill(0.0);
+    system.jacobian.fill(0.0);
+    if devices.len() != evaluations.len()
+        || devices.len() != previous_charges.len()
+        || devices.len() != previous2_charges.len()
+    {
+        return false;
+    }
+    for (position, (device, evaluation)) in devices
+        .iter()
+        .copied()
+        .zip(evaluations.iter().copied())
+        .enumerate()
+    {
+        for terminal_row in 0..4 {
+            let Some(row) = device.rows[terminal_row] else {
+                continue;
+            };
+            system.residual[row] += evaluation.currents[terminal_row]
+                + coefficients[0] * evaluation.charges[terminal_row]
+                + coefficients[1] * previous_charges[position][terminal_row]
+                + coefficients[2] * previous2_charges[position][terminal_row];
+            for terminal_col in 0..4 {
+                let Some(column) = device.rows[terminal_col] else {
+                    continue;
+                };
+                let offset = terminal_row * 4 + terminal_col;
+                system.add_jacobian(
+                    row,
+                    column,
+                    evaluation.conductance[offset]
+                        + coefficients[0] * evaluation.capacitance[offset],
+                );
+            }
+        }
+    }
+    stamp_linear_elements(
+        circuit,
+        state,
+        input_now,
+        coefficients,
+        history,
+        history2,
+        gmin,
+        system,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn charge_defect_lte(
+    circuit: &CircuitProblem,
+    devices: &[Device],
+    state: &[f64],
+    previous_state: &[f64],
+    input_now: &[f64],
+    evaluations: &[Evaluation],
+    charges1: &[[f64; 4]],
+    charges2: &[[f64; 4]],
+    charges3: &[[f64; 4]],
+    history_now: &HistoryTerms,
+    history1: &HistoryTerms,
+    history2: &HistoryTerms,
+    history3: &HistoryTerms,
+    coefficients: [f64; 3],
+    defect_weights: [f64; 4],
+    options: AdaptiveOptions,
+    system: &mut DenseSystem,
+) -> Option<f64> {
+    if !stamp_adaptive_candidate_system(
+        circuit,
+        devices,
+        state,
+        input_now,
+        evaluations,
+        charges1,
+        charges2,
+        coefficients,
+        history1,
+        history2,
+        options.newton.gmin,
+        system,
+    ) {
+        return None;
+    }
+    system.residual.fill(0.0);
+    if devices.len() != charges3.len() {
+        return None;
+    }
+    for (position, (device, evaluation)) in devices
+        .iter()
+        .copied()
+        .zip(evaluations.iter().copied())
+        .enumerate()
+    {
+        for terminal in 0..4 {
+            let Some(row) = device.rows[terminal] else {
+                continue;
+            };
+            system.residual[row] += defect_weights[0] * evaluation.charges[terminal]
+                + defect_weights[1] * charges1[position][terminal]
+                + defect_weights[2] * charges2[position][terminal]
+                + defect_weights[3] * charges3[position][terminal];
+        }
+    }
+    for (position, capacitor) in circuit.capacitors.iter().enumerate() {
+        let defect = capacitor.capacitance
+            * (defect_weights[0] * history_now.capacitor_dv[position]
+                + defect_weights[1] * history1.capacitor_dv[position]
+                + defect_weights[2] * history2.capacitor_dv[position]
+                + defect_weights[3] * history3.capacitor_dv[position]);
+        if let Some(row) = capacitor.ai {
+            system.residual[row] += defect;
+        }
+        if let Some(row) = capacitor.bi {
+            system.residual[row] -= defect;
+        }
+    }
+    if !system.residual.iter().all(|value| value.is_finite())
+        || !solve_dense_neg_rhs_in_place(&mut system.jacobian, &mut system.residual)
+    {
+        return None;
+    }
+    let error = projected_lte_wrms(
+        &system.residual,
+        state,
+        previous_state,
+        circuit.node_count,
+        options.reltol,
+        options.voltage_abstol,
+    );
+    error.is_finite().then_some(error)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_adaptive_candidate<E: Evaluator>(
+    circuit: &CircuitProblem,
+    devices: &[Device],
+    evaluator: &mut E,
+    evaluator_indices: &[usize],
+    state: &mut [f64],
+    previous_charges: &[[f64; 4]],
+    previous2_charges: &[[f64; 4]],
+    input_now: &[f64],
+    coefficients: [f64; 3],
+    history: &HistoryTerms,
+    history2: &HistoryTerms,
+    options: Options,
+    terminal_batch: &mut [[f64; 4]],
+    evaluation_batch: &mut [Evaluation],
+    system: &mut DenseSystem,
+    profile: &mut Profile,
+) -> bool {
+    for _iteration in 0..options.max_iterations {
+        if options.profile {
+            profile.newton_iterations += 1;
+        }
+        let evaluated = evaluate_devices(
+            evaluator,
+            devices,
+            evaluator_indices,
+            state,
+            input_now,
+            terminal_batch,
+            evaluation_batch,
+            profile,
+            options.profile,
+        );
+        let stamped = evaluated
+            && stamp_adaptive_candidate_system(
+                circuit,
+                devices,
+                state,
+                input_now,
+                evaluation_batch,
+                previous_charges,
+                previous2_charges,
+                coefficients,
+                history,
+                history2,
+                options.gmin,
+                system,
+            );
+        if !stamped || !solve_dense_neg_rhs_in_place(&mut system.jacobian, &mut system.residual) {
+            return false;
+        }
+        let mut peak = 0.0f64;
+        for value in &system.residual[..circuit.node_count] {
+            if !value.is_finite() {
+                return false;
+            }
+            peak = peak.max(value.abs());
+        }
+        if peak <= options.voltage_tolerance {
+            return true;
+        }
+        if peak > options.step_limit {
+            let scale = options.step_limit / peak;
+            for value in &mut system.residual {
+                *value *= scale;
+            }
+        }
+        for (value, delta) in state.iter_mut().zip(&system.residual) {
+            *value += delta;
+        }
+    }
+    false
+}
+
 pub fn solve_fixed_grid<E: Evaluator>(
     circuit: &CircuitProblem,
     devices: &[Device],
@@ -940,6 +1388,346 @@ pub fn solve_fixed_grid<E: Evaluator>(
     }
 }
 
+/// Adaptive variable-step Gear2 using a charge-history defect LTE estimate.
+pub fn solve_adaptive_gear2<E: Evaluator>(
+    circuit: &CircuitProblem,
+    devices: &[Device],
+    evaluator: &mut E,
+    initial: &[f64],
+    source_times: &[f64],
+    source_inputs: Waveforms<'_>,
+    options: AdaptiveOptions,
+) -> AdaptiveResult {
+    let valid_options = options.reltol > 0.0
+        && options.reltol.is_finite()
+        && options.voltage_abstol > 0.0
+        && options.voltage_abstol.is_finite()
+        && options.current_abstol > 0.0
+        && options.current_abstol.is_finite()
+        && options.max_steps > 0
+        && options.max_step.is_finite()
+        && options.initial_step.is_finite()
+        && options.newton.max_iterations > 0
+        && options.newton.voltage_tolerance > 0.0
+        && options.newton.voltage_tolerance.is_finite()
+        && options.newton.step_limit > 0.0
+        && options.newton.step_limit.is_finite()
+        && options.newton.gmin >= 0.0
+        && options.newton.gmin.is_finite();
+    if !valid_options
+        || validate_fixed_grid_input(circuit, devices, initial, source_times, source_inputs)
+            .is_err()
+    {
+        return AdaptiveResult {
+            completed: false,
+            times: Vec::new(),
+            states: Vec::new(),
+            inputs: Vec::new(),
+            device_currents: Vec::new(),
+            device_charges: Vec::new(),
+            coefficients: Vec::new(),
+            accepted_steps: 0,
+            rejected_steps: 0,
+            trial_solves: 0,
+            profile: Profile::default(),
+        };
+    }
+
+    let start = source_times[0];
+    let end = source_times[source_times.len() - 1];
+    let span = end - start;
+    let max_step = if options.max_step > 0.0 {
+        options.max_step.min(span)
+    } else {
+        span
+    };
+    let smallest_source_step = source_times
+        .windows(2)
+        .map(|window| window[1] - window[0])
+        .fold(span, f64::min);
+    let mut step = if options.initial_step > 0.0 {
+        options.initial_step
+    } else {
+        let denominator = (source_times.len() - 1).max(ADAPTIVE_INITIAL_MIN_DENOM);
+        ADAPTIVE_STARTUP_FRACTION * (span / denominator as f64).min(smallest_source_step)
+    };
+    if step <= 0.0 || !step.is_finite() {
+        step = span / 100.0;
+    }
+    step = step.min(max_step);
+    let restart_step = step;
+    let min_step = ADAPTIVE_MIN_H_ABS.max(span * ADAPTIVE_MIN_H_REL);
+    let done_tolerance = ADAPTIVE_DONE_ABS.max(span * ADAPTIVE_DONE_REL);
+    let critical_times = adaptive_critical_times(source_times, source_inputs);
+
+    let capacity = source_times.len().max(16);
+    let mut times = Vec::with_capacity(capacity);
+    let mut states = Vec::with_capacity(capacity);
+    let mut input_history = Vec::with_capacity(capacity);
+    let mut coefficients_history = Vec::with_capacity(capacity);
+    let mut device_currents = Vec::with_capacity(capacity.saturating_mul(devices.len()));
+    let mut device_charges = Vec::with_capacity(capacity.saturating_mul(devices.len()));
+    let mut current = initial.to_vec();
+    let mut previous2 = initial.to_vec();
+    let mut input_current = adaptive_inputs_at_time(source_times, source_inputs, start);
+    let mut input_previous2 = input_current.clone();
+    let mut current_time = start;
+    let mut previous_step = -1.0;
+    let mut previous2_step = -1.0;
+    let mut previous_accepted_error = None;
+    let mut follows_rejection = false;
+    let mut accepted_steps = 0usize;
+    let mut rejected_steps = 0usize;
+    let mut trial_solves = 0usize;
+    let mut profile = Profile::default();
+    let evaluator_indices: Vec<usize> = devices
+        .iter()
+        .map(|device| device.evaluator_index)
+        .collect();
+    let mut terminal_batch = vec![[0.0; 4]; devices.len()];
+    let mut evaluation_batch = vec![Evaluation::default(); devices.len()];
+    let mut candidate = current.clone();
+    let mut system = DenseSystem::new(circuit.size);
+
+    if !evaluate_devices(
+        evaluator,
+        devices,
+        &evaluator_indices,
+        &current,
+        &input_current,
+        &mut terminal_batch,
+        &mut evaluation_batch,
+        &mut profile,
+        options.newton.profile,
+    ) {
+        return AdaptiveResult {
+            completed: false,
+            times,
+            states,
+            inputs: input_history,
+            device_currents,
+            device_charges,
+            coefficients: coefficients_history,
+            accepted_steps,
+            rejected_steps,
+            trial_solves,
+            profile,
+        };
+    }
+    let mut current_charges: Vec<[f64; 4]> = evaluation_batch
+        .iter()
+        .map(|evaluation| evaluation.charges)
+        .collect();
+    let mut previous2_charges = current_charges.clone();
+    let mut previous3_charges = current_charges.clone();
+    let Some(mut history_current) = history_for(circuit, &current, &input_current) else {
+        return AdaptiveResult {
+            completed: false,
+            times,
+            states,
+            inputs: input_history,
+            device_currents,
+            device_charges,
+            coefficients: coefficients_history,
+            accepted_steps,
+            rejected_steps,
+            trial_solves,
+            profile,
+        };
+    };
+    let mut history2 = history_current.clone();
+    let mut history3 = history_current.clone();
+    times.push(start);
+    states.push(current.clone());
+    input_history.push(input_current.clone());
+    coefficients_history.push([0.0; 3]);
+    for evaluation in &evaluation_batch {
+        device_currents.push(evaluation.currents);
+        device_charges.push(evaluation.charges);
+    }
+
+    while accepted_steps + rejected_steps < options.max_steps && current_time < end - done_tolerance
+    {
+        if previous_step > 0.0 {
+            step = step.min(ADAPTIVE_GROWTH_MAX * previous_step);
+        }
+        step = step.min(max_step).min(end - current_time);
+        for critical in &critical_times {
+            if *critical > current_time + min_step {
+                if *critical < current_time + step {
+                    step = *critical - current_time;
+                }
+                break;
+            }
+        }
+        if step <= min_step {
+            break;
+        }
+
+        let endpoint = current_time + step;
+        let input_now = adaptive_inputs_at_time(source_times, source_inputs, endpoint);
+        let coefficients = adaptive_coefficients(step, previous_step);
+        candidate.clone_from(&current);
+        if previous_step > 0.0
+            && predict_gear2_state(
+                &mut candidate,
+                &current,
+                &previous2,
+                &input_now,
+                &input_current,
+                &input_previous2,
+                step,
+                previous_step,
+            )
+            && options.newton.profile
+        {
+            profile.gear2_predictor_steps += 1;
+        }
+        trial_solves += 1;
+        let converged = solve_adaptive_candidate(
+            circuit,
+            devices,
+            evaluator,
+            &evaluator_indices,
+            &mut candidate,
+            &current_charges,
+            &previous2_charges,
+            &input_now,
+            coefficients,
+            &history_current,
+            &history2,
+            options.newton,
+            &mut terminal_batch,
+            &mut evaluation_batch,
+            &mut system,
+            &mut profile,
+        );
+        if !converged {
+            rejected_steps += 1;
+            follows_rejection = true;
+            if options.newton.profile {
+                profile.newton_rejections += 1;
+            }
+            step = adaptive_rejected_step(step, f64::INFINITY, true).max(min_step);
+            continue;
+        }
+        let Some(candidate_history) = history_for(circuit, &candidate, &input_now) else {
+            break;
+        };
+        let defect_weights =
+            charge_defect_weights(step, previous_step, previous2_step, coefficients);
+        let error = if let Some(weights) = defect_weights {
+            if options.newton.profile {
+                profile.lte_estimates += 1;
+            }
+            let estimate = charge_defect_lte(
+                circuit,
+                devices,
+                &candidate,
+                &current,
+                &input_now,
+                &evaluation_batch,
+                &current_charges,
+                &previous2_charges,
+                &previous3_charges,
+                &candidate_history,
+                &history_current,
+                &history2,
+                &history3,
+                coefficients,
+                weights,
+                options,
+                &mut system,
+            );
+            if estimate.is_some() && options.newton.profile {
+                profile.lte_linear_solves += 1;
+            }
+            estimate.unwrap_or(f64::INFINITY)
+        } else {
+            0.0
+        };
+        if defect_weights.is_none() || error <= ADAPTIVE_ACCEPT_WRMS {
+            current_time = endpoint;
+            accepted_steps += 1;
+            previous3_charges.clone_from(&previous2_charges);
+            previous2.clone_from(&current);
+            previous2_charges.clone_from(&current_charges);
+            std::mem::swap(&mut current, &mut candidate);
+            for (charges, evaluation) in current_charges.iter_mut().zip(&evaluation_batch) {
+                *charges = evaluation.charges;
+            }
+            history3.clone_from(&history2);
+            history2.clone_from(&history_current);
+            history_current = candidate_history;
+            input_previous2.clone_from(&input_current);
+            input_current = input_now;
+            times.push(current_time);
+            states.push(current.clone());
+            input_history.push(input_current.clone());
+            coefficients_history.push(coefficients);
+            for evaluation in &evaluation_batch {
+                device_currents.push(evaluation.currents);
+                device_charges.push(evaluation.charges);
+            }
+
+            let critical_tolerance = min_step.max(done_tolerance);
+            let hit_critical = critical_times
+                .iter()
+                .any(|critical| (*critical - current_time).abs() <= critical_tolerance);
+            if hit_critical {
+                previous2.clone_from(&current);
+                previous2_charges.clone_from(&current_charges);
+                previous3_charges.clone_from(&current_charges);
+                history2.clone_from(&history_current);
+                history3.clone_from(&history_current);
+                input_previous2.clone_from(&input_current);
+                previous_step = -1.0;
+                previous2_step = -1.0;
+                previous_accepted_error = None;
+            } else {
+                previous2_step = previous_step;
+                previous_step = step;
+            }
+            step = if hit_critical {
+                restart_step.min(max_step)
+            } else if defect_weights.is_some() {
+                let next = adaptive_pi_accepted_step(
+                    step,
+                    error,
+                    previous_accepted_error,
+                    follows_rejection,
+                );
+                previous_accepted_error = Some(error.max(ADAPTIVE_ERR_FLOOR));
+                next
+            } else {
+                step
+            };
+            follows_rejection = false;
+        } else {
+            rejected_steps += 1;
+            follows_rejection = true;
+            if options.newton.profile {
+                profile.lte_rejections += 1;
+            }
+            step = adaptive_rejected_step(step, error, false).max(min_step);
+        }
+    }
+
+    AdaptiveResult {
+        completed: current_time >= end - done_tolerance,
+        times,
+        states,
+        inputs: input_history,
+        device_currents,
+        device_charges,
+        coefficients: coefficients_history,
+        accepted_steps,
+        rejected_steps,
+        trial_solves,
+        profile,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1029,6 +1817,81 @@ mod tests {
             evaluator_index: 0,
         }];
         (circuit, devices)
+    }
+
+    fn rc_problem() -> CircuitProblem {
+        use crate::transient::{Capacitor, CurrentSource, Resistor};
+
+        let node = Term {
+            kind: 0,
+            reference: 0,
+            value: 0.0,
+        };
+        let ground = Term {
+            kind: 2,
+            reference: 0,
+            value: 0.0,
+        };
+        CircuitProblem {
+            node_count: 1,
+            size: 1,
+            devices: Vec::new(),
+            resistors: vec![Resistor {
+                a: node,
+                b: ground,
+                ai: Some(0),
+                bi: None,
+                conductance: 1e-3,
+            }],
+            capacitors: vec![Capacitor {
+                a: node,
+                b: ground,
+                ai: Some(0),
+                bi: None,
+                capacitance: 1e-9,
+            }],
+            current_sources: vec![CurrentSource {
+                pi: None,
+                qi: Some(0),
+                value: 1e-3,
+            }],
+            dynamic_current_sources: Vec::new(),
+            vccs: Vec::new(),
+            voltage_sources: Vec::new(),
+            vcvs: Vec::new(),
+            cccs: Vec::new(),
+            ccvs: Vec::new(),
+        }
+    }
+
+    fn solve_adaptive_rc(reltol: f64, voltage_abstol: f64) -> AdaptiveResult {
+        let circuit = rc_problem();
+        let waveforms = Waveforms::new(&[], 0, 2).unwrap();
+        solve_adaptive_gear2(
+            &circuit,
+            &[],
+            &mut LinearEvaluator,
+            &[0.0],
+            &[0.0, 5e-6],
+            waveforms,
+            AdaptiveOptions {
+                newton: Options {
+                    gear2: true,
+                    max_iterations: 4,
+                    voltage_tolerance: 1e-12,
+                    step_limit: 10.0,
+                    gmin: 0.0,
+                    record_device_history: false,
+                    profile: true,
+                },
+                max_step: 1e-6,
+                reltol,
+                voltage_abstol,
+                current_abstol: 1e-12,
+                max_steps: 10_000,
+                initial_step: 1e-9,
+            },
+        )
     }
 
     fn options(max_iterations: usize, profile: bool) -> Options {
@@ -1171,5 +2034,168 @@ mod tests {
             1.0,
         ));
         assert_eq!(growth_state, previous);
+    }
+
+    #[test]
+    fn adaptive_gear2_returns_nonuniform_history_and_profile() {
+        let (circuit, devices) = linear_problem();
+        let waveforms = Waveforms::new(&[], 0, 3).unwrap();
+        let result = solve_adaptive_gear2(
+            &circuit,
+            &devices,
+            &mut LinearEvaluator,
+            &[1.0],
+            &[0.0, 0.4, 1.0],
+            waveforms,
+            AdaptiveOptions {
+                newton: Options {
+                    gear2: true,
+                    max_iterations: 4,
+                    voltage_tolerance: 1e-12,
+                    step_limit: 10.0,
+                    gmin: 0.0,
+                    record_device_history: true,
+                    profile: true,
+                },
+                max_step: 0.3,
+                reltol: 1e-4,
+                voltage_abstol: 1e-8,
+                current_abstol: 1e-12,
+                max_steps: 100,
+                initial_step: 0.05,
+            },
+        );
+
+        assert!(result.completed);
+        assert_eq!(result.times.first().copied(), Some(0.0));
+        assert_eq!(result.times.last().copied(), Some(1.0));
+        assert!(result.times.windows(2).all(|pair| pair[1] > pair[0]));
+        assert_eq!(result.accepted_steps, result.times.len() - 1);
+        assert_eq!(result.coefficients.len(), result.times.len());
+        assert_eq!(result.states.len(), result.times.len());
+        assert_eq!(result.inputs.len(), result.times.len());
+        assert_eq!(
+            result.device_currents.len(),
+            result.times.len() * devices.len()
+        );
+        assert_eq!(
+            result.device_charges.len(),
+            result.times.len() * devices.len()
+        );
+        assert_eq!(
+            result.trial_solves,
+            result.accepted_steps + result.rejected_steps
+        );
+        assert!(result.profile.newton_iterations > 0);
+        assert!(result.profile.bsim_batches > 0);
+        assert!(result.profile.lte_estimates > 0);
+        assert_eq!(
+            result.profile.lte_estimates,
+            result.profile.lte_linear_solves
+        );
+        assert!(
+            result
+                .states
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+        );
+    }
+
+    #[test]
+    fn adaptive_gear2_rejects_invalid_tolerances() {
+        let (circuit, devices) = linear_problem();
+        let waveforms = Waveforms::new(&[], 0, 2).unwrap();
+        let result = solve_adaptive_gear2(
+            &circuit,
+            &devices,
+            &mut LinearEvaluator,
+            &[1.0],
+            &[0.0, 1.0],
+            waveforms,
+            AdaptiveOptions {
+                newton: options(4, true),
+                max_step: -1.0,
+                reltol: 0.0,
+                voltage_abstol: 1e-8,
+                current_abstol: 1e-12,
+                max_steps: 100,
+                initial_step: -1.0,
+            },
+        );
+
+        assert!(!result.completed);
+        assert!(result.times.is_empty());
+    }
+
+    #[test]
+    fn charge_defect_lte_tracks_explicit_rc_error_and_tolerance() {
+        let loose = solve_adaptive_rc(1e-3, 1e-6);
+        let tight = solve_adaptive_rc(1e-5, 1e-8);
+
+        assert!(loose.completed);
+        assert!(tight.completed);
+        assert!(loose.profile.lte_estimates > 0);
+        assert!(tight.profile.lte_estimates > 0);
+        let trajectory_error = |result: &AdaptiveResult| {
+            result
+                .times
+                .iter()
+                .zip(&result.states)
+                .map(|(&time, state)| {
+                    let exact = 1.0 - (-time / 1e-6).exp();
+                    (state[0] - exact).abs()
+                })
+                .fold(0.0, f64::max)
+        };
+        let loose_error = trajectory_error(&loose);
+        let tight_error = trajectory_error(&tight);
+
+        assert!(loose_error < 5e-3, "loose error = {loose_error:e}");
+        assert!(tight_error < 5e-4, "tight error = {tight_error:e}");
+        assert!(
+            tight_error < loose_error / 3.0,
+            "loose error = {loose_error:e}, tight error = {tight_error:e}"
+        );
+        assert!(tight.accepted_steps > loose.accepted_steps);
+        assert_eq!(
+            tight.trial_solves,
+            tight.accepted_steps + tight.rejected_steps
+        );
+    }
+
+    #[test]
+    fn charge_defect_weights_match_uniform_bdf3_minus_bdf2() {
+        let weights =
+            charge_defect_weights(2.0, 2.0, 2.0, adaptive_coefficients(2.0, 2.0)).unwrap();
+        let expected = [1.0 / 6.0, -0.5, 0.5, -1.0 / 6.0];
+        for (actual, expected) in weights.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-14);
+        }
+        assert!(weights.into_iter().sum::<f64>().abs() < 1e-14);
+    }
+
+    #[test]
+    fn projected_lte_excludes_algebraic_branch_currents() {
+        let correction = [1e-7, 1.0e-3];
+        let state = [0.5, 1.0e-3];
+        let previous = [0.5, -1.0e-3];
+        let error = projected_lte_wrms(&correction, &state, &previous, 1, 1e-4, 1e-6);
+
+        assert!(error < ADAPTIVE_ACCEPT_WRMS);
+    }
+
+    #[test]
+    fn pi_controller_suppresses_post_rejection_growth() {
+        let free = adaptive_pi_accepted_step(1.0, 0.01, Some(0.02), false);
+        let guarded = adaptive_pi_accepted_step(1.0, 0.01, Some(0.02), true);
+
+        assert!(free > 1.0);
+        assert_eq!(guarded, 1.0);
+        assert!(adaptive_rejected_step(1.0, 8.0, false) < 1.0);
+        assert_eq!(
+            adaptive_rejected_step(1.0, f64::INFINITY, true),
+            ADAPTIVE_NEWTON_REJECT_FACTOR
+        );
     }
 }

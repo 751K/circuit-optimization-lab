@@ -70,6 +70,38 @@ release checklist.
 
 ### Changed / 变更
 
+- **Native BSIM LTE-adaptive Gear2 / 原生 BSIM LTE 自适应 Gear2**
+
+  **English:** Native SKY130, FreePDK45, and TSMC28 BSIM transient dispatch now
+  honors `adaptive=True` instead of expanding and solving a fixed grid. The Rust
+  core performs one nonlinear Gear2 solve per trial, forms a variable-step
+  BDF3-minus-BDF2 defect directly from the accepted BSIM terminal-charge
+  history, and projects that defect through the converged BDF2 Jacobian with one
+  linear solve. A PI controller rejects over-tolerance trials, limits step
+  growth, suppresses growth immediately after a rejection, and restarts
+  conservatively at detected input-slope breakpoints. LTE controls dynamic
+  node-voltage states; algebraic MNA ideal-source branch currents are excluded.
+  Profiles distinguish LTE estimates, LTE linear solves, LTE rejections, and
+  Newton rejections. On the local FreePDK45 MDAC case, default tolerances reduced
+  500 fixed steps to 146 accepted steps with one rejection and warm end-to-end
+  time from about 167 ms to 56.6 ms. Against a 0.5 ps reference with the same
+  10 ps input edge, peak/final differential-output errors were about 2.04 mV /
+  50 uV; tightening `reltol/vabstol` from `1e-4/1e-6 V` to `1e-5/1e-7 V`
+  reduced them to about 0.42 mV / 12 uV.
+
+  **中文：** SKY130、FreePDK45 和 TSMC28 的原生 BSIM transient 派发现在会真正
+  执行 `adaptive=True`，不再展开后按固定网格求解。每个 trial 只做一次非线性
+  Gear2 求解；Rust 核从已接受的 BSIM 端电荷历史直接构造变步长
+  BDF3−BDF2 defect，再通过收敛的 BDF2 Jacobian 做一次线性投影。PI controller
+  负责拒绝 LTE 超差试算、限制增长、拒步后禁止立即增步，并在输入斜率断点保守
+  重启。LTE 只控制动态节点电压，理想源的 MNA 代数支路电流不进入误差范数。
+  profile 会分别报告 LTE 估计/线性求解/LTE 拒步/Newton 拒步。在本地
+  FreePDK45 MDAC 用例上，默认容差把 500 个固定步降为 146 个接受步和 1 次拒步，
+  热端到端时间约由 167 ms 降至 56.6 ms。相对具有相同 10 ps 输入边沿的 0.5 ps
+  固定网格参考，差分输出峰值/最终误差约为 2.04 mV / 50 uV；把
+  `reltol/vabstol` 从 `1e-4/1e-6 V` 收紧到 `1e-5/1e-7 V` 后，误差降为约
+  0.42 mV / 12 uV。
+
 - **Converged-state BSIM result reuse / 收敛状态 BSIM 结果复用**
 
   **English:** Native BSIM transient now records accepted-state device-current

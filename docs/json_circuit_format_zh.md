@@ -412,10 +412,10 @@ bit 的 `decision_time` 附近脉冲到 `high`（评估）——锁存器在 CDA
 - **AC / Noise**：DC 源视为短路（AC 地）；理想源无热噪声。源名出现在 `ac_drives` 中时作为 AC 激励。
 - **Transient**：支持常数或波形 key 的 `E(t)`。编译 Rust 定网格内核直接处理扩展的
   `n_aug = n + m` 系统——含 vsource（或 VCVS/CCVS）支路电流未知量的电路仍报告
-  `result["rust_grid_solver"] is True`。adaptive Gear2 路径（`adaptive=True`）目前
-  只覆盖 OTFT/`n_aug == n` 场景；对含支路未知量的电路请求 adaptive 会直接报错，
-  而不是静默回退。生产路径不存在 Python 数值兜底；已废弃的 `numba_grid_solver`
-  结果键已不存在（测试断言其不出现）。
+  `result["rust_grid_solver"] is True`。原生 BSIM adaptive Gear2 同样支持扩展系统；
+  其 LTE 范数只控制动态节点电压，明确排除理想源的代数支路电流。通用 OTFT
+  adaptive 路径仍要求 `n_aug == n`。生产路径不存在 Python 数值兜底；已废弃的
+  `numba_grid_solver` 结果键已不存在（测试断言其不出现）。
 - **PSS / PAC / PNoise** 同样支持：shooting monodromy 与 harmonic-balance 矩阵都用支路电流未知量做 bordered 扩展（PNoise 在有电压源时走 dense 路径）。
 
 ### `vcvs`

@@ -1769,6 +1769,166 @@ impl Bsim4TransientProblem {
             result.profile.failed_steps,
         ))
     }
+
+    #[pyo3(signature = (
+        initial, times, inputs, max_step=-1.0, reltol=1e-4,
+        voltage_abstol=1e-6, current_abstol=1e-12, max_steps=200000,
+        initial_step=-1.0, max_iterations=40, voltage_tolerance=1e-8,
+        step_limit=0.25, gmin=1e-12, profile=false
+    ))]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn solve_adaptive_gear2<'py>(
+        &self,
+        py: Python<'py>,
+        initial: PyReadonlyArray1<'py, f64>,
+        times: PyReadonlyArray1<'py, f64>,
+        inputs: PyReadonlyArray2<'py, f64>,
+        max_step: f64,
+        reltol: f64,
+        voltage_abstol: f64,
+        current_abstol: f64,
+        max_steps: usize,
+        initial_step: f64,
+        max_iterations: usize,
+        voltage_tolerance: f64,
+        step_limit: f64,
+        gmin: f64,
+        profile: bool,
+    ) -> PyResult<(
+        bool,
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray3<f64>>,
+        Bound<'py, PyArray3<f64>>,
+        Bound<'py, PyArray2<f64>>,
+        (
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+        ),
+    )> {
+        let initial = initial
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("initial must be a contiguous float64 array"))?;
+        let times = times
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("times must be a contiguous float64 array"))?;
+        let input_view = inputs.as_array();
+        let input_shape = input_view.dim();
+        if !input_view.is_standard_layout() {
+            return Err(PyValueError::new_err(
+                "inputs must be a C-contiguous float64 array",
+            ));
+        }
+        let inputs = inputs
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("inputs must be a C-contiguous float64 array"))?;
+        let waveforms = transient::Waveforms::new(inputs, input_shape.0, input_shape.1)
+            .ok_or_else(|| PyValueError::new_err("invalid inputs shape"))?;
+        bsim_transient::validate_fixed_grid_input(
+            &self.circuit,
+            &self.devices,
+            initial,
+            times,
+            waveforms,
+        )
+        .map_err(core_error)?;
+        let circuit = self.circuit.clone();
+        let devices = self.devices.clone();
+        let handles = self.handles.clone();
+        let width = circuit.size;
+        let input_count = input_shape.0;
+        let device_count = devices.len();
+        let result = py.detach(move || {
+            // Bsim4TransientProblem validates that every handle is non-zero;
+            // Python owns them through this solve.
+            let mut evaluator = unsafe { RustBsimEvaluator::new(handles) };
+            bsim_transient::solve_adaptive_gear2(
+                &circuit,
+                &devices,
+                &mut evaluator,
+                initial,
+                times,
+                waveforms,
+                bsim_transient::AdaptiveOptions {
+                    newton: bsim_transient::Options {
+                        gear2: true,
+                        max_iterations,
+                        voltage_tolerance,
+                        step_limit,
+                        gmin,
+                        record_device_history: true,
+                        profile,
+                    },
+                    max_step,
+                    reltol,
+                    voltage_abstol,
+                    current_abstol,
+                    max_steps,
+                    initial_step,
+                },
+            )
+        });
+        let sample_count = result.times.len();
+        let states = rows_into_array2(py, result.states, width, "BSIM4 adaptive states")?;
+        let accepted_inputs =
+            rows_into_array2(py, result.inputs, input_count, "BSIM4 adaptive inputs")?;
+        let device_currents = terminal_history_into_array3(
+            py,
+            result.device_currents,
+            sample_count,
+            device_count,
+            "BSIM4 adaptive device currents",
+        )?;
+        let device_charges = terminal_history_into_array3(
+            py,
+            result.device_charges,
+            sample_count,
+            device_count,
+            "BSIM4 adaptive device charges",
+        )?;
+        let coefficients = rows_into_array2(
+            py,
+            result
+                .coefficients
+                .into_iter()
+                .map(|values| values.to_vec())
+                .collect(),
+            3,
+            "BSIM4 adaptive coefficients",
+        )?;
+        Ok((
+            result.completed,
+            result.times.into_pyarray(py),
+            states,
+            accepted_inputs,
+            device_currents,
+            device_charges,
+            coefficients,
+            (
+                result.accepted_steps,
+                result.rejected_steps,
+                result.trial_solves,
+                result.profile.newton_iterations,
+                result.profile.bsim_evaluations,
+                result.profile.bsim_batches,
+                result.profile.gear2_predictor_steps,
+                result.profile.lte_estimates,
+                result.profile.lte_linear_solves,
+                result.profile.lte_rejections,
+                result.profile.newton_rejections,
+            ),
+        ))
+    }
 }
 
 #[pymethods]
