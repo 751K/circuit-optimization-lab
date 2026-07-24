@@ -1072,11 +1072,12 @@ The current solver stack was calibrated against Cadence Spectre 24.1 for the AT4
   +0.03%, and TD-adjoint PNoise IRN is about +0.02%. Across slow/typical/fast,
   the old HB-K32 IRN errors were +1.81% / +1.05% / +0.66%; TD PNoise gives
   +0.02% / -0.00% / +0.57%.
-- SC-LPF calibration now explicitly uses `gear2 + adaptive + cap_mode="average"`
-  with edge breakpoints and enough PNoise resampling (`512` samples,
-  `max_sideband=20`). Against the archived Spectre SC-LPF reference it currently
-  passes with PAC gain about `-0.32%`, bandwidth `+1.07%`, and output noise
-  `+2.82%`.
+- SC-LPF calibration uses a fixed 3201-point `gear2` orbit with
+  `cap_mode="average"` and enough PNoise resampling (`512` samples,
+  `max_sideband=20`). The fixed grid avoids architecture-sensitive adaptive
+  accepted-step histories at switch edges. Against the archived Spectre
+  reference, PAC gain, bandwidth, and integrated output noise are within about
+  `0.2%`, `0.9%`, and `0.5%`, respectively.
 - Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms
   input-referred noise.
 

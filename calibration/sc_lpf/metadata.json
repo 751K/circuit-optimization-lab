@@ -21,17 +21,13 @@
     "noise_band": [0.1, 100.0]
   },
   "solver": {
-    "n_points": 201,
-    "tstab_periods": 10,
+    "n_points": 3201,
+    "tstab_periods": 60,
     "residual_tol": 0.02,
-    "max_shooting_iters": 8,
-    "max_stabilization_periods": 0,
+    "max_shooting_iters": 20,
+    "max_stabilization_periods": 200,
     "integration_method": "gear2",
-    "adaptive": true,
-    "adaptive_reltol": 0.001,
-    "adaptive_vabstol": 0.00001,
-    "adaptive_h0": 0.0000001,
-    "adaptive_max_steps": 10000,
+    "adaptive": false,
     "cap_mode": "average",
     "pnoise_max_sideband": 20,
     "pnoise_n_period_samples": 512
@@ -39,5 +35,5 @@
   "analyses": ["pac", "pnoise"],
   "reference_files": {"pac": "pac.0.pac", "pnoise": "pnoise.pnoise"},
   "tolerances": {"pac_gain_rtol": 0.05, "pac_bw_rtol": 0.08, "pnoise_out_rtol": 0.06},
-  "provenance_note": "Spectre 24.1.0.078 on flex (daraina.ele.tue.nl), 2026-06-21. pss fund=1k harms=20 tstab=50m + pac sideband-0 (pac.0.pac, VIN->VOUT) + pnoise(VOUT). Netlist generated faithful to examples/sc_lpf.py incl. ~10% clock conduction overlap. pss.td.pss kept for the steady-state VOUT level."
+  "provenance_note": "Spectre 24.1.0.078 on flex (daraina.ele.tue.nl), 2026-06-21. pss fund=1k harms=20 tstab=50m + pac sideband-0 (pac.0.pac, VIN->VOUT) + pnoise(VOUT). Netlist generated faithful to examples/sc_lpf.py incl. ~10% clock conduction overlap. pss.td.pss kept for the steady-state VOUT level. The local calibration uses a fixed 3201-point Gear2 orbit because adaptive accepted-step histories around switch edges produced architecture-dependent PNoise results on macOS arm64 and Linux x86_64."
 }

@@ -109,7 +109,9 @@ def test_latch_screen_separates_latch_prone_from_robust(monkeypatch):
         # neutral and split-seeded solves). The strict detection regression is
         # therefore pinned to the reference platform; elsewhere the screen
         # just has to run clean and keep the robust design un-flagged.
-        assert np.isfinite(drawn_dv) and drawn_dv >= 0.0
+        # A failed adversarial solve is the conservative +inf result on every
+        # platform, including x86 CI.
+        assert not np.isnan(drawn_dv) and drawn_dv >= 0.0
 
 
 def test_mismatch_mc_latch_rates():

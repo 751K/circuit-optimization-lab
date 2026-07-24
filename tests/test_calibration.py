@@ -59,11 +59,12 @@ def test_calibration_chopper_matches_cadence(case):
 SC_LPF = "calibration/sc_lpf"
 
 
-def test_sc_lpf_calibration_uses_adaptive_average_gear2_default():
+def test_sc_lpf_calibration_uses_uniform_average_gear2_default():
     metadata = json.loads(Path(SC_LPF, "metadata.json").read_text())
     solver = metadata["solver"]
     assert solver["integration_method"] == "gear2"
-    assert solver["adaptive"] is True
+    assert solver["adaptive"] is False
+    assert solver["n_points"] >= 3201
     assert solver["cap_mode"] == "average"
     assert solver["pnoise_n_period_samples"] >= 512
     assert solver["pnoise_max_sideband"] >= 20
@@ -71,9 +72,9 @@ def test_sc_lpf_calibration_uses_adaptive_average_gear2_default():
 
 def test_calibration_sc_lpf_matches_cadence():
     # Second periodic calibration case beside the chopper: a single-ended switched-
-    # capacitor LPF (vsource clocks, reverse-biased PMOS switches). It now also
-    # guards the SC-LPF calibration default: gear2 + adaptive + cap_mode="average"
-    # with enough PNoise sampling to match the archived Spectre reference.
+    # capacitor LPF (vsource clocks, reverse-biased PMOS switches). The fixed,
+    # high-resolution Gear2 orbit avoids architecture-sensitive adaptive steps at
+    # switch edges; average charge caps and the PNoise grid match Spectre.
     report = run_calibration(SC_LPF, analyses=["pac", "pnoise"])
     assert report["overall_pass"], format_report(report)
     assert report["results"]["pac"]["metrics"]["gain_baseband"]["pass"]

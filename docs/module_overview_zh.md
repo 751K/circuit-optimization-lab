@@ -900,10 +900,11 @@ AC 结果时约 1.8ms。
   `f_chop=200 Hz` 时默认 time-domain PAC 约 +0.03%，TD-adjoint PNoise IRN 约 +0.02%。
   slow/typical/fast 三 corner 的旧 HB-K32 IRN 误差为 +1.81% / +1.05% / +0.66%，
   TD PNoise 后为 +0.02% / −0.00% / +0.57%。
-- SC-LPF calibration 现在显式默认 `gear2 + adaptive + cap_mode="average"`，
-  输入网格补 clock edge 断点，并用 `pnoise_n_period_samples=512` /
-  `pnoise_max_sideband=20` 保证噪声采样。对入库 Spectre SC-LPF 参考，当前
-  PASS：PAC 增益约 −0.32%、带宽 +1.07%、输出噪声 +2.82%。
+- SC-LPF calibration 使用固定 3201 点 `gear2` 轨迹与
+  `cap_mode="average"`，并用 `pnoise_n_period_samples=512` /
+  `pnoise_max_sideband=20` 保证噪声采样。固定网格避免 switch edge 附近
+  adaptive accepted-step 历史在不同 CPU 架构上产生差异。对入库 Spectre
+  参考，PAC 增益、带宽与积分输出噪声误差分别约为 0.2%、0.9% 与 0.5%。
 - 最终锁定设计约 22.9 dB 增益、549 Hz 带宽、37 µVrms 等价输入噪声。
 
 上述数据描述当前的 AT4000TG 验证案例。后续 PDK 或拓扑应针对其各自的仿真器参考重新进行校准。

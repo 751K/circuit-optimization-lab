@@ -279,6 +279,19 @@ release checklist.
 
 ### Fixed / 修复
 
+- **Cross-platform calibration gates / 跨平台校准门**
+
+  **English:** Made the SC-LPF Cadence calibration use a fixed, high-resolution
+  Gear2 PSS orbit instead of architecture-sensitive adaptive accepted steps at
+  switch edges. Updated the latch-screen regression to accept the documented
+  conservative `+inf` result when an adversarial solve does not converge on
+  non-reference platforms.
+
+  **中文：** SC-LPF Cadence 校准改用固定高分辨率 Gear2 PSS 轨迹，避免
+  switch edge 附近 adaptive accepted-step 在不同 CPU 架构上产生差异。
+  latch-screen 回归测试同步接受已定义的保守 `+inf` 语义：非参考平台上的
+  对抗求解不收敛时不再误判 CI 失败。
+
 - **Native BSIM transient profiling / 原生 BSIM 瞬态性能统计**
 
   **English:** `transient(..., profile=True)` now reaches the native BSIM
