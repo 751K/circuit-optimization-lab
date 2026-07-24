@@ -21,8 +21,8 @@ without breaking another backend.”
 | `circuitopt/pac_solver.py` | Periodic small-signal conversion |
 | `circuitopt/pnoise_solver.py` | Cyclostationary noise |
 | `circuitopt/spice/` | HSPICE library parser and elaborator |
-| `circuitopt/compact_models/bsim4/` | Native BSIM4 ABI and implementation |
-| `circuitopt/pdk/tsmc28/` | TSMC-specific model resolution and device adapter |
+| `circuitopt/compact_models/bsim4/` | Native BSIM4 ABI, shared card cache, and implementation |
+| `circuitopt/pdk/{freepdk45,sky130,tsmc28}/` | PDK-specific model resolution and native device adapters |
 | `circuitopt/ngspice_*.py` | Explicit external ngspice characterization and oracle paths |
 | `circuitopt/dataset.py` | Dataset generation and provenance |
 | `circuitopt/surrogate*.py` / `optimize.py` | Surrogate training and optimization |

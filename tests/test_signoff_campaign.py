@@ -146,6 +146,31 @@ def test_campaign_retains_invalid_case_and_promotes_point_and_global_status(
     assert result["worst_case"]["supply_v"] == 0.95
 
 
+def test_campaign_cooperative_stop_returns_explicit_partial_result(
+    tmp_path, monkeypatch,
+):
+    path = _write_fixture(tmp_path)
+    monkeypatch.setattr(
+        campaign_module, "run_analysis_suite", lambda _spec: {"ac": {}})
+    monkeypatch.setattr(campaign_module, "evaluate_signoff", _fake_signoff)
+    checks = 0
+
+    def should_stop():
+        nonlocal checks
+        checks += 1
+        return checks > 3
+
+    result = run_signoff_campaign(
+        path, workers=1, should_stop=should_stop)
+
+    assert result["status"] == "cancelled"
+    assert result["passed"] is False
+    assert result["stopped_early"] is True
+    assert result["grid"]["total_points"] == 45
+    assert result["summary"]["points"]["total"] == 3
+    assert len(result["points"]) == 3
+
+
 def test_prepare_case_bakes_exact_corner_temperature_supply_and_pvt_expression():
     base = {
         "bias": {"VDD": 0.9},

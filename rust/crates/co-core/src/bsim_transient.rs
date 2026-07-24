@@ -41,12 +41,17 @@ pub struct Options {
     pub voltage_tolerance: f64,
     pub step_limit: f64,
     pub gmin: f64,
+    pub record_device_history: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Result {
     pub completed: bool,
     pub states: Vec<Vec<f64>>,
+    /// Sample-major terminal histories with one `[d, g, s, b]` row per device.
+    /// Empty when `Options::record_device_history` is false.
+    pub device_currents: Vec<[f64; 4]>,
+    pub device_charges: Vec<[f64; 4]>,
     pub failures: usize,
     pub first_failure: Option<usize>,
 }
@@ -508,6 +513,8 @@ pub fn solve_fixed_grid<E: Evaluator>(
         return Result {
             completed: false,
             states: Vec::new(),
+            device_currents: Vec::new(),
+            device_charges: Vec::new(),
             failures: 0,
             first_failure: Some(0),
         };
@@ -519,17 +526,34 @@ pub fn solve_fixed_grid<E: Evaluator>(
     let initial_inputs = input_at(0);
     let mut charge1 = vec![[0.0; 4]; devices.len()];
     let mut charge2 = vec![[0.0; 4]; devices.len()];
+    let history_len = times.len().saturating_mul(devices.len());
+    let mut device_currents = if options.record_device_history {
+        vec![[0.0; 4]; history_len]
+    } else {
+        Vec::new()
+    };
+    let mut device_charges = if options.record_device_history {
+        vec![[0.0; 4]; history_len]
+    } else {
+        Vec::new()
+    };
     for (position, device) in devices.iter().copied().enumerate() {
         let Some(evaluation) = evaluate_device(evaluator, device, &state, &initial_inputs) else {
             return Result {
                 completed: false,
                 states,
+                device_currents,
+                device_charges,
                 failures: 0,
                 first_failure: Some(0),
             };
         };
         charge1[position] = evaluation.charges;
         charge2[position] = evaluation.charges;
+        if options.record_device_history {
+            device_currents[position] = evaluation.currents;
+            device_charges[position] = evaluation.charges;
+        }
     }
     let mut system = DenseSystem::new(circuit.size);
     let mut failures = 0usize;
@@ -558,6 +582,8 @@ pub fn solve_fixed_grid<E: Evaluator>(
             return Result {
                 completed: false,
                 states,
+                device_currents,
+                device_charges,
                 failures,
                 first_failure: Some(sample),
             };
@@ -571,6 +597,8 @@ pub fn solve_fixed_grid<E: Evaluator>(
             return Result {
                 completed: false,
                 states,
+                device_currents,
+                device_charges,
                 failures,
                 first_failure: Some(sample),
             };
@@ -661,17 +689,26 @@ pub fn solve_fixed_grid<E: Evaluator>(
                 return Result {
                     completed: false,
                     states,
+                    device_currents,
+                    device_charges,
                     failures,
                     first_failure: Some(sample),
                 };
             };
             charge2[position] = charge1[position];
             charge1[position] = evaluation.charges;
+            if options.record_device_history {
+                let offset = sample * devices.len() + position;
+                device_currents[offset] = evaluation.currents;
+                device_charges[offset] = evaluation.charges;
+            }
         }
     }
     Result {
         completed: true,
         states,
+        device_currents,
+        device_charges,
         failures,
         first_failure,
     }

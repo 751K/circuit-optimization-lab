@@ -25,6 +25,7 @@ class _Fp45NativeFet(TransistorModel):
     HAS_TERMINAL_NOISE = True
     TRANSIENT_BACKEND = "bsim4_native"
     SUPPORTS_MULTIPLICITY = True
+    CONSUMES_BINDING_METADATA = True
     _EVAL_CACHE_MAX = 32
 
     def __init__(
@@ -40,6 +41,10 @@ class _Fp45NativeFet(TransistorModel):
         delvto: float = 0.0,
         mult: int = 1,
         extract_w: float | None = None,
+        _binding_pdk: str = "freepdk45",
+        _binding_model: str | None = None,
+        _binding_section: str = "inherit",
+        _binding_bin: str = "auto",
         **parameters,
     ):
         mismatch_v = parameters.pop("_delvto", mismatch or delvto)
@@ -53,18 +58,24 @@ class _Fp45NativeFet(TransistorModel):
         self.extract_w = extract_w
         self.g_area = self.W * self.L * self.mult
         self.kcl_sign = -1.0 if self.TYPE > 0 else 1.0
-        card = load_freepdk45_library(
-            self.POLARITY, self.corner).device_card(
+        card, self.model_card, self.instance_card = load_freepdk45_library(
+            self.POLARITY, self.corner).device_cards(
+                pdk=_binding_pdk,
+                model=_binding_model or self.POLARITY,
+                section=_binding_section,
+                bin_selector=_binding_bin,
                 width_um=self.W,
                 length_um=self.L,
                 nf=self.NF,
                 mult=self.mult,
+                corner=self.corner,
+                temperature_c=self.temperature - 273.15,
                 mismatch_v=float(mismatch_v),
                 instance_parameters=parameters,
             )
-        self.model_card, self.instance_card = card.to_bsim4_cards()
         self.card_path = card.path
         self.model_name = card.model_name
+        self.bin_name = card.model_name
         self._evaluations: OrderedDict[tuple, Bsim4Evaluation] = OrderedDict()
 
     def _evaluate(

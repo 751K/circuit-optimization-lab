@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -90,6 +91,105 @@ def test_temperature_mismatch_and_multiplicity_reach_numeric_card():
     assert cold.model_parameters == hot.model_parameters
 
 
+def test_card_cache_reuses_immutable_core_model_and_instance_cards():
+    library = load_tsmc28_core_library(_PATH)
+    library.clear_card_cache()
+    request = {
+        "pdk": "tsmc28hpcp",
+        "model": "nmos",
+        "section": "inherit",
+        "bin_selector": "auto",
+        "width_um": 1.0,
+        "length_um": 0.03,
+        "nf": 2,
+        "mult": 1,
+        "corner": "tt",
+        "temperature_c": 27.0,
+        "mismatch_v": 0.0,
+    }
+
+    first = library.device_cards("nmos", **request)
+    second = library.device_cards("nmos", **request)
+    assert all(left is right for left, right in zip(first, second, strict=True))
+    info = library.card_cache_info()
+    assert (info.hits, info.misses, info.maxsize, info.currsize) == (
+        1, 1, 1024, 1)
+    with pytest.raises(TypeError):
+        first[0].model_parameters["vth0"] = 1.0
+    with pytest.raises(TypeError):
+        first[1].parameters["vth0"] = 1.0
+    with pytest.raises(TypeError):
+        first[2].parameters["nf"] = 4
+
+
+def test_card_cache_key_separates_binding_geometry_pvt_and_mismatch():
+    library = load_tsmc28_core_library(_PATH)
+    library.clear_card_cache()
+    base = {
+        "pdk": "tsmc28hpcp",
+        "model": "pmos",
+        "section": "inherit",
+        "bin_selector": "auto",
+        "width_um": 2.0,
+        "length_um": 0.04,
+        "nf": 1,
+        "mult": 1,
+        "corner": "tt",
+        "temperature_c": 27.0,
+        "mismatch_v": 0.0,
+    }
+    variants = (
+        {},
+        {"section": "tt"},
+        {"width_um": 2.1},
+        {"length_um": 0.05},
+        {"nf": 2},
+        {"mult": 2},
+        {"temperature_c": 125.0},
+        {"corner": "ss"},
+        {"mismatch_v": 0.01},
+    )
+    bundles = [
+        library.device_cards("pmos", **(base | override))
+        for override in variants
+    ]
+    assert len({id(bundle[0]) for bundle in bundles}) == len(variants)
+    assert library.card_cache_info().currsize == len(variants)
+
+    resolved_bin = bundles[0][0].bin_name
+    explicit = library.device_cards(
+        "pmos", **(base | {"bin_selector": resolved_bin}))
+    assert explicit[0].bin_name == resolved_bin
+    assert explicit[0] is not bundles[0][0]
+    assert library.card_cache_info().currsize == len(variants) + 1
+
+
+def test_card_cache_same_key_is_identity_stable_across_threads():
+    library = load_tsmc28_core_library(_PATH)
+    library.clear_card_cache()
+
+    def load():
+        return library.device_cards(
+            "nmos",
+            pdk="tsmc28hpcp",
+            model="nmos",
+            section="tt",
+            bin_selector="auto",
+            width_um=3.0,
+            length_um=0.06,
+            nf=4,
+            corner="tt",
+            temperature_c=27.0,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        bundles = list(pool.map(lambda _: load(), range(16)))
+    assert len({id(bundle[0]) for bundle in bundles}) == 1
+    assert len({id(bundle[1]) for bundle in bundles}) == 1
+    assert len({id(bundle[2]) for bundle in bundles}) == 1
+    assert library.card_cache_info().currsize == 1
+
+
 def test_invalid_requests_fail_loudly():
     library = load_tsmc28_core_library(_PATH)
     with pytest.raises(Tsmc28ModelError, match="corner"):
@@ -98,3 +198,15 @@ def test_invalid_requests_fail_loudly():
         library.core_card("nmos", width_um=0, length_um=0.03)
     with pytest.raises(Tsmc28ModelError, match="bins"):
         library.core_card("nmos", width_um=1e9, length_um=0.03)
+    with pytest.raises(Tsmc28ModelError, match="PDK"):
+        library.core_card(
+            "nmos", pdk="freepdk45", width_um=1, length_um=0.03)
+    with pytest.raises(Tsmc28ModelError, match="model"):
+        library.core_card(
+            "nmos", model="pmos", width_um=1, length_um=0.03)
+    with pytest.raises(Tsmc28ModelError, match="section"):
+        library.core_card(
+            "nmos", section="ss", corner="tt", width_um=1, length_um=0.03)
+    with pytest.raises(Tsmc28ModelError, match="bin"):
+        library.core_card(
+            "nmos", bin_selector="not_a_bin", width_um=1, length_um=0.03)

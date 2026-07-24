@@ -53,11 +53,13 @@ from .run_contract import evaluate_signoff
 # lazily inside serve_run_cli), so importing it here never pulls the serve extra.
 from .service import add_cli_args as serve_add_cli_args
 from .service import run_cli as serve_run_cli
+from .mcp import add_cli_args as mcp_add_cli_args
+from .mcp import run_cli as mcp_run_cli
 
 _ANALYSIS_NAMES = ["ac", "noise", "transient", "pss", "pac", "pnoise"]
 _SUBCOMMANDS = [
     "run", "signoff", "corners", "mc", "chopper", "adc",
-    "explore", "plot", "dataset", "serve",
+    "explore", "plot", "dataset", "serve", "mcp",
 ]
 _CHOPPER_LEVELS = ["ideal", "pmos", "lptv", "pss", "pac", "pnoise", "transient"]
 
@@ -344,6 +346,21 @@ def _add_serve_parser(subparsers):
 
 def _cmd_serve(args):
     return serve_run_cli(args)
+
+
+# ── subcommand: mcp ──────────────────────────────────────────────────────────
+
+def _add_mcp_parser(subparsers):
+    p = subparsers.add_parser(
+        "mcp",
+        help="Start the local Model Context Protocol server (needs the 'mcp' extra)",
+    )
+    mcp_add_cli_args(p)
+    return p
+
+
+def _cmd_mcp(args):
+    return mcp_run_cli(args)
 
 
 # ── subcommand: corners ──────────────────────────────────────────────────────
@@ -1060,6 +1077,7 @@ def main(argv=None):
     _add_plot_parser(sub)
     _add_dataset_parser(sub)
     _add_serve_parser(sub)
+    _add_mcp_parser(sub)
 
     # If --help/-h is the only argument, show the full subcommand listing
     if set(argv) <= {"--help", "-h"}:
@@ -1100,6 +1118,7 @@ def main(argv=None):
         "plot": _cmd_plot,
         "dataset": _cmd_dataset,
         "serve": _cmd_serve,
+        "mcp": _cmd_mcp,
     }
     handler = handlers.get(cmd)
     if handler is None:

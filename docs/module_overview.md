@@ -85,9 +85,14 @@ circuitopt/
   service/             Optional local FastAPI HTTP service layer (the `serve` extra) — see below.
     __init__.py        Re-exports CLI glue only; never imports fastapi (import circuitopt stays fastapi-free).
     app.py             create_app() — /api/v1 routes (health/capabilities/validate/solve/jobs/*); thin adapter, no numerics.
-    jobs.py            JobManager — in-process thread-pool background jobs (explore/mc) with progress queue + cooperative cancel.
+    operations.py      Transport-neutral capabilities/validate/solve operations shared by HTTP and MCP.
+    jobs.py            Extensible in-process thread-pool jobs with progress queue + cooperative cancel.
     serialize.py        to_jsonable()/serialize_results() — numpy/complex/NaN → strict-JSON conventions.
     cli.py              add_cli_args()/run_cli() — shared `serve` subcommand argument wiring (lazy fastapi/uvicorn import).
+  mcp/                 Optional stdio/Streamable HTTP MCP adapter (the `mcp` extra).
+    server.py          FastMCP tools/resources, bounded results, and background signoff adapter.
+    workspace.py       Workspace-relative input validation and atomic result artifacts.
+    cli.py             Shared `mcp` subcommand and standalone entry-point arguments.
 ```
 
 ## Import Relationship
@@ -129,11 +134,15 @@ ngspice_process.py   <- device_model
 freepdk45_model.py   <- pdk/freepdk45, device_model, ngspice_device
 pdk/freepdk45/*      <- spice parser, compact_models/bsim4, device_model, toolchain
 tsmc28_model.py      <- device_model, ngspice_device, ngspice_process, toolchain
-service/app.py       <- analysis_dispatch, analysis_options, circuit_loader, device_factory, device_model,
-                        freepdk45_model, service/jobs, service/serialize; optional fastapi/pydantic at import time
+service/operations.py <- analysis_dispatch, analysis_options, circuit_loader, device_factory,
+                         device_model, run_contract, service/serialize
+service/app.py       <- service/operations, service/jobs; optional fastapi/pydantic at import time
 service/jobs.py      <- explore, corners, service/serialize; no fastapi (pure threading/queue)
 service/serialize.py <- no internal dependency; numpy only
 service/cli.py       <- service/app (lazy); optional uvicorn at runtime
+mcp/server.py        <- service/operations, service/jobs, signoff_campaign, mcp/workspace;
+                        optional mcp SDK at import time
+mcp/cli.py           <- mcp/server (lazy)
 ```
 
 The `service/` subpackage is a pure *consumer* leaf — nothing outside it imports
@@ -755,6 +764,15 @@ interface as the AT4000TG OTFT model. SKY130, FreePDK45, and TSMC28HPC+ all use
 the in-process native Berkeley BSIM4 backend for normal DC, AC, noise, transient,
 PSS, PAC, and PNoise operation.
 
+`compact_models/bsim4/card_cache.py` provides their shared immutable-card cache.
+The bounded, thread-safe LRU keys complete PDK/model/section/bin bindings,
+geometry, NF/multiplicity, temperature, corner, mismatch, source fingerprint,
+and adapter-specific instance fields. It caches only PDK/model/instance cards,
+never mutable device objects or runtime terminal biases. Per-key single-flight
+construction preserves parallel PVT work while preventing duplicate cold-card
+elaboration; path/mtime/size fingerprints invalidate entries when a model source
+is replaced.
+
 - **`pdk/sky130/library.py` / `device.py`** — loads the bundled geometry-resolved
   BSIM4.5 cards and registers native `sky130.nmos` / `sky130.pmos`. `extract_w`
   selects a reference-width card while the instance keeps its actual geometry.
@@ -786,8 +804,9 @@ ctypes binding is the Python-facing entry point onto the same compiled library
 for op-point/AC/noise device calls. There is no separate Python numeric
 implementation in production as of v2.0.0.
 
-- **`pdk/freepdk45/library.py`** — portable card resolution, strict corner and
-  polarity validation, numeric parsing, and path/mtime/size caching.
+- **`pdk/freepdk45/library.py`** — portable card resolution, strict binding,
+  corner and polarity validation, numeric parsing, and shared immutable-card
+  caching.
 - **`pdk/freepdk45/device.py`** — native `TransistorModel` adapter and default
   `freepdk45.*` registration.
 - **`freepdk45_model.py`** — compatibility exports and the optional historical
@@ -823,8 +842,9 @@ OTA design walkthroughs: [SKY130 FD-OTA](sky130_fd_ota_design.md),
 
 An **optional** local FastAPI HTTP layer over the whole solver stack, gated on the
 `serve` extra (`pip install -e ".[serve]"`). It is a thin adapter — every route hands
-a request straight to an existing single source of truth and carries no numerical
-logic of its own. Full endpoint reference: [Service API](service_api.md).
+a request to the transport-neutral operations in `service/operations.py` and
+carries no numerical logic of its own. Full endpoint reference:
+[Service API](service_api.md).
 
 - **`app.py`** — `create_app(job_workers=1) -> FastAPI` builds the `/api/v1` app:
   `GET health`/`capabilities`, `POST validate`/`solve` (synchronous, calling
@@ -855,6 +875,16 @@ logic of its own. Full endpoint reference: [Service API](service_api.md).
   single-source CLI pattern. Imports `fastapi`/`uvicorn` lazily inside `run_cli`, so
   importing `circuitopt.service` (which `circuitopt/__main__.py` does eagerly for
   subcommand registration) never requires the extra to be installed.
+
+### MCP layer (`mcp/server.py` / `workspace.py` / `cli.py`)
+
+The optional MCP adapter is gated on `pip install -e ".[mcp]"` and exposes
+stdio plus loopback-only Streamable HTTP transports. It calls the same
+`service.operations` functions as FastAPI, adds workspace-confined relative
+paths, compacts long vectors in direct tool responses, and writes complete
+artifacts under `results/mcp`. Exploration, mismatch MC, and signoff are
+cancellable `JobManager` jobs. Full tool and resource reference:
+[MCP Server](mcp_server.md).
 
 ## Quick Example
 

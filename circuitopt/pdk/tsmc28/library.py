@@ -6,10 +6,19 @@ ngspice and never writes foundry parameter data to disk.
 """
 from __future__ import annotations
 
+import math
 import os
 import threading
 from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Mapping
 
+from ...compact_models.bsim4 import (
+    Bsim4CardCache,
+    Bsim4CardCacheInfo,
+    Bsim4SourceFingerprint,
+    make_bsim4_card_cache_key,
+)
 from ...spice import (
     ElaboratedLibrary,
     SpiceElaborationError,
@@ -42,8 +51,8 @@ class Tsmc28CoreCard:
     macro_name: str
     bin_name: str
     model_type: str
-    model_parameters: dict[str, float]
-    instance_parameters: dict[str, float]
+    model_parameters: Mapping[str, float]
+    instance_parameters: Mapping[str, float]
 
     @property
     def width_m(self) -> float:
@@ -78,6 +87,9 @@ class Tsmc28CoreCard:
             ),
             Bsim4InstanceCard(instance_parameters),
         )
+
+
+Tsmc28CardCacheInfo = Bsim4CardCacheInfo
 
 
 def _normalize_corner(corner: str) -> str:
@@ -119,6 +131,10 @@ class Tsmc28CoreLibrary:
         self._library = parse_spice_library(self.path)
         self._programs: dict[tuple[str, float], ElaboratedLibrary] = {}
         self._lock = threading.RLock()
+        self._source = Bsim4SourceFingerprint.from_path(self.path)
+        self._card_cache = Bsim4CardCache[
+            tuple[Tsmc28CoreCard, object, object]
+        ](maxsize=1024)
 
     def _program(self, corner: str, temperature_c: float) -> ElaboratedLibrary:
         key = (_normalize_corner(corner), float(temperature_c))
@@ -137,6 +153,14 @@ class Tsmc28CoreLibrary:
                 )
                 self._programs[key] = program
             return program
+
+    def card_cache_info(self) -> Tsmc28CardCacheInfo:
+        """Return cache statistics without exposing licensed card contents."""
+        return self._card_cache.cache_info()
+
+    def clear_card_cache(self) -> None:
+        """Drop flattened card bundles while retaining parsed model programs."""
+        self._card_cache.clear()
 
     @staticmethod
     def _select_bin(instance, width_m: float, length_m: float) -> Statement:
@@ -170,6 +194,10 @@ class Tsmc28CoreLibrary:
         self,
         polarity: str,
         *,
+        pdk: str = "tsmc28hpcp",
+        model: str | None = None,
+        section: str | None = None,
+        bin_selector: str = "auto",
         width_um: float,
         length_um: float,
         nf: int = 1,
@@ -178,18 +206,121 @@ class Tsmc28CoreLibrary:
         temperature_c: float = 27.0,
         mismatch_v: float = 0.0,
     ) -> Tsmc28CoreCard:
-        """Return a flat numeric BSIM4.5 card for one core MOS instance."""
+        """Return a cached flat numeric BSIM4.5 card for one core MOS instance."""
+        return self.device_cards(
+            polarity,
+            pdk=pdk,
+            model=model,
+            section=section,
+            bin_selector=bin_selector,
+            width_um=width_um,
+            length_um=length_um,
+            nf=nf,
+            mult=mult,
+            corner=corner,
+            temperature_c=temperature_c,
+            mismatch_v=mismatch_v,
+        )[0]
+
+    def device_cards(
+        self,
+        polarity: str,
+        *,
+        pdk: str = "tsmc28hpcp",
+        model: str | None = None,
+        section: str | None = None,
+        bin_selector: str = "auto",
+        width_um: float,
+        length_um: float,
+        nf: int = 1,
+        mult: int = 1,
+        corner: str = "tt",
+        temperature_c: float = 27.0,
+        mismatch_v: float = 0.0,
+    ):
+        """Return cached core/model/instance cards for an explicit MOS binding."""
         polarity = _normalize_polarity(polarity)
+        pdk = str(pdk).strip().lower()
+        if pdk != "tsmc28hpcp":
+            raise Tsmc28ModelError(
+                f"TSMC28 core card cannot serve PDK {pdk!r}")
+        model = _normalize_polarity(model or polarity)
+        if model != polarity:
+            raise Tsmc28ModelError(
+                f"binding model {model!r} conflicts with polarity {polarity!r}")
         corner = _normalize_corner(corner)
+        section = str(section if section is not None else corner).strip().lower()
+        if not section:
+            raise Tsmc28ModelError("TSMC28 section binding must be non-empty")
+        if section != "inherit" and _normalize_corner(section) != corner:
+            raise Tsmc28ModelError(
+                f"binding section {section!r} conflicts with corner {corner!r}")
+        bin_selector = str(bin_selector).strip()
+        if not bin_selector:
+            raise Tsmc28ModelError("TSMC28 bin binding must be non-empty")
         width_um = float(width_um)
         length_um = float(length_um)
         nf = int(nf)
         mult = int(mult)
+        temperature_c = float(temperature_c)
+        mismatch_v = float(mismatch_v)
+        numeric_values = (width_um, length_um, temperature_c, mismatch_v)
+        if not all(math.isfinite(value) for value in numeric_values):
+            raise Tsmc28ModelError(
+                "TSMC28 geometry, temperature, and mismatch must be finite")
         if width_um <= 0 or length_um <= 0:
             raise Tsmc28ModelError("core MOS width and length must be positive")
         if nf < 1 or mult < 1:
             raise Tsmc28ModelError("core MOS nf and mult must be positive integers")
+        if temperature_c <= -273.15:
+            raise Tsmc28ModelError(
+                "TSMC28 temperature must be above absolute zero")
 
+        key = make_bsim4_card_cache_key(
+            source=self._source,
+            pdk=pdk,
+            model=model,
+            section=section,
+            bin_selector=bin_selector,
+            width_um=width_um,
+            length_um=length_um,
+            nf=nf,
+            mult=mult,
+            temperature_c=temperature_c,
+            corner=corner,
+            mismatch_v=mismatch_v,
+        )
+
+        def build():
+            card = self._build_core_card(
+                polarity,
+                width_um=width_um,
+                length_um=length_um,
+                nf=nf,
+                mult=mult,
+                corner=corner,
+                temperature_c=temperature_c,
+                mismatch_v=mismatch_v,
+            )
+            if key.bin != "auto" and card.bin_name.lower() != key.bin:
+                raise Tsmc28ModelError(
+                    f"requested bin {bin_selector!r}, resolved {card.bin_name!r}")
+            return (card, *card.to_bsim4_cards())
+
+        return self._card_cache.get_or_create(key, build)
+
+    def _build_core_card(
+        self,
+        polarity: str,
+        *,
+        width_um: float,
+        length_um: float,
+        nf: int,
+        mult: int,
+        corner: str,
+        temperature_c: float,
+        mismatch_v: float,
+    ) -> Tsmc28CoreCard:
         program = self._program(corner, temperature_c)
         macro_name = _MACRO[polarity]
         try:
@@ -240,8 +371,8 @@ class Tsmc28CoreLibrary:
             macro_name=macro_name,
             bin_name=selected.name or "",
             model_type=numeric.model_type.lower(),
-            model_parameters=numeric.parameters,
-            instance_parameters=instance_parameters,
+            model_parameters=MappingProxyType(dict(numeric.parameters)),
+            instance_parameters=MappingProxyType(dict(instance_parameters)),
         )
 
 

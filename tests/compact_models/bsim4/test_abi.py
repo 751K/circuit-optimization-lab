@@ -23,6 +23,10 @@ def test_cards_normalize_and_validate_parameters():
         {"W": 1e-6, "L": 30e-9, "NF": 2, "M": 1})
     assert model.parameters == {"vth0": 0.4}
     assert instance.parameters["nf"] == 2
+    with pytest.raises(TypeError):
+        model.parameters["vth0"] = 0.5
+    with pytest.raises(TypeError):
+        instance.parameters["nf"] = 4
     assert Bsim4Bias(0.9, 0.6, 0.0, 0.0).terminals.shape == (4,)
     compatible = Bsim4ModelCard(
         polarity=-1,

@@ -7,7 +7,6 @@ import numpy as np
 
 from ...compiled_topology import CompiledTopology, TERM_SOLVED
 from ...device_factory import build_devices
-from ...run_contract import ModelEvaluationError
 
 
 def _expanded_grid(tgrid, inputs, max_step):
@@ -157,20 +156,6 @@ def transient_native_bsim4(
         if row is not None and term[0] == TERM_SOLVED:
             matrix[row, term[1]] += value
 
-    def device_state(item, x, sample):
-        dev = devices[item.name]
-        vs = term_value(item.s, x, sample)
-        vd = term_value(item.d, x, sample)
-        vg = term_value(item.g, x, sample)
-        try:
-            currents = dev.get_terminal_currents(vs, vd, vg)
-            charges = dev.get_terminal_charges(vs, vd, vg)
-            conductance, capacitance = dev.get_terminal_linearization(vs, vd, vg)
-        except Exception as exc:
-            raise ModelEvaluationError(
-                item.name, "transient charge/current evaluation", exc) from exc
-        return currents, charges, conductance, capacitance
-
     def coefficients(sample):
         h = float(tgrid[sample] - tgrid[sample - 1])
         if method == "be" or sample == 1:
@@ -190,7 +175,7 @@ def transient_native_bsim4(
     near_residuals = []
     from .rust_transient import solve_bsim4_rust
 
-    xhist, nfail, first_fail = solve_bsim4_rust(
+    xhist, device_currents, device_charges, nfail, first_fail = solve_bsim4_rust(
         plan,
         devices,
         V0,
@@ -224,12 +209,9 @@ def transient_native_bsim4(
         ]
         return matches[0] if matches else None
 
-    for item in plan.devices:
-        currents = np.zeros((len(tgrid), 4), dtype=float)
-        charges = np.zeros((len(tgrid), 4), dtype=float)
-        for sample in range(len(tgrid)):
-            currents[sample], charges[sample], _, _ = device_state(
-                item, xhist[sample], sample)
+    for position, item in enumerate(plan.devices):
+        currents = device_currents[:, position, :]
+        charges = device_charges[:, position, :]
         total = currents.copy()
         for sample in range(1, len(tgrid)):
             a0, a1, a2 = coefficients(sample)

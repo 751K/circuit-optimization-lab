@@ -28,6 +28,7 @@ The two entry points are equivalent. The rest of this document uses
 | `plot` | Render the built-in AFE/chopper waveform and Bode plots |
 | `dataset` | Build a surrogate dataset with provenance |
 | `serve` | Start the optional local FastAPI service |
+| `mcp` | Start the optional Model Context Protocol server |
 
 The legacy no-subcommand form still auto-routes to `run`:
 
@@ -402,6 +403,24 @@ Flags:
 `0.0.0.0` exposes the unauthenticated service to the network and should not
 be used as a default configuration. See [Local Service API](service_api.md)
 for the full protocol.
+
+## `mcp`
+
+```bash
+uv pip install -e ".[mcp]"
+circuit-opt mcp --transport stdio --workspace .
+```
+
+| Flag | Default | Description |
+|---|---:|---|
+| `--transport` | `stdio` | `stdio` or `streamable-http` |
+| `--workspace` | `.` | Only file tree exposed to MCP tools |
+| `--host` | `127.0.0.1` | Streamable HTTP listen address; loopback only |
+| `--port` | `8342` | Streamable HTTP port |
+| `--job-workers` | `1` | Concurrent background explore/MC/signoff jobs |
+
+The equivalent dedicated entry point is `circuit-opt-mcp`. See
+[MCP Server](mcp_server.md) for tools, resources, and client configuration.
 
 ## Calibration and Benchmarks
 

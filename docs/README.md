@@ -34,6 +34,8 @@ organized for three audiences:
   extension workflow, and documentation maintenance rules.
 - [Local Service API](service_api.md): FastAPI endpoints, background jobs,
   serialization, and CLI equivalence.
+- [MCP Server](mcp_server.md): LLM tools, resources, background signoff jobs,
+  client configuration, and workspace security.
 - [ngspice Oracle Helpers](ngspice_oracles.md): explicit external-reference
   paths used by FreePDK45 and TSMC regression workflows.
 
@@ -63,6 +65,7 @@ accuracy guarantee.
 | [PDK Support Matrix](pdk_support.md) | Backend and process capability boundaries | Maintained |
 | [Core Solver Overview](module_overview.md) | Implementation architecture | Maintained |
 | [Local Service API](service_api.md) | HTTP and job API | Maintained |
+| [MCP Server](mcp_server.md) | LLM tool and resource protocol | Maintained |
 | [TSMC28HPC+ Adapter](tsmc28hpcp.md) | Licensed local model integration | Maintained |
 | [Licenses and Third-Party Software](third_party_licenses.md) | MIT scope, BSIM4 attribution, and vendored-code terms | Maintained |
 | [Environment and Performance Notes](environment_performance.md) | Dated benchmark snapshots and tuning notes | Reference snapshot |

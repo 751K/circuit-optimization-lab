@@ -68,7 +68,14 @@ def solve_bsim4_rust(
     try:
         problem = build_bsim4_problem(
             plan, devices, handles, dynamic_sources)
-        completed, states, failures, first_failure = problem.solve_fixed_grid(
+        (
+            completed,
+            states,
+            device_currents,
+            device_charges,
+            failures,
+            first_failure,
+        ) = problem.solve_fixed_grid(
             np.asarray(x0, dtype=float),
             np.asarray(tgrid, dtype=float),
             np.asarray(input_values, dtype=float),
@@ -81,7 +88,28 @@ def solve_bsim4_rust(
         if not completed:
             raise Bsim4NativeError(
                 f"Rust BSIM4 transient failed at step {int(first_failure)}")
-        return np.asarray(states, dtype=float), int(failures), int(first_failure)
+        states = np.asarray(states, dtype=float)
+        device_currents = np.asarray(device_currents, dtype=float)
+        device_charges = np.asarray(device_charges, dtype=float)
+        expected = (len(tgrid), len(wrappers), 4)
+        if device_currents.shape != expected or device_charges.shape != expected:
+            raise Bsim4NativeError(
+                "Rust BSIM4 transient returned invalid device-history shapes: "
+                f"currents={device_currents.shape}, charges={device_charges.shape}, "
+                f"expected={expected}")
+        if (
+            not np.all(np.isfinite(device_currents))
+            or not np.all(np.isfinite(device_charges))
+        ):
+            raise Bsim4NativeError(
+                "Rust BSIM4 transient returned non-finite device history")
+        return (
+            states,
+            device_currents,
+            device_charges,
+            int(failures),
+            int(first_failure),
+        )
     finally:
         for handle in handles:
             handle.close()

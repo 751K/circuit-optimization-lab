@@ -62,6 +62,7 @@ uv pip install -e ".[ml]"       # scikit-learn surrogate
 uv pip install -e ".[torch]"    # differentiable PyTorch surrogate
 uv pip install -e ".[plot]"     # matplotlib plotting
 uv pip install -e ".[serve]"    # FastAPI and uvicorn
+uv pip install -e ".[mcp]"      # Model Context Protocol server
 uv pip install -e ".[parquet]"  # Parquet dataset export
 ```
 
@@ -134,6 +135,9 @@ circuit-opt dataset examples/single_stage.json -n 500 --out results/datasets/sin
 
 # Start the optional local API
 circuit-opt serve
+
+# Start the optional stdio MCP server for an LLM client
+circuit-opt mcp --workspace .
 ```
 
 See the [CLI Reference](cli_reference.md) before applying a workflow to a silicon
@@ -164,4 +168,5 @@ environments, or simulator caches.
 - Run analyses: [CLI Reference](cli_reference.md)
 - Select a process: [PDK Support Matrix](pdk_support.md)
 - Call from another application: [Local Service API](service_api.md)
+- Connect an LLM client: [MCP Server](mcp_server.md)
 - Modify the codebase: [Developer Handoff Guide](development.md)

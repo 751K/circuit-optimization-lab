@@ -25,6 +25,7 @@ class _Tsmc28NativeCoreFet(TransistorModel):
     HAS_TERMINAL_NOISE = True
     TRANSIENT_BACKEND = "bsim4_native"
     SUPPORTS_MULTIPLICITY = True
+    CONSUMES_BINDING_METADATA = True
     _EVAL_CACHE_MAX = 32
 
     def __init__(
@@ -39,6 +40,10 @@ class _Tsmc28NativeCoreFet(TransistorModel):
         mismatch: float = 0.0,
         delvto: float = 0.0,
         mult: int = 1,
+        _binding_pdk: str = "tsmc28hpcp",
+        _binding_model: str | None = None,
+        _binding_section: str | None = None,
+        _binding_bin: str = "auto",
         **parameters,
     ):
         mismatch_v = parameters.pop("_delvto", mismatch or delvto)
@@ -54,17 +59,22 @@ class _Tsmc28NativeCoreFet(TransistorModel):
         self.temperature = float(temperature)
         self.g_area = self.W * self.L * self.mult
         self.kcl_sign = -1.0 if self.TYPE > 0 else 1.0
-        card = load_tsmc28_core_library().core_card(
-            self.POLARITY,
-            width_um=self.W,
-            length_um=self.L,
-            nf=self.NF,
-            mult=self.mult,
-            corner=self.corner,
-            temperature_c=self.temperature - 273.15,
-            mismatch_v=float(mismatch_v),
+        card, self.model_card, self.instance_card = (
+            load_tsmc28_core_library().device_cards(
+                self.POLARITY,
+                pdk=_binding_pdk,
+                model=_binding_model or self.POLARITY,
+                section=_binding_section or self.corner,
+                bin_selector=_binding_bin,
+                width_um=self.W,
+                length_um=self.L,
+                nf=self.NF,
+                mult=self.mult,
+                corner=self.corner,
+                temperature_c=self.temperature - 273.15,
+                mismatch_v=float(mismatch_v),
+            )
         )
-        self.model_card, self.instance_card = card.to_bsim4_cards()
         self.bin_name = card.bin_name
         self._evaluations: OrderedDict[tuple, Bsim4Evaluation] = OrderedDict()
 

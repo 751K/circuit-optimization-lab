@@ -21,6 +21,25 @@ release checklist.
 
 ### Added / 新增
 
+- **Model Context Protocol server / Model Context Protocol 服务**
+
+  **English:** Added the optional `mcp>=1.27,<2` adapter with
+  `circuit-opt mcp`, `circuit-opt-mcp`, and `python -m circuitopt.mcp`
+  entry points. The stdio and loopback-only Streamable HTTP transports expose
+  capability discovery, strict circuit validation, bounded analysis summaries,
+  asynchronous exploration/mismatch/signoff jobs, cooperative cancellation,
+  and filtered signoff inspection. All file paths are confined to an explicit
+  workspace; full outputs are written under `results/mcp`. FastAPI and MCP now
+  share transport-neutral application operations rather than duplicating parse,
+  solve, signoff, or serialization behavior.
+
+  **中文：** 新增可选 `mcp>=1.27,<2` 适配层及 `circuit-opt mcp`、
+  `circuit-opt-mcp`、`python -m circuitopt.mcp` 三个入口。stdio 与只允许
+  loopback 的 Streamable HTTP transport 提供能力发现、严格电路校验、有界分析摘要、
+  异步探索/失配/signoff、协作式取消和 signoff 条件筛选。所有文件路径都被限制在
+  显式工作区内，完整结果写入 `results/mcp`。FastAPI 与 MCP 现在共用与 transport
+  无关的 application operations，不重复实现解析、求解、signoff 或序列化行为。
+
 - **Multi-testbench PVT signoff campaign / 多测试台 PVT 签核 campaign**
 
   **English:** Added `circuit-opt signoff`, the strict
@@ -50,6 +69,26 @@ release checklist.
   0111→1000 主进位切换。
 
 ### Changed / 变更
+
+- **Shared native BSIM4 card cache / 公共原生 BSIM4 card 缓存**
+
+  **English:** TSMC28, FreePDK45, and SKY130 now reuse immutable
+  PDK/model/instance card bundles through one bounded, thread-safe BSIM4 LRU.
+  Its normalized key covers the complete explicit PDK/model/section/bin
+  binding, geometry, finger count, multiplicity, temperature, process corner,
+  mismatch offset, source-file fingerprint, and PDK-specific instance fields.
+  Per-key single-flight construction avoids duplicate cold builds under
+  parallel PVT execution. Replacing a model source invalidates derived entries
+  through its path/mtime/size fingerprint. Repeated 121-point TSMC28 5T OTA AC
+  runs on the reference development machine improved from 27.91 ms to 1.33 ms
+  median.
+
+  **中文：** TSMC28、FreePDK45 与 SKY130 现在通过同一个有界、线程安全的
+  BSIM4 LRU 复用只读 PDK/model/instance card 三件套。规范化缓存键覆盖完整显式
+  PDK/model/section/bin 绑定、几何尺寸、指数、倍乘、温度、工艺角、失配偏移、
+  源文件指纹及 PDK 特有实例字段；按键 single-flight 构建可避免并行 PVT 的重复
+  冷启动。模型源的路径、mtime 和大小变化会自动使派生项失效。在参考开发机上，
+  重复执行 121 点 TSMC28 5T OTA AC 的中位时间由 27.91 ms 降至 1.33 ms。
 
 - **Strict simulation contract / 严格仿真契约**
 

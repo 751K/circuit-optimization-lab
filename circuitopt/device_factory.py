@@ -133,6 +133,17 @@ def build_devices(sizes: Mapping[str, tuple[float, float]], *,
             model_class = get_model_class(model_type)
             if (
                 model_class is not None
+                and getattr(model_class, "CONSUMES_BINDING_METADATA", False)
+            ):
+                binding_pdk, binding_model = model_type.rsplit(".", 1)
+                kwargs.update({
+                    "_binding_pdk": binding_pdk,
+                    "_binding_model": binding_model,
+                    "_binding_section": binding_section,
+                    "_binding_bin": binding_bin,
+                })
+            if (
+                model_class is not None
                 and getattr(model_class, "SUPPORTS_MULTIPLICITY", False)
             ):
                 kwargs.setdefault("mult", int(multiplicity.get(name, 1)))

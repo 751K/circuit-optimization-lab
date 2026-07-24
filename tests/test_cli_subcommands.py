@@ -157,6 +157,26 @@ def test_signoff_campaign_cli_smoke(tmp_path):
     assert result["worst_case"]["case"] == "ac"
 
 
+# ── MCP server ───────────────────────────────────────────────────────────────
+
+def test_mcp_cli_help():
+    proc = _run("mcp", "--help")
+    assert proc.returncode == 0, proc.stderr
+    assert "--transport" in proc.stdout
+    assert "--workspace" in proc.stdout
+    assert "--job-workers" in proc.stdout
+
+
+def test_mcp_http_rejects_non_loopback_host():
+    proc = _run(
+        "mcp",
+        "--transport", "streamable-http",
+        "--host", "0.0.0.0",
+    )
+    assert proc.returncode != 0
+    assert "loopback" in (proc.stderr + proc.stdout).lower()
+
+
 # ── mc (mismatch Monte Carlo) ─────────────────────────────────────────────────
 
 def test_mc_smoke():

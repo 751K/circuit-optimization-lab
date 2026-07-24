@@ -393,6 +393,7 @@ fn build_sar_template(spec: &Bound<'_, PyDict>) -> PyResult<SarTemplate> {
         voltage_tolerance: newton[2],
         step_limit: newton[3],
         gmin: newton[4],
+        record_device_history: false,
     };
 
     let clock: Option<Vec<f64>> = crate::optional_field(spec, "clock")?;

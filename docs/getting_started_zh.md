@@ -56,6 +56,7 @@ uv pip install -e ".[ml]"       # scikit-learn surrogate
 uv pip install -e ".[torch]"    # 可微 PyTorch surrogate
 uv pip install -e ".[plot]"     # matplotlib 绘图
 uv pip install -e ".[serve]"    # FastAPI 和 uvicorn
+uv pip install -e ".[mcp]"      # Model Context Protocol 服务
 uv pip install -e ".[parquet]"  # Parquet 数据集导出
 ```
 
@@ -126,6 +127,9 @@ circuit-opt dataset examples/single_stage.json -n 500 --out results/datasets/sin
 
 # 启动可选本地 API
 circuit-opt serve
+
+# 为 LLM 客户端启动可选 stdio MCP 服务
+circuit-opt mcp --workspace .
 ```
 
 在硅 PDK 上使用这些流程前先看 [CLI 参考手册](cli_reference_zh.md)；不同后端的
@@ -154,4 +158,5 @@ corner 和 mismatch 覆盖并不相同。
 - 运行分析：[CLI 参考手册](cli_reference_zh.md)
 - 选择工艺：[PDK 支持矩阵](pdk_support_zh.md)
 - 供其他应用调用：[本地服务 API](service_api_zh.md)
+- 连接 LLM 客户端：[MCP 服务](mcp_server_zh.md)
 - 修改代码：[开发者接手指南](development.md)

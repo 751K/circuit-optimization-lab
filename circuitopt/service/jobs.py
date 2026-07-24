@@ -152,18 +152,25 @@ class JobManager:
     """Owns the job table and the worker pool. One instance per app, on
     ``app.state.jobs`` so tests can inject a custom-sized manager."""
 
-    def __init__(self, workers: int = 1, max_jobs: int = MAX_JOBS):
+    def __init__(
+        self,
+        workers: int = 1,
+        max_jobs: int = MAX_JOBS,
+        runners: Optional[dict[str, Callable]] = None,
+    ):
         self._pool = ThreadPoolExecutor(max_workers=max(1, int(workers)),
                                         thread_name_prefix="cktopt-job")
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
         self._max_jobs = max_jobs
+        self._runners = {**_RUNNERS, **(runners or {})}
 
     # ── submission ────────────────────────────────────────────────────────────
     def submit(self, kind: str, params: dict) -> Job:
         """Create a queued job of *kind* and schedule it on the pool."""
-        if kind not in _RUNNERS:
-            raise ValueError(f"unknown job kind {kind!r}; known: {sorted(_RUNNERS)}")
+        if kind not in self._runners:
+            raise ValueError(
+                f"unknown job kind {kind!r}; known: {sorted(self._runners)}")
         job = Job(id=uuid.uuid4().hex[:12], kind=kind, params=params)
         with self._lock:
             self._jobs[job.id] = job
@@ -200,7 +207,8 @@ class JobManager:
             job._events.put(safe)
 
         try:
-            result = _RUNNERS[job.kind](job.params, emit, job._cancel.is_set)
+            result = self._runners[job.kind](
+                job.params, emit, job._cancel.is_set)
         except Exception as exc:  # any solver/parse failure -> failed, no traceback leak
             job.status = "failed"
             job.error = {"stage": "solve", "message": str(exc)}

@@ -1,0 +1,186 @@
+"""Protocol-level tests for the optional Circuit Optimization MCP server."""
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("mcp")
+
+from mcp.shared.memory import (  # noqa: E402
+    create_connected_server_and_client_session,
+)
+
+from circuitopt.mcp.server import create_mcp_server  # noqa: E402
+from circuitopt.mcp.workspace import Workspace, WorkspaceError  # noqa: E402
+
+
+_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _periodic_rc() -> dict:
+    return json.loads((_ROOT / "examples" / "periodic_rc.json").read_text())
+
+
+def _call(coro):
+    return asyncio.run(coro)
+
+
+def _write_signoff_fixture(root: Path) -> None:
+    circuit = {
+        "name": "mcp_signoff_fixture",
+        "solved": ["OUT"],
+        "rails": {"VIN": "VIN", "GND": 0.0},
+        "bias": {"VIN": 1.0},
+        "devices": [],
+        "resistors": [
+            {"name": "R1", "a": "VIN", "b": "OUT", "R": 1e3},
+            {"name": "R2", "a": "OUT", "b": "GND", "R": 1e3},
+        ],
+        "outputs": ["OUT"],
+        "ac_drives": {"VIN": 1.0},
+        "analyses": {
+            "ac": {
+                "freqs": {
+                    "start": 1.0,
+                    "stop": 10.0,
+                    "num": 2,
+                    "scale": "log",
+                }
+            }
+        },
+        "signoff": {
+            "measurements": {},
+            "constraints": {"gain": {"min": -20.0}},
+        },
+    }
+    manifest = {
+        "name": "mcp_campaign",
+        "pvt": {
+            "corners": ["tt"],
+            "temperatures_c": [27.0],
+            "supplies_v": [1.0],
+            "nominal_supply_v": 1.0,
+            "supply_bias_key": "VIN",
+        },
+        "cases": [
+            {"name": "ac", "circuit": "circuit.json", "overrides": {}},
+        ],
+    }
+    (root / "circuit.json").write_text(json.dumps(circuit), encoding="utf-8")
+    (root / "campaign.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_workspace_rejects_absolute_and_parent_paths(tmp_path):
+    workspace = Workspace(tmp_path)
+    with pytest.raises(WorkspaceError, match="absolute"):
+        workspace.resolve_input(str((tmp_path / "x.json").resolve()))
+    with pytest.raises(WorkspaceError, match="parent path"):
+        workspace.resolve_input("../x.json")
+
+
+def test_protocol_lists_tools_resources_and_runs_analysis(tmp_path):
+    async def scenario():
+        server = create_mcp_server(workspace=tmp_path)
+        async with create_connected_server_and_client_session(server) as session:
+            tools = await session.list_tools()
+            names = {tool.name for tool in tools.tools}
+            assert {
+                "get_capabilities",
+                "validate_circuit",
+                "run_analysis",
+                "submit_signoff",
+                "get_job",
+                "cancel_job",
+                "inspect_signoff_result",
+            } <= names
+
+            resources = await session.list_resources()
+            assert {str(item.uri) for item in resources.resources} == {
+                "circuitopt://capabilities",
+                "circuitopt://workflow",
+            }
+
+            capabilities = await session.call_tool("get_capabilities", {})
+            assert not capabilities.isError
+            assert capabilities.structuredContent["jobs"] == [
+                "explore", "mc", "signoff",
+            ]
+
+            validation = await session.call_tool(
+                "validate_circuit", {"circuit": _periodic_rc()}
+            )
+            assert not validation.isError
+            assert validation.structuredContent == {"valid": True}
+
+            solved = await session.call_tool(
+                "run_analysis",
+                {"circuit": _periodic_rc(), "selected": ["ac"]},
+            )
+            assert not solved.isError
+            payload = solved.structuredContent
+            assert payload["status"] == "valid"
+            assert set(payload["analyses"]) == {"ac"}
+            assert payload["signoff"]["status"] == "not_configured"
+            assert len(payload["analyses"]["ac"]["freqs"]) == 2
+
+    _call(scenario())
+
+
+def test_signoff_job_writes_artifact_and_is_inspectable(tmp_path):
+    _write_signoff_fixture(tmp_path)
+
+    async def scenario():
+        server = create_mcp_server(workspace=tmp_path)
+        async with create_connected_server_and_client_session(server) as session:
+            submitted = await session.call_tool(
+                "submit_signoff",
+                {"campaign_path": "campaign.json", "workers": 1},
+            )
+            assert not submitted.isError
+            job_id = submitted.structuredContent["job_id"]
+
+            terminal = None
+            for _ in range(200):
+                polled = await session.call_tool(
+                    "get_job",
+                    {"job_id": job_id, "include_result": True},
+                )
+                assert not polled.isError
+                terminal = polled.structuredContent
+                if terminal["status"] in {"done", "failed", "cancelled"}:
+                    break
+                await asyncio.sleep(0.01)
+            assert terminal is not None
+            assert terminal["status"] == "done"
+            result_path = terminal["result"]["result_path"]
+            assert result_path.startswith("results/mcp/signoff-")
+            assert (tmp_path / result_path).is_file()
+
+            inspected = await session.call_tool(
+                "inspect_signoff_result",
+                {"result_path": result_path, "case": "ac"},
+            )
+            assert not inspected.isError
+            details = inspected.structuredContent
+            assert details["status"] == "pass"
+            assert details["match_count"] == 1
+            assert details["matched_points"][0]["pvt"]["corner"] == "tt"
+
+    _call(scenario())
+
+
+def test_signoff_path_cannot_escape_workspace(tmp_path):
+    async def scenario():
+        server = create_mcp_server(workspace=tmp_path)
+        async with create_connected_server_and_client_session(server) as session:
+            result = await session.call_tool(
+                "submit_signoff",
+                {"campaign_path": "../campaign.json"},
+            )
+            assert result.isError
+            assert "parent path" in result.content[0].text
+
+    _call(scenario())

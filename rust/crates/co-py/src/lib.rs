@@ -1186,6 +1186,26 @@ fn complex_rows_into_array3<'py>(
     Ok(array.into_pyarray(py))
 }
 
+fn terminal_history_into_array3<'py>(
+    py: Python<'py>,
+    rows: Vec<[f64; 4]>,
+    sample_count: usize,
+    device_count: usize,
+    name: &str,
+) -> PyResult<Bound<'py, PyArray3<f64>>> {
+    let expected = sample_count.saturating_mul(device_count);
+    if rows.len() != expected {
+        return Err(PyRuntimeError::new_err(format!(
+            "{name} returned {} rows, expected {expected}",
+            rows.len()
+        )));
+    }
+    let values = rows.into_iter().flatten().collect();
+    let array = Array3::from_shape_vec((sample_count, device_count, 4), values)
+        .map_err(|error| PyRuntimeError::new_err(format!("invalid {name} shape: {error}")))?;
+    Ok(array.into_pyarray(py))
+}
+
 #[pyclass(frozen)]
 struct LtiProblem {
     system: lti::System,
@@ -1569,7 +1589,14 @@ impl Bsim4TransientProblem {
         voltage_tolerance: f64,
         step_limit: f64,
         gmin: f64,
-    ) -> PyResult<(bool, Bound<'py, PyArray2<f64>>, usize, i64)> {
+    ) -> PyResult<(
+        bool,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray3<f64>>,
+        Bound<'py, PyArray3<f64>>,
+        usize,
+        i64,
+    )> {
         let gear2 = match integration_method {
             "be" => false,
             "gear2" | "bdf2" => true,
@@ -1609,6 +1636,8 @@ impl Bsim4TransientProblem {
         let devices = self.devices.clone();
         let handles = self.handles.clone();
         let width = circuit.size;
+        let sample_count = times.len();
+        let device_count = devices.len();
         let result = py.detach(move || {
             let mut evaluator = RustBsimEvaluator { handles };
             bsim_transient::solve_fixed_grid(
@@ -1624,13 +1653,30 @@ impl Bsim4TransientProblem {
                     voltage_tolerance,
                     step_limit,
                     gmin,
+                    record_device_history: true,
                 },
             )
         });
         let states = rows_into_array2(py, result.states, width, "BSIM4 transient states")?;
+        let device_currents = terminal_history_into_array3(
+            py,
+            result.device_currents,
+            sample_count,
+            device_count,
+            "BSIM4 transient device currents",
+        )?;
+        let device_charges = terminal_history_into_array3(
+            py,
+            result.device_charges,
+            sample_count,
+            device_count,
+            "BSIM4 transient device charges",
+        )?;
         Ok((
             result.completed,
             states,
+            device_currents,
+            device_charges,
             result.failures,
             result.first_failure.map_or(-1, |value| value as i64),
         ))

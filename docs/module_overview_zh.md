@@ -74,9 +74,14 @@ circuitopt/
   service/             可选的本地 FastAPI HTTP 服务层（`serve` extra）——见下文。
     __init__.py        只重导出 CLI 胶水代码；从不 import fastapi（import circuitopt 保持无 fastapi 依赖）。
     app.py             create_app() —— /api/v1 路由（health/capabilities/validate/solve/jobs/*）；薄适配，无数值逻辑。
-    jobs.py            JobManager —— 进程内线程池后台任务（explore/mc），带进度队列 + 协作式取消。
+    operations.py      HTTP 与 MCP 共用的能力查询/校验/求解 application operations。
+    jobs.py            可扩展进程内线程池任务，带进度队列 + 协作式取消。
     serialize.py        to_jsonable()/serialize_results() —— numpy/complex/NaN → 严格 JSON 的转换约定。
     cli.py              add_cli_args()/run_cli() —— 共享的 `serve` 子命令参数定义（延迟导入 fastapi/uvicorn）。
+  mcp/                 可选 stdio/Streamable HTTP MCP 适配层（`mcp` extra）。
+    server.py          FastMCP 工具/resources、有界响应和后台 signoff 适配。
+    workspace.py       工作区相对路径校验与原子结果写入。
+    cli.py             `mcp` 子命令和独立入口共用参数。
 ```
 
 ## 导入关系
@@ -118,11 +123,15 @@ ngspice_process.py   <- device_model
 freepdk45_model.py   <- pdk/freepdk45, device_model, ngspice_device
 pdk/freepdk45/*      <- spice 解析器、compact_models/bsim4、device_model、toolchain
 tsmc28_model.py      <- device_model, ngspice_device, ngspice_process, toolchain
-service/app.py       <- analysis_dispatch, analysis_options, circuit_loader, device_factory, device_model,
-                        freepdk45_model, service/jobs, service/serialize；import 时可选 fastapi/pydantic
+service/operations.py <- analysis_dispatch, analysis_options, circuit_loader, device_factory,
+                         device_model, run_contract, service/serialize
+service/app.py       <- service/operations, service/jobs；import 时可选 fastapi/pydantic
 service/jobs.py      <- explore, corners, service/serialize；不依赖 fastapi（纯 threading/queue）
 service/serialize.py <- 无内部依赖；仅 numpy
 service/cli.py       <- service/app（延迟导入）；运行期可选 uvicorn
+mcp/server.py        <- service/operations, service/jobs, signoff_campaign, mcp/workspace；
+                        import 时可选 mcp SDK
+mcp/cli.py           <- mcp/server（延迟导入）
 ```
 
 `service/` 子包是一个纯*消费方* leaf——没有任何模块反过来 import 它，`circuitopt/__init__.py`
@@ -629,6 +638,13 @@ mismatch/latch 相关工作：
 SKY130、FreePDK45 与 TSMC28HPC+ 的正常 DC、AC、noise、transient、PSS、PAC、
 PNoise 均使用进程内原生 Berkeley BSIM4 后端。
 
+`compact_models/bsim4/card_cache.py` 提供三者共用的只读 card 缓存。有界、
+线程安全的 LRU 键覆盖完整 PDK/model/section/bin 绑定、几何尺寸、NF/倍乘、
+温度、corner、失配、源文件指纹和适配器特有实例字段。它只缓存
+PDK/model/instance card，不缓存可变器件对象或运行时端口偏置。按键
+single-flight 构建既保留并行 PVT 能力，也避免同一冷 card 被重复展开；模型源的
+路径、mtime 或大小变化会使对应派生项自动失效。
+
 - **`pdk/sky130/library.py` / `device.py`** ——加载随包的按几何展开 BSIM4.5
   参数卡，注册原生 `sky130.nmos` / `sky130.pmos`。`extract_w` 选择参考宽度卡，
   实例仍使用实际几何；缺卡时清晰报错，不自动启动外部仿真器。
@@ -654,7 +670,8 @@ AC 电容与电荷有限差分一致，DC、AC、noise、transient、PSS、PAC�
 的 ctypes 绑定是 Python 侧调用同一份编译库做单点 op/AC/noise 求值的入口。
 v2.0.0 起生产路径不再有独立的 Python 数值实现。
 
-- **`pdk/freepdk45/library.py`** ——可迁移卡路径解析、严格 corner/极性校验、数值解析与缓存。
+- **`pdk/freepdk45/library.py`** ——可迁移卡路径解析、严格绑定/corner/极性校验、
+  数值解析与公共只读 card 缓存。
 - **`pdk/freepdk45/device.py`** ——原生 `TransistorModel` 适配器和默认 `freepdk45.*` 注册。
 - **`freepdk45_model.py`** ——兼容导出与可选的旧 `freepdk45_ngspice.*` 网格别名。
 - **`ngspice_char.py` / `ngspice_device.py` / `ngspice_transient.py`** ——保留为外部
@@ -684,8 +701,9 @@ PSS、PAC、PNoise 都不需要 ngspice 子进程。旧工艺适配器仅以显�
 ### 本地服务层（`service/app.py` / `jobs.py` / `serialize.py` / `cli.py`）
 
 架在整个求解器栈之上的**可选**本地 FastAPI HTTP 层，由 `serve` extra 门控
-（`pip install -e ".[serve]"`）。它是一层薄适配——每个路由都直接转发给已有的单一事实来源，
-本身不带任何数值逻辑。完整端点参考见 [本地服务 API](service_api_zh.md)。
+（`pip install -e ".[serve]"`）。它是一层薄适配——每个路由都调用
+`service/operations.py` 中与 transport 无关的单一实现，本身不带任何数值逻辑。
+完整端点参考见 [本地服务 API](service_api_zh.md)。
 
 - **`app.py`** —— `create_app(job_workers=1) -> FastAPI` 构建 `/api/v1` app：`GET
   health`/`capabilities`、`POST validate`/`solve`（同步，直接调用
@@ -709,6 +727,14 @@ PSS、PAC、PNoise 都不需要 ngspice 子进程。旧工艺适配器仅以显�
   的 `python -m circuitopt.service` 入口共用，与 `explore`/`dataset` 的单一来源 CLI 模式一致。
   `run_cli` 内部延迟 import `fastapi`/`uvicorn`，所以 `circuitopt/__main__.py`（为了注册子命令会
   提前 import `circuitopt.service`）不需要装了 `serve` extra 才能正常工作。
+
+### MCP 层（`mcp/server.py` / `workspace.py` / `cli.py`）
+
+可选 MCP 适配层由 `pip install -e ".[mcp]"` 门控，支持 stdio 和只允许 loopback 的
+Streamable HTTP。它与 FastAPI 调用同一组 `service.operations`，额外负责工作区相对
+路径隔离、直接响应中的长向量压缩，以及把完整结果写入 `results/mcp`。探索、失配 MC
+和 signoff 都作为可取消的 `JobManager` 任务运行。完整工具和 resources 见
+[MCP 服务](mcp_server_zh.md)。
 
 ## 快速示例
 

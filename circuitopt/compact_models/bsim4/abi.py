@@ -8,6 +8,7 @@ the same terminal sign convention and ``capacitance[i, j]`` is
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Mapping, Protocol
 
 import numpy as np
@@ -51,7 +52,8 @@ class Bsim4ModelCard:
         normalized.pop("level", None)
         normalized.pop("version", None)
         object.__setattr__(self, "version", version)
-        object.__setattr__(self, "parameters", normalized)
+        object.__setattr__(
+            self, "parameters", MappingProxyType(normalized))
 
 
 @dataclass(frozen=True)
@@ -69,7 +71,8 @@ class Bsim4InstanceCard:
             if value < 1 or value != int(value):
                 raise Bsim4ValidationError(
                     f"instance parameter {integer_name!r} must be a positive integer")
-        object.__setattr__(self, "parameters", normalized)
+        object.__setattr__(
+            self, "parameters", MappingProxyType(normalized))
 
 
 @dataclass(frozen=True)

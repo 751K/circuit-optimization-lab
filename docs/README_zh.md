@@ -24,6 +24,7 @@
   瞬态积分、周期分析、优化层和服务层。
 - [开发者接手指南](development.md)：仓库地图、测试策略、扩展流程和文档维护规则。
 - [本地服务 API](service_api_zh.md)：FastAPI 端点、后台任务、序列化和 CLI 对应关系。
+- [MCP 服务](mcp_server_zh.md)：LLM 工具、resources、后台 signoff、客户端配置和工作区安全。
 - [ngspice Oracle 辅助层](ngspice_oracles.md)：FreePDK45 与 TSMC 回归中显式使用的
   外部参考路径。
 
@@ -50,6 +51,7 @@ Foundry 模型文件只是本地输入，不属于仓库内容，必须保持 Gi
 | [PDK 支持矩阵](pdk_support_zh.md) | 工艺和后端能力边界 | 持续维护 |
 | [核心求解器概览](module_overview_zh.md) | 实现架构 | 持续维护 |
 | [本地服务 API](service_api_zh.md) | HTTP 与任务 API | 持续维护 |
+| [MCP 服务](mcp_server_zh.md) | LLM 工具与资源协议 | 持续维护 |
 | [TSMC28HPC+ 适配](tsmc28hpcp_zh.md) | Licensed 本地模型接入 | 持续维护 |
 | [许可证与第三方软件](third_party_licenses.md) | MIT 范围、BSIM4 致谢和第三方源码条款 | 持续维护 |
 | [运行环境与性能基准](environment_performance.md) | 带日期的性能测量和调优记录 | 参考快照 |

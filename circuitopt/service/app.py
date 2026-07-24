@@ -19,7 +19,6 @@ here — see :mod:`circuitopt.service` for the lazy-import contract.
 from __future__ import annotations
 
 import asyncio
-import time
 from contextlib import asynccontextmanager
 from queue import Empty as queue_Empty
 from typing import Any, Optional
@@ -35,19 +34,13 @@ except ImportError as exc:  # optional dependency (serve extra)
     ) from exc
 
 from .. import __version__
-from ..analysis_dispatch import ANALYSIS_ORDER, run_analysis_suite
-from ..analysis_options import known_keys, validate_analysis_cfg
-from ..circuit_loader import circuit_from_dict
-from ..device_factory import CORNERS, SKY130_CORNERS
-from ..device_model import registered_models
-from ..freepdk45_model import FREEPDK45_CORNERS
-from ..run_contract import (
-    SimulationInvalid,
-    evaluate_signoff,
-    validate_signoff_config,
-)
 from .jobs import JOB_KINDS, JobManager
-from .serialize import serialize_results, to_jsonable
+from .operations import (
+    OperationError,
+    build_capabilities,
+    solve_circuit,
+    validate_circuit,
+)
 
 
 # ── request envelopes ─────────────────────────────────────────────────────────
@@ -95,32 +88,6 @@ class McJobRequest(BaseModel):
 
 
 # ── capabilities assembly ─────────────────────────────────────────────────────
-
-def _build_capabilities() -> dict:
-    """Assemble the self-description payload from the authoritative registries.
-
-    Pulls model/PDK names from the device-model registry, analysis names + legal
-    option keys from :mod:`circuitopt.analysis_options`, and the three corner
-    families from their defining modules. Nothing here is hardcoded editorial
-    content — it all reflects what the current build actually supports.
-    """
-    analyses = {name: sorted(known_keys(name)) for name in ANALYSIS_ORDER}
-    return {
-        "version": __version__,
-        "api": "v1",
-        "models": registered_models(),
-        "analyses": analyses,
-        "corners": {
-            # OTFT continuous-PVT shift names (device_factory.CORNERS).
-            "otft": sorted(CORNERS),
-            # Silicon discrete corners baked into extracted device cards.
-            "sky130": sorted(SKY130_CORNERS),
-            "freepdk45": sorted(FREEPDK45_CORNERS),
-        },
-        # Long-running background job kinds a GUI can submit (see /api/v1/jobs/*).
-        "jobs": list(JOB_KINDS),
-    }
-
 
 # ── app factory ───────────────────────────────────────────────────────────────
 
@@ -171,7 +138,7 @@ def create_app(job_workers: int = 1) -> FastAPI:
 
     @app.get("/api/v1/capabilities")
     def capabilities() -> dict:
-        return _build_capabilities()
+        return build_capabilities(jobs=JOB_KINDS)
 
     @app.post("/api/v1/validate")
     def validate(circuit: dict[str, Any] = Body(...)) -> dict:
@@ -181,27 +148,7 @@ def create_app(job_workers: int = 1) -> FastAPI:
         as ``{"valid": true}`` or ``{"valid": false, "errors": [...]}``. Error
         strings are the raw exception messages so a GUI can display them as-is.
         """
-        errors: list[str] = []
-        try:
-            spec = circuit_from_dict(circuit)
-        except Exception as exc:  # loader raises ValueError/TypeError on bad JSON
-            return {"valid": False, "errors": [str(exc)]}
-
-        # Per-analysis option-key validation (a residual/typo'd key is an error).
-        for name, cfg in (spec.analyses or {}).items():
-            if isinstance(cfg, dict):
-                try:
-                    validate_analysis_cfg(name, cfg)
-                except Exception as exc:
-                    errors.append(str(exc))
-        try:
-            validate_signoff_config(spec)
-        except Exception as exc:
-            errors.append(str(exc))
-
-        if errors:
-            return {"valid": False, "errors": errors}
-        return {"valid": True}
+        return validate_circuit(circuit)
 
     @app.post("/api/v1/solve")
     def solve(req: SolveRequest) -> dict:
@@ -211,38 +158,15 @@ def create_app(job_workers: int = 1) -> FastAPI:
         detail distinguishing a ``parse`` error (bad circuit structure) from a
         ``solve`` error (e.g. DC non-convergence). Tracebacks are never leaked.
         """
-        # ── parse stage ──
         try:
-            spec = circuit_from_dict(req.circuit)
-        except Exception as exc:
+            return solve_circuit(
+                req.circuit, selected=req.selected, corner=req.corner
+            )
+        except OperationError as exc:
             raise HTTPException(
                 status_code=422,
-                detail={"stage": "parse", "message": str(exc)},
+                detail=exc.as_dict(),
             ) from exc
-
-        # ── solve stage ──
-        t0 = time.perf_counter()
-        try:
-            results = run_analysis_suite(spec, selected=req.selected, corner=req.corner)
-            signoff = evaluate_signoff(spec, results)
-        except SimulationInvalid as exc:
-            raise HTTPException(
-                status_code=422,
-                detail={"stage": "solve", "status": "invalid", **exc.as_dict()},
-            ) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=422,
-                detail={"stage": "solve", "message": str(exc)},
-            ) from exc
-        elapsed = time.perf_counter() - t0
-
-        return {
-            "status": "valid",
-            "results": serialize_results(results),
-            "signoff": to_jsonable(signoff),
-            "elapsed_s": to_jsonable(elapsed),
-        }
 
     # ── background jobs (explore / mismatch MC) ───────────────────────────────
 

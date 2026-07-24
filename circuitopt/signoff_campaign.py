@@ -443,8 +443,14 @@ def run_signoff_campaign(
     *,
     workers: int = 1,
     progress: Callable[[int, int], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Run every case over the Cartesian PVT grid and aggregate strict signoff."""
+    """Run every case over the Cartesian PVT grid and aggregate strict signoff.
+
+    ``should_stop`` is checked between PVT points.  It provides cooperative
+    cancellation for service transports; a point already executing is allowed
+    to finish so solver state is never interrupted mid-analysis.
+    """
     if workers < 1:
         raise CampaignConfigurationError("workers must be at least 1")
     if isinstance(config_or_path, Mapping):
@@ -486,24 +492,34 @@ def run_signoff_campaign(
     ordered: list[dict[str, Any] | None] = [None] * len(points)
     if workers == 1:
         for index, point in enumerate(points):
+            if should_stop is not None and should_stop():
+                break
             result_index, result = _run_point(index, point, cases, pvt)
             ordered[result_index] = result
             completed += 1
             if progress is not None:
                 progress(completed, len(points))
     else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=workers)
+        try:
             futures = {
                 executor.submit(_run_point, index, point, cases, pvt): index
                 for index, point in enumerate(points)
             }
             for future in as_completed(futures):
+                if should_stop is not None and should_stop():
+                    for pending in futures:
+                        pending.cancel()
+                    break
                 result_index, result = future.result()
                 ordered[result_index] = result
                 completed += 1
                 if progress is not None:
                     progress(completed, len(points))
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
     point_results = [point for point in ordered if point is not None]
+    stopped_early = len(point_results) != len(points)
 
     counts = {
         status: sum(point["status"] == status for point in point_results)
@@ -523,7 +539,7 @@ def run_signoff_campaign(
         status = "fail"
     else:
         status = "pass"
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "name": config["name"],
         "status": status,
@@ -544,3 +560,8 @@ def run_signoff_campaign(
         "points": point_results,
         "worst_case": _global_worst(point_results),
     }
+    if stopped_early:
+        result["stopped_early"] = True
+        result["status"] = "cancelled"
+        result["passed"] = False
+    return result

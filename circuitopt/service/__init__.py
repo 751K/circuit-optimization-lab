@@ -5,7 +5,7 @@ Requests hand circuit JSON straight through to the existing single sources of
 truth — :func:`circuitopt.circuit_loader.circuit_from_dict` for the schema,
 :mod:`circuitopt.analysis_options` for option validation, and
 :func:`circuitopt.analysis_dispatch.run_analysis_suite` for execution. This is
-the base the Tauri desktop GUI and the MCP server (S2+) sit on top of.
+the base the Tauri desktop GUI and ``circuitopt.mcp`` adapters sit on top of.
 
 ``fastapi`` / ``uvicorn`` are **optional** dependencies (the ``serve`` extra).
 This ``__init__`` deliberately imports **neither** them nor :mod:`.app`, so

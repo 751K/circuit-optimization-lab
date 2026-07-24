@@ -6,8 +6,17 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
+from typing import Mapping
 
-from ...compact_models.bsim4 import Bsim4InstanceCard, Bsim4ModelCard
+from ...compact_models.bsim4 import (
+    Bsim4CardCache,
+    Bsim4CardCacheInfo,
+    Bsim4InstanceCard,
+    Bsim4ModelCard,
+    Bsim4SourceFingerprint,
+    make_bsim4_card_cache_key,
+)
 
 
 SKY130_CORNERS = ("tt", "ss", "ff", "sf", "fs")
@@ -91,8 +100,8 @@ class Sky130Card:
     polarity: str
     corner: str
     path: Path
-    model_parameters: dict[str, float]
-    instance_parameters: dict[str, float]
+    model_parameters: Mapping[str, float]
+    instance_parameters: Mapping[str, float]
     source_version: float
 
     def to_bsim4_cards(self):
@@ -106,25 +115,49 @@ class Sky130Card:
         )
 
 
-_MODEL_CACHE: dict[tuple[str, int, int], dict[str, float]] = {}
+_MODEL_CACHE: dict[Bsim4SourceFingerprint, Mapping[str, float]] = {}
 _MODEL_CACHE_LOCK = threading.Lock()
+_CARD_CACHE = Bsim4CardCache[
+    tuple[Sky130Card, Bsim4ModelCard, Bsim4InstanceCard]
+](maxsize=1024)
 
 
-def load_sky130_card(
+def load_sky130_device_cards(
     polarity: str,
     *,
+    pdk: str = "sky130",
+    model: str | None = None,
+    section: str = "inherit",
+    bin_selector: str = "auto",
     width_um: float,
     length_um: float,
     nf: int = 1,
     mult: int = 1,
     corner: str = "tt",
+    temperature_c: float = 27.0,
     reference_width_um: float | None = None,
     mismatch_v: float = 0.0,
     instance_parameters: dict[str, float] | None = None,
-) -> Sky130Card:
-    """Load a flat card without invoking an external simulator."""
+) -> tuple[Sky130Card, Bsim4ModelCard, Bsim4InstanceCard]:
+    """Return cached PDK/model/instance cards without an external simulator."""
     polarity = normalize_polarity(polarity)
+    pdk = str(pdk).strip().lower()
+    if pdk != "sky130":
+        raise Sky130ModelError(f"SKY130 card cannot serve PDK {pdk!r}")
+    model = normalize_polarity(model or polarity)
+    if model != polarity:
+        raise Sky130ModelError(
+            f"binding model {model!r} conflicts with polarity {polarity!r}")
     corner = normalize_corner(corner)
+    section = str(section).strip().lower()
+    if not section:
+        raise Sky130ModelError("SKY130 section binding must be non-empty")
+    if section != "inherit" and normalize_corner(section) != corner:
+        raise Sky130ModelError(
+            f"binding section {section!r} conflicts with corner {corner!r}")
+    bin_selector = str(bin_selector).strip()
+    if not bin_selector:
+        raise Sky130ModelError("SKY130 bin binding must be non-empty")
     width_um = float(width_um)
     length_um = float(length_um)
     reference_width_um = (
@@ -138,10 +171,16 @@ def load_sky130_card(
 
     path = sky130_card_path(
         polarity, reference_width_um, length_um, corner)
-    stat = path.stat()
-    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    resolved_bin = path.stem
+    if (
+        bin_selector.lower() != "auto"
+        and bin_selector.lower() != resolved_bin.lower()
+    ):
+        raise Sky130ModelError(
+            f"requested bin {bin_selector!r}, resolved {resolved_bin!r}")
+    source = Bsim4SourceFingerprint.from_path(path)
     with _MODEL_CACHE_LOCK:
-        model_parameters = _MODEL_CACHE.get(key)
+        model_parameters = _MODEL_CACHE.get(source)
         if model_parameters is None:
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
@@ -159,7 +198,8 @@ def load_sky130_card(
             if version != 4.5:
                 raise Sky130ModelError(
                     f"{path} uses unsupported BSIM4 version {version!r}")
-            _MODEL_CACHE[key] = model_parameters
+            model_parameters = MappingProxyType(model_parameters)
+            _MODEL_CACHE[source] = model_parameters
 
     parameters = {
         "w": width_um * 1e-6,
@@ -173,11 +213,68 @@ def load_sky130_card(
     })
     if mismatch_v:
         parameters["delvto"] = float(mismatch_v)
-    return Sky130Card(
-        polarity=polarity,
+    key = make_bsim4_card_cache_key(
+        source=source,
+        pdk=pdk,
+        model=model,
+        section=section,
+        bin_selector=bin_selector,
+        width_um=width_um,
+        length_um=length_um,
+        nf=nf,
+        mult=mult,
+        temperature_c=temperature_c,
         corner=corner,
-        path=path,
-        model_parameters=dict(model_parameters),
-        instance_parameters=parameters,
-        source_version=4.5,
+        mismatch_v=mismatch_v,
+        extra={
+            "reference_width_um": reference_width_um,
+            **parameters,
+        },
     )
+
+    def build():
+        card = Sky130Card(
+            polarity=polarity,
+            corner=corner,
+            path=path,
+            model_parameters=model_parameters,
+            instance_parameters=MappingProxyType(dict(parameters)),
+            source_version=4.5,
+        )
+        return (card, *card.to_bsim4_cards())
+
+    return _CARD_CACHE.get_or_create(key, build)
+
+
+def load_sky130_card(
+    polarity: str,
+    *,
+    width_um: float,
+    length_um: float,
+    nf: int = 1,
+    mult: int = 1,
+    corner: str = "tt",
+    reference_width_um: float | None = None,
+    mismatch_v: float = 0.0,
+    instance_parameters: dict[str, float] | None = None,
+) -> Sky130Card:
+    """Return the PDK-facing card from the shared immutable bundle cache."""
+    return load_sky130_device_cards(
+        polarity,
+        width_um=width_um,
+        length_um=length_um,
+        nf=nf,
+        mult=mult,
+        corner=corner,
+        reference_width_um=reference_width_um,
+        mismatch_v=mismatch_v,
+        instance_parameters=instance_parameters,
+    )[0]
+
+
+def sky130_card_cache_info() -> Bsim4CardCacheInfo:
+    return _CARD_CACHE.cache_info()
+
+
+def clear_sky130_card_cache() -> None:
+    _CARD_CACHE.clear()

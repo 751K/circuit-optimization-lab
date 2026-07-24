@@ -26,6 +26,7 @@ python -m circuitopt --help
 | `plot` | 生成内置 AFE/chopper 波形和 Bode 图 |
 | `dataset` | 生成带 provenance 的 surrogate 数据集 |
 | `serve` | 启动可选 FastAPI 本地服务 |
+| `mcp` | 启动可选 Model Context Protocol 服务 |
 
 无子命令的旧写法仍会自动路由到 `run`：
 
@@ -380,6 +381,24 @@ circuit-opt serve
 
 `0.0.0.0` 会把无鉴权服务暴露到网络，不应作为默认配置。完整协议见
 [本地服务 API](service_api_zh.md)。
+
+## `mcp`
+
+```bash
+uv pip install -e ".[mcp]"
+circuit-opt mcp --transport stdio --workspace .
+```
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `--transport` | `stdio` | `stdio` 或 `streamable-http` |
+| `--workspace` | `.` | MCP 工具唯一可访问的文件树 |
+| `--host` | `127.0.0.1` | Streamable HTTP 监听地址，只允许 loopback |
+| `--port` | `8342` | Streamable HTTP 端口 |
+| `--job-workers` | `1` | 并发 explore/MC/signoff 后台任务数 |
+
+等价独立入口为 `circuit-opt-mcp`。工具、resources 和客户端配置见
+[MCP 服务](mcp_server_zh.md)。
 
 ## 校准与基准
 

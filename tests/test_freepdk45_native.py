@@ -52,6 +52,44 @@ def test_native_devices_load_flat_version_4_cards_without_ngspice(monkeypatch):
     assert pmos._evaluate(1.0, 0.5, 0.3).operating_point["internal_nodes"] == 4
 
 
+def test_native_card_bundle_cache_reuses_immutable_cards():
+    from circuitopt.pdk.freepdk45.library import load_freepdk45_library
+
+    library = load_freepdk45_library("nmos", "nom")
+    library.clear_card_cache()
+    request = {
+        "pdk": "freepdk45",
+        "model": "nmos",
+        "section": "inherit",
+        "bin_selector": "auto",
+        "width_um": 1.0,
+        "length_um": 0.05,
+        "nf": 2,
+        "mult": 1,
+        "corner": "nom",
+        "temperature_c": 27.0,
+        "mismatch_v": 0.0,
+    }
+    first = library.device_cards(**request)
+    second = library.device_cards(**request)
+    assert all(left is right for left, right in zip(first, second, strict=True))
+    info = library.card_cache_info()
+    assert (info.hits, info.misses, info.maxsize, info.currsize) == (
+        1, 1, 1024, 1)
+    with pytest.raises(TypeError):
+        first[0].instance_parameters["nf"] = 4
+    with pytest.raises(TypeError):
+        first[1].parameters["vth0"] = 0.0
+    with pytest.raises(TypeError):
+        first[2].parameters["nf"] = 4
+
+    hot = library.device_cards(**(request | {"temperature_c": 125.0}))
+    extra = library.device_cards(
+        **(request | {"instance_parameters": {"rgeo": 1.0}}))
+    assert hot[0] is not first[0]
+    assert extra[0] is not first[0]
+
+
 def test_native_single_devices_are_finite_conservative_and_noisy(monkeypatch):
     from circuitopt.device_model import create_transistor
 
@@ -207,6 +245,52 @@ def test_native_5t_ota_rust_grid_transient(monkeypatch):
     assert result["bsim4_rust_transient"] is True
     assert "bsim4_numba_transient" not in result
     assert result["nfail"] == 0
+
+
+def test_native_transient_uses_rust_terminal_history_without_scalar_replay(monkeypatch):
+    """Accepted Rust states carry I/Q history; Python must not re-evaluate MOS."""
+    from circuitopt.pdk.freepdk45.device import _Fp45NativeFet
+    from circuitopt.transient_solver import transient
+
+    def unexpected_scalar_replay(*_args, **_kwargs):
+        raise AssertionError("native transient replayed a scalar BSIM evaluation")
+
+    monkeypatch.setattr(
+        _Fp45NativeFet, "get_terminal_currents", unexpected_scalar_replay)
+    monkeypatch.setattr(
+        _Fp45NativeFet, "get_terminal_charges", unexpected_scalar_replay)
+    monkeypatch.setattr(
+        _Fp45NativeFet, "get_terminal_linearization", unexpected_scalar_replay)
+
+    spec, _ = _spec(driven=True)
+    time = np.linspace(0.0, 1e-9, 6)
+    result = transient(
+        spec.sizes,
+        spec.bias,
+        time,
+        binding=spec.binding(),
+        inputs={
+            "vip": np.full_like(time, 0.55),
+            "vin": np.full_like(time, 0.55),
+        },
+        V0=np.asarray((0.1, 0.45, 0.45)),
+        integration_method="be",
+        max_step=0.2e-9,
+    )
+
+    expected_vdd = np.asarray((
+        -3.6835149759650734e-05,
+        -3.310677162408139e-05,
+        -3.3344422110229174e-05,
+        -3.335697816084398e-05,
+        -3.3357628546930804e-05,
+        -3.3357402639062885e-05,
+    ))
+    assert result["nfail"] == 0
+    np.testing.assert_allclose(
+        result["branch_currents"]["rail:VDD"], expected_vdd, rtol=1e-12, atol=1e-15)
+    assert np.all(np.isfinite(result["branch_currents"]["gate:M1"]))
+    assert np.all(np.isfinite(result["branch_currents"]["gate:M2"]))
 
 
 def test_native_5t_ota_pss_without_ngspice(monkeypatch):

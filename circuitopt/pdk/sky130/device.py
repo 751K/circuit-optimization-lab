@@ -12,7 +12,7 @@ from ...compact_models.bsim4 import (
     NativeBsim4Backend,
 )
 from ...device_model import TransistorModel, register_pdk
-from .library import load_sky130_card, normalize_corner
+from .library import load_sky130_device_cards, normalize_corner
 
 
 _BACKEND = NativeBsim4Backend()
@@ -25,6 +25,7 @@ class _Sky130NativeFet(TransistorModel):
     HAS_TERMINAL_NOISE = True
     TRANSIENT_BACKEND = "bsim4_native"
     SUPPORTS_MULTIPLICITY = True
+    CONSUMES_BINDING_METADATA = True
     EXTRACT_W: float | None = None
     _EVAL_CACHE_MAX = 32
 
@@ -41,6 +42,10 @@ class _Sky130NativeFet(TransistorModel):
         delvto: float = 0.0,
         mult: int = 1,
         extract_w: float | None = None,
+        _binding_pdk: str = "sky130",
+        _binding_model: str | None = None,
+        _binding_section: str = "inherit",
+        _binding_bin: str = "auto",
         **parameters,
     ):
         mismatch_v = parameters.pop("_delvto", mismatch or delvto)
@@ -56,20 +61,25 @@ class _Sky130NativeFet(TransistorModel):
         self.kcl_sign = -1.0 if self.TYPE > 0 else 1.0
         reference_width = (
             extract_w if extract_w is not None else self.EXTRACT_W)
-        card = load_sky130_card(
+        card, self.model_card, self.instance_card = load_sky130_device_cards(
             self.POLARITY,
+            pdk=_binding_pdk,
+            model=_binding_model or self.POLARITY,
+            section=_binding_section,
+            bin_selector=_binding_bin,
             width_um=self.W,
             length_um=self.L,
             nf=self.NF,
             mult=self.mult,
             corner=self.corner,
+            temperature_c=self.temperature - 273.15,
             reference_width_um=reference_width,
             mismatch_v=float(mismatch_v),
             instance_parameters=parameters,
         )
-        self.model_card, self.instance_card = card.to_bsim4_cards()
         self.card_path = str(card.path)
         self.model_name = card.path.stem
+        self.bin_name = card.path.stem
         self._evaluations: OrderedDict[tuple, Bsim4Evaluation] = OrderedDict()
 
     def _evaluate(

@@ -38,3 +38,45 @@ def test_bundled_card_has_key_bsim4_params():
         assert key in card
     assert card["version"] == pytest.approx(4.5)         # SKY130 uses BSIM4.5
     assert 0.2 < card["vth0"] < 0.6                       # a sane nfet threshold
+
+
+def test_native_card_bundle_cache_reuses_immutable_cards():
+    from circuitopt.pdk.sky130 import (
+        clear_sky130_card_cache,
+        load_sky130_device_cards,
+        sky130_card_cache_info,
+    )
+
+    clear_sky130_card_cache()
+    request = {
+        "pdk": "sky130",
+        "model": "nmos",
+        "section": "inherit",
+        "bin_selector": "auto",
+        "width_um": 1.0,
+        "length_um": 0.15,
+        "nf": 2,
+        "mult": 1,
+        "corner": "tt",
+        "temperature_c": 27.0,
+        "mismatch_v": 0.0,
+    }
+    first = load_sky130_device_cards("nmos", **request)
+    second = load_sky130_device_cards("nmos", **request)
+    assert all(left is right for left, right in zip(first, second, strict=True))
+    info = sky130_card_cache_info()
+    assert (info.hits, info.misses, info.maxsize, info.currsize) == (
+        1, 1, 1024, 1)
+    with pytest.raises(TypeError):
+        first[0].model_parameters["vth0"] = 0.0
+    with pytest.raises(TypeError):
+        first[1].parameters["vth0"] = 0.0
+    with pytest.raises(TypeError):
+        first[2].parameters["nf"] = 4
+
+    hot = load_sky130_device_cards(
+        "nmos", **(request | {"temperature_c": 125.0}))
+    extra = load_sky130_device_cards(
+        "nmos", **(request | {"instance_parameters": {"rgeo": 1.0}}))
+    assert hot[0] is not first[0]
+    assert extra[0] is not first[0]

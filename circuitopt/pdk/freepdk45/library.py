@@ -4,8 +4,17 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Mapping
 
-from ...compact_models.bsim4 import Bsim4InstanceCard, Bsim4ModelCard
+from ...compact_models.bsim4 import (
+    Bsim4CardCache,
+    Bsim4CardCacheInfo,
+    Bsim4InstanceCard,
+    Bsim4ModelCard,
+    Bsim4SourceFingerprint,
+    make_bsim4_card_cache_key,
+)
 from ...spice import parse_spice_library, parse_spice_number
 from ...toolchain import pdk_root
 
@@ -73,8 +82,8 @@ class Freepdk45Card:
     corner: str
     path: str
     model_name: str
-    model_parameters: dict[str, float]
-    instance_parameters: dict[str, float]
+    model_parameters: Mapping[str, float]
+    instance_parameters: Mapping[str, float]
     source_version: float
 
     def to_bsim4_cards(self):
@@ -130,6 +139,10 @@ class Freepdk45Library:
         self.model_parameters = parameters
         self.model_name = expected_name
         self.source_version = version
+        self._source = Bsim4SourceFingerprint.from_path(self.path)
+        self._card_cache = Bsim4CardCache[
+            tuple[Freepdk45Card, Bsim4ModelCard, Bsim4InstanceCard]
+        ](maxsize=1024)
 
     def device_card(
         self,
@@ -141,6 +154,65 @@ class Freepdk45Library:
         mismatch_v: float = 0.0,
         instance_parameters: dict[str, float] | None = None,
     ) -> Freepdk45Card:
+        """Return the PDK-facing card from the shared immutable bundle cache."""
+        return self.device_cards(
+            width_um=width_um,
+            length_um=length_um,
+            nf=nf,
+            mult=mult,
+            mismatch_v=mismatch_v,
+            instance_parameters=instance_parameters,
+        )[0]
+
+    def device_cards(
+        self,
+        *,
+        pdk: str = "freepdk45",
+        model: str | None = None,
+        section: str = "inherit",
+        bin_selector: str = "auto",
+        width_um: float,
+        length_um: float,
+        nf: int = 1,
+        mult: int = 1,
+        corner: str | None = None,
+        temperature_c: float = 27.0,
+        mismatch_v: float = 0.0,
+        instance_parameters: dict[str, float] | None = None,
+    ) -> tuple[Freepdk45Card, Bsim4ModelCard, Bsim4InstanceCard]:
+        """Return cached PDK/model/instance cards for one explicit binding."""
+        pdk = str(pdk).strip().lower()
+        if pdk != "freepdk45":
+            raise Freepdk45ModelError(
+                f"FreePDK45 card cannot serve PDK {pdk!r}")
+        model = normalize_polarity(model or self.polarity)
+        if model != self.polarity:
+            raise Freepdk45ModelError(
+                f"binding model {model!r} conflicts with polarity "
+                f"{self.polarity!r}")
+        requested_corner = normalize_corner(corner or self.corner)
+        if requested_corner != self.corner:
+            raise Freepdk45ModelError(
+                f"binding corner {requested_corner!r} conflicts with loaded "
+                f"corner {self.corner!r}")
+        section = str(section).strip().lower()
+        if not section:
+            raise Freepdk45ModelError(
+                "FreePDK45 section binding must be non-empty")
+        if section != "inherit" and normalize_corner(section) != self.corner:
+            raise Freepdk45ModelError(
+                f"binding section {section!r} conflicts with corner "
+                f"{self.corner!r}")
+        bin_selector = str(bin_selector).strip()
+        if not bin_selector:
+            raise Freepdk45ModelError("FreePDK45 bin binding must be non-empty")
+        if (
+            bin_selector.lower() != "auto"
+            and bin_selector.lower() != self.model_name.lower()
+        ):
+            raise Freepdk45ModelError(
+                f"requested bin {bin_selector!r}, resolved {self.model_name!r}")
+
         width_um = float(width_um)
         length_um = float(length_um)
         nf = int(nf)
@@ -162,18 +234,47 @@ class Freepdk45Library:
         })
         if mismatch_v:
             parameters["delvto"] = float(mismatch_v)
-        return Freepdk45Card(
-            polarity=self.polarity,
+        key = make_bsim4_card_cache_key(
+            source=self._source,
+            pdk=pdk,
+            model=model,
+            section=section,
+            bin_selector=bin_selector,
+            width_um=width_um,
+            length_um=length_um,
+            nf=nf,
+            mult=mult,
+            temperature_c=temperature_c,
             corner=self.corner,
-            path=self.path,
-            model_name=self.model_name,
-            model_parameters=dict(self.model_parameters),
-            instance_parameters=parameters,
-            source_version=self.source_version,
+            mismatch_v=mismatch_v,
+            extra=parameters,
         )
 
+        def build():
+            card = Freepdk45Card(
+                polarity=self.polarity,
+                corner=self.corner,
+                path=self.path,
+                model_name=self.model_name,
+                model_parameters=MappingProxyType(dict(self.model_parameters)),
+                instance_parameters=MappingProxyType(dict(parameters)),
+                source_version=self.source_version,
+            )
+            return (card, *card.to_bsim4_cards())
 
-_LIBRARIES: dict[tuple[str, int, int], Freepdk45Library] = {}
+        return self._card_cache.get_or_create(key, build)
+
+    def card_cache_info(self) -> Bsim4CardCacheInfo:
+        return self._card_cache.cache_info()
+
+    def clear_card_cache(self) -> None:
+        self._card_cache.clear()
+
+
+_LIBRARIES: dict[
+    tuple[Bsim4SourceFingerprint, str, str],
+    Freepdk45Library,
+] = {}
 _LIBRARIES_LOCK = threading.Lock()
 
 
@@ -190,8 +291,8 @@ def load_freepdk45_library(
     if not os.path.isfile(resolved):
         raise Freepdk45ModelError(
             f"FreePDK45 model card not found: {resolved}; set PDK_ROOT")
-    stat = os.stat(resolved)
-    key = (resolved, stat.st_mtime_ns, stat.st_size)
+    source = Bsim4SourceFingerprint.from_path(resolved)
+    key = (source, polarity, corner)
     with _LIBRARIES_LOCK:
         library = _LIBRARIES.get(key)
         if library is None:
