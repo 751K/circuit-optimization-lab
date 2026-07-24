@@ -560,6 +560,11 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - adaptive gear2 使用 step-doubling LTE 估计；PSS 会在接近收敛时冻结 accepted grid，
   再用该固定 grid 生成最终 orbit/monodromy。编译核（`_solve_adaptive_rust`，
   唯一的 adaptive driver）负责这条路径的加速。
+- 需要可复现 PAC/PNoise 轨迹的 PSS 调用可传入 `final_tgrid`。此时 adaptive
+  Gear2 只负责 stabilization，且不会冻结 accepted grid；shooting、解析
+  monodromy、fallback stabilization、profile 和最终返回轨迹都使用指定的
+  确定性网格。analysis JSON 通过 `final_n_points` 开启该模式，periodic
+  pulse/square 的边沿边界会同时并入 warmup 与 final grid。
 - 裸 `transient(integration_method="gear2")` 仍是显式 opt-in；当调用方请求
   `max_retry_subdivisions` 或 `max_step` 的 robust 行为时，会留在编译 Rust gear2
   grid；grid 在每个 accepted internal substep 后更新 rolling 两步 BDF2 历史，并在
@@ -900,11 +905,11 @@ AC 结果时约 1.8ms。
   `f_chop=200 Hz` 时默认 time-domain PAC 约 +0.03%，TD-adjoint PNoise IRN 约 +0.02%。
   slow/typical/fast 三 corner 的旧 HB-K32 IRN 误差为 +1.81% / +1.05% / +0.66%，
   TD PNoise 后为 +0.02% / −0.00% / +0.57%。
-- SC-LPF calibration 使用固定 3201 点 `gear2` 轨迹与
-  `cap_mode="average"`，并用 `pnoise_n_period_samples=512` /
-  `pnoise_max_sideband=20` 保证噪声采样。固定网格避免 switch edge 附近
-  adaptive accepted-step 历史在不同 CPU 架构上产生差异。对入库 Spectre
-  参考，PAC 增益、带宽与积分输出噪声误差分别约为 0.2%、0.9% 与 0.5%。
+- SC-LPF calibration 只用 adaptive Gear2 完成 stabilization，随后在并入全部
+  时钟边沿的 3201 点基础确定性网格上完成 shooting，并返回 PAC/PNoise 轨迹。
+  它保留 `cap_mode="average"`，PNoise 使用 512 点重采样和
+  `pnoise_max_sideband=20`。对入库 Spectre 参考，PAC 增益、带宽与积分输出
+  噪声误差分别约为 0.5%、1.2% 与 2.3%。
 - 最终锁定设计约 22.9 dB 增益、549 Hz 带宽、37 µVrms 等价输入噪声。
 
 上述数据描述当前的 AT4000TG 验证案例。后续 PDK 或拓扑应针对其各自的仿真器参考重新进行校准。

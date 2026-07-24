@@ -644,6 +644,12 @@ also supports variable-step BDF2 (second-order, stiffly stable). Key properties:
 - The adaptive gear2 path uses a step-doubling LTE estimate and freezes the PSS
   grid near convergence before the final fixed-grid orbit/monodromy. The compiled
   core (`_solve_adaptive_rust`, the sole adaptive driver) accelerates it.
+- PSS callers that need a reproducible PAC/PNoise orbit can pass
+  `final_tgrid`. Adaptive Gear2 then performs stabilization only and never
+  freezes its accepted grid. Shooting, analytic monodromy, fallback
+  stabilization, profiling, and the returned trajectory all use the supplied
+  deterministic grid. Analysis JSON exposes this mode as `final_n_points`;
+  periodic pulse/square edge boundaries are inserted into both grids.
 - Raw `transient(integration_method="gear2")` keeps the BE default opt-in
   boundary, but when `max_retry_subdivisions` or `max_step` asks for robustness
   it stays in the compiled Rust gear2 grid. The grid updates rolling two-step BDF2
@@ -1072,12 +1078,12 @@ The current solver stack was calibrated against Cadence Spectre 24.1 for the AT4
   +0.03%, and TD-adjoint PNoise IRN is about +0.02%. Across slow/typical/fast,
   the old HB-K32 IRN errors were +1.81% / +1.05% / +0.66%; TD PNoise gives
   +0.02% / -0.00% / +0.57%.
-- SC-LPF calibration uses a fixed 3201-point `gear2` orbit with
-  `cap_mode="average"` and enough PNoise resampling (`512` samples,
-  `max_sideband=20`). The fixed grid avoids architecture-sensitive adaptive
-  accepted-step histories at switch edges. Against the archived Spectre
-  reference, PAC gain, bandwidth, and integrated output noise are within about
-  `0.2%`, `0.9%`, and `0.5%`, respectively.
+- SC-LPF calibration uses adaptive Gear2 only for stabilization, then completes
+  shooting and returns the PAC/PNoise orbit on a deterministic 3201-point base
+  grid augmented with every clock edge. It keeps `cap_mode="average"` and
+  PNoise resampling at 512 samples / `max_sideband=20`. Against the archived
+  Spectre reference, PAC gain, bandwidth, and integrated output noise are within
+  about `0.5%`, `1.2%`, and `2.3%`, respectively.
 - Final locked design around 22.9 dB gain, 549 Hz bandwidth, and 37 uVrms
   input-referred noise.
 

@@ -281,16 +281,25 @@ release checklist.
 
 - **Cross-platform calibration gates / 跨平台校准门**
 
-  **English:** Made the SC-LPF Cadence calibration use a fixed, high-resolution
-  Gear2 PSS orbit instead of architecture-sensitive adaptive accepted steps at
-  switch edges. Updated the latch-screen regression to accept the documented
-  conservative `+inf` result when an adversarial solve does not converge on
-  non-reference platforms.
+  **English:** Added two-stage PSS with `final_tgrid`: adaptive Gear2 performs
+  stabilization without freezing its state-dependent accepted grid, then
+  shooting, analytic monodromy, profiling, and the returned PAC/PNoise orbit run
+  on a deterministic event-aligned grid. JSON analysis dispatch exposes the
+  same path through `pss.final_n_points`. SC-LPF calibration now uses a
+  201-point event-aware warmup grid and a 3201-point base final grid augmented
+  with every clock edge; changing the adaptive initial step by +/-10% changes
+  integrated output noise by less than 2e-5 relative. The latch-screen
+  regression also accepts the documented conservative `+inf` result when an
+  adversarial solve does not converge on non-reference platforms.
 
-  **中文：** SC-LPF Cadence 校准改用固定高分辨率 Gear2 PSS 轨迹，避免
-  switch edge 附近 adaptive accepted-step 在不同 CPU 架构上产生差异。
-  latch-screen 回归测试同步接受已定义的保守 `+inf` 语义：非参考平台上的
-  对抗求解不收敛时不再误判 CI 失败。
+  **中文：** 新增带 `final_tgrid` 的两阶段 PSS：adaptive Gear2 只负责
+  stabilization，且不冻结状态相关的 accepted grid；随后 shooting、解析
+  monodromy、profile 和返回给 PAC/PNoise 的轨迹全部运行在确定性的事件对齐
+  网格上。JSON analysis dispatch 通过 `pss.final_n_points` 提供同一入口。
+  SC-LPF 校准使用 201 点事件感知 warmup 网格，以及并入全部时钟边沿的 3201 点
+  基础 final grid；adaptive 初始步长变化 +/-10% 时，积分输出噪声的相对变化
+  小于 2e-5。latch-screen 回归测试也同步接受已定义的保守 `+inf` 语义：
+  非参考平台上的对抗求解不收敛时不再误判 CI 失败。
 
 - **Native BSIM transient profiling / 原生 BSIM 瞬态性能统计**
 

@@ -250,6 +250,7 @@ def test_dispatch_forwards_adaptive_pss_options(monkeypatch):
 
     def fake_pss_solve(*args, **kwargs):
         seen.update(kwargs)
+        seen["period"] = args[2]
         return {"converged": True, "period": args[2], "corner": kwargs.get("corner")}
 
     monkeypatch.setattr(dispatch_mod, "pss_solve", fake_pss_solve)
@@ -260,6 +261,8 @@ def test_dispatch_forwards_adaptive_pss_options(monkeypatch):
             "pss": {
                 "integration_method": "gear2",
                 "adaptive": True,
+                "final_n_points": 257,
+                "tstab_periods": 2,
                 "adaptive_reltol": 1e-4,
                 "adaptive_vabstol": 1e-6,
                 "adaptive_iabstol": 1e-12,
@@ -273,6 +276,9 @@ def test_dispatch_forwards_adaptive_pss_options(monkeypatch):
     )
 
     assert seen["adaptive"] is True
+    assert len(seen["final_tgrid"]) >= 257
+    assert seen["final_tgrid"][0] == 0.0
+    assert seen["final_tgrid"][-1] == pytest.approx(seen["period"])
     assert seen["adaptive_config"].reltol == 1e-4
     assert seen["adaptive_config"].vabstol == 1e-6
     assert seen["adaptive_config"].iabstol == 1e-12

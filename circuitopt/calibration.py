@@ -239,7 +239,8 @@ def _sc_lpf_clocks(c, tgrid):
             "vin": np.full(n, float(c.get("vin_dc", 20.0)))}
 
 
-def _sc_lpf_adaptive_tgrid(c, n_points):
+def _sc_lpf_event_tgrid(c, n_points):
+    """Uniform period grid augmented with every PWL clock edge boundary."""
     period = 1.0 / float(c["f_clk"])
     base = np.linspace(0.0, period, int(n_points))
     width = float(c.get("duty", 0.45)) * period
@@ -272,11 +273,15 @@ def _run_local_sc_lpf(metadata, want):
     n_points = int(s.get("n_points", 201))
     adaptive = bool(s.get("adaptive", False))
     if adaptive:
-        tgrid = _sc_lpf_adaptive_tgrid(c, n_points)
+        tgrid = _sc_lpf_event_tgrid(c, n_points)
         pss_grid_kwargs = {"tgrid": tgrid}
+        final_n_points = s.get("final_n_points")
+        if final_n_points is not None:
+            pss_grid_kwargs["final_tgrid"] = _sc_lpf_event_tgrid(
+                c, int(final_n_points))
     else:
-        tgrid = np.linspace(0.0, period, n_points + 1)[:-1]
-        pss_grid_kwargs = {"n_points": n_points}
+        tgrid = _sc_lpf_event_tgrid(c, n_points)
+        pss_grid_kwargs = {"tgrid": tgrid}
     pss = pss_solve(
         sizes, {}, period, topo=topo,
         inputs=_sc_lpf_clocks(c, tgrid),

@@ -514,6 +514,64 @@ def test_adaptive_pss_inputs_match_orbit_grid():
     assert np.isfinite(pac["gains"][0])
 
 
+def test_adaptive_pss_warmup_returns_deterministic_final_grid():
+    period = 1e-3
+    warm = np.array([0.0, 0.2e-3, 0.5e-3, 0.8e-3, period])
+    final = np.unique(np.concatenate([
+        np.linspace(0.0, period, 257),
+        np.array([0.2e-3, 0.5e-3, 0.8e-3]),
+    ]))
+    topo = _rc_lowpass_topology()
+    pss = pss_solve(
+        {}, {"VIN": 0.0}, period, topo=topo, tgrid=warm,
+        final_tgrid=final, inputs={"vin": np.zeros_like(warm)},
+        node_inputs={"VIN": "vin"}, V0=np.array([1.0]),
+        tstab_periods=2, residual_tol=1e-8, max_shooting_iters=4,
+        integration_method="gear2", adaptive=True,
+        adaptive_reltol=1e-4, adaptive_h0=period / 1000)
+
+    assert pss["converged"]
+    assert pss["pss_adaptive_requested"] is True
+    assert pss["pss_adaptive_warmup"] is True
+    assert pss["pss_adaptive_warmup_grid_frozen"] is False
+    assert pss["pss_warmup_period_runs"] > 0
+    assert pss["pss_final_period_runs"] > 0
+    assert pss["pss_final_grid_used"] is True
+    assert pss["pss_orbit_grid"] == "deterministic_final"
+    assert pss["adaptive"] is False
+    assert pss["adaptive_grid_frozen"] is False
+    np.testing.assert_array_equal(pss["t"], final)
+    assert len(pss["inputs"]["vin"]) == len(final)
+
+    pac = pac_solve(
+        {}, {"VIN": 0.0}, np.array([100.0]), pss_result=pss,
+        input_drive={"vin": 1.0}, lti_fast_path=False,
+        analytic=True, max_sideband=1, n_period_samples=16)
+    assert pac["pss"] is pss
+    assert np.isfinite(pac["gains"][0])
+    pnoise = pnoise_solve(
+        {}, {"VIN": 0.0}, np.array([100.0]), pss_result=pss,
+        fundamental=1.0 / period, input_drive={"vin": 1.0},
+        lti_fast_path=False, max_sideband=1, n_period_samples=16)
+    assert pnoise["pss"] is pss
+    assert np.isfinite(pnoise["out_psd"][0])
+
+
+def test_adaptive_pss_final_grid_requires_warmup():
+    period = 1e-3
+    grid = np.linspace(0.0, period, 11)
+    topo = _rc_lowpass_topology()
+    common = dict(
+        topo=topo, tgrid=grid, final_tgrid=grid,
+        inputs={"vin": np.zeros_like(grid)}, node_inputs={"VIN": "vin"},
+        V0=np.array([0.0]), integration_method="gear2")
+    with pytest.raises(ValueError, match="requires adaptive=True"):
+        pss_solve({}, {"VIN": 0.0}, period, adaptive=False, **common)
+    with pytest.raises(ValueError, match="tstab_periods >= 1"):
+        pss_solve({}, {"VIN": 0.0}, period, adaptive=True,
+                  tstab_periods=0, **common)
+
+
 def test_reverse_biased_pass_switch_restores_not_pumps():
     # A pass-gate switch whose drain is driven ABOVE its source must DISCHARGE the
     # drain back toward the source. The signed Verilog-A drain current does this;

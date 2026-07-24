@@ -345,6 +345,17 @@ def _run_pss(spec, binding, pss_cfg, periodic):
         tgrid = _with_adaptive_waveform_breakpoints(periodic, context["tgrid"], context["period"])
         if len(tgrid) != len(context["tgrid"]):
             context = build_periodic_context(spec, periodic, tgrid=tgrid)
+    final_n_points = pss_cfg.get("final_n_points")
+    if final_n_points is not None:
+        final_periodic = dict(periodic)
+        final_periodic.pop("tgrid", None)
+        final_periodic["n_points"] = int(final_n_points)
+        final_context = build_periodic_context(spec, final_periodic)
+        kwargs["final_tgrid"] = _with_adaptive_waveform_breakpoints(
+            final_periodic,
+            final_context["tgrid"],
+            final_context["period"],
+        )
     if "corner" in kwargs:
         kwargs["corner"] = _corner_from_cfg(pss_cfg)
     return pss_solve(

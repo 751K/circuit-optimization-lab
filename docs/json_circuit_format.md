@@ -596,6 +596,10 @@ Unknown keys in an `analyses` block are rejected with an error (a typo such as
 "analyses": {
   "pss": {
     "corner": "slow",
+    "integration_method": "gear2",
+    "adaptive": true,
+    "tstab_periods": 10,
+    "final_n_points": 3201,
     "residual_tol": 1e-12,
     "max_shooting_iters": 2,
     "jacobian_reuse": true,
@@ -647,6 +651,11 @@ adaptive timestepping. The dispatch forwards `"adaptive_reltol"`,
 `"adaptive_h0"`, and `"cap_mode"`; pulse/square periodic inputs get edge
 breakpoints inserted before the adaptive run. `cap_mode` is limited to
 `"charge"` (id 0) and `"average"` (id 1), plus their documented aliases.
+For reproducible PAC/PNoise conversion, set `"final_n_points"` together with
+`"adaptive": true` and at least one stabilization period. Adaptive Gear2 then
+supplies only the warm start; the accepted grid is not frozen, and dispatch
+builds a deterministic final grid with the same pulse/square edge breakpoints.
+Shooting, monodromy, profiling, and the returned orbit all use that final grid.
 PAC uses analytic-adjoint harmonic balance by default (`"analytic": true`): one
 adjoint linear solve per frequency on the orbit conversion matrix, with zero extra
 transient runs. `"max_sideband"` and `"n_period_samples"` control the HB resolution.

@@ -92,6 +92,8 @@ ADAPTIVE_OPTIONS = (
 PSS_OPTIONS = (
     _opt("periodic", forward=False, schema=PERIODIC),
     _opt("n_points", forward=False, cast=_int, schema={"type": "integer", "minimum": 2}),
+    _opt("final_n_points", forward=False, cast=_int,
+         schema={"type": "integer", "minimum": 2}),
     _opt("tgrid", forward=False, schema=TIME_GRID),
     _opt("tstab_periods", cast=_int, schema={"type": "integer", "minimum": 0}),
     _opt("max_step", cast=_float, schema=POSITIVE_NUMBER),

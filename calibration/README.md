@@ -60,13 +60,14 @@ HEADER by `core.psf.provenance` and copied into `metadata.json`.
 | chopper_design3_typical | PAC gain / IRN | 11.96 / 9.83 µV | 11.83 / 9.81 µV | **+1.11% / +0.18%** |
 | chopper_design3_slow | PAC gain / IRN | 8.95 / 9.50 µV | 9.03 / 9.32 µV | **−0.88% / +1.92%** |
 | chopper_design3_fast | PAC gain / IRN | 12.00 / 10.81 µV | 11.87 / 10.84 µV | **+1.07% / −0.26%** |
-| sc_lpf | PAC gain / BW / out-noise | 1.001 / 16.97 Hz / 3.47 µV | 1.003 / 16.82 Hz / 3.48 µV | **−0.2% / +0.9% / −0.5%** |
+| sc_lpf | PAC gain / BW / out-noise | 0.998 / 17.02 Hz / 3.56 µV | 1.003 / 16.82 Hz / 3.48 µV | **−0.4% / +1.2% / +2.3%** |
 
 The amp (DC/AC/noise) matches Cadence to ~machine precision; the chopper PAC baseband gain
 and integrated IRN match within ~1–2% across all three corners; the SC-LPF PAC DC gain,
-−3 dB bandwidth, and integrated output noise all match within ~1%. Its calibration
-uses a fixed 3201-point Gear2 orbit because adaptive accepted-step histories at switch
-edges produced architecture-dependent PNoise results. The SC-LPF PAC is computed by
+−3 dB bandwidth, and integrated output noise all match within ~2.3%. Its two-stage
+calibration uses adaptive Gear2 for stabilization without freezing the accepted grid,
+then completes shooting on a deterministic 3201-point base grid augmented with every
+clock edge. PAC and PNoise consume only that final orbit. The SC-LPF PAC is computed by
 the analytic-adjoint harmonic balance (the small-signal drive on the `V_IN` ideal source couples
 into the bordered HB branch row), so it is **integration-method independent** — gear2 and BE give
 the same ~1.006 gain. (The finite-difference shooting fallback was x0-sensitive: on this stiff τ≫T

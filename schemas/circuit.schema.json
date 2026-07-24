@@ -468,6 +468,7 @@
       "properties": {
         "periodic": {"$ref": "#/$defs/periodic"},
         "n_points": {"type": "integer", "minimum": 2},
+        "final_n_points": {"type": "integer", "minimum": 2},
         "tgrid": {"$ref": "#/$defs/timeGrid"},
         "tstab_periods": {"type": "integer", "minimum": 0},
         "max_step": {"$ref": "#/$defs/positiveNumber"},

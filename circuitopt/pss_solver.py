@@ -349,7 +349,7 @@ class _Orbit:
 
 
 class _PSSPeriodRunner:
-    """Own one-period transient runs plus adaptive-grid freeze state.
+    """Own one-period transient runs plus optional adaptive-grid freeze state.
 
     This isolates the interaction between PSS shooting/stabilization and the
     transient driver. Shooting logic can request period runs without knowing
@@ -357,7 +357,8 @@ class _PSSPeriodRunner:
     """
 
     def __init__(self, *, sizes, bias, period, topo, tgrid, inputs,
-                 transient_kwargs, residual_tol, adaptive, adaptive_config):
+                 transient_kwargs, residual_tol, adaptive, adaptive_config,
+                 freeze_adaptive_grid=True):
         self.sizes = sizes
         self.bias = bias
         self.period = float(period)
@@ -368,10 +369,12 @@ class _PSSPeriodRunner:
         self.residual_tol = float(residual_tol)
         self.adaptive = bool(adaptive)
         self.adaptive_config = adaptive_config
+        self.freeze_adaptive_grid = bool(freeze_adaptive_grid)
         self.period_runs = 0
         self.adaptive_grid_frozen = False
         self.frozen_tgrid = None
         self.frozen_inputs = None
+        self.last_orbit = None
 
     def period_kwargs(self):
         if self.adaptive_grid_frozen:
@@ -382,7 +385,8 @@ class _PSSPeriodRunner:
         return self.tgrid, self.inputs, self.transient_kwargs
 
     def maybe_freeze_grid(self, tr, norm, nfail):
-        if (not self.adaptive or self.adaptive_grid_frozen or nfail != 0 or
+        if (not self.freeze_adaptive_grid or not self.adaptive or
+                self.adaptive_grid_frozen or nfail != 0 or
                 norm > float(self.adaptive_config.freeze_factor) * self.residual_tol):
             return
         tr_t = np.asarray(tr["t"], float)
@@ -407,9 +411,11 @@ class _PSSPeriodRunner:
         residual = x_end - x0
         norm = float(np.linalg.norm(residual, ord=np.inf))
         nfail = int(tr.get("nfail", 0))
+        orbit = _Orbit(tr, x0, x_end, residual, norm, nfail)
+        self.last_orbit = orbit
         if allow_freeze:
             self.maybe_freeze_grid(tr, norm, nfail)
-        return _Orbit(tr, x0, x_end, residual, norm, nfail)
+        return orbit
 
     def stabilize(self, x0, max_periods, phys_bounds):
         """Pseudo-transient stabilization with best-physical orbit tracking."""
@@ -456,7 +462,9 @@ class _PSSPeriodRunner:
         residual = x_end - x
         norm = float(np.linalg.norm(residual, ord=np.inf))
         nfail = int(tr.get("nfail", 0))
-        return _Orbit(tr, x, x_end, residual, norm, nfail)
+        orbit = _Orbit(tr, x, x_end, residual, norm, nfail)
+        self.last_orbit = orbit
+        return orbit
 
 
 def _build_shooting_jacobian_fd(x_base, residual_base, *, topo, bias,
@@ -519,7 +527,9 @@ def _pss_status(converged, converged_stabilization, x, phys_bounds, topo):
 
 def _finalize_pss_result(cur, runner, stepper, *, converged,
                          converged_stabilization, stab_runaway, phys_bounds,
-                         iterations, history):
+                         iterations, history, adaptive_requested=False,
+                         warmup_runner=None, warmup_converged=False,
+                         warmup_last_grid_points=0, final_grid_used=False):
     """Assemble the public PSS result dict from the final orbit (``cur``) plus
     the two solver objects — ``runner`` (period grid, prepared inputs, the
     transient config, period-run count) and ``stepper`` (Jacobian counters,
@@ -534,6 +544,9 @@ def _finalize_pss_result(cur, runner, stepper, *, converged,
         final_inputs = _resample_inputs(
             runner.inputs, runner.tgrid, np.asarray(tr["t"], float), runner.period)
     result = dict(tr)
+    warmup_period_runs = (
+        int(warmup_runner.period_runs) if warmup_runner is not None else 0)
+    final_period_runs = int(runner.period_runs)
     result.update({
         "converged": bool(converged),
         "pss_status": pss_status,
@@ -548,7 +561,9 @@ def _finalize_pss_result(cur, runner, stepper, *, converged,
         "residual_tol": float(runner.residual_tol),
         "shooting_iters": int(iterations),
         "shooting_history": history,
-        "shooting_period_runs": int(runner.period_runs),
+        "shooting_period_runs": warmup_period_runs + final_period_runs,
+        "pss_warmup_period_runs": warmup_period_runs,
+        "pss_final_period_runs": final_period_runs,
         "shooting_jacobian_evals": int(stepper.shooting_jacobian_evals),
         "shooting_jacobian_reuses": int(stepper.shooting_jacobian_reuses),
         "shooting_jacobian_reuse_enabled": bool(stepper.jacobian_reuse),
@@ -566,7 +581,26 @@ def _finalize_pss_result(cur, runner, stepper, *, converged,
         "transient_flat_max_step": tk["flat_max_step"],
         "rail_margin": tk["rail_margin"],
         "corner": tk["corner"],
+        # ``adaptive`` describes the returned orbit. In two-stage mode the
+        # adaptive solver supplied the warm start, while this trajectory is the
+        # deterministic fixed-grid orbit used by PAC/PNoise.
         "adaptive": bool(runner.adaptive),
+        "pss_adaptive_requested": bool(adaptive_requested),
+        "pss_adaptive_warmup": bool(warmup_runner is not None),
+        "pss_adaptive_warmup_converged": bool(warmup_converged),
+        "pss_adaptive_warmup_grid_frozen": bool(
+            warmup_runner.adaptive_grid_frozen)
+        if warmup_runner is not None else False,
+        "pss_adaptive_warmup_last_grid_points": int(warmup_last_grid_points),
+        "pss_final_grid_used": bool(final_grid_used),
+        "pss_final_grid_points": int(len(np.asarray(tr["t"], float)))
+        if final_grid_used else 0,
+        "pss_orbit_grid": (
+            "deterministic_final" if final_grid_used
+            else "frozen_adaptive" if runner.adaptive_grid_frozen
+            else "adaptive" if runner.adaptive
+            else "fixed"
+        ),
         "adaptive_grid_frozen": bool(runner.adaptive_grid_frozen),
     })
     return result
@@ -849,6 +883,7 @@ class _PSSShootingStepper:
 def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float],
               period: float, *, topo: Any = None,
               nf: int | Mapping[str, int] | None = None, tgrid: np.ndarray | None = None,
+              final_tgrid: np.ndarray | None = None,
               n_points: int = 161, inputs: Mapping[str, Any] | None = None,
               node_inputs: Mapping[str, str] | None = None,
               current_inputs: Sequence[Any] | None = None,
@@ -893,6 +928,12 @@ def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
     initial state ``x0``, ``residual = x(T)-x0``, residual norm, convergence flag,
     and shooting iteration history.  Non-convergence is reported in the result
     instead of raising, so callers can inspect the best trajectory.
+
+    With ``adaptive=True``, an explicit ``final_tgrid`` selects two-stage PSS:
+    adaptive Gear2 is used only for pseudo-transient stabilization, its accepted
+    grid is never frozen, and all shooting/monodromy/final-orbit work runs on the
+    supplied deterministic grid. The returned trajectory, and therefore every
+    downstream PAC/PNoise linearization, is always the fixed-grid final orbit.
     """
     topo, nf, corner, model_types, device_kwargs, _ = resolve_binding(
         binding, topo=topo, nf=nf, corner=corner, model_types=model_types,
@@ -908,8 +949,15 @@ def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         adaptive_h0=adaptive_h0,
         adaptive_freeze_factor=adaptive_freeze_factor,
     )
-    tgrid = _make_period_grid(period, tgrid, n_points)
     period = float(period)
+    tgrid = _make_period_grid(period, tgrid, n_points)
+    if final_tgrid is not None:
+        if not adaptive:
+            raise ValueError("final_tgrid requires adaptive=True")
+        if int(tstab_periods) < 1:
+            raise ValueError(
+                "final_tgrid requires tstab_periods >= 1 for adaptive warmup")
+        final_tgrid = _make_period_grid(period, final_tgrid, n_points)
     inputs = _prepare_inputs(
         inputs, tgrid,
         check_periodic=bool(check_periodic_inputs),
@@ -957,6 +1005,7 @@ def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
 
     phys_bounds = _physical_span(topo, bias, float(physical_factor))
     stab_runaway = False
+    two_stage = final_tgrid is not None
     runner = _PSSPeriodRunner(
         sizes=sizes,
         bias=bias,
@@ -968,6 +1017,10 @@ def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         residual_tol=residual_tol,
         adaptive=adaptive,
         adaptive_config=adaptive_config,
+        # A caller-supplied final grid replaces accepted-grid freezing. The
+        # adaptive runner is stabilization-only and must never leak its
+        # state-dependent grid into shooting or downstream analyses.
+        freeze_adaptive_grid=not two_stage,
     )
 
     converged_stabilization, stab_best, x, stab_runaway, _ = runner.stabilize(
@@ -977,10 +1030,43 @@ def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
     if converged_stabilization is None and stab_runaway and stab_best is not None:
         x = stab_best.x0.copy()
 
+    warmup_runner = None
+    warmup_converged = converged_stabilization is not None
+    warmup_last_grid_points = 0
+    if two_stage:
+        warmup_runner = runner
+        warmup_orbit = warmup_runner.last_orbit
+        if warmup_orbit is not None:
+            warmup_last_grid_points = len(
+                np.asarray(warmup_orbit.tr["t"], float))
+
+        final_inputs = _resample_inputs(inputs, tgrid, final_tgrid, period)
+        final_transient_kwargs = dict(transient_kwargs)
+        final_transient_kwargs["adaptive"] = False
+        # The warmup edge mask belongs to the source grid. The deterministic
+        # final grid already contains every caller-selected event breakpoint.
+        final_transient_kwargs["edge_mask"] = None
+        runner = _PSSPeriodRunner(
+            sizes=sizes,
+            bias=bias,
+            period=period,
+            topo=topo,
+            tgrid=final_tgrid,
+            inputs=final_inputs,
+            transient_kwargs=final_transient_kwargs,
+            residual_tol=residual_tol,
+            adaptive=False,
+            adaptive_config=adaptive_config,
+            freeze_adaptive_grid=False,
+        )
+        # Adaptive convergence is only a warm-start result. Periodicity must be
+        # re-established independently on the canonical final grid.
+        converged_stabilization = None
+
     history = []
 
     if converged_stabilization is None:
-        cur = runner.run_period(x)
+        cur = runner.run_period(x, allow_freeze=not two_stage)
     else:
         cur = converged_stabilization
     best = _best_orbit(cur.x0, cur.x_end, cur.residual, cur.norm, cur.nfail, cur.tr)
@@ -1000,10 +1086,10 @@ def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         nf=nf,
         bias=bias,
         topo=topo,
-        inputs=inputs,
+        inputs=runner.inputs,
         node_inputs=node_inputs,
         runner=runner,
-        adaptive=adaptive,
+        adaptive=runner.adaptive,
         analytic_jacobian=analytic_jacobian,
         integration_method=integration_method,
         fd_step=fd_step,
@@ -1051,7 +1137,10 @@ def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
     # converge during shooting and never reach here, so their path is unchanged.
     if (not converged and int(max_stabilization_periods) > 0 and not stab_runaway
             and _within(best.x0, phys_bounds, topo)):
-        extra = int(max_stabilization_periods) - runner.period_runs
+        warmup_runs = (
+            warmup_runner.period_runs if warmup_runner is not None else 0)
+        extra = (
+            int(max_stabilization_periods) - warmup_runs - runner.period_runs)
         if extra > 0:
             conv2, best2, _, runaway2, _ = runner.stabilize(
                 best.x0, extra, phys_bounds)
@@ -1080,4 +1169,9 @@ def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         converged=converged,
         converged_stabilization=converged_stabilization,
         stab_runaway=stab_runaway, phys_bounds=phys_bounds,
-        iterations=iterations, history=history)
+        iterations=iterations, history=history,
+        adaptive_requested=adaptive,
+        warmup_runner=warmup_runner,
+        warmup_converged=warmup_converged,
+        warmup_last_grid_points=warmup_last_grid_points,
+        final_grid_used=two_stage)

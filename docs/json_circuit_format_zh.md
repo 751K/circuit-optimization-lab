@@ -559,6 +559,10 @@ solver 参数后 dispatch/schema/docs 继续漂移。
 "analyses": {
   "pss": {
     "corner": "slow",
+    "integration_method": "gear2",
+    "adaptive": true,
+    "tstab_periods": 10,
+    "final_n_points": 3201,
     "residual_tol": 1e-12,
     "max_shooting_iters": 2,
     "jacobian_reuse": true,
@@ -606,6 +610,10 @@ dispatch 会转发 `"adaptive_reltol"`、`"adaptive_vabstol"`、`"adaptive_iabst
 `"adaptive_max_steps"`、`"adaptive_h0"` 和 `"cap_mode"`；pulse/square 周期输入会在
 adaptive run 前自动补入边沿断点。`cap_mode` 只支持 `"charge"`（id 0）和
 `"average"`（id 1）及其文档别名。
+需要可复现的 PAC/PNoise 转换轨迹时，可同时设置 `"adaptive": true`、
+至少一个 stabilization period 和 `"final_n_points"`。adaptive Gear2 此时只
+提供 warm start，不冻结 accepted grid；dispatch 会构造带相同时钟边沿断点的
+确定性 final grid。shooting、monodromy、profile 和最终返回轨迹均使用该网格。
 PAC 默认使用解析伴随谐波平衡（`"analytic": true`）：在 PSS 轨道转换矩阵上每频率
 一次伴随线性求解，零额外瞬态运行。`"max_sideband"` 和 `"n_period_samples"` 控制
 HB 分辨率。对 rail-driven chopper 类电路，可设置 `"time_domain": true` 优先尝试
