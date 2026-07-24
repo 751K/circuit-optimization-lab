@@ -125,12 +125,15 @@ generic batch machinery lives in `co_core::campaign` (single Rayon pool,
 adaptive candidate-vs-frequency axis, candidate-index-ordered write-back, atomic
 progress + cooperative cancel that never feed a reduction, and the
 `bw_from_gain` / `band_rms` metric reductions). Two device families are wired:
-the AFE OTFT evaluator (`co_core::otft_campaign`) and the silicon BSIM4
+the AFE OTFT evaluator (`co_core::otft_campaign`) and the generic silicon BSIM4
 evaluator (`co-py/src/silicon_campaign.rs`, families freepdk45 / sky130 /
 tsmc28). Eligible dataset, corner, mismatch, and benchmark batches use this
-executor through `circuitopt._campaign_sweep`. Eligible fixed-topology analog
+executor through `circuitopt._campaign_sweep`. The BSIM template is compiled
+from generic `CircuitSpec` topology records, not a 5T macro: arbitrary MOS
+connectivity, R/C elements, independent sources, all four controlled-source
+forms, and augmented MNA branch unknowns are accepted. Eligible analog
 `explore()` runs use it as well, including arbitrary candidate bias and a
-two-stage AC-prefilter/noise-survivor flow. Scalar paths remain the compatibility
+prepared AC-prefilter/noise-survivor flow. Scalar paths remain the compatibility
 reference/fallback; multistable AFE exploration requires a consistent seed.
 
 ```python
@@ -139,9 +142,25 @@ class circuitopt_core.CompiledCampaign:
         # spec = {"family": "afe_otft" | "silicon_bsim4", "template": <template dict>}
     @property
     def family(self) -> str: ...
+    def prepare_batch(self, candidates: list[dict], workers: int = 1
+                      ) -> PreparedCampaign: ...  # silicon_bsim4
     def evaluate_batch(self, candidates: list[dict], workers: int = 1,
                        analyses: list[str] = ("dc", "ac", "noise")) -> list[dict]
+
+class circuitopt_core.PreparedCampaign:
+    @property
+    def profile(self) -> dict: ...
+    def evaluate_batch(self, indices: list[int] | None = None, workers: int = 1,
+                       analyses: list[str] = ("dc", "ac")) -> list[dict]
 ```
+
+`PreparedCampaign` owns only numeric state: DC operating point, terminal
+currents, device G/C linearization embedded in the assembled `lti::System`,
+forward gain response, and reduced AC metrics. A later `"noise"` call accepts
+an arbitrary candidate-index subset and reuses those values. Native BSIM C
+handles are never retained across calls; fresh handles are re-biased at the
+saved operating point solely to establish the model state required by
+`co_bsim4::noise`.
 
 ### Template dict (candidate-invariant; marshalled once from `CompiledTopology`)
 
@@ -203,7 +222,7 @@ AC-only prefilter — `irn_uV` becomes NaN).
 
 ### Silicon family (`"silicon_bsim4"`, freepdk45 / sky130 / tsmc28)
 
-Template (built by `circuitopt._rust_campaign.SiliconCampaign` from a loaded
+Template (built by `circuitopt._rust_campaign.BsimCampaign` from a loaded
 circuit JSON; marshalled once):
 
 ```

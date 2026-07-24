@@ -582,14 +582,18 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
 - `explore(topo, base_sizes, base_bias, nf, cfg, n=, seed=, method=, corner=,
   workers=)`——运行一次扫描。
   `corner` 对每次评估施加工艺偏移（如 `CORNERS["slow"]`），实现在不修改配置的情况下进行 corner 感知搜索。
-  满足条件的固定拓扑 BSIM4 电路走 `CompiledCampaign`：geometry/NF/bias 候选分块
-  进入一个释放 GIL 的 Rayon 线程池。多稳态 OTFT AFE 只有在 `seed_fn` 提供一致
-  DC 种子时才走编译路径；冷启动 AFE 保留标量参考，避免改变物理根。
+  满足条件的 BSIM4 电路走由拓扑驱动的 `CompiledCampaign`：任意 MOS 连接、无源
+  元件、独立/受控源和增广 MNA 支路只编译一次，geometry/NF/bias 候选再分块进入
+  一个释放 GIL 的 Rayon 线程池。多稳态 OTFT AFE 只有在 `seed_fn` 提供一致 DC
+  种子时才走编译路径；冷启动 AFE 保留标量参考，避免改变物理根。
 - `evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None)`——单候选求解器评估，
   新增可选的 corner/mismatch 参数。在 `explore` 中评价流程为 AC-first：先计算
   gain/BW/power/area，非噪声约束失败的候选会立即淘汰；只有幸存候选的约束或目标
-  需要 `irn_uV` 时才运行噪声。编译路径用 AC-only batch 筛选，再只对幸存候选
-  运行 noise batch，保持相同的 lazy-noise 语义。
+  需要 `irn_uV` 时才运行噪声。编译式 BSIM 路径一次性准备 DC、工作点器件
+  线性化、已组装 MNA system 和正向 AC 响应，再由可复用 `PreparedCampaign`
+  只对幸存候选索引续跑 noise，不重复 DC 或正向 AC。native BSIM handle 保持在
+  单次调用内部，并在保留的工作点重新偏置，因此 C 指针不会跨 Python 调用或
+  Rayon worker。
 - `load_explore_json(path)`——从完整电路 JSON 中读取 `explore` 块。拓扑、器件尺寸、
   偏置和可选 NF 都走同一条 JSON 路径；探索层不再接受旧的 `builtin_topology` 配置。
 - 采样方式为 `lhs`（拉丁超立方）或 `random`，使用带种子的 RNG 保证可重复性。

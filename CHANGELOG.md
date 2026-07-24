@@ -23,27 +23,33 @@ release checklist.
 
 - **Rust-compiled analog exploration / Rust 编译式模拟电路探索**
 
-  **English:** Wired eligible fixed-topology `explore()` runs into
-  `CompiledCampaign`. Candidate geometry, NF, process corner, and arbitrary
-  named bias values are marshalled in cancellable chunks and evaluated under
-  one GIL-free Rayon pool. Lazy noise remains a two-stage operation: an AC-only
-  batch applies non-noise constraints first, then only survivors enter the
-  noise batch. Campaign results now expose low-frequency gain, UGF, integrated
-  input/output noise, full four-terminal DC currents, and the augmented DC
-  state, allowing exact topology-level source-power and area reductions without
-  rebuilding Python PDK devices. CLI, HTTP jobs, and MCP exploration accept
+  **English:** Wired eligible `explore()` runs into `CompiledCampaign`.
+  The BSIM compiler is topology-driven rather than a 5T macro: arbitrary MOS
+  connectivity plus resistors, capacitors, independent sources, controlled
+  sources, and augmented MNA branches are compiled from `CircuitSpec`.
+  Candidate geometry, NF, process corner, and arbitrary named bias values are
+  marshalled in cancellable chunks and evaluated under one GIL-free Rayon pool.
+  Lazy noise now uses an explicit reusable `PreparedCampaign`: DC, operating
+  point device linearization, the assembled MNA system, and the forward AC
+  response are retained, then only survivor indices run the noise continuation.
+  No native C handle crosses calls or worker threads. Campaign results expose
+  low-frequency gain, UGF, integrated input/output noise, full four-terminal DC
+  currents, and the augmented DC state, allowing exact topology-level source
+  power and area reductions. CLI, HTTP jobs, and MCP exploration accept
   `workers`. Monostable BSIM4 circuits run cold; multistable OTFT AFE circuits
   require an explicit `seed_fn`, otherwise they retain the scalar reference
   path to prevent silent DC-root changes.
 
-  **中文：** 将满足条件的固定拓扑 `explore()` 接入 `CompiledCampaign`。候选
-  geometry、NF、工艺角和任意命名 bias 以可取消分块送入同一个释放 GIL 的 Rayon
-  线程池。lazy noise 保持两阶段语义：先用 AC-only batch 应用非噪声约束，再只让
-  幸存候选进入 noise batch。Campaign 结果新增低频增益、UGF、输入/输出积分噪声、
-  完整四端 DC 电流和增广 DC 状态，因此可在不重建 Python PDK 器件的情况下精确
-  归约拓扑源功耗与面积。CLI、HTTP job 和 MCP exploration 均支持 `workers`。
-  单稳态 BSIM4 电路可冷启动；多稳态 OTFT AFE 必须显式提供 `seed_fn`，否则继续
-  使用标量参考路径，避免静默改变 DC 根。
+  **中文：** 将满足条件的 `explore()` 接入 `CompiledCampaign`。BSIM 编译器由
+  拓扑驱动，不再是 5T 宏：可从 `CircuitSpec` 编译任意 MOS 连接、电阻、电容、
+  独立源、受控源和增广 MNA 支路。候选 geometry、NF、工艺角和任意命名 bias
+  以可取消分块送入同一个释放 GIL 的 Rayon 线程池。lazy noise 现在使用显式可复用
+  `PreparedCampaign`：保留 DC、工作点器件线性化、已组装 MNA system 和正向 AC
+  响应，再只对幸存候选索引续跑 noise；native C handle 不跨调用或 worker 线程。
+  Campaign 结果包含低频增益、UGF、输入/输出积分噪声、完整四端 DC 电流和增广
+  DC 状态，因此可精确归约拓扑源功耗与面积。CLI、HTTP job 和 MCP exploration
+  均支持 `workers`。单稳态 BSIM4 电路可冷启动；多稳态 OTFT AFE 必须显式提供
+  `seed_fn`，否则继续使用标量参考路径，避免静默改变 DC 根。
 
 - **Per-candidate bias in compiled campaigns / compiled campaign 候选级 bias**
 

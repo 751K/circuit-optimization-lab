@@ -100,6 +100,18 @@ class SweepCampaign:
         """Run the compiled batch; results are candidate-index ordered."""
         return self._core.evaluate_batch(list(candidates), workers, list(analyses))
 
+    @property
+    def supports_prepared(self) -> bool:
+        """Whether this family supports reusable DC/AC campaign stages."""
+        return callable(getattr(self._core, "prepare_batch", None))
+
+    def prepare_batch(self, candidates: Sequence[dict], workers: int = 1):
+        """Prepare reusable DC, linearization, MNA, and forward-AC state."""
+        if not self.supports_prepared:
+            raise RuntimeError(
+                f"campaign family {self.family!r} does not support prepared stages")
+        return self._core.prepare_batch(list(candidates), workers)
+
     def reduce_result(self, row, sizes, bias, nf=None) -> dict:
         """Exact Python-side topology reductions over native campaign outputs."""
         return self._core.reduce_result(row, sizes, bias, nf)
@@ -122,9 +134,9 @@ def make_sweep_campaign(spec, freqs, band) -> SweepCampaign | None:
         from .device_factory import is_silicon_model_types
 
         if is_silicon_model_types(model_types):
-            from ._rust_campaign import SiliconCampaign
+            from ._rust_campaign import BsimCampaign
 
-            core = SiliconCampaign(spec, freqs, band=tuple(band))
+            core = BsimCampaign(spec, freqs, band=tuple(band))
             return SweepCampaign(core, "silicon_bsim4", core.nominal_corner,
                                  needs_seed=False)
         if not model_types or not all(

@@ -1,11 +1,13 @@
 """Python bridge to ``circuitopt_core.CompiledCampaign`` (rewrite R5-C/R5-D).
 
-Marshals the frozen AFE OTFT topology + analysis plan into the Rust compiled
-campaign and expands a candidate matrix into the flat, index-ordered candidate
-list the executor consumes. Each candidate may override any named topology bias;
-symbolic rails remain candidate-input slots through the Rust DC solve. Random
-mismatch draws and candidate-specific DC guesses are prepared **up front** so
-the detached Rust batch never calls back into Python.
+Marshals a generic BSIM ``CircuitSpec`` or the legacy AFE OTFT topology plus an
+analysis plan into the Rust compiled campaign, then expands a candidate matrix
+into the flat, index-ordered list the executor consumes. Each candidate may
+override any named topology bias; symbolic rails remain candidate-input slots
+through the Rust DC solve. Random mismatch draws and candidate-specific DC
+guesses are prepared **up front** so the detached Rust batch never calls back
+into Python. BSIM campaigns may additionally retain prepared DC/linearization/
+AC state and resume noise for an index subset.
 
 The shared :mod:`circuitopt._campaign_sweep` dispatcher wires this bridge into
 eligible dataset, corner, mismatch, and benchmark batches. Scalar Python
@@ -378,14 +380,15 @@ def silicon_pdk_root(pdk: str) -> str:
     raise ValueError(f"unknown silicon pdk {pdk!r}")
 
 
-class SiliconCampaign:
-    """Compiled silicon (BSIM4) campaign over one circuit spec + analysis plan.
+class BsimCampaign:
+    """Compiled BSIM4 campaign over a generic circuit spec + analysis plan.
 
     ``spec`` is a loaded circuit (:func:`circuit_loader.load_circuit_json`).
-    The template captures everything candidate-invariant — passive circuit,
-    per-device polarity/vb/temperature, LTI element records, analysis plan —
-    while candidates carry geometry (+ per-candidate process corner and
-    optional ``delvto`` mismatch volts).
+    Device count and connectivity are unrestricted. The template captures the
+    topology's MOS terminals, resistors, capacitors, independent sources,
+    controlled sources, output projection, per-device process binding, and
+    analysis plan. Candidates carry geometry, bias, process corner, NF, and
+    optional ``delvto`` mismatch volts.
     """
 
     def __init__(self, spec, freqs: Sequence[float],
@@ -554,6 +557,11 @@ class SiliconCampaign:
         """Run the compiled batch; results are candidate-index ordered."""
         return self.core.evaluate_batch(list(candidates), workers, list(analyses))
 
+    def prepare_batch(self, candidates: Sequence[dict], workers: int = 1):
+        """Retain DC, device linearization, MNA, and forward-AC state."""
+        return PreparedBsimCampaign(
+            self.core.prepare_batch(list(candidates), int(workers)))
+
     def reduce_result(self, row, sizes, bias, nf=None):
         """Return exact topology-level area and source power without device rebuilds."""
         area = sum(
@@ -565,3 +573,40 @@ class SiliconCampaign:
             "source_power": _campaign_source_power(
                 self.topo, self.plan, bias, row, self._bulk_metadata),
         }
+
+
+class PreparedBsimCampaign:
+    """Opaque reusable state returned by the native BSIM campaign.
+
+    The Rust object owns only numeric state, never native C handles. A noise
+    continuation therefore re-biases fresh handles at the retained operating
+    point while reusing DC, the device linearization, assembled MNA system, and
+    the forward AC response.
+    """
+
+    def __init__(self, core):
+        self.core = core
+
+    @property
+    def count(self) -> int:
+        return int(self.core.count)
+
+    @property
+    def prepared_count(self) -> int:
+        return int(self.core.prepared_count)
+
+    @property
+    def profile(self) -> dict:
+        return dict(self.core.profile)
+
+    def evaluate_batch(self, indices=None, workers: int = 1,
+                       analyses: Sequence[str] = ("dc", "ac")) -> list[dict]:
+        """Evaluate retained states in ``indices`` order without rerunning DC/AC."""
+        selected = None if indices is None else [int(index) for index in indices]
+        return self.core.evaluate_batch(
+            selected, int(workers), list(analyses))
+
+
+# Compatibility name retained for existing callers. The implementation is not
+# tied to a 5T OTA or a particular silicon PDK.
+SiliconCampaign = BsimCampaign

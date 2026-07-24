@@ -31,6 +31,7 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int, c_uint, c_void};
 use std::panic::catch_unwind;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use numpy::ndarray::{Array1, Array2, Array3};
 use numpy::{
@@ -3447,9 +3448,212 @@ struct CampaignMetrics {
     ich: Vec<f64>,
 }
 
+type CampaignResults = Vec<Option<Result<CampaignMetrics, String>>>;
+
 enum CampaignKind {
     Otft(Arc<otft_campaign::OtftTemplate>),
     Silicon(Arc<silicon_campaign::SiliconTemplate>),
+}
+
+struct SiliconPrepareEvaluator<'a> {
+    template: &'a silicon_campaign::SiliconTemplate,
+    candidates: &'a [silicon_campaign::SiliconCandidate],
+}
+
+impl campaign::CandidateEvaluator for SiliconPrepareEvaluator<'_> {
+    type Output = silicon_campaign::SiliconPrepared;
+
+    fn evaluate(
+        &self,
+        index: usize,
+        inner_parallel: bool,
+    ) -> campaign::CandidateOutcome<Self::Output> {
+        let candidate = self
+            .candidates
+            .get(index)
+            .ok_or_else(|| format!("candidate index {index} out of range"))?;
+        silicon_campaign::prepare_candidate(self.template, candidate, index, inner_parallel)
+    }
+}
+
+struct SiliconPreparedEvaluator<'a> {
+    template: &'a silicon_campaign::SiliconTemplate,
+    prepared: &'a [Result<silicon_campaign::SiliconPrepared, String>],
+    indices: &'a [usize],
+    compute_noise: bool,
+}
+
+impl campaign::CandidateEvaluator for SiliconPreparedEvaluator<'_> {
+    type Output = CampaignMetrics;
+
+    fn evaluate(
+        &self,
+        local_index: usize,
+        inner_parallel: bool,
+    ) -> campaign::CandidateOutcome<Self::Output> {
+        let index = *self
+            .indices
+            .get(local_index)
+            .ok_or_else(|| format!("prepared candidate index {local_index} out of range"))?;
+        let prepared = self
+            .prepared
+            .get(index)
+            .ok_or_else(|| format!("prepared candidate index {index} out of range"))?
+            .as_ref()
+            .map_err(Clone::clone)?;
+        silicon_campaign::finish_prepared(
+            self.template,
+            prepared,
+            index,
+            inner_parallel,
+            self.compute_noise,
+        )
+        .map(|metrics| CampaignMetrics {
+            gain_peak_db: metrics.gain_peak_db,
+            gain_dc_db: metrics.av_dc_db,
+            bw_hz: metrics.bw_hz,
+            ugf_hz: metrics.ugf_hz,
+            irn_uv: metrics.irn_uv,
+            orn_v: metrics.orn_v,
+            latch_dv: metrics.latch_dv,
+            dc_op: metrics.dc_op,
+            terminal_currents: metrics.terminal_currents,
+            dc_iterations: metrics.dc_iterations,
+            dc_from_seed: metrics.dc_from_seed,
+            ich: metrics.ich,
+        })
+    }
+}
+
+fn campaign_results_to_py<'py>(
+    py: Python<'py>,
+    results: CampaignResults,
+) -> PyResult<Bound<'py, PyList>> {
+    let mut items = Vec::with_capacity(results.len());
+    for slot in results {
+        let dict = PyDict::new(py);
+        match slot {
+            None => {
+                dict.set_item("ok", false)?;
+                dict.set_item("cancelled", true)?;
+            }
+            Some(Ok(metrics)) => {
+                dict.set_item("ok", true)?;
+                dict.set_item("gain_peak_dB", metrics.gain_peak_db)?;
+                dict.set_item("gain_dB", metrics.gain_dc_db)?;
+                dict.set_item("bw_Hz", metrics.bw_hz)?;
+                dict.set_item("ugf_Hz", metrics.ugf_hz)?;
+                dict.set_item("irn_uV", metrics.irn_uv)?;
+                dict.set_item("orn_V", metrics.orn_v)?;
+                dict.set_item("latch_dV", metrics.latch_dv)?;
+                dict.set_item("dc_op", metrics.dc_op)?;
+                dict.set_item("terminal_currents", metrics.terminal_currents)?;
+                dict.set_item("ich", metrics.ich)?;
+                dict.set_item("dc_iterations", metrics.dc_iterations)?;
+                dict.set_item("dc_from_seed", metrics.dc_from_seed)?;
+            }
+            Some(Err(message)) => {
+                dict.set_item("ok", false)?;
+                dict.set_item("error", message)?;
+            }
+        }
+        items.push(dict);
+    }
+    PyList::new(py, items)
+}
+
+/// Reusable DC + linearization + AC state for a silicon campaign batch.
+///
+/// The state contains no native BSIM handles, so it can safely outlive the
+/// worker call that prepared it. Noise continuation re-biases fresh handles at
+/// the retained operating point and reuses the assembled MNA system and forward
+/// AC response.
+#[pyclass(name = "PreparedCampaign")]
+struct PyPreparedCampaign {
+    template: Arc<silicon_campaign::SiliconTemplate>,
+    prepared: Vec<Result<silicon_campaign::SiliconPrepared, String>>,
+    noise_evaluations: AtomicUsize,
+}
+
+#[pymethods]
+impl PyPreparedCampaign {
+    #[getter]
+    fn family(&self) -> &str {
+        "silicon_bsim4"
+    }
+
+    #[getter]
+    fn count(&self) -> usize {
+        self.prepared.len()
+    }
+
+    #[getter]
+    fn prepared_count(&self) -> usize {
+        self.prepared.iter().filter(|item| item.is_ok()).count()
+    }
+
+    #[getter]
+    fn profile<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let prepared = self.prepared_count();
+        let profile = PyDict::new(py);
+        profile.set_item("candidate_count", self.prepared.len())?;
+        profile.set_item("prepared", prepared)?;
+        profile.set_item("failed", self.prepared.len() - prepared)?;
+        profile.set_item("dc_ac_preparations", prepared)?;
+        profile.set_item(
+            "noise_continuations",
+            self.noise_evaluations.load(Ordering::Relaxed),
+        )?;
+        Ok(profile)
+    }
+
+    /// Evaluate retained states in the requested index order. Omitting
+    /// `indices` returns every candidate. `noise` adds only the transpose/noise
+    /// continuation; DC, device linearization, and forward AC are never rerun.
+    #[pyo3(signature = (indices=None, workers=1, analyses=None))]
+    fn evaluate_batch<'py>(
+        &self,
+        py: Python<'py>,
+        indices: Option<Vec<usize>>,
+        workers: usize,
+        analyses: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let selected = indices.unwrap_or_else(|| (0..self.prepared.len()).collect());
+        if let Some(index) = selected
+            .iter()
+            .copied()
+            .find(|index| *index >= self.prepared.len())
+        {
+            return Err(PyValueError::new_err(format!(
+                "prepared candidate index {index} out of range for {} states",
+                self.prepared.len()
+            )));
+        }
+        let compute_noise = analyses
+            .as_ref()
+            .map(|names| names.iter().any(|name| name == "noise"))
+            .unwrap_or(false);
+        let config = campaign::BatchConfig::new(workers.max(1));
+        let results = py.detach(|| {
+            let evaluator = SiliconPreparedEvaluator {
+                template: &self.template,
+                prepared: &self.prepared,
+                indices: &selected,
+                compute_noise,
+            };
+            let progress = campaign::BatchProgress::new();
+            campaign::evaluate_batch(&evaluator, selected.len(), config, &progress)
+        });
+        if compute_noise {
+            let completed = results
+                .iter()
+                .filter(|slot| matches!(slot, Some(Ok(_))))
+                .count();
+            self.noise_evaluations
+                .fetch_add(completed, Ordering::Relaxed);
+        }
+        campaign_results_to_py(py, results)
+    }
 }
 
 /// An immutable compiled campaign over one circuit template + analysis plan.
@@ -3491,6 +3695,62 @@ impl PyCompiledCampaign {
         &self.family
     }
 
+    /// Prepare reusable DC + device-linearization + forward-AC state.
+    ///
+    /// This is available for every all-BSIM4 topology accepted by the generic
+    /// silicon compiler. The legacy OTFT family keeps its one-shot evaluator
+    /// because its compact-device state has different lifetime semantics.
+    #[pyo3(signature = (candidates, workers=1))]
+    fn prepare_batch(
+        &self,
+        py: Python<'_>,
+        candidates: &Bound<'_, PyList>,
+        workers: usize,
+    ) -> PyResult<PyPreparedCampaign> {
+        let CampaignKind::Silicon(template) = &self.kind else {
+            return Err(PyValueError::new_err(
+                "prepared campaign stages currently require family 'silicon_bsim4'",
+            ));
+        };
+        let mut parsed = Vec::with_capacity(candidates.len());
+        for item in candidates.iter() {
+            parsed.push(silicon_campaign::parse_silicon_candidate(&item, template)?);
+        }
+        let ndev = template.devices.len();
+        for (index, candidate) in parsed.iter().enumerate() {
+            if candidate.devices.len() != ndev {
+                return Err(PyValueError::new_err(format!(
+                    "candidate {index} has {} devices, template has {ndev}",
+                    candidate.devices.len()
+                )));
+            }
+        }
+        let template = template.clone();
+        let config = campaign::BatchConfig::new(workers.max(1));
+        let results = py.detach({
+            let template = template.clone();
+            move || {
+                let evaluator = SiliconPrepareEvaluator {
+                    template: &template,
+                    candidates: &parsed,
+                };
+                let progress = campaign::BatchProgress::new();
+                campaign::evaluate_batch(&evaluator, parsed.len(), config, &progress)
+            }
+        });
+        let prepared = results
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| Err("candidate preparation was cancelled".to_string()))
+            })
+            .collect();
+        Ok(PyPreparedCampaign {
+            template,
+            prepared,
+            noise_evaluations: AtomicUsize::new(0),
+        })
+    }
+
     /// Evaluate a candidate matrix in one GIL-free batch. `candidates` is a list
     /// of family-specific dicts (`{devices, bias?, dc_guesses?, seed?,
     /// trust_seed_as_op?}` for AFE;
@@ -3513,7 +3773,7 @@ impl PyCompiledCampaign {
         let n = candidates.len();
         let config = campaign::BatchConfig::new(workers);
 
-        let results: Vec<Option<Result<CampaignMetrics, String>>> = match &self.kind {
+        let results: CampaignResults = match &self.kind {
             CampaignKind::Otft(template) => {
                 let mut parsed = Vec::with_capacity(n);
                 for item in candidates.iter() {
@@ -3606,37 +3866,7 @@ impl PyCompiledCampaign {
             }
         };
 
-        let mut items = Vec::with_capacity(results.len());
-        for slot in results {
-            let dict = PyDict::new(py);
-            match slot {
-                None => {
-                    dict.set_item("ok", false)?;
-                    dict.set_item("cancelled", true)?;
-                }
-                Some(Ok(metrics)) => {
-                    dict.set_item("ok", true)?;
-                    dict.set_item("gain_peak_dB", metrics.gain_peak_db)?;
-                    dict.set_item("gain_dB", metrics.gain_dc_db)?;
-                    dict.set_item("bw_Hz", metrics.bw_hz)?;
-                    dict.set_item("ugf_Hz", metrics.ugf_hz)?;
-                    dict.set_item("irn_uV", metrics.irn_uv)?;
-                    dict.set_item("orn_V", metrics.orn_v)?;
-                    dict.set_item("latch_dV", metrics.latch_dv)?;
-                    dict.set_item("dc_op", metrics.dc_op)?;
-                    dict.set_item("terminal_currents", metrics.terminal_currents)?;
-                    dict.set_item("ich", metrics.ich)?;
-                    dict.set_item("dc_iterations", metrics.dc_iterations)?;
-                    dict.set_item("dc_from_seed", metrics.dc_from_seed)?;
-                }
-                Some(Err(message)) => {
-                    dict.set_item("ok", false)?;
-                    dict.set_item("error", message)?;
-                }
-            }
-            items.push(dict);
-        }
-        PyList::new(py, items)
+        campaign_results_to_py(py, results)
     }
 }
 
@@ -3690,6 +3920,7 @@ fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // PDK compilers parity surface.
     m.add_class::<PyCompiledPdk>()?;
     m.add_class::<PyCompiledCampaign>()?;
+    m.add_class::<PyPreparedCampaign>()?;
     // SAR conversion batch (R8).
     m.add_class::<sar_campaign::PyCompiledSarConversion>()?;
     Ok(())

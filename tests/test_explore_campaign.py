@@ -63,6 +63,16 @@ def test_sky130_explore_campaign_matches_scalar_with_candidate_bias(monkeypatch)
 
 
 def test_sky130_explore_campaign_preserves_lazy_noise(monkeypatch):
+    from circuitopt._rust_campaign import BsimCampaign
+
+    prepared_calls = {"count": 0}
+    original_prepare = BsimCampaign.prepare_batch
+
+    def prepare(self, candidates, workers=1):
+        prepared_calls["count"] += 1
+        return original_prepare(self, candidates, workers)
+
+    monkeypatch.setattr(BsimCampaign, "prepare_batch", prepare)
     data = _sky130()
     data["explore"]["constraints"] = {
         "gain_dB": {"min": 34.0},
@@ -73,6 +83,7 @@ def test_sky130_explore_campaign_preserves_lazy_noise(monkeypatch):
         "power_uW": "min",
     }
     native = explore_from_dict(copy.deepcopy(data), n=6, seed=4, workers=4)
+    assert prepared_calls["count"] > 0
     scalar = _scalar(monkeypatch, copy.deepcopy(data), n=6, seed=4)
 
     assert native["summary"]["noise_evaluated"] == scalar["summary"]["noise_evaluated"]
@@ -140,4 +151,3 @@ def test_compiled_explore_cancellation_stops_between_native_chunks():
     assert result["summary"]["stopped_early"] is True
     assert result["summary"]["evaluated"] == 8
     assert progress == [(index, 40) for index in range(1, 9)]
-

@@ -1,9 +1,12 @@
-//! Silicon (BSIM4) campaign evaluator — rewrite step R5-C.
+//! Generic-topology silicon (BSIM4) campaign evaluator — rewrite step R5-C.
 //!
 //! Composes `co_pdk::CompiledPdk` numeric cards, `co_bsim4` device handles,
 //! `co_core::bsim_transient::solve_dc`, and the complex `lti` MNA into the
 //! per-candidate device-build -> DC -> AC -> noise pipeline for the
 //! freepdk45 / sky130 / tsmc28 families, driven by `co_core::campaign`.
+//! `SiliconPrepared` splits that pipeline after forward AC so survivor-only
+//! noise can reuse the DC operating point, linearized/assembled MNA system, and
+//! gain response without retaining native C handles across worker calls.
 //!
 //! Every step mirrors the frozen Python scalar path exactly:
 //!
@@ -301,292 +304,429 @@ pub struct SiliconEvaluator<'a> {
     pub compute_noise: bool,
 }
 
-impl SiliconEvaluator<'_> {
-    fn solve_dc(
-        &self,
-        cand: &SiliconCandidate,
-        handles: &[HandleGuard],
-        index: usize,
-    ) -> Result<(Vec<f64>, usize, bool), String> {
-        let t = self.template;
-        if let (true, Some(seed)) = (cand.trust_seed_as_op, &cand.seed) {
-            if seed.len() != t.circuit.size {
-                return Err(format!(
-                    "candidate {index}: seed length {} != n_aug {}",
-                    seed.len(),
-                    t.circuit.size
-                ));
-            }
-            return Ok((seed.clone(), 0, true));
-        }
-        let mut guesses: Vec<&[f64]> = Vec::new();
-        if let Some(seed) = &cand.seed {
-            if seed.len() != t.circuit.size {
-                return Err(format!(
-                    "candidate {index}: seed length {} != n_aug {}",
-                    seed.len(),
-                    t.circuit.size
-                ));
-            }
-            guesses.push(seed.as_slice());
-        }
-        let default_guesses = cand.dc_guesses.as_ref().unwrap_or(&t.dc_guesses);
-        for guess in default_guesses {
-            guesses.push(guess.as_slice());
-        }
-        for (gi, guess) in guesses.iter().enumerate() {
-            let mut evaluator = GuardEvaluator { handles };
-            let result = bsim_transient::solve_dc(
-                &t.circuit,
-                &t.dc_devices,
-                &mut evaluator,
-                guess,
-                &cand.bias,
-                t.dc_options,
-            );
-            if result.converged {
-                let from_seed = gi == 0 && cand.seed.is_some();
-                return Ok((result.state, result.iterations, from_seed));
-            }
-        }
-        Err(format!(
-            "candidate {index}: DC did not converge from any guess"
-        ))
+/// Candidate state retained between campaign stages.
+///
+/// Only owned numeric data is kept here. Native BSIM handles are intentionally
+/// absent: a prepared batch may be resumed from a different Rayon worker in a
+/// later Python call, while the C host's handles have worker-local lifetimes.
+/// Noise continuation rebuilds and biases handles at `dc_op`, but reuses the
+/// expensive DC solution, device linearization, assembled MNA system, and
+/// forward AC gain sweep.
+pub struct SiliconPrepared {
+    pub candidate: SiliconCandidate,
+    pub system: lti::System,
+    pub gains: Vec<f64>,
+    pub base_metrics: SiliconMetrics,
+}
+
+type LinearizedState = (lti::System, Vec<f64>, Vec<[f64; 4]>);
+
+fn validate_candidate(
+    template: &SiliconTemplate,
+    cand: &SiliconCandidate,
+    index: usize,
+) -> Result<(), String> {
+    if cand.devices.len() != template.devices.len() {
+        return Err(format!(
+            "candidate {index} has {} devices, template has {}",
+            cand.devices.len(),
+            template.devices.len()
+        ));
     }
+    if cand.bias.len() != template.bias_defaults.len()
+        || cand.bias.iter().any(|value| !value.is_finite())
+    {
+        return Err(format!(
+            "candidate {index} has invalid bias vector length {} (expected {})",
+            cand.bias.len(),
+            template.bias_defaults.len()
+        ));
+    }
+    if cand.dc_guesses.as_ref().is_some_and(|guesses| {
+        guesses.iter().any(|guess| {
+            guess.len() != template.circuit.size || guess.iter().any(|value| !value.is_finite())
+        })
+    }) {
+        return Err(format!(
+            "candidate {index} has an invalid DC guess; expected finite vectors of length {}",
+            template.circuit.size
+        ));
+    }
+    Ok(())
+}
+
+fn build_handles(
+    template: &SiliconTemplate,
+    cand: &SiliconCandidate,
+    index: usize,
+) -> Result<Vec<HandleGuard>, String> {
+    let mut handles = Vec::with_capacity(template.devices.len());
+    for (stat, geom) in template.devices.iter().zip(&cand.devices) {
+        handles.push(
+            build_handle(template, stat, geom, &cand.corner)
+                .map_err(|error| format!("candidate {index}: {error}"))?,
+        );
+    }
+    Ok(handles)
+}
+
+fn solve_dc(
+    template: &SiliconTemplate,
+    cand: &SiliconCandidate,
+    handles: &[HandleGuard],
+    index: usize,
+) -> Result<(Vec<f64>, usize, bool), String> {
+    if let (true, Some(seed)) = (cand.trust_seed_as_op, &cand.seed) {
+        if seed.len() != template.circuit.size {
+            return Err(format!(
+                "candidate {index}: seed length {} != n_aug {}",
+                seed.len(),
+                template.circuit.size
+            ));
+        }
+        return Ok((seed.clone(), 0, true));
+    }
+    let mut guesses: Vec<&[f64]> = Vec::new();
+    if let Some(seed) = &cand.seed {
+        if seed.len() != template.circuit.size {
+            return Err(format!(
+                "candidate {index}: seed length {} != n_aug {}",
+                seed.len(),
+                template.circuit.size
+            ));
+        }
+        guesses.push(seed.as_slice());
+    }
+    let default_guesses = cand.dc_guesses.as_ref().unwrap_or(&template.dc_guesses);
+    for guess in default_guesses {
+        guesses.push(guess.as_slice());
+    }
+    for (gi, guess) in guesses.iter().enumerate() {
+        let mut evaluator = GuardEvaluator { handles };
+        let result = bsim_transient::solve_dc(
+            &template.circuit,
+            &template.dc_devices,
+            &mut evaluator,
+            guess,
+            &cand.bias,
+            template.dc_options,
+        );
+        if result.converged {
+            let from_seed = gi == 0 && cand.seed.is_some();
+            return Ok((result.state, result.iterations, from_seed));
+        }
+    }
+    Err(format!(
+        "candidate {index}: DC did not converge from any guess"
+    ))
+}
+
+fn evaluate_devices_at_op(
+    template: &SiliconTemplate,
+    cand: &SiliconCandidate,
+    handles: &[HandleGuard],
+    dc_op: &[f64],
+    index: usize,
+) -> Result<Vec<bsim_transient::Evaluation>, String> {
+    let mut evaluations = Vec::with_capacity(template.devices.len());
+    for (slot, (stat, handle)) in template.devices.iter().zip(handles).enumerate() {
+        let dc_terms = &template.dc_devices[slot].terms;
+        let resolve = |term: &mna::Term, terminal: &str| {
+            term.resolve(dc_op, &cand.bias).ok_or_else(|| {
+                format!("candidate {index}: device {slot} {terminal} bias is missing")
+            })
+        };
+        let vd = resolve(&dc_terms[0], "drain")?;
+        let vg = resolve(&dc_terms[1], "gate")?;
+        let vs = resolve(&dc_terms[2], "source")?;
+        let mut evaluation = bsim_transient::Evaluation::default();
+        let status = unsafe {
+            co_bsim4::eval_vp(
+                handle.0,
+                [vd, vg, vs, stat.vb].as_ptr(),
+                evaluation.currents.as_mut_ptr(),
+                evaluation.conductance.as_mut_ptr(),
+                evaluation.charges.as_mut_ptr(),
+                evaluation.capacitance.as_mut_ptr(),
+            )
+        };
+        if status != 0 {
+            return Err(format!(
+                "candidate {index}: BSIM4 evaluation failed at the operating point"
+            ));
+        }
+        evaluations.push(evaluation);
+    }
+    Ok(evaluations)
+}
+
+fn bias_and_linearize(
+    template: &SiliconTemplate,
+    cand: &SiliconCandidate,
+    handles: &[HandleGuard],
+    dc_op: &[f64],
+    index: usize,
+) -> Result<LinearizedState, String> {
+    let evaluations = evaluate_devices_at_op(template, cand, handles, dc_op, index)?;
+    let mut problem = template.lti_base.clone();
+    let mut ich = Vec::with_capacity(template.devices.len());
+    let mut terminal_currents = Vec::with_capacity(template.devices.len());
+    for (stat, evaluation) in template.devices.iter().zip(evaluations) {
+        ich.push(evaluation.currents[0].abs());
+        terminal_currents.push(evaluation.currents);
+        problem.dense_devices.push(lti::DenseDevice {
+            terms: vec![
+                stat.ac_d,
+                stat.ac_g,
+                stat.ac_s,
+                mna::Term {
+                    kind: 2,
+                    reference: 0,
+                    value: 0.0,
+                },
+            ],
+            conductance: evaluation.conductance.to_vec(),
+            capacitance: evaluation.capacitance.to_vec(),
+        });
+    }
+    let system = problem
+        .try_assemble()
+        .map_err(|error| format!("candidate {index}: AC assembly failed: {error}"))?;
+    Ok((system, ich, terminal_currents))
+}
+
+fn solve_gain(
+    template: &SiliconTemplate,
+    system: &lti::System,
+    index: usize,
+    inner_parallel: bool,
+) -> Result<Vec<f64>, String> {
+    let voltages = if inner_parallel {
+        system.solve_frequencies_parallel(&template.freqs)
+    } else {
+        system.solve_frequencies_serial(&template.freqs)
+    }
+    .ok_or_else(|| format!("candidate {index}: AC solve singular"))?;
+    let mut gains = Vec::with_capacity(template.freqs.len());
+    for row in &voltages {
+        let mut re = 0.0;
+        let mut im = 0.0;
+        for &(node, weight) in &template.output_weights {
+            re += weight * row[node].re;
+            im += weight * row[node].im;
+        }
+        gains.push((re / template.vin_norm).hypot(im / template.vin_norm));
+    }
+    Ok(gains)
+}
+
+fn prepare_with_handles(
+    template: &SiliconTemplate,
+    cand: &SiliconCandidate,
+    index: usize,
+    inner_parallel: bool,
+) -> Result<(SiliconPrepared, Vec<HandleGuard>), String> {
+    validate_candidate(template, cand, index)?;
+    let handles = build_handles(template, cand, index)?;
+    let (dc_op, dc_iterations, dc_from_seed) = solve_dc(template, cand, &handles, index)?;
+    let (system, ich, terminal_currents) =
+        bias_and_linearize(template, cand, &handles, &dc_op, index)?;
+    let gains = solve_gain(template, &system, index, inner_parallel)?;
+    let peak = gains.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let gain_peak_db = 20.0 * peak.max(1e-9).log10();
+    let av_dc_db = 20.0 * gains.first().copied().unwrap_or(0.0).max(1e-9).log10();
+    let latch_dv = match template.latch_nodes {
+        Some((a, b)) => (dc_op[a] - dc_op[b]).abs(),
+        None => 0.0,
+    };
+    let base_metrics = SiliconMetrics {
+        gain_peak_db,
+        bw_hz: bw_from_gain(&template.freqs, &gains),
+        ugf_hz: unity_gain_freq(&template.freqs, &gains),
+        irn_uv: f64::NAN,
+        orn_v: f64::NAN,
+        latch_dv,
+        dc_op,
+        dc_iterations,
+        dc_from_seed,
+        av_dc_db,
+        ich,
+        terminal_currents,
+    };
+    Ok((
+        SiliconPrepared {
+            candidate: cand.clone(),
+            system,
+            gains,
+            base_metrics,
+        },
+        handles,
+    ))
+}
+
+pub fn prepare_candidate(
+    template: &SiliconTemplate,
+    cand: &SiliconCandidate,
+    index: usize,
+    inner_parallel: bool,
+) -> Result<SiliconPrepared, String> {
+    prepare_with_handles(template, cand, index, inner_parallel).map(|(prepared, _)| prepared)
+}
+
+fn noise_metrics(
+    template: &SiliconTemplate,
+    prepared: &SiliconPrepared,
+    handles: &[HandleGuard],
+    index: usize,
+    inner_parallel: bool,
+) -> Result<(f64, f64), String> {
+    let tvec = if inner_parallel {
+        prepared
+            .system
+            .solve_transpose_parallel(&template.freqs, &template.sense)
+    } else {
+        prepared
+            .system
+            .solve_transpose_serial(&template.freqs, &template.sense)
+    }
+    .ok_or_else(|| format!("candidate {index}: noise transpose solve singular"))?;
+
+    let nfreq = template.freqs.len();
+    let mut out_psd = vec![0.0; nfreq];
+    let mut total_re = [0.0f64; 16];
+    let mut total_im = [0.0f64; 16];
+    let mut flicker_re = [0.0f64; 16];
+    let mut flicker_im = [0.0f64; 16];
+    for (stat, handle) in template.devices.iter().zip(handles) {
+        for (fi, &frequency) in template.freqs.iter().enumerate() {
+            let status = unsafe {
+                co_bsim4::noise(
+                    handle.0,
+                    frequency,
+                    total_re.as_mut_ptr(),
+                    total_im.as_mut_ptr(),
+                    flicker_re.as_mut_ptr(),
+                    flicker_im.as_mut_ptr(),
+                )
+            };
+            if status != 0 {
+                return Err(format!(
+                    "candidate {index}: BSIM4 noise evaluation failed (status {status})"
+                ));
+            }
+            let mut z = [lti::Complex { re: 0.0, im: 0.0 }; 4];
+            for (slot, node) in stat.noise_nodes.iter().enumerate() {
+                if let Some(node) = node {
+                    z[slot] = tvec[fi][*node];
+                }
+            }
+            let mut acc = 0.0;
+            for (row, zi) in z.iter().enumerate() {
+                for (col, zj) in z.iter().enumerate() {
+                    let s_re = total_re[row * 4 + col];
+                    let s_im = total_im[row * 4 + col];
+                    let zr = zi.re * s_re - zi.im * s_im;
+                    let zi_im = zi.re * s_im + zi.im * s_re;
+                    acc += zr * zj.re + zi_im * zj.im;
+                }
+            }
+            out_psd[fi] += acc.max(0.0);
+        }
+    }
+    for (a, b, s_th) in &template.resistor_noise {
+        for (fi, psd) in out_psd.iter_mut().enumerate() {
+            let mut zre = 0.0f64;
+            let mut zim = 0.0f64;
+            if a.kind == 0 {
+                zre += tvec[fi][a.reference].re;
+                zim += tvec[fi][a.reference].im;
+            }
+            if b.kind == 0 {
+                zre -= tvec[fi][b.reference].re;
+                zim -= tvec[fi][b.reference].im;
+            }
+            let zabs = zre.hypot(zim);
+            *psd += zabs * zabs * s_th;
+        }
+    }
+    let mut irn_psd = vec![0.0; nfreq];
+    for (fi, value) in irn_psd.iter_mut().enumerate() {
+        *value = out_psd[fi] / (prepared.gains[fi] * prepared.gains[fi]).max(1e-300);
+    }
+    Ok((
+        band_rms(
+            &template.freqs,
+            &irn_psd,
+            template.band_lo,
+            template.band_hi,
+        ) * 1e6,
+        band_rms(
+            &template.freqs,
+            &out_psd,
+            template.band_lo,
+            template.band_hi,
+        ),
+    ))
+}
+
+fn finish_with_handles(
+    template: &SiliconTemplate,
+    prepared: &SiliconPrepared,
+    handles: &[HandleGuard],
+    index: usize,
+    inner_parallel: bool,
+    compute_noise: bool,
+) -> Result<SiliconMetrics, String> {
+    let mut metrics = prepared.base_metrics.clone();
+    if compute_noise {
+        let (irn_uv, orn_v) = noise_metrics(template, prepared, handles, index, inner_parallel)?;
+        metrics.irn_uv = irn_uv;
+        metrics.orn_v = orn_v;
+    }
+    Ok(metrics)
+}
+
+pub fn finish_prepared(
+    template: &SiliconTemplate,
+    prepared: &SiliconPrepared,
+    index: usize,
+    inner_parallel: bool,
+    compute_noise: bool,
+) -> Result<SiliconMetrics, String> {
+    if !compute_noise {
+        return Ok(prepared.base_metrics.clone());
+    }
+    let handles = build_handles(template, &prepared.candidate, index)?;
+    // BSIM noise reads the model state established by the immediately preceding
+    // operating-point evaluation. Re-bias fresh handles without rebuilding the
+    // already retained linearized MNA system.
+    let _ = evaluate_devices_at_op(
+        template,
+        &prepared.candidate,
+        &handles,
+        &prepared.base_metrics.dc_op,
+        index,
+    )?;
+    finish_with_handles(template, prepared, &handles, index, inner_parallel, true)
 }
 
 impl CandidateEvaluator for SiliconEvaluator<'_> {
     type Output = SiliconMetrics;
 
     fn evaluate(&self, index: usize, inner_parallel: bool) -> CandidateOutcome<SiliconMetrics> {
-        let t = self.template;
         let cand = self
             .candidates
             .get(index)
             .ok_or_else(|| format!("candidate index {index} out of range"))?;
-        if cand.devices.len() != t.devices.len() {
-            return Err(format!(
-                "candidate {index} has {} devices, template has {}",
-                cand.devices.len(),
-                t.devices.len()
-            ));
-        }
-        if cand.bias.len() != t.bias_defaults.len()
-            || cand.bias.iter().any(|value| !value.is_finite())
-        {
-            return Err(format!(
-                "candidate {index} has invalid bias vector length {} (expected {})",
-                cand.bias.len(),
-                t.bias_defaults.len()
-            ));
-        }
-        if cand.dc_guesses.as_ref().is_some_and(|guesses| {
-            guesses.iter().any(|guess| {
-                guess.len() != t.circuit.size || guess.iter().any(|value| !value.is_finite())
-            })
-        }) {
-            return Err(format!(
-                "candidate {index} has an invalid DC guess; expected finite vectors of length {}",
-                t.circuit.size
-            ));
-        }
-
-        // 1. Device build: numeric cards -> native handles (fresh per candidate).
-        let mut handles = Vec::with_capacity(t.devices.len());
-        for (stat, geom) in t.devices.iter().zip(&cand.devices) {
-            handles.push(
-                build_handle(t, stat, geom, &cand.corner)
-                    .map_err(|error| format!("candidate {index}: {error}"))?,
-            );
-        }
-
-        // 2. DC operating point.
-        let (dc_op, dc_iterations, dc_from_seed) = self.solve_dc(cand, &handles, index)?;
-
-        // 3. One eval per device at the op: the terminal linearization AND the
-        //    bias state the noise call reads (evaluate-then-noise order). The
-        //    bias comes from the DC terminal tokens (rails carry their true DC
-        //    voltage there — the AC tokens are small-signal values).
-        let mut problem = t.lti_base.clone();
-        let mut ich = Vec::with_capacity(t.devices.len());
-        let mut terminal_currents = Vec::with_capacity(t.devices.len());
-        for (slot, (stat, handle)) in t.devices.iter().zip(&handles).enumerate() {
-            let dc_terms = &t.dc_devices[slot].terms;
-            let resolve = |term: &mna::Term, terminal: &str| {
-                term.resolve(&dc_op, &cand.bias).ok_or_else(|| {
-                    format!("candidate {index}: device {slot} {terminal} bias is missing")
-                })
-            };
-            let vd = resolve(&dc_terms[0], "drain")?;
-            let vg = resolve(&dc_terms[1], "gate")?;
-            let vs = resolve(&dc_terms[2], "source")?;
-            let mut evaluation = bsim_transient::Evaluation::default();
-            let status = unsafe {
-                co_bsim4::eval_vp(
-                    handle.0,
-                    [vd, vg, vs, stat.vb].as_ptr(),
-                    evaluation.currents.as_mut_ptr(),
-                    evaluation.conductance.as_mut_ptr(),
-                    evaluation.charges.as_mut_ptr(),
-                    evaluation.capacitance.as_mut_ptr(),
-                )
-            };
-            if status != 0 {
-                return Err(format!(
-                    "candidate {index}: BSIM4 evaluation failed at the operating point"
-                ));
-            }
-            // Per-device DC channel current = |drain terminal current| — the exact
-            // `abs(result.terminal_currents[0])` the Python device get_ss_params
-            // reports as ``Ich`` (the KCL fix-up only touches the bulk terminal).
-            ich.push(evaluation.currents[0].abs());
-            terminal_currents.push(evaluation.currents);
-            problem.dense_devices.push(lti::DenseDevice {
-                terms: vec![
-                    stat.ac_d,
-                    stat.ac_g,
-                    stat.ac_s,
-                    mna::Term {
-                        kind: 2,
-                        reference: 0,
-                        value: 0.0,
-                    },
-                ],
-                conductance: evaluation.conductance.to_vec(),
-                capacitance: evaluation.capacitance.to_vec(),
-            });
-        }
-
-        // 4. AC solve + gain reductions.
-        let system = problem
-            .try_assemble()
-            .map_err(|error| format!("candidate {index}: AC assembly failed: {error}"))?;
-        let v = if inner_parallel {
-            system.solve_frequencies_parallel(&t.freqs)
-        } else {
-            system.solve_frequencies_serial(&t.freqs)
-        }
-        .ok_or_else(|| format!("candidate {index}: AC solve singular"))?;
-        let mut gains = Vec::with_capacity(t.freqs.len());
-        for row in &v {
-            let mut re = 0.0;
-            let mut im = 0.0;
-            for &(node, weight) in &t.output_weights {
-                re += weight * row[node].re;
-                im += weight * row[node].im;
-            }
-            gains.push((re / t.vin_norm).hypot(im / t.vin_norm));
-        }
-        let peak = gains.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let gain_peak_db = 20.0 * peak.max(1e-9).log10();
-        // DC gain (`gain_dB` label): the gain at the lowest analysis frequency,
-        // the same `20*log10(max(Av_dc, 1e-9))` reduction as `ac_solver.Av_dc_dB`.
-        let av_dc_db = 20.0 * gains.first().copied().unwrap_or(0.0).max(1e-9).log10();
-        let bw_hz = bw_from_gain(&t.freqs, &gains);
-        let ugf_hz = unity_gain_freq(&t.freqs, &gains);
-
-        // 5. Noise: transposed solve + per-device BSIM4 noise matrices.
-        let (irn_uv, orn_v) = if self.compute_noise {
-            let tvec = if inner_parallel {
-                system.solve_transpose_parallel(&t.freqs, &t.sense)
-            } else {
-                system.solve_transpose_serial(&t.freqs, &t.sense)
-            }
-            .ok_or_else(|| format!("candidate {index}: noise transpose solve singular"))?;
-
-            let nfreq = t.freqs.len();
-            let mut out_psd = vec![0.0; nfreq];
-            let mut total_re = [0.0f64; 16];
-            let mut total_im = [0.0f64; 16];
-            let mut flicker_re = [0.0f64; 16];
-            let mut flicker_im = [0.0f64; 16];
-            for (stat, handle) in t.devices.iter().zip(&handles) {
-                for (fi, &frequency) in t.freqs.iter().enumerate() {
-                    let status = unsafe {
-                        co_bsim4::noise(
-                            handle.0,
-                            frequency,
-                            total_re.as_mut_ptr(),
-                            total_im.as_mut_ptr(),
-                            flicker_re.as_mut_ptr(),
-                            flicker_im.as_mut_ptr(),
-                        )
-                    };
-                    if status != 0 {
-                        return Err(format!(
-                            "candidate {index}: BSIM4 noise evaluation failed (status {status})"
-                        ));
-                    }
-                    // z_t = tvec[fi][node] for solved-node terminals, else 0.
-                    let mut z = [lti::Complex { re: 0.0, im: 0.0 }; 4];
-                    for (slot, node) in stat.noise_nodes.iter().enumerate() {
-                        if let Some(node) = node {
-                            z[slot] = tvec[fi][*node];
-                        }
-                    }
-                    // contribution = max(Re(z S z*), 0) over the total matrix.
-                    let mut acc = 0.0;
-                    for (row, zi) in z.iter().enumerate() {
-                        for (col, zj) in z.iter().enumerate() {
-                            let s_re = total_re[row * 4 + col];
-                            let s_im = total_im[row * 4 + col];
-                            // Re(zi * S * conj(zj))
-                            let zr = zi.re * s_re - zi.im * s_im;
-                            let zi_im = zi.re * s_im + zi.im * s_re;
-                            acc += zr * zj.re + zi_im * zj.im;
-                        }
-                    }
-                    out_psd[fi] += acc.max(0.0);
-                }
-            }
-            for (a, b, s_th) in &t.resistor_noise {
-                for (fi, psd) in out_psd.iter_mut().enumerate() {
-                    let mut zre = 0.0f64;
-                    let mut zim = 0.0f64;
-                    if a.kind == 0 {
-                        zre += tvec[fi][a.reference].re;
-                        zim += tvec[fi][a.reference].im;
-                    }
-                    if b.kind == 0 {
-                        zre -= tvec[fi][b.reference].re;
-                        zim -= tvec[fi][b.reference].im;
-                    }
-                    let zabs = zre.hypot(zim);
-                    *psd += zabs * zabs * s_th;
-                }
-            }
-            let mut irn_psd = vec![0.0; nfreq];
-            for fi in 0..nfreq {
-                let h2 = (gains[fi] * gains[fi]).max(1e-300);
-                irn_psd[fi] = out_psd[fi] / h2;
-            }
-            (
-                band_rms(&t.freqs, &irn_psd, t.band_lo, t.band_hi) * 1e6,
-                band_rms(&t.freqs, &out_psd, t.band_lo, t.band_hi),
-            )
-        } else {
-            (f64::NAN, f64::NAN)
-        };
-
-        let latch_dv = match t.latch_nodes {
-            Some((a, b)) => (dc_op[a] - dc_op[b]).abs(),
-            None => 0.0,
-        };
-
-        Ok(SiliconMetrics {
-            gain_peak_db,
-            bw_hz,
-            ugf_hz,
-            irn_uv,
-            orn_v,
-            latch_dv,
-            dc_op,
-            dc_iterations,
-            dc_from_seed,
-            av_dc_db,
-            ich,
-            terminal_currents,
-        })
+        let (prepared, handles) = prepare_with_handles(self.template, cand, index, inner_parallel)?;
+        finish_with_handles(
+            self.template,
+            &prepared,
+            &handles,
+            index,
+            inner_parallel,
+            self.compute_noise,
+        )
     }
 }
 

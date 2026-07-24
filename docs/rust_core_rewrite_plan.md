@@ -454,11 +454,14 @@ FreePDK45/SKY130/TSMC28 BSIM4 候选均可独立提供部分命名 bias 覆盖�
   device frame；三 PDK 卡展开 parity 过门；TSan 干净；全套默认 pytest 绿。
 
 **design-space sweep 接入注记（2026-07-25）**：通用模拟 `explore()` 已接
-`CompiledCampaign`。固定拓扑 BSIM4 候选的 geometry/NF/corner/bias 分块后在单
-Rayon pool 内执行；AC-only 预筛与 survivor-only noise batch 保留 lazy-noise，
-完整四端电流和增广 DC 状态用于真实源支路功耗归约。CLI、HTTP job 与 MCP 均透传
-`workers`。多稳态 OTFT AFE 继续执行 R5-C 冷根裁决：有 `seed_fn` 才可进入
-campaign，无 seed 时回退标量。SKY130 100-candidate 本机 warm 样例约为
+`CompiledCampaign`。BSIM 编译器直接消费通用 `CircuitSpec` 拓扑，而非 5T 宏；
+任意 MOS 连接、R/C、独立源、四类受控源和增广 MNA 支路共用同一模板。候选的
+geometry/NF/corner/bias 分块后在单 Rayon pool 内执行。lazy-noise 使用显式
+`PreparedCampaign`：保留 DC、工作点 G/C 线性化、已组装 LTI system 和正向 AC
+响应，只对 survivor 索引续跑 noise；C handle 不跨调用或线程。完整四端电流和
+增广 DC 状态用于真实源支路功耗归约。CLI、HTTP job 与 MCP 均透传 `workers`。
+多稳态 OTFT AFE 继续执行 R5-C 冷根裁决：有 `seed_fn` 才可进入 campaign，无
+seed 时回退标量。SKY130 100-candidate 本机 warm 样例约为
 0.447 s（1 worker）、0.118 s（8 workers）、0.477 s（标量）；8-worker 相对
 标量约 4.0×，该数字仅作当前机器的回归参考。
 

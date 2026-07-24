@@ -697,6 +697,91 @@ def test_silicon_candidate_bias_partial_override_matches_scalar():
     assert max(_rel(a, b) for a, b in zip(result["dc_op"], expected_op)) <= 1e-12
 
 
+def test_silicon_prepared_campaign_reuses_dc_ac_for_noise_subset():
+    spec, _corners, camp = _si_load("sky130")
+    kwargs = _si_reference_kwargs(spec)
+    candidates = []
+    for sizes in _si_geometries("sky130", spec, camp):
+        ac = ac_solve(sizes, spec.bias, _SI_FREQS, corner="tt", **kwargs)
+        assert ac is not None
+        candidates.append(camp.candidate(
+            sizes,
+            "tt",
+            seed=camp.seed_vector(ac["dc_op"]),
+            trust_seed_as_op=False,
+        ))
+
+    prepared = camp.prepare_batch(candidates, workers=3)
+    assert prepared.count == 3
+    assert prepared.prepared_count == 3
+    assert prepared.profile == {
+        "candidate_count": 3,
+        "prepared": 3,
+        "failed": 0,
+        "dc_ac_preparations": 3,
+        "noise_continuations": 0,
+    }
+
+    ac_rows = prepared.evaluate_batch(workers=2, analyses=("dc", "ac"))
+    noisy = prepared.evaluate_batch(
+        indices=[2, 0], workers=2, analyses=("noise",))
+    one_shot = camp.evaluate_batch(
+        [candidates[2], candidates[0]], workers=2,
+        analyses=("dc", "ac", "noise"))
+
+    assert prepared.profile["dc_ac_preparations"] == 3
+    assert prepared.profile["noise_continuations"] == 2
+    assert all(row["ok"] for row in ac_rows + noisy + one_shot)
+    assert all(np.isnan(row["irn_uV"]) for row in ac_rows)
+    for staged, direct in zip(noisy, one_shot):
+        for key in ("gain_dB", "gain_peak_dB", "bw_Hz", "ugf_Hz",
+                    "irn_uV", "orn_V", "latch_dV"):
+            assert staged[key] == direct[key]
+        assert staged["dc_op"] == direct["dc_op"]
+        assert staged["terminal_currents"] == direct["terminal_currents"]
+
+
+def test_silicon_campaign_compiles_non_5t_generic_topology():
+    """The BSIM campaign compiler is topology-driven, not a 5T macro."""
+    from circuitopt._rust_campaign import SiliconCampaign
+    from circuitopt.circuit_loader import CircuitSpec
+    from circuitopt.topology import Topology
+
+    base = load_circuit_json("examples/sky130_5t_ota.json")
+    binding = base.binding()
+    topo = Topology(
+        solved=["OUT"],
+        devices=[("MX", "OUT", "VIN", "GND")],
+        rails={"VDD": "VDD", "VIN": "VIN", "GND": 0.0},
+        outputs=("OUT",),
+        input_drives={"MX": 1.0},
+        resistors=[("RD", "VDD", "OUT", 20e3)],
+        capacitors=[("CL", "OUT", "GND", 200e-15)],
+        dc_guesses=[{"OUT": 1.0}],
+    )
+    spec = CircuitSpec(
+        name="generic_common_source",
+        topology=topo,
+        sizes={"MX": (24.0, 0.5)},
+        bias={"VDD": 1.8, "VIN": 0.9},
+        model_types={"MX": binding.model_types["M1"]},
+        device_kwargs={"MX": dict(binding.device_kwargs["M1"])},
+    )
+    freqs = np.logspace(1, 8, 41)
+    camp = SiliconCampaign(spec, freqs, band=(1e3, 1e6))
+    candidate = camp.candidate(spec.sizes, "tt")
+
+    direct = camp.evaluate_batch([candidate], analyses=("dc", "ac", "noise"))[0]
+    prepared = camp.prepare_batch([candidate])
+    staged = prepared.evaluate_batch(indices=[0], analyses=("noise",))[0]
+
+    assert direct["ok"] and staged["ok"]
+    assert len(staged["dc_op"]) == topo.n_aug == 1
+    assert len(staged["terminal_currents"]) == 1
+    for key in ("gain_dB", "gain_peak_dB", "bw_Hz", "irn_uV", "orn_V"):
+        assert staged[key] == direct[key]
+
+
 def test_silicon_no_python_callback_during_batch(monkeypatch):
     spec, _corners, camp = _si_load("sky130")
     kwargs = _si_reference_kwargs(spec)

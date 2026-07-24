@@ -499,16 +499,24 @@ def _campaign_candidates(campaign, samples, base_sizes, base_bias, nf, cfg,
                 "native": native,
             })
 
-        first_analyses = (
-            ("dc", "ac")
-            if (prefilter_noise or not need_noise)
-            else ("dc", "ac", "noise")
-        )
-        first = campaign.evaluate_batch(
-            [record["native"] for record in records],
-            workers=workers,
-            analyses=first_analyses,
-        )
+        native_candidates = [record["native"] for record in records]
+        prepared = None
+        if prefilter_noise and campaign.supports_prepared:
+            prepared = campaign.prepare_batch(
+                native_candidates, workers=workers)
+            first = prepared.evaluate_batch(
+                workers=workers, analyses=("dc", "ac"))
+        else:
+            first_analyses = (
+                ("dc", "ac")
+                if (prefilter_noise or not need_noise)
+                else ("dc", "ac", "noise")
+            )
+            first = campaign.evaluate_batch(
+                native_candidates,
+                workers=workers,
+                analyses=first_analyses,
+            )
         final_rows = list(first)
         noise_indices = set()
         if prefilter_noise:
@@ -524,11 +532,18 @@ def _campaign_candidates(campaign, samples, base_sizes, base_bias, nf, cfg,
                         metrics, _non_noise_constraints(cfg.constraints)):
                     survivors.append(local)
             if survivors:
-                noisy = campaign.evaluate_batch(
-                    [records[local]["native"] for local in survivors],
-                    workers=workers,
-                    analyses=("dc", "ac", "noise"),
-                )
+                if prepared is not None:
+                    noisy = prepared.evaluate_batch(
+                        indices=survivors,
+                        workers=workers,
+                        analyses=("noise",),
+                    )
+                else:
+                    noisy = campaign.evaluate_batch(
+                        [records[local]["native"] for local in survivors],
+                        workers=workers,
+                        analyses=("dc", "ac", "noise"),
+                    )
                 for local, row in zip(survivors, noisy):
                     final_rows[local] = row
                     noise_indices.add(local)

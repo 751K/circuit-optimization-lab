@@ -673,9 +673,11 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
 - `explore(topo, base_sizes, base_bias, nf, cfg, n=, seed=, method=, corner=,
   workers=)` — run a sweep.
   `corner` applies a process shift (e.g. `CORNERS["slow"]`) to every evaluation, enabling
-  corner-aware search without modifying the config. Eligible fixed-topology
-  BSIM4 circuits use `CompiledCampaign`: geometry/NF/bias candidates execute in
-  cancellable chunks under one GIL-free Rayon pool. A multistable OTFT AFE uses
+  corner-aware search without modifying the config. Eligible BSIM4 circuits use
+  the topology-driven `CompiledCampaign`: arbitrary MOS connectivity, passive
+  elements, independent/controlled sources, and augmented MNA branches are
+  compiled once, then geometry/NF/bias candidates execute in cancellable chunks
+  under one GIL-free Rayon pool. A multistable OTFT AFE uses
   the compiled path only when `seed_fn` supplies a consistent DC seed; cold AFE
   exploration stays on the scalar reference to avoid changing physical roots.
 - `evaluate(topo, sizes, bias, nf, freqs, band, x0_guess=None, corner=None)` — single-candidate
@@ -683,8 +685,11 @@ solvers, filters by constraints, and Pareto-selects the trade-off front.
   evaluation is AC-first: gain/BW/power/area are computed before noise, failed
   candidates are rejected immediately, and noise runs only when `irn_uV` is
   required by a surviving candidate's constraints or objectives. The compiled
-  path preserves this with an AC-only batch followed by a noise batch containing
-  only survivors.
+  BSIM path prepares DC, operating-point device linearization, the assembled MNA
+  system, and the forward AC response once. A reusable `PreparedCampaign` then
+  runs only the noise continuation for survivor indices; it does not repeat DC
+  or forward AC. Native BSIM handles remain call-local and are re-biased at the
+  retained operating point, so no C pointer crosses Python calls or Rayon workers.
 - `load_explore_json(path)` — read an `explore` block from a full circuit JSON.
   The topology, device sizes, bias, and optional NF data are all loaded through
   the same JSON path; legacy `builtin_topology` configs are no longer accepted
