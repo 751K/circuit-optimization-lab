@@ -327,9 +327,42 @@ pub struct Conversion {
     pub bits: Vec<i32>,
 }
 
+/// The original-grid samples `np_interp(x, tgrid, ..)` reads: the bracket index
+/// `j`, and whether the value at `j + 1` is needed too.
+///
+/// Mirrors `np_interp`'s own branch order — the two clamps, the last-interval
+/// shortcut and the exact-hit shortcut all resolve to `fp[j]` alone.
+fn interp_bracket(tgrid: &[f64], x: f64) -> (usize, bool) {
+    let n = tgrid.len();
+    if x >= tgrid[n - 1] {
+        return (n - 1, false);
+    }
+    if x < tgrid[0] {
+        return (0, false);
+    }
+    let j = match tgrid.binary_search_by(|probe| probe.partial_cmp(&x).unwrap()) {
+        Ok(hit) => hit,
+        Err(insert) => insert - 1,
+    };
+    (j, tgrid[j] != x)
+}
+
 /// Run one closed-loop SAR conversion for `vin`, returning the code and per-bit
 /// decisions, or `None` if any bit's transient fails to complete (the frozen
 /// Python path raises there; the caller maps `None` to a per-trial error).
+///
+/// Bits are *continued*, not replayed. Resolving bit `k` only changes the
+/// stimulus after its decision instant: the bit-`k` row gains its clear events
+/// at `decision_time(k)`, and bit `k + 1` gains its trial events half a period
+/// later — while the intervals that precede them keep both endpoints at the
+/// same level, so `_wave`'s zero-slope interpolation reproduces the earlier
+/// samples exactly. The trajectory over `[0, decision_time(k)]` is therefore
+/// the same whichever bit is under trial, and the solver, being deterministic,
+/// reproduces it step for step. So each bit resumes from the last original grid
+/// point at or before its predecessor's decision instant instead of restarting
+/// at `t = 0`, turning N whole-grid solves into one pass plus, per bit, the
+/// handful of steps that bracket the comparator read and are then re-solved
+/// against the updated stimulus.
 #[allow(clippy::too_many_arguments)]
 pub fn run_conversion<E: Evaluator>(
     circuit: &CircuitProblem,
@@ -348,8 +381,24 @@ pub fn run_conversion<E: Evaluator>(
     let mut comparator = vec![0.0f64; tgrid.len()];
     let mut flat = vec![0.0f64; n_rows * exp_n];
 
-    for bit in 0..n_bits {
-        let orig_rows = build_original_rows(cfg, vin, &decisions, bit, tgrid);
+    // The conversion never reads the per-device history, so it is not recorded.
+    // That flag only gates bookkeeping writes; the trajectory is unaffected.
+    let options = bsim_transient::Options {
+        record_device_history: false,
+        ..cfg.newton
+    };
+    let mut states = vec![vec![0.0; circuit.size]; exp_n];
+    states[0].copy_from_slice(v0);
+    let mut workspace = bsim_transient::FixedGridWorkspace::new(circuit, devices);
+    let mut profile = bsim_transient::Profile::default();
+    // Disjoint empty sinks: the history flag is off, so nothing is written.
+    let mut no_currents: [[f64; 4]; 0] = [];
+    let mut no_charges: [[f64; 4]; 0] = [];
+
+    // Sample 0 of the first trial's stimulus. Every trial agrees there, so the
+    // initial evaluation is shared by the whole conversion.
+    let render = |decisions: &[Option<i32>], trial: usize, flat: &mut [f64]| {
+        let orig_rows = build_original_rows(cfg, vin, decisions, trial, tgrid);
         // Stage 2: re-interpolate each original-grid row onto the expanded grid.
         for (r, orig) in orig_rows.iter().enumerate() {
             let base = r * exp_n;
@@ -357,25 +406,80 @@ pub fn run_conversion<E: Evaluator>(
                 flat[base + m] = np_interp(te, tgrid, orig);
             }
         }
+    };
+    render(&decisions, 0, &mut flat);
+    let initial_inputs = Waveforms::new(&flat, n_rows, exp_n)?.sample(0)?;
+    let mut carry = bsim_transient::begin_fixed_grid(
+        devices,
+        evaluator,
+        &mut workspace,
+        v0,
+        &initial_inputs,
+        options,
+        &mut no_currents,
+        &mut no_charges,
+        &mut profile,
+    )?;
+
+    let mut solved_upto = 0usize;
+    for bit in 0..n_bits {
+        if bit > 0 {
+            render(&decisions, bit, &mut flat);
+        }
         let waveforms = Waveforms::new(&flat, n_rows, exp_n)?;
-        let result = bsim_transient::solve_fixed_grid(
-            circuit,
-            devices,
-            evaluator,
-            v0,
-            &grid.times,
-            waveforms,
-            cfg.newton,
-        );
-        if !result.completed {
+        let decision_time = cfg.sample_end + (bit as f64 + 1.0) * cfg.bit_period;
+        let (lower, needs_upper) = interp_bracket(tgrid, decision_time);
+        let resume_at = grid.requested_index[lower];
+
+        // Advance to the last grid point the next bit may resume from, and keep
+        // the integrator state there: the steps beyond it are solved against a
+        // stimulus this bit's decision is about to invalidate.
+        if resume_at > solved_upto
+            && !bsim_transient::advance_fixed_grid(
+                circuit,
+                devices,
+                evaluator,
+                &mut workspace,
+                &mut states,
+                &grid.times,
+                waveforms,
+                options,
+                solved_upto + 1..resume_at + 1,
+                &mut carry,
+                &mut no_currents,
+                &mut no_charges,
+                &mut profile,
+            )
+        {
             return None;
         }
-        // Down-sample the comparator node back to the original grid, then read
-        // it at the decision instant (np.interp over the original grid).
-        for (i, &ri) in grid.requested_index.iter().enumerate() {
-            comparator[i] = result.states[ri][cfg.comparator_index];
+        let resume_carry = carry.clone();
+        comparator[lower] = states[resume_at][cfg.comparator_index];
+
+        if needs_upper {
+            let upper = grid.requested_index[lower + 1];
+            if upper > resume_at
+                && !bsim_transient::advance_fixed_grid(
+                    circuit,
+                    devices,
+                    evaluator,
+                    &mut workspace,
+                    &mut states,
+                    &grid.times,
+                    waveforms,
+                    options,
+                    resume_at + 1..upper + 1,
+                    &mut carry,
+                    &mut no_currents,
+                    &mut no_charges,
+                    &mut profile,
+                )
+            {
+                return None;
+            }
+            comparator[lower + 1] = states[upper][cfg.comparator_index];
         }
-        let decision_time = cfg.sample_end + (bit as f64 + 1.0) * cfg.bit_period;
+
         let comparator_v = np_interp(decision_time, tgrid, &comparator);
         let high = comparator_v >= cfg.comparator_threshold;
         decisions[bit] = Some(if cfg.high_means_clear {
@@ -383,6 +487,29 @@ pub fn run_conversion<E: Evaluator>(
         } else {
             i32::from(high)
         });
+        // Roll back to the resume point: the bracket steps just consumed belong
+        // to the pre-decision stimulus and are re-solved by the next bit.
+        carry = resume_carry;
+        solved_upto = resume_at;
+        if needs_upper {
+            // Put the compact model back where a solve stopping at `resume_at`
+            // would have left it. Those bracket evaluations moved its internal-
+            // node warm start and limiting reference past the resume point, and
+            // rolling back only the host state would leave the next step reading
+            // a different warm start — a ULP the latch turns into a flipped bit.
+            let inputs_at_resume = waveforms.sample(resume_at)?;
+            if !bsim_transient::resync_evaluator(
+                devices,
+                evaluator,
+                &mut workspace,
+                &states[resume_at],
+                &inputs_at_resume,
+                options,
+                &mut profile,
+            ) {
+                return None;
+            }
+        }
     }
 
     let mut code: u64 = 0;

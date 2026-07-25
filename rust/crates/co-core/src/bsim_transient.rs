@@ -1104,44 +1104,27 @@ pub fn solve_fixed_grid<E: Evaluator>(
         };
     }
     let mut profile = Profile::default();
-    let input_at = |index: usize| inputs.sample(index).unwrap_or_default();
     let mut states = vec![vec![0.0; circuit.size]; times.len()];
     states[0].copy_from_slice(initial);
-    let mut state = initial.to_vec();
-    let initial_inputs = input_at(0);
-    let mut charge1 = vec![[0.0; 4]; devices.len()];
-    let mut charge2 = vec![[0.0; 4]; devices.len()];
-    let evaluator_indices: Vec<usize> = devices
-        .iter()
-        .map(|device| device.evaluator_index)
-        .collect();
-    let mut terminal_batch = vec![[0.0; 4]; devices.len()];
-    let mut evaluation_batch = vec![Evaluation::default(); devices.len()];
     let history_len = times.len().saturating_mul(devices.len());
-    let mut device_currents = if options.record_device_history {
-        vec![[0.0; 4]; history_len]
+    let (mut device_currents, mut device_charges) = if options.record_device_history {
+        (vec![[0.0; 4]; history_len], vec![[0.0; 4]; history_len])
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
-    let mut device_charges = if options.record_device_history {
-        vec![[0.0; 4]; history_len]
-    } else {
-        Vec::new()
-    };
-    if !evaluate_devices(
-        evaluator,
+    let mut workspace = FixedGridWorkspace::new(circuit, devices);
+    let initial_inputs = inputs.sample(0).unwrap_or_default();
+    let Some(mut carry) = begin_fixed_grid(
         devices,
-        &evaluator_indices,
-        &state,
+        evaluator,
+        &mut workspace,
+        initial,
         &initial_inputs,
-        &mut terminal_batch,
-        &mut evaluation_batch,
+        options,
+        &mut device_currents,
+        &mut device_charges,
         &mut profile,
-        options.profile,
-    ) {
-        if options.profile {
-            profile.failed_steps.push(0);
-        }
+    ) else {
         return Result {
             completed: false,
             states,
@@ -1151,22 +1134,211 @@ pub fn solve_fixed_grid<E: Evaluator>(
             first_failure: Some(0),
             profile,
         };
+    };
+    let completed = advance_fixed_grid(
+        circuit,
+        devices,
+        evaluator,
+        &mut workspace,
+        &mut states,
+        times,
+        inputs,
+        options,
+        1..times.len(),
+        &mut carry,
+        &mut device_currents,
+        &mut device_charges,
+        &mut profile,
+    );
+    Result {
+        completed,
+        states,
+        device_currents,
+        device_charges,
+        failures: carry.failures,
+        first_failure: carry.first_failure,
+        profile,
     }
-    for (position, evaluation) in evaluation_batch.iter().copied().enumerate() {
-        charge1[position] = evaluation.charges;
-        charge2[position] = evaluation.charges;
+}
+
+/// The integrator state a fixed-grid step reads beyond `times`, `inputs`, and
+/// the two previous entries of `states`.
+///
+/// A step needs the two-step device charge history, the converged streak that
+/// gates the Gear2 predictor, and the running failure bookkeeping; everything
+/// else it derives from the grid and the two previous states. Capturing it
+/// explicitly lets a driver stop on a grid point, rewrite the *future* of the
+/// stimulus, and resume with a trajectory identical to solving the whole grid
+/// against the new stimulus in one pass. The SAR conversion loop does exactly
+/// that between bit decisions.
+#[derive(Clone, Debug)]
+pub struct FixedGridCarry {
+    charge1: Vec<[f64; 4]>,
+    charge2: Vec<[f64; 4]>,
+    converged_streak: usize,
+    failures: usize,
+    first_failure: Option<usize>,
+}
+
+impl FixedGridCarry {
+    /// Steps that exhausted their Newton budget so far.
+    pub fn failures(&self) -> usize {
+        self.failures
+    }
+
+    /// Grid index of the first such step, if any.
+    pub fn first_failure(&self) -> Option<usize> {
+        self.first_failure
+    }
+}
+
+/// Per-transient scratch reused by every step of a fixed-grid solve.
+pub struct FixedGridWorkspace {
+    evaluator_indices: Vec<usize>,
+    terminal_batch: Vec<[f64; 4]>,
+    evaluation_batch: Vec<Evaluation>,
+    system: DenseSystem,
+    state: Vec<f64>,
+}
+
+impl FixedGridWorkspace {
+    pub fn new(circuit: &CircuitProblem, devices: &[Device]) -> Self {
+        Self {
+            evaluator_indices: devices
+                .iter()
+                .map(|device| device.evaluator_index)
+                .collect(),
+            terminal_batch: vec![[0.0; 4]; devices.len()],
+            evaluation_batch: vec![Evaluation::default(); devices.len()],
+            system: DenseSystem::new(circuit.size),
+            state: vec![0.0; circuit.size],
+        }
+    }
+}
+
+/// Evaluate the initial point and seed the charge history (grid sample 0).
+///
+/// Returns `None` when the compact model rejects that point, which is the
+/// `first_failure: Some(0)` outcome of a whole-grid solve.
+#[allow(clippy::too_many_arguments)]
+pub fn begin_fixed_grid<E: Evaluator>(
+    devices: &[Device],
+    evaluator: &mut E,
+    workspace: &mut FixedGridWorkspace,
+    initial: &[f64],
+    initial_inputs: &[f64],
+    options: Options,
+    device_currents: &mut [[f64; 4]],
+    device_charges: &mut [[f64; 4]],
+    profile: &mut Profile,
+) -> Option<FixedGridCarry> {
+    workspace.state.clear();
+    workspace.state.extend_from_slice(initial);
+    if !evaluate_devices(
+        evaluator,
+        devices,
+        &workspace.evaluator_indices,
+        &workspace.state,
+        initial_inputs,
+        &mut workspace.terminal_batch,
+        &mut workspace.evaluation_batch,
+        profile,
+        options.profile,
+    ) {
+        if options.profile {
+            profile.failed_steps.push(0);
+        }
+        return None;
+    }
+    let mut carry = FixedGridCarry {
+        charge1: vec![[0.0; 4]; devices.len()],
+        charge2: vec![[0.0; 4]; devices.len()],
+        converged_streak: 1,
+        failures: 0,
+        first_failure: None,
+    };
+    for (position, evaluation) in workspace.evaluation_batch.iter().copied().enumerate() {
+        carry.charge1[position] = evaluation.charges;
+        carry.charge2[position] = evaluation.charges;
         if options.record_device_history {
             device_currents[position] = evaluation.currents;
             device_charges[position] = evaluation.charges;
         }
     }
-    let mut system = DenseSystem::new(circuit.size);
-    let mut failures = 0usize;
-    let mut first_failure = None;
-    let mut converged_streak = 1usize;
+    Some(carry)
+}
+
+/// Re-evaluate the devices at an accepted state, restoring what the compact
+/// model remembers between calls.
+///
+/// `eval_vp` is not a pure function of its terminal voltages: a BSIM instance
+/// keeps the internal drain/source node solution as the next call's warm start
+/// and the `state0` voltages the next load limits against. A whole-grid solve
+/// leaves that memory holding the last accepted step, so a driver that solves
+/// past a grid point and then resumes from it must put the model back where a
+/// solve stopping at that point would have left it — otherwise the next step
+/// starts from a different warm start and lands a ULP away.
+pub fn resync_evaluator<E: Evaluator>(
+    devices: &[Device],
+    evaluator: &mut E,
+    workspace: &mut FixedGridWorkspace,
+    state: &[f64],
+    inputs: &[f64],
+    options: Options,
+    profile: &mut Profile,
+) -> bool {
+    evaluate_devices(
+        evaluator,
+        devices,
+        &workspace.evaluator_indices,
+        state,
+        inputs,
+        &mut workspace.terminal_batch,
+        &mut workspace.evaluation_batch,
+        profile,
+        options.profile,
+    )
+}
+
+/// Advance the grid samples in `samples`, resuming from `carry`.
+///
+/// `states[samples.start - 1]` and, for a BDF2 step, `states[samples.start - 2]`
+/// must already hold the trajectory `carry` was captured at. Returns whether
+/// every step completed; `carry` carries the failure bookkeeping either way.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_fixed_grid<E: Evaluator>(
+    circuit: &CircuitProblem,
+    devices: &[Device],
+    evaluator: &mut E,
+    workspace: &mut FixedGridWorkspace,
+    states: &mut [Vec<f64>],
+    times: &[f64],
+    inputs: Waveforms<'_>,
+    options: Options,
+    samples: core::ops::Range<usize>,
+    carry: &mut FixedGridCarry,
+    device_currents: &mut [[f64; 4]],
+    device_charges: &mut [[f64; 4]],
+    profile: &mut Profile,
+) -> bool {
+    let input_at = |index: usize| inputs.sample(index).unwrap_or_default();
+    let FixedGridWorkspace {
+        evaluator_indices,
+        terminal_batch,
+        evaluation_batch,
+        system,
+        state,
+    } = workspace;
+    let FixedGridCarry {
+        charge1,
+        charge2,
+        converged_streak,
+        failures,
+        first_failure,
+    } = carry;
     let predictor_enabled = options.gear2 && gear2_predictor_enabled();
 
-    for sample in 1..times.len() {
+    for sample in samples {
         let h = times[sample] - times[sample - 1];
         let coefficients = if options.gear2 && sample >= 2 {
             let h_previous = times[sample - 1] - times[sample - 2];
@@ -1189,15 +1361,8 @@ pub fn solve_fixed_grid<E: Evaluator>(
             if options.profile {
                 profile.failed_steps.push(sample);
             }
-            return Result {
-                completed: false,
-                states,
-                device_currents,
-                device_charges,
-                failures,
-                first_failure: Some(sample),
-                profile,
-            };
+            *first_failure = Some(sample);
+            return false;
         };
         let history2_state = if sample >= 2 {
             &states[sample - 2]
@@ -1208,22 +1373,15 @@ pub fn solve_fixed_grid<E: Evaluator>(
             if options.profile {
                 profile.failed_steps.push(sample);
             }
-            return Result {
-                completed: false,
-                states,
-                device_currents,
-                device_charges,
-                failures,
-                first_failure: Some(sample),
-                profile,
-            };
+            *first_failure = Some(sample);
+            return false;
         };
         state.clone_from(&states[sample - 1]);
         if predictor_enabled
             && sample >= 2
-            && converged_streak >= 2
+            && *converged_streak >= 2
             && predict_gear2_state(
-                &mut state,
+                state,
                 &states[sample - 1],
                 &states[sample - 2],
                 &input_now,
@@ -1246,12 +1404,12 @@ pub fn solve_fixed_grid<E: Evaluator>(
             let evaluated = evaluate_devices(
                 evaluator,
                 devices,
-                &evaluator_indices,
-                &state,
+                evaluator_indices,
+                state,
                 &input_now,
-                &mut terminal_batch,
-                &mut evaluation_batch,
-                &mut profile,
+                terminal_batch,
+                evaluation_batch,
+                profile,
                 options.profile,
             );
             if evaluated {
@@ -1288,13 +1446,13 @@ pub fn solve_fixed_grid<E: Evaluator>(
             let stamped = evaluated
                 && stamp_linear_elements(
                     circuit,
-                    &state,
+                    state,
                     &input_now,
                     coefficients,
                     &history,
                     &history2,
                     options.gmin,
-                    &mut system,
+                    system,
                 );
             if !stamped || !solve_dense_neg_rhs_in_place(&mut system.jacobian, &mut system.residual)
             {
@@ -1327,16 +1485,16 @@ pub fn solve_fixed_grid<E: Evaluator>(
             }
         }
         if !converged {
-            failures += 1;
+            *failures += 1;
             first_failure.get_or_insert(sample);
-            converged_streak = 0;
+            *converged_streak = 0;
             if options.profile {
                 profile.failed_steps.push(sample);
             }
         } else {
-            converged_streak = converged_streak.saturating_add(1);
+            *converged_streak = converged_streak.saturating_add(1);
         }
-        states[sample].copy_from_slice(&state);
+        states[sample].copy_from_slice(state);
         // A converged Newton round does not apply its already-sub-tolerance
         // correction, so evaluation_batch is exactly the accepted-state I/G/Q/C.
         // Failed rounds may have updated state after their last evaluation and
@@ -1345,27 +1503,20 @@ pub fn solve_fixed_grid<E: Evaluator>(
             && !evaluate_devices(
                 evaluator,
                 devices,
-                &evaluator_indices,
-                &state,
+                evaluator_indices,
+                state,
                 &input_now,
-                &mut terminal_batch,
-                &mut evaluation_batch,
-                &mut profile,
+                terminal_batch,
+                evaluation_batch,
+                profile,
                 options.profile,
             )
         {
             if options.profile && profile.failed_steps.last().copied() != Some(sample) {
                 profile.failed_steps.push(sample);
             }
-            return Result {
-                completed: false,
-                states,
-                device_currents,
-                device_charges,
-                failures,
-                first_failure: Some(sample),
-                profile,
-            };
+            *first_failure = Some(sample);
+            return false;
         }
         for (position, evaluation) in evaluation_batch.iter().copied().enumerate() {
             charge2[position] = charge1[position];
@@ -1377,15 +1528,7 @@ pub fn solve_fixed_grid<E: Evaluator>(
             }
         }
     }
-    Result {
-        completed: true,
-        states,
-        device_currents,
-        device_charges,
-        failures,
-        first_failure,
-        profile,
-    }
+    true
 }
 
 /// Adaptive variable-step Gear2 using a charge-history defect LTE estimate.
@@ -1754,6 +1897,25 @@ mod tests {
         }
     }
 
+    /// An evaluator with memory, standing in for what a BSIM instance keeps
+    /// between calls: the internal-node warm start and the `state0` voltages the
+    /// next load limits against. Its answer depends on the previous call, so a
+    /// driver that solves past a grid point and then resumes from it has to put
+    /// that memory back.
+    struct WarmStartEvaluator {
+        last: f64,
+    }
+
+    impl Evaluator for WarmStartEvaluator {
+        fn evaluate(&mut self, _index: usize, terminals: [f64; 4]) -> Option<Evaluation> {
+            let mut evaluation = linear_evaluation(terminals);
+            evaluation.currents[0] += 1e-3 * self.last;
+            evaluation.currents[2] -= 1e-3 * self.last;
+            self.last = terminals[0];
+            Some(evaluation)
+        }
+    }
+
     struct BatchOnlyEvaluator {
         calls: usize,
     }
@@ -1904,6 +2066,192 @@ mod tests {
             record_device_history: false,
             profile,
         }
+    }
+
+    /// Splitting a fixed grid at an interior point and resuming from the carry
+    /// must reproduce the whole-grid trajectory bit for bit — the invariant the
+    /// SAR conversion loop relies on to continue between bit decisions instead
+    /// of replaying the grid.
+    #[test]
+    fn resumed_fixed_grid_matches_the_whole_grid_bit_for_bit() {
+        let (circuit, devices) = linear_problem();
+        let times: Vec<f64> = (0..9).map(|k| 0.1 * k as f64).collect();
+        // Uneven inputs so BDF2, the predictor and the charge history all matter.
+        let rows: Vec<f64> = (0..times.len())
+            .map(|k| 0.3 + 0.11 * (k as f64) - 0.02 * (k * k) as f64)
+            .collect();
+        let waveforms = Waveforms::new(&rows, 1, times.len()).unwrap();
+        let mut settings = options(8, false);
+        settings.gear2 = true;
+
+        let whole = solve_fixed_grid(
+            &circuit,
+            &devices,
+            &mut LinearEvaluator,
+            &[1.0],
+            &times,
+            waveforms,
+            settings,
+        );
+        assert!(whole.completed);
+
+        for split in 1..times.len() {
+            let mut states = vec![vec![0.0; circuit.size]; times.len()];
+            states[0].copy_from_slice(&[1.0]);
+            let mut workspace = FixedGridWorkspace::new(&circuit, &devices);
+            let mut profile = Profile::default();
+            let mut sink: [[f64; 4]; 0] = [];
+            let mut sink2: [[f64; 4]; 0] = [];
+            let initial_inputs = waveforms.sample(0).unwrap();
+            let mut carry = begin_fixed_grid(
+                &devices,
+                &mut LinearEvaluator,
+                &mut workspace,
+                &[1.0],
+                &initial_inputs,
+                settings,
+                &mut sink,
+                &mut sink2,
+                &mut profile,
+            )
+            .unwrap();
+            for range in [1..split, split..times.len()] {
+                if range.is_empty() {
+                    continue;
+                }
+                assert!(advance_fixed_grid(
+                    &circuit,
+                    &devices,
+                    &mut LinearEvaluator,
+                    &mut workspace,
+                    &mut states,
+                    &times,
+                    waveforms,
+                    settings,
+                    range,
+                    &mut carry,
+                    &mut sink,
+                    &mut sink2,
+                    &mut profile,
+                ));
+            }
+            assert_eq!(states, whole.states, "split at {split} drifted");
+            assert_eq!(carry.failures(), whole.failures);
+        }
+    }
+
+    /// The SAR loop solves a couple of steps past its resume point to bracket
+    /// the comparator read, then rolls back and re-solves them against the
+    /// updated stimulus. Rolling back the host carry is not enough: those extra
+    /// evaluations also moved the compact model's own memory, and the next step
+    /// reads it. `resync_evaluator` puts it back.
+    #[test]
+    fn resuming_after_bracket_steps_requires_an_evaluator_resync() {
+        let (circuit, devices) = linear_problem();
+        let times: Vec<f64> = (0..9).map(|k| 0.1 * k as f64).collect();
+        let rows: Vec<f64> = (0..times.len())
+            .map(|k| 0.3 + 0.11 * (k as f64) - 0.02 * (k * k) as f64)
+            .collect();
+        let waveforms = Waveforms::new(&rows, 1, times.len()).unwrap();
+        let mut settings = options(8, false);
+        settings.gear2 = true;
+        let split = 4usize;
+
+        let whole = solve_fixed_grid(
+            &circuit,
+            &devices,
+            &mut WarmStartEvaluator { last: 0.0 },
+            &[1.0],
+            &times,
+            waveforms,
+            settings,
+        );
+        assert!(whole.completed);
+
+        let resumed = |resync: bool| {
+            let mut evaluator = WarmStartEvaluator { last: 0.0 };
+            let mut states = vec![vec![0.0; circuit.size]; times.len()];
+            states[0].copy_from_slice(&[1.0]);
+            let mut workspace = FixedGridWorkspace::new(&circuit, &devices);
+            let mut profile = Profile::default();
+            let mut sink: [[f64; 4]; 0] = [];
+            let mut sink2: [[f64; 4]; 0] = [];
+            let initial_inputs = waveforms.sample(0).unwrap();
+            let mut carry = begin_fixed_grid(
+                &devices,
+                &mut evaluator,
+                &mut workspace,
+                &[1.0],
+                &initial_inputs,
+                settings,
+                &mut sink,
+                &mut sink2,
+                &mut profile,
+            )
+            .unwrap();
+            let mut advance = |evaluator: &mut WarmStartEvaluator,
+                               workspace: &mut FixedGridWorkspace,
+                               states: &mut Vec<Vec<f64>>,
+                               carry: &mut FixedGridCarry,
+                               profile: &mut Profile,
+                               range: core::ops::Range<usize>| {
+                assert!(advance_fixed_grid(
+                    &circuit, &devices, evaluator, workspace, states, &times, waveforms, settings,
+                    range, carry, &mut sink, &mut sink2, profile,
+                ));
+            };
+            advance(
+                &mut evaluator,
+                &mut workspace,
+                &mut states,
+                &mut carry,
+                &mut profile,
+                1..split,
+            );
+            let resume_carry = carry.clone();
+            // Bracket the read, then discard those steps.
+            advance(
+                &mut evaluator,
+                &mut workspace,
+                &mut states,
+                &mut carry,
+                &mut profile,
+                split..split + 1,
+            );
+            carry = resume_carry;
+            if resync {
+                let inputs_at_resume = waveforms.sample(split - 1).unwrap();
+                assert!(resync_evaluator(
+                    &devices,
+                    &mut evaluator,
+                    &mut workspace,
+                    &states[split - 1],
+                    &inputs_at_resume,
+                    settings,
+                    &mut profile,
+                ));
+            }
+            advance(
+                &mut evaluator,
+                &mut workspace,
+                &mut states,
+                &mut carry,
+                &mut profile,
+                split..times.len(),
+            );
+            states
+        };
+
+        assert_eq!(
+            resumed(true),
+            whole.states,
+            "resync did not restore the model"
+        );
+        assert_ne!(
+            resumed(false),
+            whole.states,
+            "the stand-in evaluator has no memory, so this test proves nothing"
+        );
     }
 
     #[test]
