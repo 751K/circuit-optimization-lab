@@ -21,252 +21,182 @@ release checklist.
 
 ### Changed / 变更
 
-- **Outer-level parallelism owns the cores / 并行归外层所有**
+- **Much faster SAR conversions and Monte-Carlo / SAR 转换与蒙特卡洛大幅加速**
 
-  **English:** The compiled core evaluates a transient's device batch through one
-  process-wide pool. That is right for a single isolated solve, but every driver
-  that runs solves concurrently — signoff PVT points, SAR conversions and
-  Monte-Carlo trials, corner and PVT slices, exploration candidates — submitted
-  into that same pool, so the outer workers queued behind each other. Measured
-  with sixteen TSMC28 MDAC residue transients, the pool finished one thread's
-  worth in 4.90 s while keeping 7.8 of ten cores busy, and eight threads only
-  reached 4.03 s because no idle core was left; evaluating the batches inline
-  took 10.54 s on one thread but 3.19 s on eight, at 6.0 cores. Drivers that own
-  an outer parallel level now declare it, and their workers evaluate device
-  batches inline. The rule matches the compiled campaign's existing axis policy:
-  it applies only when there is more outer work than there are workers, so a
-  single solve, or a batch too small to fill the machine, keeps the pool. Set
-  `CIRCUITOPT_BSIM_NESTED_POOL=1` to restore the previous scheduling. Results are
-  unaffected — batch slots are written independently, so only the schedule
-  changes, and SAR codes, corner tables and mismatch summaries were checked
-  identical either way. An eight-trial FreePDK45 SAR6 mismatch Monte-Carlo at
-  eight workers improved from about 21-31 s to 17-20 s while its CPU time fell
-  from about 200-260 s to 130-160 s, lifting worker scaling from 1.8x to 2.4x.
+  **English:** A closed-loop SAR conversion used to re-simulate the whole time
+  grid once per bit. It now carries the simulation forward instead: deciding a
+  bit only changes the stimulus after that bit's decision instant, so the run
+  resumes from there rather than restarting at t=0. An eight-trial FreePDK45
+  SAR6 ramp went from 235.1 s to 34.7 s and the SAR3 ramp from 4.3 s to 1.2 s;
+  one mismatch trial went from about 32 s to 4.5 s, which puts a 200-trial
+  Monte-Carlo at roughly 8.6 minutes on eight workers instead of about 106.
+  Results are unchanged — 576 ramp codes and a mismatch Monte-Carlo were checked
+  bit-for-bit against the previous kernel.
 
-  **中文：** 编译核通过一个进程级线程池求值瞬态的器件批次。对单次孤立求解这是对的，
-  但所有并发驱动——signoff PVT 点、SAR 转换与蒙特卡洛 trial、corner 与 PVT 切片、
-  探索候选——都提交进同一个池，外层 worker 因而相互排队。以 16 次 TSMC28 MDAC
-  residue 瞬态实测：用池时单线程 4.90 s 就占满十核中的 7.8 核，八线程只到 4.03 s，
-  因为已无空闲核可用；改为内联求值后单线程 10.54 s，八线程 3.19 s，占 6.0 核。
-  现在拥有外层并行的驱动会显式声明，其 worker 内联求值器件批次。判定规则与编译式
-  campaign 既有的轴策略一致：仅当外层任务数不少于 worker 数时生效，因此单次求解或
-  不足以填满机器的小批次仍然使用池。设置 `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复
-  原调度。结果不受影响——批次槽位相互独立写入，改变的只是调度；SAR 码、corner 表和
-  失配汇总均已核对两种调度下完全一致。8 trial 的 FreePDK45 SAR6 失配蒙特卡洛在
-  8 worker 下由约 21-31 s 降至 17-20 s，CPU 时间由约 200-260 s 降至 130-160 s，
-  worker 扩展比由 1.8 倍提升至 2.4 倍。
+  **中文：** 闭环 SAR 转换过去每定一个 bit 就把整条时间网格重跑一遍，现在改为继续
+  往前推进：一个 bit 定下来只会改变其判决时刻之后的激励，因此从该时刻续算，而不是
+  回到 t=0 重来。8 trial 的 FreePDK45 SAR6 斜坡由 235.1 s 降至 34.7 s，SAR3 斜坡
+  由 4.3 s 降至 1.2 s；单次失配 trial 由约 32 s 降至 4.5 s，因此 200 trial 蒙特
+  卡洛在 8 worker 下由约 106 分钟降至约 8.6 分钟。结果不变——576 个斜坡码和一次
+  失配蒙特卡洛与改前内核逐位比对一致。
 
-- **Continued SAR conversion / SAR 转换续算**
+- **Parallel runs now actually use the extra cores / 并行运行现在真的用得上多余的核**
 
-  **English:** The compiled SAR conversion no longer replays the whole expanded
-  grid once per bit. Resolving a bit only changes the stimulus after its
-  decision instant, so each bit now resumes from the last original grid point at
-  or before its predecessor's decision. The fixed-grid kernel became resumable
-  for this: the stepping loop moved into `advance_fixed_grid`, which takes an
-  explicit carry (two-step device charge history, the converged streak gating
-  the Gear2 predictor, failure bookkeeping) over a sample range, and
-  `solve_fixed_grid` is that plus one whole-grid advance. Because a BSIM
-  instance keeps its internal-node warm start and the `state0` voltages the next
-  load limits against, rolling back the host state alone was not enough — the
-  steps solved to bracket the comparator read leave that memory ahead, which
-  moved a node by one ULP and the regenerative latch turned it into a flipped
-  code. `resync_evaluator` re-runs the device evaluation at the resume point's
-  accepted state, restoring exactly what a solve stopping there would have left.
-  Verified bit-exact against the previous kernel over 576 ramp codes and a
-  mismatch Monte-Carlo. On the reference machine an eight-trial FreePDK45 SAR6
-  ramp improved from 235.1 s to 34.7 s, SAR3 from 4.3 s to 1.2 s, and a mismatch
-  trial from about 32 s to 4.5 s, putting a 200-trial Monte-Carlo at roughly
-  8.6 minutes on eight workers instead of about 106 minutes.
+  **English:** Anything that runs many simulations at once — signoff PVT points,
+  SAR conversions and Monte-Carlo trials, corner and PVT sweeps, exploration
+  candidates — used to hand each simulation's device evaluation to one shared
+  thread pool. That pool filled the machine on its own, leaving the outer
+  workers nothing to run on. Measured with sixteen TSMC28 MDAC transients: the
+  old scheme took 4.90 s on one thread while keeping 7.8 of ten cores busy, and
+  eight threads only reached 4.03 s; the new one takes 3.19 s on eight threads
+  using 6.0 cores. Drivers that manage their own parallelism now say so, and
+  their workers evaluate inline. A single simulation, or a batch too small to
+  fill the machine, still uses the pool. Only scheduling changes, never results.
+  Set `CIRCUITOPT_BSIM_NESTED_POOL=1` for the old behaviour.
 
-  **中文：** 编译式 SAR 转换不再为每个 bit 重放整条展开网格。一个 bit 定下来只会
-  改变其判决时刻之后的激励，因此每个 bit 现在从"不晚于前一位判决时刻的最后一个原始
-  网格点"续算。为此固定网格内核改为可续算：步进循环移入 `advance_fixed_grid`，它按
-  样本区间接收显式 carry（两步器件电荷历史、门控 Gear2 预测器的连续收敛计数、失败
-  记账），`solve_fixed_grid` 即"它 + 一次整段推进"。由于 BSIM 实例会保留内部节点热
-  启动和下一次 load 用于限幅的 `state0` 电压，只回滚主机状态并不够——为读取比较器而
-  多解的那几步会把这份记忆推到续算点之后，导致某节点偏离 1 ULP，再生锁存把它放大成
-  翻码。`resync_evaluator` 在续算点的接受态上重新求值一次，精确还原"求解到此为止"
-  会留下的状态。已对 576 个斜坡码和一次失配蒙特卡洛与改前内核做位一致比对。在参考机
-  上，8 trial 的 FreePDK45 SAR6 斜坡由 235.1 s 降至 34.7 s，SAR3 由 4.3 s 降至
-  1.2 s，单次失配 trial 由约 32 s 降至 4.5 s；200 trial 蒙特卡洛在 8 worker 下由
-  约 106 分钟降至约 8.6 分钟。
+  **中文：** 所有同时跑多个仿真的场景——signoff PVT 点、SAR 转换与蒙特卡洛 trial、
+  corner 与 PVT 扫描、探索候选——过去都把每个仿真的器件求值交给同一个共享线程池。
+  那个池自己就占满了机器，外层 worker 无核可用。以 16 次 TSMC28 MDAC 瞬态实测：
+  旧方案单线程 4.90 s 却占满十核中的 7.8 核，八线程也只到 4.03 s；新方案八线程
+  3.19 s，占 6.0 核。自己管理并行的驱动现在会显式声明，其 worker 内联求值；单次
+  仿真或不足以填满机器的小批次仍然使用线程池。改变的只有调度，结果不受影响。设置
+  `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复旧行为。
 
-### Changed / 变更
+- **Faster transient post-processing / 瞬态后处理加速**
 
-- **MDAC signoff transients run adaptively / MDAC 签核瞬态改用自适应**
+  **English:** Rebuilding branch currents after a native BSIM transient walked
+  the time grid in Python, once per device and per capacitor. It is now array
+  arithmetic over the whole run. The reconstruction is bit-identical, not merely
+  close: every value applies the same sequence of floating-point operations the
+  per-sample form did. A FreePDK45 SAR6 conversion went from 754.5 ms to
+  503.2 ms, and the Python share of one TSMC28 MDAC transient from 72 ms to
+  27 ms.
 
-  **English:** The TSMC28HPC+ MDAC signoff manifest's six transient cases now
-  request `adaptive` Gear2 at `reltol=1e-5` / `vabstol=1e-7` instead of a fixed
-  10 ps grid. That tolerance sits at the point where the endpoint error stops
-  improving (5.6 uV against the fixed grid; loosening to the 1e-4 default costs
-  41 uV for another 0.7x of speed, which is a poor trade for an acceptance
-  gate). Compared deterministically at one worker, where the campaign
-  reproduces exactly: no verdict moves across 45 PVT points x 11 cases, the
-  global worst case stays the same case, corner, temperature, supply and
-  measurement, and of 1260 numeric measurements 6 differ, all in the tenth
-  significant digit. The 45-point campaign runs in 56.0 s instead of 94.4 s
-  (1.69x) at one worker and 43.9 s instead of 57.7 s at eight.
+  **中文：** 原生 BSIM 瞬态之后重建支路电流时，过去按每个器件、每个电容分别用
+  Python 遍历时间网格，现在整段用数组运算完成。重建结果是位一致而非近似：每个值
+  施加的浮点运算序列与原逐点形式完全相同。FreePDK45 SAR6 单次转换由 754.5 ms 降至
+  503.2 ms，单次 TSMC28 MDAC 瞬态中 Python 占用由 72 ms 降至 27 ms。
 
-  **中文：** TSMC28HPC+ MDAC 签核配置中的六个瞬态 case 现在请求 `adaptive`
-  Gear2，容差 `reltol=1e-5` / `vabstol=1e-7`，不再使用固定 10 ps 网格。该容差正处
-  于端点误差不再改善的拐点（相对固定网格 5.6 uV；放宽到默认的 1e-4 会变成 41 uV
-  以换取额外 0.7 倍速度，对一道验收门并不划算）。在单 worker 下做确定性对比（此时
-  campaign 可精确复现）：45 个 PVT 点 × 11 个 case 无任何判定变化，全局最差点的
-  case、corner、温度、电压和指标完全相同，1260 个数值测量中有 6 个不同，差异均在
-  第十位有效数字。45 点 campaign 单 worker 由 94.4 s 降至 56.0 s（1.69 倍），
-  8 worker 由 57.7 s 降至 43.9 s。
+- **MDAC signoff runs its transients adaptively / MDAC 签核瞬态改用自适应步长**
+
+  **English:** The TSMC28HPC+ MDAC signoff manifest now asks for adaptive Gear2
+  on its six transient cases instead of a fixed 10 ps grid, at a tolerance
+  (`reltol=1e-5`) chosen where tightening further stops improving accuracy. The
+  45-point campaign takes 56.0 s instead of 94.4 s. Nothing about the verdicts
+  moves: across 45 PVT points x 11 cases no case changes status, the global
+  worst case stays the same case at the same corner, temperature and supply, and
+  6 of 1260 measured values differ, all in the tenth significant digit.
+
+  **中文：** TSMC28HPC+ MDAC 签核配置的六个瞬态 case 现在请求自适应 Gear2，不再使用
+  固定 10 ps 网格；容差取 `reltol=1e-5`，即再收紧也不再提升精度的拐点。45 点
+  campaign 由 94.4 s 降至 56.0 s。判定完全不变：45 个 PVT 点 × 11 个 case 无任何
+  状态变化，全局最差点仍是同一 case、同一 corner、温度与电压，1260 个测量值中有
+  6 个不同，差异均在第十位有效数字。
 
 ### Fixed / 修复
 
-- **Signoff campaigns reproduce at any worker count / 签核 campaign 在任意 worker 数下可复现**
+- **Signoff campaigns now reproduce at any worker count / 签核 campaign 在任意 worker 数下可复现**
 
-  **English:** A campaign only reproduced at one worker. Running the same
-  45-point TSMC28HPC+ MDAC campaign twice on eight workers moved 559 of its 1260
-  measured values, worst on the CMFB loop gains, while one worker reproduced
-  exactly. Native BSIM handles are leased from a process-wide cache keyed by the
-  device card, so the three supply points of a given corner and temperature —
-  which share a card — leased the *same* handle. A handle carries state between
-  calls (its internal node solution seeds the next call's warm start, and its
-  `state0` voltages are what the next load limits against), so concurrent points
-  saw each other's history and each point's result depended on what ran beside
-  it. Each PVT point now leases into a namespace of its own, closed when the
-  point finishes; reuse within a point, which is what the cache is for, is
-  unchanged. Two eight-worker runs are now identical, and eight workers agree
-  with one. The reference values barely move: of 1260 measurements 90 differ
-  from the previous single-worker run, the largest by 2.9e-10 relative, and no
-  verdict changes. The 45-point campaign costs about 5% more at eight workers
-  and 17% more at one.
+  **English:** Running the same campaign twice gave different numbers unless it
+  ran on a single worker: two eight-worker runs of the 45-point TSMC28HPC+ MDAC
+  campaign disagreed on 559 of 1260 measured values. Simulations reuse compiled
+  device instances from a shared cache, and those instances carry state from one
+  evaluation to the next, so PVT points that share a device — the three supply
+  points of a corner and temperature — were reading each other's history
+  whenever they ran side by side. Each PVT point now gets its own instances,
+  released when the point finishes; reuse within a point is unchanged. Two
+  eight-worker runs are now identical, and eight workers agree with one. The
+  reference numbers barely move: 90 of 1260 values differ from the previous
+  single-worker run, the largest by 3e-10 relative, with no verdict change. The
+  campaign costs about 5% more at eight workers.
 
-  **中文：** campaign 此前只在单 worker 下可复现。同一个 45 点 TSMC28HPC+ MDAC
-  campaign 在 8 worker 下跑两次，1260 个测量值中有 559 个发生变化（CMFB 环路增益
-  最甚），而单 worker 完全可复现。原生 BSIM handle 从进程级缓存中按器件 card 租借，
-  因此同一 corner 与温度下的三个电压点——它们的 card 相同——租到的是**同一个**
-  handle。handle 会跨调用携带状态（内部节点解作为下次调用的热启动，`state0` 电压
-  是下次 load 的限幅基准），于是并发的点互相看到对方的历史，每个点的结果取决于与它
-  并行的是谁。现在每个 PVT 点租借到自己的命名空间，点结束时关闭；点内复用（缓存的
-  意义所在）不受影响。两次 8 worker 运行现在完全一致，且 8 worker 与 1 worker 结果
-  相同。参考值几乎未动：1260 个测量中有 90 个与此前的单 worker 结果不同，最大相对
-  差 2.9e-10，且无任何判定变化。45 点 campaign 在 8 worker 下约慢 5%，单 worker
-  下约慢 17%。
+  **中文：** 同一个 campaign 跑两遍会得到不同数字，除非只用单 worker：45 点
+  TSMC28HPC+ MDAC campaign 在 8 worker 下的两次运行，1260 个测量值中有 559 个不
+  一致。仿真会从共享缓存复用已编译的器件实例，而这些实例会把状态从一次求值带到
+  下一次；于是共用同一器件的 PVT 点——同一 corner 与温度下的三个电压点——只要并排
+  运行就会读到彼此的历史。现在每个 PVT 点使用自己的实例，点结束即释放，点内复用
+  不变。两次 8 worker 运行现在完全一致，且 8 worker 与单 worker 结果相同。参考
+  数值几乎未动：1260 个值中有 90 个与此前单 worker 结果不同，最大相对差 3e-10，
+  且无任何判定变化。代价是 8 worker 下约慢 5%。
 
-- **Adaptive transient stays inside the requested window / 自适应瞬态不再越出请求窗口**
+- **Adaptive transients no longer fail at t=0 / 自适应瞬态不再在 t=0 失败**
 
-  **English:** Adding waveform breakpoints for an adaptive transient closed the
-  whole period, so a run covering part of a period solved past its own `tstop`
-  and returned an accepted grid reaching to the period end — the MDAC signoff
-  cases run 5 ns of a 10 ns period and got samples out to 10 ns, which read as a
-  gross disagreement with the fixed grid when it was only a different window.
-  The transient path now keeps the caller's window; a PSS orbit still closes its
-  period. On those cases adaptive went from 1.76-1.99x to 2.33-2.47x the
-  fixed-grid speed, since it no longer integrates twice as far, with the
-  output agreeing to 21-41 uV at `tstop` as before.
+  **English:** `transient(..., adaptive=True)` could abort immediately with
+  "failed at t=0", having solved nothing, on any grid fine enough for an input
+  event to nearly coincide with a time sample. Those two nearly-equal times left
+  a gap of about 3e-27 s, which was mistaken for the smallest step the stimulus
+  demanded and shrank the starting step below the solver's own minimum. Only
+  intervals the solver could actually step over are considered now. Runs that
+  already worked are untouched — 552 result arrays across the SC-LPF,
+  periodic-RC, FreePDK45 and TSMC28 MDAC adaptive paths are bit-identical. On
+  the MDAC signoff cases adaptive now costs less than half of the fixed grid
+  (104-108 steps instead of 501) and agrees with it to 5.6 uV.
 
-  **中文：** 为自适应瞬态添加波形断点时会把网格补满一个完整周期，于是只覆盖周期
-  一部分的运行会解到自己的 `tstop` 之外，并返回一直延伸到周期末的接受网格——MDAC
-  签核用例在 10 ns 周期内只跑 5 ns，却拿回直到 10 ns 的采样，看起来像与固定网格
-  严重不符，实际只是窗口不同。瞬态路径现在保持调用方的窗口，PSS 轨道仍然闭合其
-  周期。在这些用例上，自适应相对固定网格的速度由 1.76-1.99 倍提升到
-  2.33-2.47 倍（不再多积分一倍），输出在 `tstop` 处仍相差 21-41 uV。
+  **中文：** 只要网格细到某个输入事件与时间采样几乎重合，`transient(...,
+  adaptive=True)` 就可能立即以 "failed at t=0" 中止且未解出任何步。那两个几乎相等
+  的时刻之间留下约 3e-27 s 的间隔，被误当作激励所要求的最小步长，把起始步长压到
+  低于求解器自身下限。现在只考虑求解器真正可以跨越的间隔。原本可用的运行不受影响
+  ——SC-LPF、periodic-RC、FreePDK45 与 TSMC28 MDAC 自适应路径共 552 个结果数组
+  逐位一致。在 MDAC 签核用例上，自适应现在的耗时不到固定网格的一半（104-108 步
+  对 501 步），且与其相差 5.6 uV。
+
+- **Adaptive transients stay inside the requested time window / 自适应瞬态不再超出请求的时间窗**
+
+  **English:** An adaptive transient driven by a periodic stimulus solved to the
+  end of the period rather than to its own `tstop`, and returned the extra
+  samples. The MDAC signoff cases ask for 5 ns of a 10 ns period and got results
+  out to 10 ns, which looked like a gross disagreement with the fixed grid when
+  it was only a different window. The transient path now keeps the caller's
+  window; a PSS orbit still closes its period. Those cases also stopped
+  simulating twice as far as asked, which is most of why adaptive is now under
+  half the cost of the fixed grid.
+
+  **中文：** 由周期性激励驱动的自适应瞬态会一直解到周期末尾而不是自己的 `tstop`，
+  并把多出来的采样一并返回。MDAC 签核用例请求 10 ns 周期中的 5 ns，却拿回直到
+  10 ns 的结果，看起来像与固定网格严重不符，实际只是窗口不同。瞬态路径现在保持
+  调用方的窗口，PSS 轨道仍然闭合其周期。这些用例也因此不再多算一倍时长——这正是
+  自适应现在能降到固定网格一半以下的主要原因。
 
 - **Settling time reports zero when nothing had to settle / 无需建立时 settling time 报零**
 
-  **English:** A settling measurement whose signal is already inside the
-  tolerance band as its window opens reported the gap between the declared
-  `start_time` and the first sample at or after it. That gap is float noise:
-  the TSMC28 MDAC `residue_zero` case declares `start_time` at 2e-11 against a
-  grid sample one ULP above it and reported a settling time of 3.2e-27 s. It now
-  reports 0.0 s, which is what "already settled" means. Constraint verdicts are
-  unchanged — both values pass any settling limit.
+  **English:** When a signal is already inside its tolerance band as the
+  measurement window opens, the reported settling time was the floating-point
+  gap between the declared `start_time` and the first sample at or after it —
+  the TSMC28 MDAC `residue_zero` case reported 3.2e-27 s. It now reports 0.0 s,
+  which is what "already settled" means. No constraint verdict changes; both
+  values pass any settling limit.
 
-  **中文：** 若建立时间测量的信号在窗口开启时就已处于容差带内，此前会报告声明的
-  `start_time` 与其后第一个采样之间的间隔。该间隔是浮点噪声：TSMC28 MDAC
-  `residue_zero` 用例的 `start_time` 为 2e-11，而网格采样比它高一个 ULP，于是报出
-  3.2e-27 s 的建立时间。现在报告 0.0 s，这才是"已经建立"的含义。约束判定不变——
-  两个值都能通过任何建立时间上限。
+  **中文：** 当信号在测量窗口开启时就已处于容差带内，报告的建立时间是声明的
+  `start_time` 与其后第一个采样之间的浮点间隔——TSMC28 MDAC `residue_zero` 用例
+  因此报出 3.2e-27 s。现在报告 0.0 s，这才是"已经建立"的含义。约束判定不变，两个
+  值都能通过任何建立时间上限。
 
-- **Adaptive transient no longer stalls on a degenerate source interval / 自适应瞬态不再被退化源间隔卡死**
+- **A circuit's other DC guesses are tried when the first one fails / 首个 DC 初值失败时会尝试其余初值**
 
-  **English:** `transient(..., adaptive=True)` could fail immediately with
-  "failed at t=0" and nothing solved. Merging an input's event times into the
-  requested grid leaves two samples a few ULP apart whenever an event all but
-  coincides with a grid point: the TSMC28 MDAC deck puts a clock edge at 2e-11
-  on a grid whose own sample there differs in the last bits, leaving a 3.2e-27
-  gap. That gap was taken as the smallest source step and set the adaptive
-  startup step to 8e-28, below the solver's own minimum, so the loop broke
-  before its first trial. Only intervals the stepper could actually take now
-  inform the startup step. Adaptive runs that already worked are untouched —
-  552 arrays across the SC-LPF, periodic-RC, FreePDK45 and TSMC28 MDAC adaptive
-  paths compare bit-identical. On the MDAC residue cases adaptive now runs at
-  1.76-1.99x the fixed-grid cost with 104-108 steps instead of 501, agreeing
-  with the fixed-grid output to 21-41 uV at `tstop` (5.6 uV at
-  `reltol=1e-5`).
+  **English:** A circuit may declare several DC guesses. Loading one through
+  `CircuitSpec.binding()` promoted the first of them to an authoritative seed,
+  which made the solver trust it and skip its ordinary search — so a wrong first
+  guess failed the whole analysis while the remaining declared guesses were
+  never tried. The AFE example is exactly that: its first guess does not
+  converge and its second does. A seed that only came from the binding default
+  now falls back to the declared guesses. A seed the caller passed explicitly is
+  still authoritative and gets no fallback, because the latch screen probes a
+  specific operating region on purpose and reads a failure to converge as
+  evidence about the design. Of the 25 example circuits that declare DC guesses,
+  24 operating points are bit-identical; the 25th is the AFE, which changes from
+  `invalid` to converged on the same branch the unseeded path finds. This also
+  restores the engine-parity golden for `afe_explore`, which v2.1.5 had frozen
+  as an empty payload because it silently dropped the non-converged analysis.
 
-  **中文：** `transient(..., adaptive=True)` 可能立即以 "failed at t=0" 失败且未
-  解出任何步。把输入事件时刻并入请求网格时，只要某个事件与网格点几乎重合，就会留下
-  相差几个 ULP 的两个采样：TSMC28 MDAC 电路的时钟边沿在 2e-11，而网格自身在该处的
-  采样只在末位不同，留下 3.2e-27 的间隔。该间隔被当作最小源步长，使自适应起始步长
-  变为 8e-28，低于求解器自身的下限，循环因而在第一次试算前就退出。现在只有步进器
-  真正可采用的间隔才参与起始步长的选取。原本可用的自适应运行不受影响——SC-LPF、
-  periodic-RC、FreePDK45 与 TSMC28 MDAC 自适应路径共 552 个数组逐位一致。在 MDAC
-  residue 用例上，自适应现在以固定网格 1.76-1.99 倍的速度运行，步数由 501 降至
-  104-108，在 `tstop` 处与固定网格输出相差 21-41 uV（`reltol=1e-5` 时为 5.6 uV）。
-
-- **Non-converging default DC seed no longer fails the analysis / 默认 DC 种子不收敛不再判失败**
-
-  **English:** `CircuitSpec.binding()` promotes a circuit's first declared
-  `dc_guess` into the binding's `dc_seed`, and a seed makes `ac_solve` trust it
-  and skip the ordinary search. A hand-written guess is not a solved operating
-  point, though, so a wrong one failed the whole analysis while the circuit's
-  remaining declared guesses were never tried. The AFE example is exactly that
-  case: its first guess does not converge, its second does. A seed that only
-  arrived as the binding default now keeps the declared guesses behind it. A
-  seed the caller chose is still authoritative and gets no fallback — the latch
-  screen probes a specific basin with a deliberately split operating point and
-  reads a failure to converge as evidence about the design. Across every example
-  circuit that declares DC guesses, 24 of 25 operating points are bit-identical
-  and the 25th is the AFE, which changes from `invalid` to converged on the same
-  physical branch the unseeded path finds. This restores the engine-parity
-  golden for `afe_explore`, which had been frozen as an empty payload because
-  v2.1.5 silently dropped the non-converged analysis.
-
-  **中文：** `CircuitSpec.binding()` 会把电路声明的第一个 `dc_guess` 提升为
-  binding 的 `dc_seed`，而一旦存在种子，`ac_solve` 就信任它并跳过常规搜索。但
-  手写初值并非已求解的工作点，写错时整个分析直接失败，电路声明的其余 guesses
-  从未被尝试。AFE 示例正是此情形：第一个 guess 不收敛，第二个可以。现在仅由
-  binding 默认值提供的种子会保留其后的声明 guesses 作为回退；调用方显式给出的
-  种子仍然是权威的、不做回退——latch 筛选正是用刻意劈开的工作点探测特定吸引域，
-  并把不收敛本身当作对设计的判据。在所有声明了 DC guesses 的示例电路上，25 个
-  中有 24 个工作点逐位不变，第 25 个即 AFE，从 `invalid` 变为收敛，且落在无种子
-  路径所找到的同一条物理支路上。这也恢复了 `afe_explore` 的 engine-parity
-  golden——此前它因 v2.1.5 静默丢弃不收敛的分析而被冻结成空载荷。
-
-### Changed / 变更
-
-- **Vectorized BSIM transient branch-current reconstruction / BSIM 瞬态支路电流重建向量化**
-
-  **English:** Native BSIM transient post-processing no longer walks the sample
-  grid in Python. The BDF coefficients are computed once per transient as three
-  columns, compiled terminals are read as whole-transient array slices, and the
-  device charge and capacitor voltage derivatives run as elementwise array
-  expressions over all devices at once. Every entry applies the same sequence of
-  IEEE double operations the per-sample form used, so reconstructed rail and
-  waveform branch currents are bit-identical, not merely close; `_expanded_grid`
-  additionally skips its per-interval subdivision loop when `max_step` splits
-  nothing. On the reference machine a FreePDK45 SAR6 conversion improved from
-  754.5 ms to 503.2 ms (per-transient Python 42 ms to 8 ms), the TSMC28 MDAC
-  residue case from 300.7 ms to 258.1 ms, and the 45-point MDAC signoff campaign
-  from 109.2 s to 84.1 s at one worker and 102.6 s to 63.3 s at eight, where the
-  shorter GIL-held section also lifted worker scaling from 1.07x to 1.33x.
-
-  **中文：** 原生 BSIM 瞬态后处理不再用 Python 遍历采样网格。BDF 系数每次瞬态
-  只算一次并以三列形式复用，编译端子按整段数组切片读取，器件电荷与电容电压导数
-  对全部器件一次性做逐元素数组运算。每个元素施加的 IEEE 双精度运算序列与原逐点
-  形式完全相同，因此重建出的电源轨与波形支路电流是位一致而非近似；`_expanded_grid`
-  在 `max_step` 不产生细分时另外跳过逐区间循环。在参考机上，FreePDK45 SAR6 单次
-  转换由 754.5 ms 降至 503.2 ms（单次瞬态 Python 段 42 ms 降至 8 ms），TSMC28
-  MDAC residue case 由 300.7 ms 降至 258.1 ms，45 点 MDAC signoff campaign 单
-  worker 由 109.2 s 降至 84.1 s、8 worker 由 102.6 s 降至 63.3 s，同时因持有 GIL
-  的区间缩短，worker 扩展比由 1.07 倍提升至 1.33 倍。
+  **中文：** 一个电路可以声明多个 DC 初值。经 `CircuitSpec.binding()` 加载时，其中
+  第一个会被提升为权威种子，求解器于是信任它并跳过常规搜索——首个初值写错就会让
+  整个分析失败，而电路声明的其余初值从未被尝试。AFE 示例正是如此：第一个初值不
+  收敛，第二个可以。现在仅来自 binding 默认值的种子会回退到声明的初值；调用方显式
+  传入的种子仍然权威、不做回退，因为 latch 筛选正是刻意探测特定工作区，并把不收敛
+  本身当作对设计的判据。在声明了 DC 初值的 25 个示例电路中，24 个工作点逐位不变；
+  第 25 个即 AFE，从 `invalid` 变为收敛，且落在无种子路径找到的同一条支路上。这也
+  恢复了 `afe_explore` 的 engine-parity golden——v2.1.5 曾因静默丢弃不收敛的分析
+  而把它冻结成空载荷。
 
 ## [2.2.0] - 2026-07-25
 
