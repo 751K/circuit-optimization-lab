@@ -91,6 +91,31 @@ release checklist.
   1.2 s，单次失配 trial 由约 32 s 降至 4.5 s；200 trial 蒙特卡洛在 8 worker 下由
   约 106 分钟降至约 8.6 分钟。
 
+### Changed / 变更
+
+- **MDAC signoff transients run adaptively / MDAC 签核瞬态改用自适应**
+
+  **English:** The TSMC28HPC+ MDAC signoff manifest's six transient cases now
+  request `adaptive` Gear2 at `reltol=1e-5` / `vabstol=1e-7` instead of a fixed
+  10 ps grid. That tolerance sits at the point where the endpoint error stops
+  improving (5.6 uV against the fixed grid; loosening to the 1e-4 default costs
+  41 uV for another 0.7x of speed, which is a poor trade for an acceptance
+  gate). Compared deterministically at one worker, where the campaign
+  reproduces exactly: no verdict moves across 45 PVT points x 11 cases, the
+  global worst case stays the same case, corner, temperature, supply and
+  measurement, and of 1260 numeric measurements 6 differ, all in the tenth
+  significant digit. The 45-point campaign runs in 56.0 s instead of 94.4 s
+  (1.69x) at one worker and 43.9 s instead of 57.7 s at eight.
+
+  **中文：** TSMC28HPC+ MDAC 签核配置中的六个瞬态 case 现在请求 `adaptive`
+  Gear2，容差 `reltol=1e-5` / `vabstol=1e-7`，不再使用固定 10 ps 网格。该容差正处
+  于端点误差不再改善的拐点（相对固定网格 5.6 uV；放宽到默认的 1e-4 会变成 41 uV
+  以换取额外 0.7 倍速度，对一道验收门并不划算）。在单 worker 下做确定性对比（此时
+  campaign 可精确复现）：45 个 PVT 点 × 11 个 case 无任何判定变化，全局最差点的
+  case、corner、温度、电压和指标完全相同，1260 个数值测量中有 6 个不同，差异均在
+  第十位有效数字。45 点 campaign 单 worker 由 94.4 s 降至 56.0 s（1.69 倍），
+  8 worker 由 57.7 s 降至 43.9 s。
+
 ### Fixed / 修复
 
 - **Adaptive transient stays inside the requested window / 自适应瞬态不再越出请求窗口**
