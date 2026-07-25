@@ -1,6 +1,12 @@
 //! OTFT transient stamping and circuit-level Newton primitives.
 
+use crate::integrator::{
+    self, ADAPTIVE_ACCEPT_WRMS, ADAPTIVE_DONE_ABS, ADAPTIVE_DONE_REL, ADAPTIVE_ERR_FLOOR,
+    ADAPTIVE_GROWTH_MAX, ADAPTIVE_GROWTH_MIN, ADAPTIVE_MIN_H_ABS, ADAPTIVE_MIN_H_REL,
+    ADAPTIVE_SAFETY, ADAPTIVE_SCALE_FLOOR, ADAPTIVE_STEP_ORDER,
+};
 use crate::otft::{self, Params};
+use crate::stimulus;
 use crate::{
     CoreError,
     mna::{DenseSystem, Term, solve_dense_neg_rhs_in_place},
@@ -850,16 +856,7 @@ pub fn newton_step(
     } else {
         history2.clone_from(&history);
     }
-    let bdf = if h_previous > 0.0 && h / h_previous <= 2.0 {
-        let ratio = h / h_previous;
-        [
-            (1.0 + 2.0 * ratio) / (1.0 + ratio),
-            -(1.0 + ratio),
-            ratio * ratio / (1.0 + ratio),
-        ]
-    } else {
-        [1.0, -1.0, 0.0]
-    };
+    let bdf = integrator::gear2_or_be_dimensionless(h, h_previous);
     let mut previous_step = f64::INFINITY;
     let mut last_residual = f64::INFINITY;
     let mut last_step = f64::INFINITY;
@@ -1358,20 +1355,7 @@ pub fn solve_fixed_grid(
     }
 }
 
-const ADAPTIVE_ACCEPT_WRMS: f64 = 1.0;
-const ADAPTIVE_DONE_ABS: f64 = 1e-18;
-const ADAPTIVE_DONE_REL: f64 = 1e-13;
-const ADAPTIVE_ERR_FLOOR: f64 = 1e-12;
-const ADAPTIVE_GROWTH_MAX: f64 = 2.0;
-const ADAPTIVE_GROWTH_MIN: f64 = 0.2;
-const ADAPTIVE_INITIAL_MIN_DENOM: usize = 16;
-const ADAPTIVE_INPUT_SLOPE_BREAK_FRACTION: f64 = 0.1;
 const ADAPTIVE_LTE_DIVISOR: f64 = 3.0;
-const ADAPTIVE_MIN_H_ABS: f64 = 1e-18;
-const ADAPTIVE_MIN_H_REL: f64 = 1e-15;
-const ADAPTIVE_SAFETY: f64 = 0.9;
-const ADAPTIVE_SCALE_FLOOR: f64 = 1e-30;
-const ADAPTIVE_STEP_ORDER: f64 = 3.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AdaptiveOptions {
@@ -1415,30 +1399,6 @@ pub fn validate_adaptive_input(
     })
 }
 
-fn inputs_at_time(times: &[f64], inputs: Waveforms<'_>, time: f64) -> Vec<f64> {
-    if time <= times[0] {
-        return inputs.sample(0).unwrap_or_default();
-    }
-    let last = times.len() - 1;
-    if time >= times[last] {
-        return inputs.sample(last).unwrap_or_default();
-    }
-    let mut interval = 0usize;
-    for position in 0..last {
-        if times[position] <= time && time <= times[position + 1] {
-            interval = position;
-            break;
-        }
-    }
-    let fraction = (time - times[interval]) / (times[interval + 1] - times[interval]);
-    (0..inputs.rows())
-        .map(|row| {
-            let values = inputs.row(row).unwrap_or_default();
-            values[interval] + (values[interval + 1] - values[interval]) * fraction
-        })
-        .collect()
-}
-
 fn adaptive_error(
     half: &[f64],
     full: &[f64],
@@ -1472,36 +1432,6 @@ fn adaptive_next_step(step: f64, error: f64) -> f64 {
             .clamp(ADAPTIVE_GROWTH_MIN, ADAPTIVE_GROWTH_MAX)
     };
     step * factor
-}
-
-fn adaptive_critical_times(times: &[f64], inputs: Waveforms<'_>) -> Vec<f64> {
-    if inputs.rows() == 0 || times.len() < 3 {
-        return Vec::new();
-    }
-    let mut global_slope = 1.0f64;
-    for interval in 0..times.len() - 1 {
-        let dt = times[interval + 1] - times[interval];
-        for row in 0..inputs.rows() {
-            let values = inputs.row(row).unwrap_or_default();
-            global_slope = global_slope.max(((values[interval + 1] - values[interval]) / dt).abs());
-        }
-    }
-    let mut critical = Vec::new();
-    for position in 1..times.len() - 1 {
-        let dt0 = times[position] - times[position - 1];
-        let dt1 = times[position + 1] - times[position];
-        let mut jump = 0.0f64;
-        for row in 0..inputs.rows() {
-            let values = inputs.row(row).unwrap_or_default();
-            let slope0 = (values[position] - values[position - 1]) / dt0;
-            let slope1 = (values[position + 1] - values[position]) / dt1;
-            jump = jump.max((slope1 - slope0).abs());
-        }
-        if jump > ADAPTIVE_INPUT_SLOPE_BREAK_FRACTION * global_slope {
-            critical.push(times[position]);
-        }
-    }
-    critical
 }
 
 fn add_adaptive_profile(
@@ -1547,30 +1477,30 @@ pub fn solve_adaptive_gear2(
     } else {
         span
     };
+    let min_step = ADAPTIVE_MIN_H_ABS.max(span * ADAPTIVE_MIN_H_REL);
     let mut step = if options.initial_step > 0.0 {
         options.initial_step
     } else {
-        let denominator = (source_times.len() - 1).max(ADAPTIVE_INITIAL_MIN_DENOM);
-        let smallest_source_step = source_times
-            .windows(2)
-            .map(|window| window[1] - window[0])
-            .fold(span, f64::min);
-        (span / denominator as f64).min(smallest_source_step)
+        integrator::startup_step(
+            source_times,
+            span,
+            min_step,
+            integrator::OTFT_STARTUP_FRACTION,
+        )
     };
     if step <= 0.0 || !step.is_finite() {
         step = span / 100.0;
     }
     step = step.min(max_step);
-    let min_step = ADAPTIVE_MIN_H_ABS.max(span * ADAPTIVE_MIN_H_REL);
     let done_tolerance = ADAPTIVE_DONE_ABS.max(span * ADAPTIVE_DONE_REL);
-    let critical_times = adaptive_critical_times(source_times, source_inputs);
+    let critical_times = stimulus::critical_times(source_times, source_inputs);
 
     let mut times = Vec::with_capacity(options.max_steps + 1);
     let mut states = Vec::with_capacity(options.max_steps + 1);
     let mut input_history = Vec::with_capacity(options.max_steps + 1);
     let mut current = initial.to_vec();
     let mut previous2 = initial.to_vec();
-    let mut input_current = inputs_at_time(source_times, source_inputs, start);
+    let mut input_current = stimulus::inputs_at_time(source_times, source_inputs, start);
     let mut input_previous2 = input_current.clone();
     times.push(start);
     states.push(current.clone());
@@ -1600,8 +1530,9 @@ pub fn solve_adaptive_gear2(
         if step <= min_step {
             break;
         }
-        let input_now = inputs_at_time(source_times, source_inputs, current_time + step);
-        let input_mid = inputs_at_time(source_times, source_inputs, current_time + 0.5 * step);
+        let input_now = stimulus::inputs_at_time(source_times, source_inputs, current_time + step);
+        let input_mid =
+            stimulus::inputs_at_time(source_times, source_inputs, current_time + 0.5 * step);
         let device_before = device_stats;
         let (full_result, full) = fixed_substep(
             problem,
@@ -1803,5 +1734,91 @@ mod tests {
         );
         assert!(result.converged);
         assert!((state[0] - 0.5).abs() < 1e-12);
+    }
+
+    fn passive_rc_problem() -> Problem {
+        Problem {
+            node_count: 1,
+            size: 1,
+            devices: Vec::new(),
+            resistors: vec![Resistor {
+                a: solved(0),
+                b: rail(0.0),
+                ai: Some(0),
+                bi: None,
+                conductance: 1e-3,
+            }],
+            capacitors: vec![Capacitor {
+                a: solved(0),
+                b: rail(0.0),
+                ai: Some(0),
+                bi: None,
+                capacitance: 1e-6,
+            }],
+            current_sources: vec![CurrentSource {
+                pi: None,
+                qi: Some(0),
+                value: 1e-3,
+            }],
+            dynamic_current_sources: Vec::new(),
+            vccs: Vec::new(),
+            voltage_sources: Vec::new(),
+            vcvs: Vec::new(),
+            cccs: Vec::new(),
+            ccvs: Vec::new(),
+        }
+    }
+
+    /// The OTFT adaptive start must survive a merged grid whose event time
+    /// sits a few ULP from a grid sample, exactly like the BSIM engine does.
+    #[test]
+    fn a_degenerate_source_interval_does_not_stall_the_otft_adaptive_start() {
+        let problem = passive_rc_problem();
+        let edge = 2e-5f64;
+        let mut times = vec![0.0, edge, f64::from_bits(edge.to_bits() + 1)];
+        times.extend((1..=40).map(|k| k as f64 * 2.5e-4));
+        let gap = times[2] - times[1];
+        assert!(
+            gap > 0.0 && gap < 1e-18,
+            "expected a degenerate gap, got {gap:e}"
+        );
+        let waveforms = Waveforms::new(&[], 0, times.len()).unwrap();
+        let result = solve_adaptive_gear2(
+            &problem,
+            &[0.0],
+            &times,
+            waveforms,
+            AdaptiveOptions {
+                newton: NewtonOptions {
+                    max_iterations: 30,
+                    step_limit: 5.0,
+                    voltage_tolerance: 1e-9,
+                    fallback_accept: false,
+                    fallback_tolerance: 1e-9,
+                    clip_lo: f64::INFINITY,
+                    clip_hi: f64::NEG_INFINITY,
+                    gmin: 0.0,
+                    hh: 1e-6,
+                    cap_mode: 0,
+                },
+                max_step: -1.0,
+                reltol: 1e-4,
+                voltage_abstol: 1e-6,
+                current_abstol: 1e-12,
+                max_steps: 200_000,
+                initial_step: -1.0,
+                profile: false,
+            },
+        );
+        assert!(
+            result.completed,
+            "adaptive solve stalled on the degenerate gap"
+        );
+        assert_eq!(result.times.first().copied(), Some(0.0));
+        let reached = result.times.last().copied().unwrap_or(0.0);
+        assert!(
+            (reached - times[times.len() - 1]).abs() <= 1e-15,
+            "stopped early at {reached:e}"
+        );
     }
 }

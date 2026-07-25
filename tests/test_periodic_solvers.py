@@ -666,3 +666,30 @@ def test_adaptive_breakpoints_preserve_nonzero_absolute_time_window():
     # The 3 ns and 5 ns phase edges repeat at 13 ns and 15 ns in this window.
     assert np.any(np.isclose(merged, 13e-9, rtol=0.0, atol=1e-18))
     assert np.any(np.isclose(merged, 15e-9, rtol=0.0, atol=1e-18))
+
+
+def test_adaptive_breakpoints_merge_near_duplicate_edge_times():
+    # The MDAC deck's clock edge literal 2e-11 lands 3.2e-27 s away from the
+    # 501-point grid's own sample there. Keeping both left a sub-ULP interval
+    # in the merged grid: harmless to the solver's startup step (filtered in
+    # the core), but a zero-rise edge sampled across such a pair swings full
+    # scale over the gap and poisons the slope scale that selects critical
+    # times. The merger now collapses each near-duplicate cluster onto its
+    # earliest member.
+    import numpy as np
+
+    from circuitopt.analysis_dispatch import _with_adaptive_waveform_breakpoints
+
+    period = 1e-8
+    periodic = {"inputs": {"clk": {"type": "square", "delay": 2e-11, "duty": 0.5}}}
+    requested = np.linspace(0.0, 5e-9, 501)
+    assert requested[2] != 2e-11  # the near-duplicate pair this test is about
+
+    merged = _with_adaptive_waveform_breakpoints(
+        periodic, requested, period, close_period=False)
+
+    gaps = np.diff(merged)
+    assert gaps.min() > 1e-18, f"degenerate interval survived: {gaps.min():.3e}"
+    assert np.any(merged == 2e-11)
+    assert merged[0] == 0.0
+    assert merged[-1] == 5e-9

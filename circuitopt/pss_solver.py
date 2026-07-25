@@ -161,33 +161,38 @@ def _shooting_monodromy(tr, topo, sizes, nf, bias, inputs, node_inputs,
             phi = _bsolve(G + Ch, Ch) @ phi
         return phi
 
-    # gear2/BDF2: augmented 2n-state monodromy on [x_m; x_{m-1}]
+    # gear2/BDF2: augmented 2n-state monodromy on [x_m; x_{m-1}].
+    # The per-step BDF rows come from the compiled core so every engine walks
+    # the same BE-start / variable-BDF2 / ratio>2-fallback family; a BE row is
+    # recognizable by its exactly-zero a2 (a gear2 row has a2 = rho^2/(1+rho)).
+    import circuitopt_core
+
+    rows = np.asarray(
+        circuitopt_core.integration_rows(
+            np.asarray(t, float), integration_method="gear2", scaled=False),
+        dtype=float,
+    )
     eye = np.eye(n)
     P = None                                    # 2n x n  (maps dx0 -> [dx_m; dx_{m-1}])
-    h_prev = None
     for m in range(1, N):
         h = float(t[m] - t[m - 1])
         if h <= 0.0:
             continue
         G, C = _GC(m)
         Ch = C / h
-        rho = (h / h_prev) if h_prev is not None else 0.0
-        if P is None or rho > 2.0:              # BE self-start / large-ratio step
+        a0, a1, a2 = rows[m]
+        if P is None or a2 == 0.0:              # BE self-start / large-ratio step
             A1 = _bsolve(G + Ch, Ch)            # a0=1, a1=-1, a2=0
             if P is None:
                 P = np.vstack([A1, eye])
             else:
                 P = np.vstack([A1 @ P[:n], P[:n]])
         else:
-            a0 = (1.0 + 2.0 * rho) / (1.0 + rho)
-            a1 = -(1.0 + rho)
-            a2 = (rho * rho) / (1.0 + rho)
             J = G + a0 * Ch
             B1 = _bsolve(J, a1 * Ch)
             B2 = _bsolve(J, a2 * Ch)
             top = -(B1 @ P[:n]) - (B2 @ P[n:])
             P = np.vstack([top, P[:n]])
-        h_prev = h
     return P[:n] if P is not None else np.eye(n)
 
 

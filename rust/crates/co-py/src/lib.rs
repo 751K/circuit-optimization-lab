@@ -44,7 +44,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use co_bsim4::CoBsim4;
-use co_core::{bsim_transient, campaign, lti, mna, otft, otft_campaign, periodic, transient};
+use co_core::{
+    bsim_transient, campaign, integrator, lti, mna, otft, otft_campaign, periodic, transient,
+};
 use co_pdk::{CompiledPdk as PdkCompiled, NumericCard, PdkError};
 use co_spice::{
     ErrorKind as SpiceErrorKind, EvalCtx, LibrarySection, NumericModel, ParamValue,
@@ -292,6 +294,49 @@ pub unsafe extern "C" fn co_bsim4_noise_batch(
 /// nominal. Returns a deterministic scalar the Python tests can pin.
 fn workspace_probe() -> f64 {
     co_core::core_probe(co_bsim4::model_probe(1.0))
+}
+
+/// Per-sample BDF derivative rows for a fixed time grid.
+///
+/// One shared rule for every engine: row 0 is `[0, 0, 0]`, row 1 is backward
+/// Euler, later rows use variable-step BDF2 unless the step grew past twice
+/// its predecessor. `scaled=True` returns rows with the `1/h` factor applied
+/// (the BSIM convention); `scaled=False` returns the dimensionless rows the
+/// LTI PSS/PAC companion maps consume.
+#[pyfunction]
+#[pyo3(signature = (times, integration_method="gear2", scaled=true))]
+fn integration_rows<'py>(
+    py: Python<'py>,
+    times: PyReadonlyArray1<'py, f64>,
+    integration_method: &str,
+    scaled: bool,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let gear2 = match integration_method {
+        "be" => false,
+        "gear2" | "bdf2" => true,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown integration method {other:?}"
+            )));
+        }
+    };
+    let times = times
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("times must be a contiguous float64 array"))?;
+    let rows = if scaled {
+        bsim_transient::fixed_grid_integration_coefficients(times, gear2)
+    } else {
+        integrator::integration_rows_dimensionless(times, gear2)
+    }
+    .ok_or_else(|| {
+        PyValueError::new_err("integration times must be finite and strictly increasing")
+    })?;
+    rows_into_array2(
+        py,
+        rows.into_iter().map(|values| values.to_vec()).collect(),
+        3,
+        "integration rows",
+    )
 }
 
 /// Build/runtime metadata for the compiled core.
@@ -3945,6 +3990,7 @@ impl PyCompiledCampaign {
 fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(engine_info, m)?)?;
+    m.add_function(wrap_pyfunction!(integration_rows, m)?)?;
     m.add_function(wrap_pyfunction!(bsim4_eval_vp_address, m)?)?;
     m.add_class::<SerialDeviceEval>()?;
     m.add_function(wrap_pyfunction!(otft_device_batch, m)?)?;

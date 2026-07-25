@@ -7,12 +7,14 @@
 pub mod bsim_transient;
 pub mod campaign;
 pub mod error;
+pub mod integrator;
 pub mod lti;
 pub mod mna;
 pub mod otft;
 pub mod otft_campaign;
 pub mod periodic;
 pub mod sar;
+pub mod stimulus;
 pub mod transient;
 
 pub use error::CoreError;

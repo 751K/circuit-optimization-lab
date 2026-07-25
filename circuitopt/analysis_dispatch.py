@@ -133,6 +133,13 @@ def _with_adaptive_waveform_breakpoints(periodic, tgrid, period, *,
     grid reaching past ``tstop``. Breakpoints are generated in absolute time so
     a transient beginning after zero retains its requested start and still hits
     every periodic edge inside its window.
+
+    Breakpoints landing within ``tolerance`` of an existing sample are merged
+    onto the earliest time of their cluster. An edge literal a few ULP from a
+    grid sample otherwise leaves a degenerate interval (the MDAC deck's edge
+    at 2e-11 sits 3.2e-27 s from its grid's own sample), and if a zero-rise
+    edge falls across such a pair, the sampled swing over the sub-ULP gap
+    poisons the slope normalization that picks the solver's critical times.
     """
     tgrid = np.asarray(tgrid, float)
     start = float(tgrid[0])
@@ -170,6 +177,15 @@ def _with_adaptive_waveform_breakpoints(periodic, tgrid, period, *,
     ]))
     out = out[(out >= start - tolerance) & (out <= stop + tolerance)]
     out = np.unique(np.clip(out, start, stop))
+    if len(out) > 1:
+        keep = np.ones(len(out), dtype=bool)
+        anchor = out[0]
+        for index in range(1, len(out)):
+            if out[index] - anchor <= tolerance:
+                keep[index] = False
+            else:
+                anchor = out[index]
+        out = out[keep]
     out[0] = start
     out[-1] = stop
     return out
@@ -364,7 +380,9 @@ def _run_pss(spec, binding, pss_cfg, periodic):
     context = build_periodic_context(spec, periodic)
     if bool(kwargs.get("adaptive", False)):
         tgrid = _with_adaptive_waveform_breakpoints(periodic, context["tgrid"], context["period"])
-        if len(tgrid) != len(context["tgrid"]):
+        # Near-duplicate merging can replace a sample rather than only adding
+        # some, so compare values: a length match no longer implies identity.
+        if not np.array_equal(tgrid, context["tgrid"]):
             context = build_periodic_context(spec, periodic, tgrid=tgrid)
     final_n_points = pss_cfg.get("final_n_points")
     if final_n_points is not None:
@@ -406,7 +424,7 @@ def _run_transient(spec, binding, cfg):
         if bool(kwargs.get("adaptive", False)):
             tgrid = _with_adaptive_waveform_breakpoints(
                 periodic, context["tgrid"], period, close_period=False)
-            if len(tgrid) != len(context["tgrid"]):
+            if not np.array_equal(tgrid, context["tgrid"]):
                 context = build_periodic_context(spec, periodic, tgrid=tgrid)
         if "corner" in kwargs:
             kwargs["corner"] = _corner_from_cfg(cfg)

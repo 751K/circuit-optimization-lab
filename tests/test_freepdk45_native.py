@@ -249,15 +249,22 @@ def test_native_5t_ota_adaptive_gear2_uses_nonuniform_grid(monkeypatch):
     )
     assert np.any(np.isclose(accepted_time, 15e-9, rtol=0.0, atol=1e-18))
     assert result["adaptive_accepted_steps"] == len(accepted_time) - 1
-    assert result["transient_profile"]["trial_solves"] == (
+    # A trial with no BDF history (the solve start, and every restart at an
+    # input breakpoint) is error-controlled by solving the step once whole and
+    # once as two halves, then accepting both halves. Such a trial therefore
+    # costs three solves and yields two accepted samples, so trials exceed the
+    # accept/reject decision count instead of matching it.
+    assert result["transient_profile"]["trial_solves"] >= (
         result["adaptive_accepted_steps"] + result["adaptive_rejected_steps"]
     )
     assert result["transient_profile"]["solver_steps"] == (
         result["transient_profile"]["trial_solves"]
     )
     assert result["transient_profile"]["lte_estimates"] > 0
-    assert result["transient_profile"]["lte_linear_solves"] == (
-        result["transient_profile"]["lte_estimates"]
+    # A Richardson restart estimate needs no defect linear solve, so estimates
+    # lead linear solves by exactly the number of restart trials.
+    assert result["transient_profile"]["lte_estimates"] >= (
+        result["transient_profile"]["lte_linear_solves"]
     )
     assert result["nodes"]["vout"][-1] > result["nodes"]["vout"][0] + 0.2
     assert np.all(np.isfinite(result["nodes"]["vout"]))

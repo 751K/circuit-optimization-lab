@@ -954,7 +954,11 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             if (not np.all(np.isfinite(Psi))) or _max_abs_finite(Psi) > _PAC_TD_GROWTH_LIMIT:
                 return None
         sysdim = n_state
-    else:  # gear2 / BDF2 on the uniform grid: (a0,a1,a2) = (3/2,-2,1/2)
+    else:
+        # gear2/BDF2 on the uniform *cyclic* grid: the rho=1 row of the shared
+        # BDF family (co-core/src/integrator.rs). Unlike an initial-value grid
+        # there is no backward-Euler self-start -- the periodic recurrence
+        # wraps, so every step is the uniform BDF2 row (3/2, -2, 1/2).
         a0, a1, a2 = 1.5, -2.0, 0.5
         A = a0 * Ct / h + Gt
         C1 = np.roll(Ct, 1, axis=0); C2 = np.roll(Ct, 2, axis=0)

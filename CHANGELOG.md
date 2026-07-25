@@ -81,18 +81,108 @@ release checklist.
   **English:** The TSMC28HPC+ MDAC signoff manifest now asks for adaptive Gear2
   on its six transient cases instead of a fixed 10 ps grid, at a tolerance
   (`reltol=1e-5`) chosen where tightening further stops improving accuracy. The
-  45-point campaign takes 56.0 s instead of 94.4 s. Nothing about the verdicts
-  moves: across 45 PVT points x 11 cases no case changes status, the global
-  worst case stays the same case at the same corner, temperature and supply, and
-  6 of 1260 measured values differ, all in the tenth significant digit.
+  45-point campaign takes 78.9 s instead of the fixed grid's 99.3 s. Nothing
+  about the verdicts moves: across 45 PVT points x 11 cases no case changes
+  status and the global worst case stays the same case at the same corner,
+  temperature and supply.
 
   **中文：** TSMC28HPC+ MDAC 签核配置的六个瞬态 case 现在请求自适应 Gear2，不再使用
   固定 10 ps 网格；容差取 `reltol=1e-5`，即再收紧也不再提升精度的拐点。45 点
-  campaign 由 94.4 s 降至 56.0 s。判定完全不变：45 个 PVT 点 × 11 个 case 无任何
-  状态变化，全局最差点仍是同一 case、同一 corner、温度与电压，1260 个测量值中有
-  6 个不同，差异均在第十位有效数字。
+  campaign 为 78.9 s，固定网格为 99.3 s。判定完全不变：45 个 PVT 点 × 11 个 case
+  无任何状态变化，全局最差点仍是同一 case、同一 corner、温度与电压。
+
+- **Every engine now reads its integration formula from one place / 所有引擎的积分公式收归一处**
+
+  **English:** The rule for stepping a transient forward — start on backward
+  Euler, use variable-step BDF2 afterwards, drop back to backward Euler when a
+  step more than doubles, and estimate the local error from the BDF3 defect —
+  used to be written out by hand in four places: the two BSIM solvers, the OTFT
+  solver, and the Python PSS monodromy. The guard constant appeared once per
+  copy, and they had begun to drift; a fix made in one copy did not reach the
+  others. All four now call `co-core`'s new integrator module, and the two
+  identical copies of the stimulus sampling live in one module as well. Two
+  scaling conventions remain on purpose (whether the `1/h` factor is folded in),
+  because converting between them reorders floating-point operations and would
+  move every frozen result; property tests pin both closed forms to the same
+  Lagrange generator instead. Every golden stays bit-exact.
+
+  **中文：** 瞬态推进的规则——首步用后向欧拉、之后用变步长 BDF2、步长翻倍以上时退回
+  后向欧拉、用 BDF3 缺陷估计局部误差——过去在四处分别手写：两个 BSIM 求解器、OTFT
+  求解器，以及 Python 的 PSS monodromy。判据常数每份抄一遍，且已经开始漂移：在一份
+  里修好的问题传不到其余几份。现在四处统一调用 `co-core` 新增的 integrator 模块，
+  两份逐字相同的激励采样也合并为一个模块。两种缩放约定（是否已并入 `1/h` 因子）有意
+  保留，因为互相转换会重排浮点运算顺序、移动所有已冻结结果；改由 property test 把两
+  条闭式同时钉在同一个 Lagrange 生成器上。所有 golden 保持位一致。
 
 ### Fixed / 修复
+
+- **Adaptive restarts are error-controlled instead of accepted blind / 自适应重启步改为受误差控制，不再无条件接受**
+
+  **English:** Whenever the adaptive solver had no step history — at t=0 and
+  again after every input breakpoint it restarts on — its local-error estimate
+  was undefined, so the next two steps were accepted without any check, at
+  whatever size the startup heuristic picked. Those steps land right after a
+  clock edge, where the circuit moves fastest, and their error was invisible to
+  `reltol`: on the TSMC28 MDAC deck, tightening `reltol` tenfold (115% more
+  steps) barely moved the result while shrinking the startup step 25-fold cut
+  the error by four. Such a trial is now solved twice, once whole and once as
+  two halves, and the difference between the two is the error estimate;
+  accepting keeps both halves, so the following step already has real history
+  and full error control. No step of a solve escapes error control any more.
+  Measured against a 40x-finer reference on the same stimulus, the largest
+  deviation over a 5 ns MDAC window falls from 3.69 mV to 92 uV on the
+  major-carry case and from 308 uV to 68 uV on a residue case; the adaptive run
+  is now 6 to 43 times closer to the reference than the 501-point fixed grid it
+  replaced, where before it was worse. It costs about 35% more steps: the
+  45-point campaign goes from 66.7 s to 78.9 s, still under the fixed grid's
+  99.3 s. No signoff verdict changes anywhere, and of 50760 reported values the
+  largest move is 0.1 mV.
+
+  **中文：** 自适应求解器只要没有步长历史——t=0 时，以及每次在输入断点处重启之后——
+  局部误差估计就无从计算，于是接下来两步会按启动启发式给出的尺寸被无条件接受。这两步
+  恰好落在时钟沿之后电路变化最快的位置，而它们的误差对 `reltol` 不可见：在 TSMC28
+  MDAC 电路上，把 `reltol` 收紧十倍（步数增加 115%）几乎不改变结果，而把启动步缩小
+  25 倍则使误差降为四分之一。现在这种试探步会求解两次，一次整步、一次拆成两个半步，
+  两者之差即误差估计；接受时两个半步都保留，因此紧接的下一步就已具备真实历史与完整
+  误差控制。求解过程中不再有任何一步脱离误差控制。以同一激励下 40 倍密网格为基准，
+  5 ns MDAC 窗口内的最大偏差：major carry case 由 3.69 mV 降至 92 µV，某个 residue
+  case 由 308 µV 降至 68 µV；自适应结果现在比它取代的 501 点固定网格更接近基准 6 至
+  43 倍，而此前是更差。代价是步数约增加 35%：45 点 campaign 由 66.7 s 增至 78.9 s，
+  仍低于固定网格的 99.3 s。所有签核判定无一变化，50760 个上报数值中最大变动 0.1 mV。
+
+- **The OTFT adaptive solver no longer stalls at t=0 on a merged grid / OTFT 自适应求解器不再在合并网格上于 t=0 卡死**
+
+  **English:** Merging an input's event times into a requested grid can leave
+  two samples a few ULP apart when an event all but coincides with a grid
+  point. Taking that gap as the smallest stimulus interval drove the startup
+  step below the solver's own minimum, and the loop gave up before its first
+  trial. This was fixed for the BSIM engine in the previous release, but the
+  OTFT engine carried its own copy of the same code and never received the fix;
+  it now shares the corrected one. Each engine keeps its own startup fraction,
+  which was never a shared choice.
+
+  **中文：** 把输入的事件时刻并入请求网格时，若某个事件几乎与网格点重合，就会留下相差
+  几个 ULP 的两个采样点。把这个间隔当成最小激励间隔，会使启动步小于求解器自身的下限，
+  循环于是在第一次试探之前就放弃。此问题上一版已在 BSIM 引擎修复，但 OTFT 引擎持有同
+  一段代码的另一份拷贝，从未收到该修复；现在两者共用修好的那一份。各引擎仍保留自己的
+  启动步系数——那从来不是共用的选择。
+
+- **Near-duplicate breakpoint times are merged / 近重复的断点时刻会被合并**
+
+  **English:** The same near-coincidence left a sub-ULP interval in the merged
+  grid itself. The solver tolerates it, but a zero-rise clock edge sampled
+  across such a pair swings full scale over a gap of ~3e-27 s, and the implied
+  slope then dominates the scale used to decide which input breakpoints deserve
+  a solver restart — leaving every genuine edge below the threshold and
+  undetected. Whether this happened at all came down to which way one sample
+  rounded. Breakpoints within a tolerance of an existing sample now collapse
+  onto the earliest time of their cluster.
+
+  **中文：** 同一种近重合还会在合并后的网格里留下小于 1 ULP 的间隔。求解器本身能容忍
+  它，但零上升沿的时钟在这样一对采样点之间会在约 3e-27 s 内完成整个摆幅，由此得出的
+  斜率会主导"哪些输入断点值得让求解器重启"的判据尺度——真正的边沿全部落到阈值之下而
+  被漏检。此事是否发生，仅取决于某个采样点向哪个方向舍入。现在与已有采样点相差在容差
+  以内的断点会合并到该簇最早的时刻上。
 
 - **Native backend shutdown and reproducible CLI payloads / 原生后端关闭与 CLI 输出可复现**
 
