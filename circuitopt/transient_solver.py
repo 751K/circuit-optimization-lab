@@ -204,7 +204,7 @@ class _SolverOptions:
     newton_maxit: int; newton_step_limit: float; newton_vtol: float
     fallback_full_jacobian: bool; fallback_least_squares: bool; fallback_tol: float
     max_step: object; flat_max_step: object; max_retry_subdivisions: int
-    edge_mask_arr: np.ndarray; gear2_be_fallback: bool
+    edge_mask_arr: np.ndarray; be_rerun_on_step_failures: bool
     integration_method: str
     adaptive: bool; adaptive_config: object
 
@@ -497,7 +497,7 @@ def _marshal_transient(
         fallback_full_jacobian=False, fallback_least_squares=False,
         fallback_tol=1e-9, signed_devices=None, profile=False,
         edge_mask=None, rail_margin=None, integration_method="be",
-        gear2_be_fallback=True, cap_mode=None, cap_mode_id=None,
+        be_rerun_on_step_failures=True, cap_mode=None, cap_mode_id=None,
         adaptive=False, adaptive_reltol=1e-4, adaptive_vabstol=1e-6,
         adaptive_iabstol=1e-12, adaptive_max_steps=200000,
         adaptive_h0=None, adaptive_config=None):
@@ -800,7 +800,8 @@ def _marshal_transient(
         fallback_least_squares=fallback_least_squares, fallback_tol=fallback_tol,
         max_step=max_step, flat_max_step=flat_max_step,
         max_retry_subdivisions=max_retry_subdivisions,
-        edge_mask_arr=edge_mask_arr, gear2_be_fallback=gear2_be_fallback,
+        edge_mask_arr=edge_mask_arr,
+        be_rerun_on_step_failures=be_rerun_on_step_failures,
         integration_method=integration_method,
         adaptive=adaptive, adaptive_config=adaptive_config)
     runtime = _RuntimeCaches(
@@ -868,16 +869,23 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
               signed_devices: Any = None, profile: bool = False,
               edge_mask: Any = None,
               rail_margin: float | None = None, integration_method: str = "be",
-              gear2_be_fallback: bool = True, cap_mode: Any = None,
+              be_rerun_on_step_failures: bool = True, cap_mode: Any = None,
               cap_mode_id: Any = None,
               adaptive: bool = False, adaptive_reltol: float = 1e-4,
               adaptive_vabstol: float = 1e-6,
               adaptive_iabstol: float = 1e-12, adaptive_max_steps: int = 200000,
               adaptive_h0: float | None = None, adaptive_config: Any = None, *,
               binding: CircuitBinding | None = None,
-              mismatch: Mapping[str, float] | None = None) -> dict:
+              mismatch: Mapping[str, float] | None = None,
+              gear2_be_fallback: bool | None = None) -> dict:
     """Backward-Euler (default) or gear2/BDF2 transient.
 
+      be_rerun_on_step_failures : when a gear2 solve fails more than a tenth of
+               its steps, redo the *whole* transient on backward Euler. This is
+               the run-level remedy, distinct from the per-sample order drop a
+               gear2 solve already applies when one step more than doubles.
+               Accepts the retired name ``gear2_be_fallback``, which named both
+               ideas at once.
       integration_method : "be" (backward-Euler, 1st order; the default for the
                raw transient because its compiled grid keeps substep subdivision +
                retry, which hard standalone transients rely on) or "gear2"
@@ -934,6 +942,11 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         (``delvto`` for FreePDK45, ``_delvto`` for TSMC28HPC+).
         ``None`` leaves every instance nominal.
     """
+    if gear2_be_fallback is not None:
+        # The retired spelling named both the whole-run rerun and the per-step
+        # order drop. A caller who still passes it means the rerun, so honour
+        # it; nothing in the tree passes both.
+        be_rerun_on_step_failures = bool(gear2_be_fallback)
     topo, nf, corner, model_types, device_kwargs, _ = resolve_binding(
         binding, topo=topo, nf=nf, corner=corner, model_types=model_types,
         device_kwargs=device_kwargs)
@@ -1026,7 +1039,7 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         fallback_least_squares=fallback_least_squares, fallback_tol=fallback_tol,
         signed_devices=signed_devices, profile=profile, edge_mask=edge_mask,
         rail_margin=rail_margin, integration_method=integration_method,
-        gear2_be_fallback=gear2_be_fallback, cap_mode=cap_mode,
+        be_rerun_on_step_failures=be_rerun_on_step_failures, cap_mode=cap_mode,
         cap_mode_id=cap_mode_id, adaptive=adaptive,
         adaptive_reltol=adaptive_reltol, adaptive_vabstol=adaptive_vabstol,
         adaptive_iabstol=adaptive_iabstol,
@@ -1045,7 +1058,7 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
     N = len(tgrid)
     adaptive = ctx.adaptive
     integration_method = ctx.integration_method
-    gear2_be_fallback = ctx.gear2_be_fallback
+    be_rerun_on_step_failures = ctx.be_rerun_on_step_failures
     max_retry_subdivisions = ctx.max_retry_subdivisions
     max_step = ctx.max_step
     flat_max_step = ctx.flat_max_step
@@ -1121,13 +1134,17 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         else:
             raise RuntimeError(grid_error or "Rust adaptive transient failed")
 
-    # Graceful fallback: gear2's single-step Newton stalls on stiff transients
+    # Whole-run rerun, not the per-step order drop. Inside one gear2 solve a
+    # sample whose step more than doubled falls back to backward Euler for that
+    # sample alone (see co-core's integrator module); this is the coarser
+    # remedy above it. Gear2's single-step Newton stalls on stiff transients
     # (e.g. the chopper switch edges), where it can fail a large fraction of
-    # steps and drift.  When too many steps fail, the gear2 result is unreliable,
-    # so re-run with the robust backward-Euler path (recursive bisection + LS).
-    # The PSS/periodic path opts out (gear2_be_fallback=False): shooting manages
-    # its own convergence and must not mix a BE orbit into the gear2 iteration.
-    if ((not adaptive) and integration_method == "gear2" and gear2_done and gear2_be_fallback and
+    # steps and drift.  When too many steps fail the gear2 result is unreliable
+    # as a whole, so the entire transient is redone on the robust
+    # backward-Euler path (recursive bisection + LS). The PSS/periodic path
+    # opts out (`be_rerun_on_step_failures=False`): shooting manages its own
+    # convergence and must not mix a BE orbit into the gear2 iteration.
+    if ((not adaptive) and integration_method == "gear2" and gear2_done and be_rerun_on_step_failures and
             nfail > max(8, int(0.10 * (N - 1)))):
         be_result = transient(
             sizes, bias, tgrid, vip=vip, vin=vin, nf=nf, V0=V0, topo=topo,
@@ -1140,7 +1157,10 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
             fallback_least_squares=fallback_least_squares, fallback_tol=fallback_tol,
             signed_devices=signed_devices, profile=profile, edge_mask=edge_mask,
             rail_margin=rail_margin, integration_method="be",
-            gear2_be_fallback=False)
+            be_rerun_on_step_failures=False)
+        be_result["be_rerun_used"] = True
+        be_result["be_rerun_step_failures"] = int(nfail)
+        # Retired spellings, still emitted so existing readers keep working.
         be_result["gear2_be_fallback_used"] = True
         be_result["gear2_nfail_before_fallback"] = int(nfail)
         return be_result

@@ -581,6 +581,7 @@
         "profile": {"type": "boolean"},
         "rail_margin": {"type": "number"},
         "integration_method": {"type": "string", "enum": ["gear2", "be"]},
+        "be_rerun_on_step_failures": {"type": "boolean"},
         "gear2_be_fallback": {"type": "boolean"},
         "cap_mode": {"type": "string", "enum": ["charge", "q", "qstamp", "q-stamp", "average", "avg", "trapezoid", "trap"]},
         "cap_mode_id": {"type": "integer", "minimum": 0, "maximum": 1},

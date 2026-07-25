@@ -234,6 +234,173 @@ pub const BSIM_STARTUP_FRACTION: f64 = 0.25;
 /// a step-halving comparison that shrinks on its own when the guess is coarse.
 pub const OTFT_STARTUP_FRACTION: f64 = 1.0;
 
+// ---------------------------------------------------------------------------
+// Step-size control
+//
+// Everything below decides how large the next trial step is. The two adaptive
+// drivers keep their own state machines and their own local-error estimators --
+// OTFT compares a step against two half steps, BSIM projects a BDF3 charge
+// defect -- but every decision about *step size* is made here, so the two
+// cannot drift apart the way the duplicated copies did.
+// ---------------------------------------------------------------------------
+
+// The BSIM controller's extra gains. The OTFT controller is a plain
+// error-order rule and needs none of them.
+const PI_INTEGRAL: f64 = 0.4 / ADAPTIVE_STEP_ORDER;
+const PI_PROPORTIONAL: f64 = 0.7 / ADAPTIVE_STEP_ORDER;
+const POST_REJECT_GROWTH_MAX: f64 = 1.0;
+const REJECT_GROWTH_MAX: f64 = 0.8;
+const NEWTON_REJECT_FACTOR: f64 = 0.25;
+
+/// Plain error-order step update: the OTFT driver's controller.
+///
+/// A non-finite error means the trial did not converge and the step takes the
+/// hardest available cut.
+pub fn simple_next_step(step: f64, error: f64) -> f64 {
+    let factor = if error <= 0.0 {
+        ADAPTIVE_GROWTH_MAX
+    } else if !error.is_finite() {
+        ADAPTIVE_GROWTH_MIN
+    } else {
+        (ADAPTIVE_SAFETY * error.powf(-1.0 / ADAPTIVE_STEP_ORDER))
+            .clamp(ADAPTIVE_GROWTH_MIN, ADAPTIVE_GROWTH_MAX)
+    };
+    step * factor
+}
+
+/// PI step update after an accepted step: the BSIM driver's controller.
+///
+/// Feeding the previous accepted error back damps the oscillation a purely
+/// proportional rule shows on stiff edges. A step that follows a rejection may
+/// not grow at all until one clean step has passed.
+pub fn pi_accepted_step(
+    step: f64,
+    error: f64,
+    previous_accepted_error: Option<f64>,
+    follows_rejection: bool,
+) -> f64 {
+    let error = error.max(ADAPTIVE_ERR_FLOOR);
+    let previous = previous_accepted_error
+        .unwrap_or(error)
+        .max(ADAPTIVE_ERR_FLOOR);
+    let mut factor = ADAPTIVE_SAFETY * error.powf(-PI_PROPORTIONAL) * previous.powf(PI_INTEGRAL);
+    factor = factor.clamp(ADAPTIVE_GROWTH_MIN, ADAPTIVE_GROWTH_MAX);
+    if follows_rejection {
+        factor = factor.min(POST_REJECT_GROWTH_MAX);
+    }
+    step * factor
+}
+
+/// Step update after a rejected step: the BSIM driver's controller.
+pub fn rejected_step(step: f64, error: f64, newton_failure: bool) -> f64 {
+    let factor = if newton_failure || !error.is_finite() {
+        NEWTON_REJECT_FACTOR
+    } else {
+        (ADAPTIVE_SAFETY * error.powf(-1.0 / ADAPTIVE_STEP_ORDER))
+            .clamp(ADAPTIVE_GROWTH_MIN, REJECT_GROWTH_MAX)
+    };
+    step * factor
+}
+
+/// The window, limits, and breakpoints an adaptive solve steps through.
+///
+/// Both drivers used to carry their own copy of this arithmetic. The copies
+/// were identical, and identical is what let them drift silently once one of
+/// them was fixed, so it lives here now.
+#[derive(Clone, Debug)]
+pub struct StepPlanner {
+    start: f64,
+    end: f64,
+    span: f64,
+    max_step: f64,
+    min_step: f64,
+    done_tolerance: f64,
+    critical: Vec<f64>,
+}
+
+impl StepPlanner {
+    /// `max_step_option <= 0` means "no caller limit"; the span is the limit.
+    pub fn new(source_times: &[f64], critical: Vec<f64>, max_step_option: f64) -> Self {
+        let start = source_times[0];
+        let end = source_times[source_times.len() - 1];
+        let span = end - start;
+        let max_step = if max_step_option > 0.0 {
+            max_step_option.min(span)
+        } else {
+            span
+        };
+        Self {
+            start,
+            end,
+            span,
+            max_step,
+            min_step: ADAPTIVE_MIN_H_ABS.max(span * ADAPTIVE_MIN_H_REL),
+            done_tolerance: ADAPTIVE_DONE_ABS.max(span * ADAPTIVE_DONE_REL),
+            critical,
+        }
+    }
+
+    pub fn start(&self) -> f64 {
+        self.start
+    }
+
+    pub fn span(&self) -> f64 {
+        self.span
+    }
+
+    pub fn max_step(&self) -> f64 {
+        self.max_step
+    }
+
+    /// The smallest step the solve will ever attempt. A trial at or below this
+    /// is treated as no progress at all.
+    pub fn min_step(&self) -> f64 {
+        self.min_step
+    }
+
+    /// The startup (and post-restart) trial step for this window.
+    pub fn startup_step(&self, source_times: &[f64], fraction: f64) -> f64 {
+        startup_step(source_times, self.span, self.min_step, fraction)
+    }
+
+    /// Whether the solve has reached the end of its window.
+    pub fn is_done(&self, current_time: f64) -> bool {
+        current_time >= self.end - self.done_tolerance
+    }
+
+    /// Clamp a proposed step to the growth limit, the caller's maximum, the
+    /// remaining window, and the next breakpoint. `None` means the step has
+    /// collapsed to nothing and the solve must stop.
+    ///
+    /// `previous_step <= 0` means the step has no predecessor to grow from
+    /// (the solve start, or a step right after a breakpoint restart).
+    pub fn propose(&self, current_time: f64, step: f64, previous_step: f64) -> Option<f64> {
+        let mut step = step;
+        if previous_step > 0.0 {
+            step = step.min(ADAPTIVE_GROWTH_MAX * previous_step);
+        }
+        step = step.min(self.max_step).min(self.end - current_time);
+        for critical in &self.critical {
+            if *critical > current_time + self.min_step {
+                if *critical < current_time + step {
+                    step = *critical - current_time;
+                }
+                break;
+            }
+        }
+        (step > self.min_step).then_some(step)
+    }
+
+    /// Whether an accepted step landed on a breakpoint, so the driver must
+    /// drop its history and restart the integration order there.
+    pub fn hit_critical(&self, time: f64) -> bool {
+        let tolerance = self.min_step.max(self.done_tolerance);
+        self.critical
+            .iter()
+            .any(|critical| (*critical - time).abs() <= tolerance)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +511,71 @@ mod tests {
             assert!((actual - expected).abs() < 1e-14);
         }
         assert!(weights.into_iter().sum::<f64>().abs() < 1e-14);
+    }
+
+    #[test]
+    fn pi_controller_suppresses_post_rejection_growth() {
+        let free = pi_accepted_step(1.0, 0.01, Some(0.02), false);
+        let guarded = pi_accepted_step(1.0, 0.01, Some(0.02), true);
+
+        assert!(free > 1.0);
+        assert_eq!(guarded, 1.0);
+        assert!(rejected_step(1.0, 8.0, false) < 1.0);
+        assert_eq!(
+            rejected_step(1.0, f64::INFINITY, true),
+            NEWTON_REJECT_FACTOR
+        );
+    }
+
+    #[test]
+    fn simple_controller_grows_on_slack_and_collapses_on_failure() {
+        assert_eq!(simple_next_step(1.0, 0.0), ADAPTIVE_GROWTH_MAX);
+        assert_eq!(simple_next_step(1.0, f64::INFINITY), ADAPTIVE_GROWTH_MIN);
+        assert!(simple_next_step(1.0, 8.0) < 1.0);
+        assert!(simple_next_step(1.0, 1e-6) > 1.0);
+    }
+
+    fn planner(max_step: f64, critical: Vec<f64>) -> StepPlanner {
+        StepPlanner::new(&[0.0, 0.25, 0.5, 0.75, 1.0], critical, max_step)
+    }
+
+    #[test]
+    fn the_planner_clamps_growth_window_and_breakpoints_in_order() {
+        let open = planner(-1.0, vec![]);
+        // No predecessor: growth is unclamped, but the window still bounds it.
+        assert_eq!(open.propose(0.0, 10.0, -1.0), Some(1.0));
+        // With a predecessor the step may at most double.
+        assert_eq!(open.propose(0.0, 10.0, 0.1), Some(0.2));
+        // A caller maximum wins over both.
+        assert_eq!(planner(0.05, vec![]).propose(0.0, 10.0, 1.0), Some(0.05));
+
+        let gated = planner(-1.0, vec![0.3]);
+        // A breakpoint inside the proposed step pulls the endpoint onto it.
+        assert_eq!(gated.propose(0.2, 0.5, 0.4), Some(0.3 - 0.2));
+        assert_eq!(gated.propose(0.0, 10.0, -1.0), Some(0.3));
+        // A breakpoint already behind us is not chased backwards.
+        assert_eq!(gated.propose(0.5, 0.1, 0.4), Some(0.1));
+        // A step that stops short of the breakpoint is left alone.
+        assert_eq!(gated.propose(0.0, 0.1, 0.2), Some(0.1));
+    }
+
+    #[test]
+    fn the_planner_stops_when_a_step_collapses() {
+        let plan = planner(-1.0, vec![]);
+        assert_eq!(plan.propose(0.0, plan.min_step(), -1.0), None);
+        assert_eq!(plan.propose(0.0, 0.0, -1.0), None);
+        // Reaching the end leaves no room for another step.
+        assert_eq!(plan.propose(1.0, 0.5, -1.0), None);
+        assert!(plan.is_done(1.0));
+        assert!(!plan.is_done(0.9));
+    }
+
+    #[test]
+    fn the_planner_recognizes_a_breakpoint_landing() {
+        let plan = planner(-1.0, vec![0.3]);
+        assert!(plan.hit_critical(0.3));
+        assert!(plan.hit_critical(0.3 + plan.min_step() * 0.5));
+        assert!(!plan.hit_critical(0.31));
     }
 
     #[test]

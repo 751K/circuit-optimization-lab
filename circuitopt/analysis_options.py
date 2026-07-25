@@ -43,19 +43,34 @@ class AnalysisOption:
     cast: object = None
     forward: bool = True
     schema: object = None
+    #: Retired spellings still accepted in JSON. The canonical name wins when
+    #: both appear, so a deck being migrated cannot silently get the old value.
+    aliases: tuple = ()
+
+    def _lookup(self, cfg):
+        if self.name in cfg:
+            return cfg[self.name]
+        for alias in self.aliases:
+            if alias in cfg:
+                return cfg[alias]
+        return _MISSING
 
     def convert(self, cfg):
-        if self.name not in cfg:
+        value = self._lookup(cfg)
+        if value is _MISSING:
             if self.default is _MISSING:
                 return _MISSING
             value = self.default
-        else:
-            value = cfg[self.name]
         return self.cast(value) if self.cast is not None else value
 
+    def present_in(self, cfg) -> bool:
+        return self._lookup(cfg) is not _MISSING
 
-def _opt(name, *, default=_MISSING, cast=None, forward=True, schema=None):
-    return AnalysisOption(name, default=default, cast=cast, forward=forward, schema=schema)
+
+def _opt(name, *, default=_MISSING, cast=None, forward=True, schema=None,
+         aliases=()):
+    return AnalysisOption(name, default=default, cast=cast, forward=forward,
+                          schema=schema, aliases=tuple(aliases))
 
 
 POSITIVE_NUMBER = {"$ref": "#/$defs/positiveNumber"}
@@ -145,7 +160,8 @@ TRANSIENT_OPTIONS = (
     _opt("rail_margin", cast=_float, schema={"type": "number"}),
     _opt("corner", schema=CORNER),
     _opt("integration_method", schema=INTEGRATION_METHOD),
-    _opt("gear2_be_fallback", cast=_bool, schema={"type": "boolean"}),
+    _opt("be_rerun_on_step_failures", cast=_bool,
+         schema={"type": "boolean"}, aliases=("gear2_be_fallback",)),
     _opt("cap_mode", schema=CAP_MODE),
     _opt("cap_mode_id", cast=_int, schema={"type": "integer", "minimum": 0, "maximum": 1}),
 ) + ADAPTIVE_OPTIONS
@@ -242,7 +258,10 @@ def known_keys(analysis):
     registry (``ac``/``noise``) rely entirely on the dispatch set.
     """
     analysis = str(analysis)
-    solver = {opt.name for opt in options_for(analysis)}
+    solver = set()
+    for opt in options_for(analysis):
+        solver.add(opt.name)
+        solver.update(opt.aliases)
     return frozenset(solver | DISPATCH_KEYS.get(analysis, frozenset()))
 
 
@@ -282,9 +301,7 @@ def solver_kwargs(analysis, cfg, *, include_defaults=False):
     for opt in options_for(analysis):
         if not opt.forward:
             continue
-        if include_defaults:
-            value = opt.convert(cfg)
-        elif opt.name in cfg:
+        if include_defaults or opt.present_in(cfg):
             value = opt.convert(cfg)
         else:
             continue

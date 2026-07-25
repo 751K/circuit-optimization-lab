@@ -1,10 +1,6 @@
 //! OTFT transient stamping and circuit-level Newton primitives.
 
-use crate::integrator::{
-    self, ADAPTIVE_ACCEPT_WRMS, ADAPTIVE_DONE_ABS, ADAPTIVE_DONE_REL, ADAPTIVE_ERR_FLOOR,
-    ADAPTIVE_GROWTH_MAX, ADAPTIVE_GROWTH_MIN, ADAPTIVE_MIN_H_ABS, ADAPTIVE_MIN_H_REL,
-    ADAPTIVE_SAFETY, ADAPTIVE_SCALE_FLOOR, ADAPTIVE_STEP_ORDER,
-};
+use crate::integrator::{self, ADAPTIVE_ACCEPT_WRMS, ADAPTIVE_ERR_FLOOR, ADAPTIVE_SCALE_FLOOR};
 use crate::otft::{self, Params};
 use crate::stimulus;
 use crate::{
@@ -284,7 +280,9 @@ pub struct StampOptions {
     pub gmin: f64,
     pub hh: f64,
     pub cap_mode: i64,
-    pub bdf: [f64; 3],
+    /// Dimensionless derivative row for this step (see the integrator
+    /// module); the stamp applies the `1/h` factor itself.
+    pub derivative_row: [f64; 3],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -514,9 +512,9 @@ pub fn stamp_system(
                     * ((vg - vs) - (history.vg[position] - history.vs[position]))
                     * inv_h
             } else {
-                (options.bdf[0] * qgs
-                    + options.bdf[1] * history.cgs[position]
-                    + options.bdf[2] * history2.cgs[position])
+                (options.derivative_row[0] * qgs
+                    + options.derivative_row[1] * history.cgs[position]
+                    + options.derivative_row[2] * history2.cgs[position])
                     * inv_h
             };
             if let Some(row) = device.gi {
@@ -532,9 +530,9 @@ pub fn stamp_system(
                     * ((vg - vd) - (history.vg[position] - history.vd[position]))
                     * inv_h
             } else {
-                (options.bdf[0] * qgd
-                    + options.bdf[1] * history.cgd[position]
-                    + options.bdf[2] * history2.cgd[position])
+                (options.derivative_row[0] * qgd
+                    + options.derivative_row[1] * history.cgd[position]
+                    + options.derivative_row[2] * history2.cgd[position])
                     * inv_h
             };
             if let Some(row) = device.gi {
@@ -626,7 +624,7 @@ pub fn stamp_system(
             }
         }
         if cgs != 0.0 {
-            let gc = options.bdf[0] * cgs * inv_h;
+            let gc = options.derivative_row[0] * cgs * inv_h;
             if let Some(row) = device.gi {
                 system.add_jacobian(row, row, -gc);
                 if let Some(col) = device.si {
@@ -641,7 +639,7 @@ pub fn stamp_system(
             }
         }
         if cgd != 0.0 {
-            let gc = options.bdf[0] * cgd * inv_h;
+            let gc = options.derivative_row[0] * cgd * inv_h;
             if let Some(row) = device.gi {
                 system.add_jacobian(row, row, -gc);
                 if let Some(col) = device.di {
@@ -690,7 +688,7 @@ pub fn stamp_system(
             capacitor.bi,
             capacitor.capacitance,
             inv_h,
-            options.bdf,
+            options.derivative_row,
             history.capacitor_dv[position],
             history2.capacitor_dv[position],
         ) {
@@ -856,7 +854,7 @@ pub fn newton_step(
     } else {
         history2.clone_from(&history);
     }
-    let bdf = integrator::gear2_or_be_dimensionless(h, h_previous);
+    let derivative_row = integrator::gear2_or_be_dimensionless(h, h_previous);
     let mut previous_step = f64::INFINITY;
     let mut last_residual = f64::INFINITY;
     let mut last_step = f64::INFINITY;
@@ -873,7 +871,7 @@ pub fn newton_step(
                 gmin: options.gmin,
                 hh: options.hh,
                 cap_mode: options.cap_mode,
-                bdf,
+                derivative_row,
             },
             system,
             device_stats,
@@ -1422,18 +1420,6 @@ fn adaptive_error(
     (sum / half.len() as f64).sqrt()
 }
 
-fn adaptive_next_step(step: f64, error: f64) -> f64 {
-    let factor = if error <= 0.0 {
-        ADAPTIVE_GROWTH_MAX
-    } else if !error.is_finite() {
-        ADAPTIVE_GROWTH_MIN
-    } else {
-        (ADAPTIVE_SAFETY * error.powf(-1.0 / ADAPTIVE_STEP_ORDER))
-            .clamp(ADAPTIVE_GROWTH_MIN, ADAPTIVE_GROWTH_MAX)
-    };
-    step * factor
-}
-
 fn add_adaptive_profile(
     profile: &mut [f64; PROFILE_LEN],
     iterations: usize,
@@ -1469,31 +1455,22 @@ pub fn solve_adaptive_gear2(
             profile,
         };
     }
-    let start = source_times[0];
-    let end = source_times[source_times.len() - 1];
-    let span = end - start;
-    let max_step = if options.max_step > 0.0 {
-        options.max_step.min(span)
-    } else {
-        span
-    };
-    let min_step = ADAPTIVE_MIN_H_ABS.max(span * ADAPTIVE_MIN_H_REL);
+    let planner = integrator::StepPlanner::new(
+        source_times,
+        stimulus::critical_times(source_times, source_inputs),
+        options.max_step,
+    );
+    let start = planner.start();
+    let min_step = planner.min_step();
     let mut step = if options.initial_step > 0.0 {
         options.initial_step
     } else {
-        integrator::startup_step(
-            source_times,
-            span,
-            min_step,
-            integrator::OTFT_STARTUP_FRACTION,
-        )
+        planner.startup_step(source_times, integrator::OTFT_STARTUP_FRACTION)
     };
     if step <= 0.0 || !step.is_finite() {
-        step = span / 100.0;
+        step = planner.span() / 100.0;
     }
-    step = step.min(max_step);
-    let done_tolerance = ADAPTIVE_DONE_ABS.max(span * ADAPTIVE_DONE_REL);
-    let critical_times = stimulus::critical_times(source_times, source_inputs);
+    step = step.min(planner.max_step());
 
     let mut times = Vec::with_capacity(options.max_steps + 1);
     let mut states = Vec::with_capacity(options.max_steps + 1);
@@ -1514,22 +1491,11 @@ pub fn solve_adaptive_gear2(
     let mut system = DenseSystem::new(problem.size);
     let mut device_stats = DeviceSolveStats::default();
 
-    while accepted < options.max_steps && current_time < end - done_tolerance {
-        if previous_step > 0.0 {
-            step = step.min(ADAPTIVE_GROWTH_MAX * previous_step);
-        }
-        step = step.min(max_step).min(end - current_time);
-        for critical in &critical_times {
-            if *critical > current_time + min_step {
-                if *critical < current_time + step {
-                    step = *critical - current_time;
-                }
-                break;
-            }
-        }
-        if step <= min_step {
+    while accepted < options.max_steps && !planner.is_done(current_time) {
+        let Some(planned) = planner.propose(current_time, step, previous_step) else {
             break;
-        }
+        };
+        step = planned;
         let input_now = stimulus::inputs_at_time(source_times, source_inputs, current_time + step);
         let input_mid =
             stimulus::inputs_at_time(source_times, source_inputs, current_time + 0.5 * step);
@@ -1623,25 +1589,21 @@ pub fn solve_adaptive_gear2(
             times.push(current_time);
             states.push(current.clone());
             input_history.push(input_current.clone());
-            let critical_tolerance = min_step.max(done_tolerance);
-            let hit_critical = critical_times
-                .iter()
-                .any(|critical| (*critical - current_time).abs() <= critical_tolerance);
-            if hit_critical {
+            if planner.hit_critical(current_time) {
                 previous2[..problem.node_count].copy_from_slice(&current[..problem.node_count]);
                 input_previous2.clone_from(&input_current);
                 previous_step = -1.0;
             } else {
                 previous_step = step;
             }
-            step = adaptive_next_step(step, error.max(ADAPTIVE_ERR_FLOOR));
+            step = integrator::simple_next_step(step, error.max(ADAPTIVE_ERR_FLOOR));
         } else {
             rejected += 1;
-            step = adaptive_next_step(step, error).max(min_step);
+            step = integrator::simple_next_step(step, error).max(min_step);
         }
     }
     AdaptiveResult {
-        completed: current_time >= end - done_tolerance,
+        completed: planner.is_done(current_time),
         times,
         states,
         inputs: input_history,

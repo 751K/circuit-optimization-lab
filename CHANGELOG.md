@@ -114,6 +114,39 @@ release checklist.
   保留，因为互相转换会重排浮点运算顺序、移动所有已冻结结果；改由 property test 把两
   条闭式同时钉在同一个 Lagrange 生成器上。所有 golden 保持位一致。
 
+  **English (step policy):** The two adaptive drivers also each carried their
+  own copy of the step arithmetic — the startup step, the growth clamp, the
+  clamp onto the next breakpoint, the give-up test, and the restart detection
+  after landing on one. The copies were identical, which is exactly what let
+  them drift once one was fixed. Every decision about step *size* now comes
+  from one shared planner, so the drivers hold only their state machines and
+  their local-error estimators; those stay separate on purpose, because
+  comparing a step against two half steps and projecting a BDF3 charge defect
+  are different cost/robustness trades, not an accident.
+
+  **中文（步长策略）：** 两个自适应驱动此前还各自抄了一份步长算法——启动步、增长钳制、
+  钳到下一个断点、放弃判据，以及落在断点上后的重启判定。两份完全相同，而这正是其中
+  一份被修好之后另一份悄悄漂移的原因。现在所有关于步长*大小*的决策都出自同一个共享
+  planner，驱动只保留各自的状态机与局部误差估计器；后者有意不合并，因为"整步对两个
+  半步"与"投影 BDF3 电荷缺陷"是两种不同的代价/健壮性取舍，而非历史偶然。
+
+- **Retired option spelling / 退役的选项拼写**
+
+  **English:** `gear2_be_fallback` named two different things at once: the
+  whole-run rerun on backward Euler after a gear2 solve fails too many steps,
+  and the per-sample order drop a gear2 solve already performs when one step
+  more than doubles. The option is now `be_rerun_on_step_failures`, and the
+  result keys are `be_rerun_used` / `be_rerun_step_failures`. Decks and Python
+  callers using the old spelling keep working — it is accepted as an alias and
+  the old result keys are still emitted — and the canonical spelling wins if a
+  deck carries both.
+
+  **中文：** `gear2_be_fallback` 同时指代了两件不同的事：gear2 求解失败步过多后
+  在后向欧拉上重跑整场，以及 gear2 求解本来就会在某一步长翻倍以上时对该采样点降阶。
+  该选项现名为 `be_rerun_on_step_failures`，结果键为 `be_rerun_used` /
+  `be_rerun_step_failures`。使用旧拼写的电路 JSON 与 Python 调用方不受影响——旧名作为
+  别名继续接受，旧结果键继续输出——若同一份配置里两种拼写并存，以新名为准。
+
 ### Fixed / 修复
 
 - **Adaptive restarts are error-controlled instead of accepted blind / 自适应重启步改为受误差控制，不再无条件接受**
@@ -183,6 +216,21 @@ release checklist.
   斜率会主导"哪些输入断点值得让求解器重启"的判据尺度——真正的边沿全部落到阈值之下而
   被漏检。此事是否发生，仅取决于某个采样点向哪个方向舍入。现在与已有采样点相差在容差
   以内的断点会合并到该簇最早的时刻上。
+
+  **English (solver side):** Preventing the grid from carrying such a pair is
+  not enough on its own, because a caller can hand the adaptive solver any time
+  grid it likes. The breakpoint search itself now ignores intervals narrower
+  than the smallest step the solver would ever take, and compares each sample
+  against its nearest steppable neighbour on either side. A degenerate pair the
+  stimulus actually moves across is a real discontinuity and is reported as a
+  breakpoint; one it does not move across says nothing and is dropped. On a
+  grid without such a pair this is exactly the previous test.
+
+  **中文（求解器侧）：** 仅让网格不再携带这种采样对还不够，因为调用方可以把任意时间
+  网格直接交给自适应求解器。现在断点检测本身会忽略比求解器可能采用的最小步长还窄的
+  间隔，并改用两侧最近的"可步进"邻居计算斜率。若激励确实在这种退化采样对之间发生了
+  跳变，那是真实的不连续点，会被作为断点上报；若没有跳变则不含信息，直接丢弃。在不含
+  此类采样对的网格上，结果与此前完全一致。
 
 - **Native backend shutdown and reproducible CLI payloads / 原生后端关闭与 CLI 输出可复现**
 

@@ -1001,7 +1001,7 @@ def pss_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
         cap_mode_id=cap_mode_id,
         # Shooting manages its own convergence per period; never let a single
         # period silently fall back to a BE orbit mid-iteration.
-        gear2_be_fallback=False,
+        be_rerun_on_step_failures=False,
     )
 
     x = _initial_vector(sizes, bias, topo, nf, V0, corner=corner,

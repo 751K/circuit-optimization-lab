@@ -517,3 +517,39 @@ def test_explicit_dc_seed_is_never_rescued_by_the_declared_guesses():
     with pytest.raises(SimulationInvalid):
         ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology,
                  nf=spec.nf, x0_guess=failing_seed)
+
+
+def test_retired_option_spelling_still_configures_the_be_rerun():
+    # `gear2_be_fallback` named two different things at once: the whole-run
+    # rerun on backward Euler, and the per-sample order drop a gear2 solve
+    # already does when a step more than doubles. The option is now
+    # `be_rerun_on_step_failures`; decks written against the old spelling must
+    # keep working rather than silently reverting to the default.
+    from circuitopt.analysis_options import solver_kwargs, validate_analysis_cfg
+
+    validate_analysis_cfg("transient", {"gear2_be_fallback": False})  # no raise
+    retired = solver_kwargs("transient", {"gear2_be_fallback": False})
+    assert retired == {"be_rerun_on_step_failures": False}
+
+    current = solver_kwargs("transient", {"be_rerun_on_step_failures": False})
+    assert current == retired
+
+    # The canonical spelling wins when a deck carries both, so a half-migrated
+    # deck cannot keep running on the value it meant to replace.
+    both = solver_kwargs("transient", {
+        "be_rerun_on_step_failures": True, "gear2_be_fallback": False})
+    assert both == {"be_rerun_on_step_failures": True}
+
+    # An unrelated typo is still rejected.
+    with pytest.raises(ValueError):
+        validate_analysis_cfg("transient", {"gear2_be_fallbak": False})
+
+
+def test_transient_accepts_the_retired_python_keyword():
+    import inspect
+
+    from circuitopt.transient_solver import transient
+
+    signature = inspect.signature(transient)
+    assert "be_rerun_on_step_failures" in signature.parameters
+    assert signature.parameters["gear2_be_fallback"].default is None

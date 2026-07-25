@@ -1,9 +1,7 @@
 //! Fixed-grid four-terminal compact-model transient orchestration.
 
 use crate::integrator::{
-    self, ADAPTIVE_ACCEPT_WRMS, ADAPTIVE_DONE_ABS, ADAPTIVE_DONE_REL, ADAPTIVE_ERR_FLOOR,
-    ADAPTIVE_GROWTH_MAX, ADAPTIVE_GROWTH_MIN, ADAPTIVE_MIN_H_ABS, ADAPTIVE_MIN_H_REL,
-    ADAPTIVE_SAFETY, ADAPTIVE_SCALE_FLOOR, ADAPTIVE_STEP_ORDER, charge_defect_weights,
+    self, ADAPTIVE_ACCEPT_WRMS, ADAPTIVE_ERR_FLOOR, ADAPTIVE_SCALE_FLOOR, charge_defect_weights,
 };
 use crate::stimulus;
 use crate::transient::{HistoryTerms, Problem as CircuitProblem, Waveforms, fill_history_terms};
@@ -612,7 +610,13 @@ pub fn fixed_grid_integration_coefficients(times: &[f64], gear2: bool) -> Option
     Some(coefficients)
 }
 
-fn gear2_predictor_enabled() -> bool {
+/// Whether Newton gets an extrapolated seed for variable-step solves.
+///
+/// The seed is a quadratic extrapolation of accepted state; it has nothing to
+/// do with which BDF row the corrector uses, and a bad seed costs iterations
+/// rather than accuracy. The environment variable keeps its historical
+/// spelling because it is documented and user-facing.
+fn newton_seed_predictor_enabled() -> bool {
     std::env::var("CIRCUITOPT_BSIM_GEAR2_PREDICTOR")
         .map(|value| {
             !matches!(
@@ -623,13 +627,16 @@ fn gear2_predictor_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Seed one variable-step Gear2 solve by linearly extrapolating accepted state.
+/// Seed Newton for one variable-step solve by extrapolating accepted state.
+///
+/// This is a *predictor* only: it chooses where Newton starts, never how the
+/// step is discretized. The integration row comes from the integrator module.
 ///
 /// A visible input-slope discontinuity disables prediction for the edge and the
 /// following sample. This avoids carrying a pre-edge state slope across clock
 /// or DAC-code transitions while retaining the predictor on smooth waveforms.
 #[allow(clippy::too_many_arguments)]
-fn predict_gear2_state(
+fn predict_newton_seed(
     state: &mut [f64],
     previous: &[f64],
     previous2: &[f64],
@@ -678,12 +685,6 @@ fn predict_gear2_state(
     }
     true
 }
-
-const ADAPTIVE_NEWTON_REJECT_FACTOR: f64 = 0.25;
-const ADAPTIVE_PI_INTEGRAL: f64 = 0.4 / ADAPTIVE_STEP_ORDER;
-const ADAPTIVE_PI_PROPORTIONAL: f64 = 0.7 / ADAPTIVE_STEP_ORDER;
-const ADAPTIVE_POST_REJECT_GROWTH_MAX: f64 = 1.0;
-const ADAPTIVE_REJECT_GROWTH_MAX: f64 = 0.8;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AdaptiveOptions {
@@ -736,36 +737,6 @@ fn projected_lte_wrms(
         sum += normalized * normalized;
     }
     (sum / controlled_count as f64).sqrt()
-}
-
-fn adaptive_pi_accepted_step(
-    step: f64,
-    error: f64,
-    previous_accepted_error: Option<f64>,
-    follows_rejection: bool,
-) -> f64 {
-    let error = error.max(ADAPTIVE_ERR_FLOOR);
-    let previous = previous_accepted_error
-        .unwrap_or(error)
-        .max(ADAPTIVE_ERR_FLOOR);
-    let mut factor = ADAPTIVE_SAFETY
-        * error.powf(-ADAPTIVE_PI_PROPORTIONAL)
-        * previous.powf(ADAPTIVE_PI_INTEGRAL);
-    factor = factor.clamp(ADAPTIVE_GROWTH_MIN, ADAPTIVE_GROWTH_MAX);
-    if follows_rejection {
-        factor = factor.min(ADAPTIVE_POST_REJECT_GROWTH_MAX);
-    }
-    step * factor
-}
-
-fn adaptive_rejected_step(step: f64, error: f64, newton_failure: bool) -> f64 {
-    let factor = if newton_failure || !error.is_finite() {
-        ADAPTIVE_NEWTON_REJECT_FACTOR
-    } else {
-        (ADAPTIVE_SAFETY * error.powf(-1.0 / ADAPTIVE_STEP_ORDER))
-            .clamp(ADAPTIVE_GROWTH_MIN, ADAPTIVE_REJECT_GROWTH_MAX)
-    };
-    step * factor
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1244,7 +1215,7 @@ pub fn advance_fixed_grid<E: Evaluator>(
         failures,
         first_failure,
     } = carry;
-    let predictor_enabled = options.gear2 && gear2_predictor_enabled();
+    let predictor_enabled = options.gear2 && newton_seed_predictor_enabled();
 
     for sample in samples {
         let h = times[sample] - times[sample - 1];
@@ -1285,7 +1256,7 @@ pub fn advance_fixed_grid<E: Evaluator>(
         if predictor_enabled
             && sample >= 2
             && *converged_streak >= 2
-            && predict_gear2_state(
+            && predict_newton_seed(
                 state,
                 &states[sample - 1],
                 &states[sample - 2],
@@ -1481,32 +1452,23 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
         };
     }
 
-    let start = source_times[0];
-    let end = source_times[source_times.len() - 1];
-    let span = end - start;
-    let max_step = if options.max_step > 0.0 {
-        options.max_step.min(span)
-    } else {
-        span
-    };
-    let min_step = ADAPTIVE_MIN_H_ABS.max(span * ADAPTIVE_MIN_H_REL);
+    let planner = integrator::StepPlanner::new(
+        source_times,
+        stimulus::critical_times(source_times, source_inputs),
+        options.max_step,
+    );
+    let start = planner.start();
+    let min_step = planner.min_step();
     let mut step = if options.initial_step > 0.0 {
         options.initial_step
     } else {
-        integrator::startup_step(
-            source_times,
-            span,
-            min_step,
-            integrator::BSIM_STARTUP_FRACTION,
-        )
+        planner.startup_step(source_times, integrator::BSIM_STARTUP_FRACTION)
     };
     if step <= 0.0 || !step.is_finite() {
-        step = span / 100.0;
+        step = planner.span() / 100.0;
     }
-    step = step.min(max_step);
+    step = step.min(planner.max_step());
     let restart_step = step;
-    let done_tolerance = ADAPTIVE_DONE_ABS.max(span * ADAPTIVE_DONE_REL);
-    let critical_times = stimulus::critical_times(source_times, source_inputs);
 
     let capacity = source_times.len().max(16);
     let mut times = Vec::with_capacity(capacity);
@@ -1594,23 +1556,11 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
         device_charges.push(evaluation.charges);
     }
 
-    while accepted_steps + rejected_steps < options.max_steps && current_time < end - done_tolerance
-    {
-        if previous_step > 0.0 {
-            step = step.min(ADAPTIVE_GROWTH_MAX * previous_step);
-        }
-        step = step.min(max_step).min(end - current_time);
-        for critical in &critical_times {
-            if *critical > current_time + min_step {
-                if *critical < current_time + step {
-                    step = *critical - current_time;
-                }
-                break;
-            }
-        }
-        if step <= min_step {
+    while accepted_steps + rejected_steps < options.max_steps && !planner.is_done(current_time) {
+        let Some(planned) = planner.propose(current_time, step, previous_step) else {
             break;
-        }
+        };
+        step = planned;
 
         if previous_step <= 0.0 {
             // Startup or post-restart: no BDF history exists, so the
@@ -1717,7 +1667,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                 if options.newton.profile {
                     profile.newton_rejections += 1;
                 }
-                step = adaptive_rejected_step(step, f64::INFINITY, true).max(min_step);
+                step = integrator::rejected_step(step, f64::INFINITY, true).max(min_step);
                 continue;
             }
             let Some(end_history) = history_for(circuit, &candidate, &input_now) else {
@@ -1750,7 +1700,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                 if options.newton.profile {
                     profile.lte_rejections += 1;
                 }
-                step = adaptive_rejected_step(step, error, false).max(min_step);
+                step = integrator::rejected_step(step, error, false).max(min_step);
                 continue;
             }
 
@@ -1800,10 +1750,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                 device_charges.push(evaluation.charges);
             }
 
-            let critical_tolerance = min_step.max(done_tolerance);
-            let hit_critical = critical_times
-                .iter()
-                .any(|critical| (*critical - current_time).abs() <= critical_tolerance);
+            let hit_critical = planner.hit_critical(current_time);
             if hit_critical {
                 previous2.clone_from(&current);
                 previous2_charges.clone_from(&current_charges);
@@ -1814,11 +1761,11 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                 previous_step = -1.0;
                 previous2_step = -1.0;
                 previous_accepted_error = None;
-                step = restart_step.min(max_step);
+                step = restart_step.min(planner.max_step());
             } else {
                 previous2_step = half;
                 previous_step = half;
-                let next = adaptive_pi_accepted_step(
+                let next = integrator::pi_accepted_step(
                     half,
                     error,
                     previous_accepted_error,
@@ -1836,7 +1783,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
         let coefficients = integrator::gear2_or_be_scaled(step, previous_step);
         candidate.clone_from(&current);
         if previous_step > 0.0
-            && predict_gear2_state(
+            && predict_newton_seed(
                 &mut candidate,
                 &current,
                 &previous2,
@@ -1875,7 +1822,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
             if options.newton.profile {
                 profile.newton_rejections += 1;
             }
-            step = adaptive_rejected_step(step, f64::INFINITY, true).max(min_step);
+            step = integrator::rejected_step(step, f64::INFINITY, true).max(min_step);
             continue;
         }
         let Some(candidate_history) = history_for(circuit, &candidate, &input_now) else {
@@ -1937,10 +1884,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                 device_charges.push(evaluation.charges);
             }
 
-            let critical_tolerance = min_step.max(done_tolerance);
-            let hit_critical = critical_times
-                .iter()
-                .any(|critical| (*critical - current_time).abs() <= critical_tolerance);
+            let hit_critical = planner.hit_critical(current_time);
             if hit_critical {
                 previous2.clone_from(&current);
                 previous2_charges.clone_from(&current_charges);
@@ -1956,9 +1900,9 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                 previous_step = step;
             }
             step = if hit_critical {
-                restart_step.min(max_step)
+                restart_step.min(planner.max_step())
             } else if defect_weights.is_some() {
-                let next = adaptive_pi_accepted_step(
+                let next = integrator::pi_accepted_step(
                     step,
                     error,
                     previous_accepted_error,
@@ -1976,12 +1920,12 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
             if options.newton.profile {
                 profile.lte_rejections += 1;
             }
-            step = adaptive_rejected_step(step, error, false).max(min_step);
+            step = integrator::rejected_step(step, error, false).max(min_step);
         }
     }
 
     AdaptiveResult {
-        completed: current_time >= end - done_tolerance,
+        completed: planner.is_done(current_time),
         times,
         states,
         inputs: input_history,
@@ -2583,7 +2527,7 @@ mod tests {
     #[test]
     fn gear2_predictor_extrapolates_variable_step_state() {
         let mut state = [0.0, 0.0];
-        assert!(predict_gear2_state(
+        assert!(predict_newton_seed(
             &mut state,
             &[2.0, -1.0],
             &[1.0, -0.5],
@@ -2601,7 +2545,7 @@ mod tests {
         let previous = [2.0];
         let previous2 = [1.0];
         let mut edge_state = previous;
-        assert!(!predict_gear2_state(
+        assert!(!predict_newton_seed(
             &mut edge_state,
             &previous,
             &previous2,
@@ -2614,7 +2558,7 @@ mod tests {
         assert_eq!(edge_state, previous);
 
         let mut growth_state = previous;
-        assert!(!predict_gear2_state(
+        assert!(!predict_newton_seed(
             &mut growth_state,
             &previous,
             &previous2,
@@ -2784,19 +2728,5 @@ mod tests {
         let error = projected_lte_wrms(&correction, &state, &previous, 1, 1e-4, 1e-6);
 
         assert!(error < ADAPTIVE_ACCEPT_WRMS);
-    }
-
-    #[test]
-    fn pi_controller_suppresses_post_rejection_growth() {
-        let free = adaptive_pi_accepted_step(1.0, 0.01, Some(0.02), false);
-        let guarded = adaptive_pi_accepted_step(1.0, 0.01, Some(0.02), true);
-
-        assert!(free > 1.0);
-        assert_eq!(guarded, 1.0);
-        assert!(adaptive_rejected_step(1.0, 8.0, false) < 1.0);
-        assert_eq!(
-            adaptive_rejected_step(1.0, f64::INFINITY, true),
-            ADAPTIVE_NEWTON_REJECT_FACTOR
-        );
     }
 }

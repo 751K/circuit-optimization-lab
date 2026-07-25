@@ -465,7 +465,22 @@ class _NativeDeviceLease:
 
 
 class NativeBsim4Backend:
-    """Berkeley BSIM4.5 evaluator hosted by CircuitOpt in the current process."""
+    """Berkeley BSIM4.5 evaluator hosted by CircuitOpt in the current process.
+
+    ``_lock`` is held across a whole lease, including ``_NativeDevice``
+    construction, and that breadth is load-bearing rather than lazy. Building a
+    handle runs the vendored ``BSIM4v5setup``/``BSIM4v5temp`` path, which the
+    Rust host guards only with a *per-device* mutex, so two threads building
+    two different handles enter that vendored code concurrently. Narrowing the
+    lock to the cache bookkeeping and letting construction run outside it was
+    measured on the 45-point TSMC28HPC+ MDAC campaign: 90.0 s and 108.9 s at
+    eight workers against 75.0 s and 70.4 s for this code, with an identical
+    handle-construction count (838 per PVT point) and identical results, so the
+    cost is contention inside the vendored setup path rather than anything the
+    cache does. Re-serializing only the construction restored it (55.1 s, 58.4 s,
+    63.4 s). If this lock is ever narrowed, the construction still has to be
+    serialized against every other construction.
+    """
 
     name = "berkeley-bsim4v5-native"
     version = "4.5.0"
