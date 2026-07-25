@@ -880,15 +880,35 @@ def _add_adc_parser(subparsers):
     return p
 
 
+_DROP = object()
+
+
 def _jsonable(value):
+    """A JSON-ready copy of a solver payload.
+
+    Callables and private keys were always excluded. Opaque objects are too:
+    a PSS result carries its ``Topology`` for downstream PAC/PNoise, and the
+    serializer's ``default=str`` would otherwise write a
+    ``<... object at 0x...>`` memory address into the file — meaningless to a
+    reader and different on every run, which also makes the payload
+    irreproducible. Complex values are kept; their text form is stable.
+    """
     if isinstance(value, dict):
-        return {str(k): _jsonable(v) for k, v in value.items()
-                if not callable(v) and not str(k).startswith("_")}
+        ready = {}
+        for key, item in value.items():
+            if callable(item) or str(key).startswith("_"):
+                continue
+            converted = _jsonable(item)
+            if converted is not _DROP:
+                ready[str(key)] = converted
+        return ready
     if isinstance(value, (list, tuple)):
         return [_jsonable(v) for v in value]
     if hasattr(value, "tolist"):
         return value.tolist()
-    return value
+    if value is None or isinstance(value, (str, int, float, bool, complex)):
+        return value
+    return _DROP
 
 
 def _cmd_adc_explore(args):

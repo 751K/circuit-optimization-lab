@@ -220,3 +220,42 @@ def test_chopper_missing_file_fails():
                 "--freqs-num", "5", "--max-harmonic", "3")
     assert proc.returncode != 0
     assert "not found" in (proc.stderr + proc.stdout).lower()
+
+
+# ── payload serialization ─────────────────────────────────────────────────────
+
+def test_jsonable_drops_opaque_objects_so_payloads_reproduce():
+    # A PSS result carries its Topology for downstream PAC/PNoise. Serializing
+    # it through json.dump's default=str used to write a
+    # "<... object at 0x...>" memory address into --output, which differs on
+    # every run and made the engine-parity golden for periodic_rc
+    # irreproducible by construction.
+    from circuitopt.__main__ import _jsonable
+    from circuitopt.topology import AFE_TOPO
+
+    ready = _jsonable({"gain": 1.5, "topology": AFE_TOPO, "nfail": 0})
+
+    assert ready == {"gain": 1.5, "nfail": 0}
+    assert "0x" not in json.dumps(ready)
+
+
+def test_jsonable_keeps_complex_and_array_values():
+    # Complex responses and numpy arrays are real results, not internal
+    # handles: dropping opaque objects must not touch them.
+    import numpy as np
+
+    from circuitopt.__main__ import _jsonable
+
+    ready = _jsonable({
+        "response": np.asarray([1 + 2j, 3 - 4j]),
+        "gains": np.asarray([0.5, 0.25]),
+        "drive": complex(1, 0),
+        "corner": None,
+        "converged": True,
+    })
+
+    assert ready["response"] == [1 + 2j, 3 - 4j]
+    assert ready["gains"] == [0.5, 0.25]
+    assert ready["drive"] == complex(1, 0)
+    assert ready["corner"] is None
+    assert ready["converged"] is True

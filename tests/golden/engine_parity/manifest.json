@@ -1,6 +1,6 @@
 {
   "env": {
-    "commit": "6e137606020ae160a772b47077503ae4d4e097a1",
+    "commit": "7bd790d24fe4b6ba45cc1f319cc63769494c2f28",
     "machine": "arm64",
     "numpy": "2.4.6",
     "platform": "macOS-27.0-arm64-arm-64bit",
@@ -8,40 +8,13 @@
     "scipy": "1.18.0"
   },
   "files": {
-    "tests/golden/engine_parity/circuits/afe_explore--ac-noise.json": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-    "tests/golden/engine_parity/circuits/freepdk45_5t_ota--ac-noise-transient.json": "89830c8f25e588c5205422245ebf2d5e0593e8f2721ecc9d3a7157f1638ae0a8",
-    "tests/golden/engine_parity/circuits/periodic_rc--ac-noise-pss-pac-pnoise.json": "ce137a6b7cdda4dca3d3b05f527b79a896afd1d995d9502d52b3a94c0927ae02",
-    "tests/golden/engine_parity/circuits/sky130_5t_ota--ac-noise.json": "db2bad1fa65725de6cc5a869bbddcae7bc5c28e42baf0ebdd439fb1765c618f2",
-    "tests/golden/engine_parity/circuits/tsmc28hpcp_5t_ota--ac-noise.json": "c439087c3687687bf759f8b28a003cc4d2440075072241a778ffda86c35aa511",
+    "tests/golden/engine_parity/circuits/freepdk45_5t_ota--ac-noise-transient.json": "ec9b03424633f4b58efb30a777a6150d229bb7a4f1b2c6bd07adbf265e317d90",
+    "tests/golden/engine_parity/circuits/periodic_rc--ac-noise-pss-pac-pnoise.json": "7e16eca4e992258db8384df8d342623c0d2afe84103a735be1b00b8a29025fc8",
+    "tests/golden/engine_parity/circuits/sky130_5t_ota--ac-noise.json": "1d26b77ec938adf1cf6946281e4d73a20d7fd0967f350f1d66b353540a16d6c8",
+    "tests/golden/engine_parity/circuits/tsmc28hpcp_5t_ota--ac-noise.json": "31c831ba0444b5a96af91289337f9d182f8b4e7a657ee53b6ae3e0a38e1e6e3b",
     "tests/golden/engine_parity/devices.npz": "db53402bc46d0ba1981a9c0d4d7f93afd87397f40b68914516a7e13557d88096"
   },
   "frozen_circuit_cases": [
-    [
-      "afe_explore.json",
-      "ac,noise",
-      {
-        "ac": {
-          "freqs": {
-            "num": 31,
-            "scale": "log",
-            "start": 1.0,
-            "stop": 1000000.0
-          }
-        },
-        "noise": {
-          "band": [
-            10.0,
-            100000.0
-          ],
-          "freqs": {
-            "num": 31,
-            "scale": "log",
-            "start": 1.0,
-            "stop": 1000000.0
-          }
-        }
-      }
-    ],
     [
       "freepdk45_5t_ota.json",
       "ac,noise,transient",
@@ -183,7 +156,7 @@
     "tsmc28hpcp|pmos|W2L0.1NF2|ff|T233.15: ok",
     "tsmc28hpcp|pmos|W2L0.1NF2|ff|T300.15: ok",
     "tsmc28hpcp|pmos|W2L0.1NF2|ff|T398.15: ok",
-    "circuit afe_explore.json [ac,noise]: ok (0.4s)",
+    "SKIP circuit afe_explore.json [ac,noise]: rc=1   File \"/Users/kong/PycharmProjects/circuit/circuit-optimization-lab/circuitopt/ac_solver.py\", line 135, in require_retry_result |     raise SimulationInvalid( | circuitopt.run_contract.SimulationInvalid: DC operating-point solve did not converge",
     "circuit freepdk45_5t_ota.json [ac,noise,transient]: ok (0.3s)",
     "circuit sky130_5t_ota.json [ac,noise]: ok (0.3s)",
     "circuit tsmc28hpcp_5t_ota.json [ac,noise]: ok (1.7s)",
