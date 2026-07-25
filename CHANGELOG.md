@@ -100,8 +100,15 @@ release checklist.
   solver, and the Python PSS monodromy. The guard constant appeared once per
   copy, and they had begun to drift; a fix made in one copy did not reach the
   others. All four now call `co-core`'s new integrator module, and the two
-  identical copies of the stimulus sampling live in one module as well. Two
-  scaling conventions remain on purpose (whether the `1/h` factor is folded in),
+  identical copies of the stimulus sampling live in one module as well. The two
+  adaptive drivers had likewise each copied the step arithmetic — the startup
+  step, the growth clamp, the clamp onto the next breakpoint, the give-up test,
+  and the restart detection after landing on a breakpoint — so every decision
+  about step *size* now comes from one shared planner too. Each driver keeps
+  only its state machine and its local-error estimator; those stay separate
+  deliberately, because comparing a step against two half steps and projecting
+  a BDF3 charge defect are different cost/robustness trades. Two scaling
+  conventions also remain on purpose (whether the `1/h` factor is folded in),
   because converting between them reorders floating-point operations and would
   move every frozen result; property tests pin both closed forms to the same
   Lagrange generator instead. Every golden stays bit-exact.
@@ -110,27 +117,15 @@ release checklist.
   后向欧拉、用 BDF3 缺陷估计局部误差——过去在四处分别手写：两个 BSIM 求解器、OTFT
   求解器，以及 Python 的 PSS monodromy。判据常数每份抄一遍，且已经开始漂移：在一份
   里修好的问题传不到其余几份。现在四处统一调用 `co-core` 新增的 integrator 模块，
-  两份逐字相同的激励采样也合并为一个模块。两种缩放约定（是否已并入 `1/h` 因子）有意
-  保留，因为互相转换会重排浮点运算顺序、移动所有已冻结结果；改由 property test 把两
-  条闭式同时钉在同一个 Lagrange 生成器上。所有 golden 保持位一致。
+  两份逐字相同的激励采样也合并为一个模块。两个自适应驱动同样各抄了一份步长算法——
+  启动步、增长钳制、钳到下一个断点、放弃判据，以及落到断点后的重启判定——因此所有关于
+  步长*大小*的决策现在也统一出自一个共享 planner。各驱动只保留自己的状态机与局部误差
+  估计器；后者有意不合并，因为"整步对两个半步"与"投影 BDF3 电荷缺陷"是两种不同的
+  代价/健壮性取舍。两种缩放约定（是否已并入 `1/h` 因子）同样有意保留，因为互相转换会
+  重排浮点运算顺序、移动所有已冻结结果；改由 property test 把两条闭式同时钉在同一个
+  Lagrange 生成器上。所有 golden 保持位一致。
 
-  **English (step policy):** The two adaptive drivers also each carried their
-  own copy of the step arithmetic — the startup step, the growth clamp, the
-  clamp onto the next breakpoint, the give-up test, and the restart detection
-  after landing on one. The copies were identical, which is exactly what let
-  them drift once one was fixed. Every decision about step *size* now comes
-  from one shared planner, so the drivers hold only their state machines and
-  their local-error estimators; those stay separate on purpose, because
-  comparing a step against two half steps and projecting a BDF3 charge defect
-  are different cost/robustness trades, not an accident.
-
-  **中文（步长策略）：** 两个自适应驱动此前还各自抄了一份步长算法——启动步、增长钳制、
-  钳到下一个断点、放弃判据，以及落在断点上后的重启判定。两份完全相同，而这正是其中
-  一份被修好之后另一份悄悄漂移的原因。现在所有关于步长*大小*的决策都出自同一个共享
-  planner，驱动只保留各自的状态机与局部误差估计器；后者有意不合并，因为"整步对两个
-  半步"与"投影 BDF3 电荷缺陷"是两种不同的代价/健壮性取舍，而非历史偶然。
-
-- **Retired option spelling / 退役的选项拼写**
+- **The backward-Euler rerun option has a name that says what it does / 后向欧拉重跑选项改用能说明其作用的名字**
 
   **English:** `gear2_be_fallback` named two different things at once: the
   whole-run rerun on backward Euler after a gear2 solve fails too many steps,
@@ -183,23 +178,6 @@ release checklist.
   43 倍，而此前是更差。代价是步数约增加 35%：45 点 campaign 由 66.7 s 增至 78.9 s，
   仍低于固定网格的 99.3 s。所有签核判定无一变化，50760 个上报数值中最大变动 0.1 mV。
 
-- **The OTFT adaptive solver no longer stalls at t=0 on a merged grid / OTFT 自适应求解器不再在合并网格上于 t=0 卡死**
-
-  **English:** Merging an input's event times into a requested grid can leave
-  two samples a few ULP apart when an event all but coincides with a grid
-  point. Taking that gap as the smallest stimulus interval drove the startup
-  step below the solver's own minimum, and the loop gave up before its first
-  trial. This was fixed for the BSIM engine in the previous release, but the
-  OTFT engine carried its own copy of the same code and never received the fix;
-  it now shares the corrected one. Each engine keeps its own startup fraction,
-  which was never a shared choice.
-
-  **中文：** 把输入的事件时刻并入请求网格时，若某个事件几乎与网格点重合，就会留下相差
-  几个 ULP 的两个采样点。把这个间隔当成最小激励间隔，会使启动步小于求解器自身的下限，
-  循环于是在第一次试探之前就放弃。此问题上一版已在 BSIM 引擎修复，但 OTFT 引擎持有同
-  一段代码的另一份拷贝，从未收到该修复；现在两者共用修好的那一份。各引擎仍保留自己的
-  启动步系数——那从来不是共用的选择。
-
 - **Near-duplicate breakpoint times are merged / 近重复的断点时刻会被合并**
 
   **English:** The same near-coincidence left a sub-ULP interval in the merged
@@ -209,28 +187,24 @@ release checklist.
   a solver restart — leaving every genuine edge below the threshold and
   undetected. Whether this happened at all came down to which way one sample
   rounded. Breakpoints within a tolerance of an existing sample now collapse
-  onto the earliest time of their cluster.
+  onto the earliest time of their cluster. Keeping such a pair out of the grid
+  is not sufficient on its own, because a caller can hand the adaptive solver
+  any time grid it likes, so the breakpoint search itself now ignores intervals
+  narrower than the smallest step the solver would ever take and compares each
+  sample against its nearest steppable neighbour on either side. A degenerate
+  pair the stimulus actually moves across is a real discontinuity and is
+  reported as a breakpoint; one it does not move across says nothing and is
+  dropped. On a grid without such a pair this is exactly the previous test.
 
   **中文：** 同一种近重合还会在合并后的网格里留下小于 1 ULP 的间隔。求解器本身能容忍
   它，但零上升沿的时钟在这样一对采样点之间会在约 3e-27 s 内完成整个摆幅，由此得出的
   斜率会主导"哪些输入断点值得让求解器重启"的判据尺度——真正的边沿全部落到阈值之下而
   被漏检。此事是否发生，仅取决于某个采样点向哪个方向舍入。现在与已有采样点相差在容差
-  以内的断点会合并到该簇最早的时刻上。
-
-  **English (solver side):** Preventing the grid from carrying such a pair is
-  not enough on its own, because a caller can hand the adaptive solver any time
-  grid it likes. The breakpoint search itself now ignores intervals narrower
-  than the smallest step the solver would ever take, and compares each sample
-  against its nearest steppable neighbour on either side. A degenerate pair the
-  stimulus actually moves across is a real discontinuity and is reported as a
-  breakpoint; one it does not move across says nothing and is dropped. On a
-  grid without such a pair this is exactly the previous test.
-
-  **中文（求解器侧）：** 仅让网格不再携带这种采样对还不够，因为调用方可以把任意时间
-  网格直接交给自适应求解器。现在断点检测本身会忽略比求解器可能采用的最小步长还窄的
-  间隔，并改用两侧最近的"可步进"邻居计算斜率。若激励确实在这种退化采样对之间发生了
-  跳变，那是真实的不连续点，会被作为断点上报；若没有跳变则不含信息，直接丢弃。在不含
-  此类采样对的网格上，结果与此前完全一致。
+  以内的断点会合并到该簇最早的时刻上。仅让网格不再携带这种采样对还不够，因为调用方
+  可以把任意时间网格直接交给自适应求解器，所以断点检测本身现在也会忽略比求解器可能
+  采用的最小步长还窄的间隔，并改用两侧最近的"可步进"邻居计算斜率。若激励确实在这种
+  退化采样对之间发生了跳变，那是真实的不连续点，会被作为断点上报；若没有跳变则不含
+  信息，直接丢弃。在不含此类采样对的网格上，结果与此前完全一致。
 
 - **Native backend shutdown and reproducible CLI payloads / 原生后端关闭与 CLI 输出可复现**
 
@@ -265,7 +239,7 @@ release checklist.
   获得全部判决，每个输入只再运行一次最终瞬态，以保留原有波形、比较器 trace 与功耗
   返回契约；sweep 会一次编译完整输入向量。不支持的拓扑仍显式回退 Python replay。
 
-- **Fixed-grid Gear2 now uses one integration formula end to end / 固定步长 Gear2 全流程统一积分公式**
+- **Fixed-grid Gear2 solves and reconstructs with the same discretization / 固定步长 Gear2 的求解与重构改用同一离散式**
 
   **English:** The Rust Newton solve previously used variable-step BDF2 at
   every fixed-grid Gear2 sample, while Python branch-current reconstruction
@@ -309,19 +283,22 @@ release checklist.
   event to nearly coincide with a time sample. Those two nearly-equal times left
   a gap of about 3e-27 s, which was mistaken for the smallest step the stimulus
   demanded and shrank the starting step below the solver's own minimum. Only
-  intervals the solver could actually step over are considered now. Runs that
-  already worked are untouched — 552 result arrays across the SC-LPF,
-  periodic-RC, FreePDK45 and TSMC28 MDAC adaptive paths are bit-identical. On
-  the MDAC signoff cases adaptive now costs less than half of the fixed grid
-  (104-108 steps instead of 501) and agrees with it to 5.6 uV.
+  intervals the solver could actually step over are considered now. Both
+  transient engines were affected and both are fixed: the BSIM engine first,
+  and then the OTFT engine, which carried its own copy of the same routine and
+  so did not inherit the first fix — the two now share one. Each engine keeps
+  its own startup step size, which was never a shared choice. Runs that already
+  worked are untouched: 552 result arrays across the SC-LPF, periodic-RC,
+  FreePDK45 and TSMC28 MDAC adaptive paths are bit-identical.
 
   **中文：** 只要网格细到某个输入事件与时间采样几乎重合，`transient(...,
   adaptive=True)` 就可能立即以 "failed at t=0" 中止且未解出任何步。那两个几乎相等
   的时刻之间留下约 3e-27 s 的间隔，被误当作激励所要求的最小步长，把起始步长压到
-  低于求解器自身下限。现在只考虑求解器真正可以跨越的间隔。原本可用的运行不受影响
-  ——SC-LPF、periodic-RC、FreePDK45 与 TSMC28 MDAC 自适应路径共 552 个结果数组
-  逐位一致。在 MDAC 签核用例上，自适应现在的耗时不到固定网格的一半（104-108 步
-  对 501 步），且与其相差 5.6 uV。
+  低于求解器自身下限。现在只考虑求解器真正可以跨越的间隔。两个瞬态引擎都受此影响，
+  现均已修复：先是 BSIM 引擎，之后是 OTFT 引擎——后者持有同一段例程的另一份拷贝，
+  因而没有继承前一次修复，现在两者共用同一份。各引擎仍保留自己的启动步长，那从来
+  不是共用的选择。原本可用的运行不受影响：SC-LPF、periodic-RC、FreePDK45 与
+  TSMC28 MDAC 自适应路径共 552 个结果数组逐位一致。
 
 - **Adaptive transients stay inside the requested time window / 自适应瞬态不再超出请求的时间窗**
 
