@@ -19,6 +19,34 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Changed / 变更
+
+- **Vectorized BSIM transient branch-current reconstruction / BSIM 瞬态支路电流重建向量化**
+
+  **English:** Native BSIM transient post-processing no longer walks the sample
+  grid in Python. The BDF coefficients are computed once per transient as three
+  columns, compiled terminals are read as whole-transient array slices, and the
+  device charge and capacitor voltage derivatives run as elementwise array
+  expressions over all devices at once. Every entry applies the same sequence of
+  IEEE double operations the per-sample form used, so reconstructed rail and
+  waveform branch currents are bit-identical, not merely close; `_expanded_grid`
+  additionally skips its per-interval subdivision loop when `max_step` splits
+  nothing. On the reference machine a FreePDK45 SAR6 conversion improved from
+  754.5 ms to 503.2 ms (per-transient Python 42 ms to 8 ms), the TSMC28 MDAC
+  residue case from 300.7 ms to 258.1 ms, and the 45-point MDAC signoff campaign
+  from 109.2 s to 84.1 s at one worker and 102.6 s to 63.3 s at eight, where the
+  shorter GIL-held section also lifted worker scaling from 1.07x to 1.33x.
+
+  **中文：** 原生 BSIM 瞬态后处理不再用 Python 遍历采样网格。BDF 系数每次瞬态
+  只算一次并以三列形式复用，编译端子按整段数组切片读取，器件电荷与电容电压导数
+  对全部器件一次性做逐元素数组运算。每个元素施加的 IEEE 双精度运算序列与原逐点
+  形式完全相同，因此重建出的电源轨与波形支路电流是位一致而非近似；`_expanded_grid`
+  在 `max_step` 不产生细分时另外跳过逐区间循环。在参考机上，FreePDK45 SAR6 单次
+  转换由 754.5 ms 降至 503.2 ms（单次瞬态 Python 段 42 ms 降至 8 ms），TSMC28
+  MDAC residue case 由 300.7 ms 降至 258.1 ms，45 点 MDAC signoff campaign 单
+  worker 由 109.2 s 降至 84.1 s、8 worker 由 102.6 s 降至 63.3 s，同时因持有 GIL
+  的区间缩短，worker 扩展比由 1.07 倍提升至 1.33 倍。
+
 ## [2.2.0] - 2026-07-25
 
 ### Added / 新增
