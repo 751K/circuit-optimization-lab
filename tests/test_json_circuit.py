@@ -479,3 +479,41 @@ def test_loader_rejects_unknown_device_node():
         assert "unknown node" in str(exc)
     else:
         raise AssertionError("Expected ValueError for unknown node")
+
+
+def test_binding_default_dc_seed_falls_back_to_the_declared_guesses():
+    # A seed makes ac_solve skip the ordinary search. CircuitSpec.binding()
+    # promotes the circuit's first declared dc_guess into that slot, but a
+    # hand-written hint is not a solved operating point and can simply be wrong:
+    # the AFE's first guess does not converge on its own. That default must
+    # degrade to the remaining declared guesses instead of failing the analysis —
+    # this is the path `circuit-opt run` (and the engine-parity golden) takes.
+    spec = load_circuit_json("examples/afe_explore.json")
+    freqs = np.logspace(0, 6, 21)
+
+    bound = ac_solve(spec.sizes, spec.bias, freqs, binding=spec.binding())
+    cold = ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology, nf=spec.nf)
+
+    assert bound is not None
+    # Same physical branch: on a 40 V supply an alternate equilibrium sits volts
+    # away, not sub-microvolts.
+    for node in spec.topology.solved:
+        assert bound["dc_op"][node] == pytest.approx(cold["dc_op"][node], abs=1e-5)
+    assert np.isfinite(bound["gains"]).all()
+
+
+def test_explicit_dc_seed_is_never_rescued_by_the_declared_guesses():
+    # The other side of that boundary. latch_screen probes a specific basin with
+    # a deliberately split operating point, and reads a failure to converge as
+    # evidence about the design. If an explicit seed fell back to the declared
+    # guesses it would silently recover to the nominal root and the screen would
+    # report every design as robust.
+    from circuitopt.run_contract import SimulationInvalid
+
+    spec = load_circuit_json("examples/afe_explore.json")
+    freqs = np.logspace(0, 4, 11)
+    failing_seed = spec.topology.dc_guesses[0]
+
+    with pytest.raises(SimulationInvalid):
+        ac_solve(spec.sizes, spec.bias, freqs, topo=spec.topology,
+                 nf=spec.nf, x0_guess=failing_seed)

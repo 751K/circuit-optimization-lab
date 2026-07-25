@@ -19,6 +19,37 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Fixed / 修复
+
+- **Non-converging default DC seed no longer fails the analysis / 默认 DC 种子不收敛不再判失败**
+
+  **English:** `CircuitSpec.binding()` promotes a circuit's first declared
+  `dc_guess` into the binding's `dc_seed`, and a seed makes `ac_solve` trust it
+  and skip the ordinary search. A hand-written guess is not a solved operating
+  point, though, so a wrong one failed the whole analysis while the circuit's
+  remaining declared guesses were never tried. The AFE example is exactly that
+  case: its first guess does not converge, its second does. A seed that only
+  arrived as the binding default now keeps the declared guesses behind it. A
+  seed the caller chose is still authoritative and gets no fallback — the latch
+  screen probes a specific basin with a deliberately split operating point and
+  reads a failure to converge as evidence about the design. Across every example
+  circuit that declares DC guesses, 24 of 25 operating points are bit-identical
+  and the 25th is the AFE, which changes from `invalid` to converged on the same
+  physical branch the unseeded path finds. This restores the engine-parity
+  golden for `afe_explore`, which had been frozen as an empty payload because
+  v2.1.5 silently dropped the non-converged analysis.
+
+  **中文：** `CircuitSpec.binding()` 会把电路声明的第一个 `dc_guess` 提升为
+  binding 的 `dc_seed`，而一旦存在种子，`ac_solve` 就信任它并跳过常规搜索。但
+  手写初值并非已求解的工作点，写错时整个分析直接失败，电路声明的其余 guesses
+  从未被尝试。AFE 示例正是此情形：第一个 guess 不收敛，第二个可以。现在仅由
+  binding 默认值提供的种子会保留其后的声明 guesses 作为回退；调用方显式给出的
+  种子仍然是权威的、不做回退——latch 筛选正是用刻意劈开的工作点探测特定吸引域，
+  并把不收敛本身当作对设计的判据。在所有声明了 DC guesses 的示例电路上，25 个
+  中有 24 个工作点逐位不变，第 25 个即 AFE，从 `invalid` 变为收敛，且落在无种子
+  路径所找到的同一条物理支路上。这也恢复了 `afe_explore` 的 engine-parity
+  golden——此前它因 v2.1.5 静默丢弃不收敛的分析而被冻结成空载荷。
+
 ### Changed / 变更
 
 - **Vectorized BSIM transient branch-current reconstruction / BSIM 瞬态支路电流重建向量化**

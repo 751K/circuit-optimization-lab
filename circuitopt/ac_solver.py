@@ -85,6 +85,11 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     DC KCL, per-device bias mapping, and the AC terminal list are all DERIVED from
     `topo` (see topology.py) — no hand-written per-device wiring here.
     """
+    # A seed the caller chose is authoritative: latch_screen probes a specific
+    # basin with a deliberately split op, and an MC/corner sweep carries a solved
+    # nominal op forward. A seed that only arrived as the binding's default is
+    # not — see the fallback below.
+    caller_seeded = x0_guess is not None
     topo, nf, corner, model_types, device_kwargs, x0_guess = resolve_binding(
         binding, topo=topo, nf=nf, corner=corner, model_types=model_types,
         device_kwargs=device_kwargs, x0_guess=x0_guess)
@@ -208,6 +213,17 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
         # branch — and SKIP the (expensive) continuation. Keeps in-loop sweeps fast.
         guesses.append(topo.guess_vector(x0_guess, default=VCM)
                        if isinstance(x0_guess, dict) else list(x0_guess))
+        if not caller_seeded:
+            # This seed is only CircuitSpec.binding()'s default — the circuit's
+            # first declared dc_guess, a hand-written hint rather than a solved
+            # operating point, and it can simply be wrong. Keep the remaining
+            # declared guesses behind it so a bad default degrades to the ordinary
+            # search instead of failing the analysis. A seed that does converge
+            # still breaks out first, so this changes nothing for circuits whose
+            # first guess works. Explicit caller seeds keep no fallback: a probe
+            # that fails to reach its basin must stay a failure, not silently
+            # recover to the nominal root.
+            guesses.extend(topo.dc_guess_vectors(bias))
     else:
         if symmetric_fast:
             symv = symmetric_seed(sizes, bias, Id, gmin)
