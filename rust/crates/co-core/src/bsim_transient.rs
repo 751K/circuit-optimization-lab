@@ -1584,9 +1584,19 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
     } else {
         span
     };
+    let min_step = ADAPTIVE_MIN_H_ABS.max(span * ADAPTIVE_MIN_H_REL);
+    // Only intervals the stepper could actually take inform the startup step.
+    // Merging an input's event times into the requested grid can leave two
+    // samples a few ULP apart when an event all but coincides with a grid point
+    // -- the TSMC28 MDAC deck puts a clock edge at 2e-11 on a grid whose own
+    // sample there differs in the last bits, giving a 3e-27 gap. Taking that as
+    // the smallest source step made the startup step smaller than `min_step`,
+    // and the loop then broke before its first trial and reported a failure at
+    // t=0. Such a gap says nothing about how fast the stimulus moves.
     let smallest_source_step = source_times
         .windows(2)
         .map(|window| window[1] - window[0])
+        .filter(|delta| *delta > min_step)
         .fold(span, f64::min);
     let mut step = if options.initial_step > 0.0 {
         options.initial_step
@@ -1599,7 +1609,6 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
     }
     step = step.min(max_step);
     let restart_step = step;
-    let min_step = ADAPTIVE_MIN_H_ABS.max(span * ADAPTIVE_MIN_H_REL);
     let done_tolerance = ADAPTIVE_DONE_ABS.max(span * ADAPTIVE_DONE_REL);
     let critical_times = adaptive_critical_times(source_times, source_inputs);
 
@@ -2251,6 +2260,60 @@ mod tests {
             resumed(false),
             whole.states,
             "the stand-in evaluator has no memory, so this test proves nothing"
+        );
+    }
+
+    /// Merging an input's event times into a requested grid can leave two
+    /// samples a few ULP apart when an event all but coincides with a grid
+    /// point. Such a gap is not a step the solver could take, so it must not
+    /// set the adaptive startup step -- doing so drove the step below
+    /// `min_step`, and the loop then broke before its first trial and reported
+    /// a failure at t=0 with nothing solved.
+    #[test]
+    fn a_degenerate_source_interval_does_not_stall_the_adaptive_start() {
+        let circuit = rc_problem();
+        let devices: Vec<Device> = Vec::new();
+        // 2e-11 appears twice, one ULP apart, exactly as the TSMC28 MDAC deck's
+        // clock edge does against its own uniform sample there.
+        let edge = 2e-11f64;
+        let mut times = vec![0.0, edge, f64::from_bits(edge.to_bits() + 1)];
+        times.extend((1..=40).map(|k| k as f64 * 2.5e-10));
+        let gap = times[2] - times[1];
+        assert!(
+            gap > 0.0 && gap < 1e-25,
+            "expected a degenerate gap, got {gap:e}"
+        );
+        let waveforms = Waveforms::new(&[], 0, times.len()).unwrap();
+        let mut newton = options(30, false);
+        newton.gear2 = true;
+        let result = solve_adaptive_gear2(
+            &circuit,
+            &devices,
+            &mut LinearEvaluator,
+            &[0.0],
+            &times,
+            waveforms,
+            AdaptiveOptions {
+                newton,
+                max_step: -1.0,
+                reltol: 1e-4,
+                voltage_abstol: 1e-6,
+                current_abstol: 1e-12,
+                max_steps: 200_000,
+                initial_step: -1.0,
+            },
+        );
+
+        assert!(
+            result.completed,
+            "adaptive solve stalled on the degenerate gap"
+        );
+        assert!(result.accepted_steps > 0, "no step was ever accepted");
+        assert_eq!(result.times.first().copied(), Some(0.0));
+        let reached = result.times.last().copied().unwrap_or(0.0);
+        assert!(
+            (reached - times[times.len() - 1]).abs() <= 1e-18,
+            "stopped early at {reached:e}"
         );
     }
 

@@ -93,6 +93,33 @@ release checklist.
 
 ### Fixed / 修复
 
+- **Adaptive transient no longer stalls on a degenerate source interval / 自适应瞬态不再被退化源间隔卡死**
+
+  **English:** `transient(..., adaptive=True)` could fail immediately with
+  "failed at t=0" and nothing solved. Merging an input's event times into the
+  requested grid leaves two samples a few ULP apart whenever an event all but
+  coincides with a grid point: the TSMC28 MDAC deck puts a clock edge at 2e-11
+  on a grid whose own sample there differs in the last bits, leaving a 3.2e-27
+  gap. That gap was taken as the smallest source step and set the adaptive
+  startup step to 8e-28, below the solver's own minimum, so the loop broke
+  before its first trial. Only intervals the stepper could actually take now
+  inform the startup step. Adaptive runs that already worked are untouched —
+  552 arrays across the SC-LPF, periodic-RC, FreePDK45 and TSMC28 MDAC adaptive
+  paths compare bit-identical. On the MDAC residue cases adaptive now runs at
+  1.76-1.99x the fixed-grid cost with 104-108 steps instead of 501, agreeing
+  with the fixed-grid output to 21-41 uV at `tstop` (5.6 uV at
+  `reltol=1e-5`).
+
+  **中文：** `transient(..., adaptive=True)` 可能立即以 "failed at t=0" 失败且未
+  解出任何步。把输入事件时刻并入请求网格时，只要某个事件与网格点几乎重合，就会留下
+  相差几个 ULP 的两个采样：TSMC28 MDAC 电路的时钟边沿在 2e-11，而网格自身在该处的
+  采样只在末位不同，留下 3.2e-27 的间隔。该间隔被当作最小源步长，使自适应起始步长
+  变为 8e-28，低于求解器自身的下限，循环因而在第一次试算前就退出。现在只有步进器
+  真正可采用的间隔才参与起始步长的选取。原本可用的自适应运行不受影响——SC-LPF、
+  periodic-RC、FreePDK45 与 TSMC28 MDAC 自适应路径共 552 个数组逐位一致。在 MDAC
+  residue 用例上，自适应现在以固定网格 1.76-1.99 倍的速度运行，步数由 501 降至
+  104-108，在 `tstop` 处与固定网格输出相差 21-41 uV（`reltol=1e-5` 时为 5.6 uV）。
+
 - **Non-converging default DC seed no longer fails the analysis / 默认 DC 种子不收敛不再判失败**
 
   **English:** `CircuitSpec.binding()` promotes a circuit's first declared
