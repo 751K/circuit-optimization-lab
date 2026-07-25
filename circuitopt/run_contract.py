@@ -631,7 +631,14 @@ def _settling_measurement(
     }
     if outside.size and int(outside[-1]) == len(window) - 1:
         return metric(None, "s", status="not_settled", **metadata)
-    index = int(window[int(outside[-1] + 1)]) if outside.size else int(window[0])
+    if not outside.size:
+        # Already inside the band when the window opened, so nothing had to
+        # settle. Reporting `t[window[0]] - start_time` instead measured the
+        # gap between the declared start and the first sample at or after it,
+        # which is float noise: a 2e-11 start against a grid sample one ULP
+        # above it produced a 3.2e-27 s "settling time".
+        return metric(0.0, "s", **metadata)
+    index = int(window[int(outside[-1] + 1)])
     return metric(
         float(t[index] - start_time),
         "s",

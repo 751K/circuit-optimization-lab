@@ -93,6 +93,41 @@ release checklist.
 
 ### Fixed / 修复
 
+- **Adaptive transient stays inside the requested window / 自适应瞬态不再越出请求窗口**
+
+  **English:** Adding waveform breakpoints for an adaptive transient closed the
+  whole period, so a run covering part of a period solved past its own `tstop`
+  and returned an accepted grid reaching to the period end — the MDAC signoff
+  cases run 5 ns of a 10 ns period and got samples out to 10 ns, which read as a
+  gross disagreement with the fixed grid when it was only a different window.
+  The transient path now keeps the caller's window; a PSS orbit still closes its
+  period. On those cases adaptive went from 1.76-1.99x to 2.33-2.47x the
+  fixed-grid speed, since it no longer integrates twice as far, with the
+  output agreeing to 21-41 uV at `tstop` as before.
+
+  **中文：** 为自适应瞬态添加波形断点时会把网格补满一个完整周期，于是只覆盖周期
+  一部分的运行会解到自己的 `tstop` 之外，并返回一直延伸到周期末的接受网格——MDAC
+  签核用例在 10 ns 周期内只跑 5 ns，却拿回直到 10 ns 的采样，看起来像与固定网格
+  严重不符，实际只是窗口不同。瞬态路径现在保持调用方的窗口，PSS 轨道仍然闭合其
+  周期。在这些用例上，自适应相对固定网格的速度由 1.76-1.99 倍提升到
+  2.33-2.47 倍（不再多积分一倍），输出在 `tstop` 处仍相差 21-41 uV。
+
+- **Settling time reports zero when nothing had to settle / 无需建立时 settling time 报零**
+
+  **English:** A settling measurement whose signal is already inside the
+  tolerance band as its window opens reported the gap between the declared
+  `start_time` and the first sample at or after it. That gap is float noise:
+  the TSMC28 MDAC `residue_zero` case declares `start_time` at 2e-11 against a
+  grid sample one ULP above it and reported a settling time of 3.2e-27 s. It now
+  reports 0.0 s, which is what "already settled" means. Constraint verdicts are
+  unchanged — both values pass any settling limit.
+
+  **中文：** 若建立时间测量的信号在窗口开启时就已处于容差带内，此前会报告声明的
+  `start_time` 与其后第一个采样之间的间隔。该间隔是浮点噪声：TSMC28 MDAC
+  `residue_zero` 用例的 `start_time` 为 2e-11，而网格采样比它高一个 ULP，于是报出
+  3.2e-27 s 的建立时间。现在报告 0.0 s，这才是"已经建立"的含义。约束判定不变——
+  两个值都能通过任何建立时间上限。
+
 - **Adaptive transient no longer stalls on a degenerate source interval / 自适应瞬态不再被退化源间隔卡死**
 
   **English:** `transient(..., adaptive=True)` could fail immediately with

@@ -609,3 +609,28 @@ def test_pss_reports_stiffness_and_honest_status():
     assert pss["pss_status"] in ("converged_shooting", "converged_stabilization")
     # Stable RC (tau = RC = 0.1*period): dominant multiplier well inside the unit circle.
     assert 0.0 <= pss["dominant_multiplier"] < 1.0
+
+
+def test_adaptive_transient_stays_inside_the_requested_window():
+    # A transient with a periodic block asked for its own window. Adding the
+    # waveform breakpoints used to close the whole period, so a 5 ns run of a
+    # 10 ns period solved twice as far and handed back an accepted grid
+    # reaching past tstop. A PSS orbit still needs the period closed.
+    import numpy as np
+
+    from circuitopt.analysis_dispatch import _with_adaptive_waveform_breakpoints
+
+    period = 1e-8
+    periodic = {"inputs": {"clk": {"type": "square", "delay": 2e-11, "duty": 0.5}}}
+    requested = np.linspace(0.0, 5e-9, 501)
+
+    windowed = _with_adaptive_waveform_breakpoints(
+        periodic, requested, period, close_period=False)
+    assert windowed[0] == 0.0
+    assert windowed[-1] <= requested[-1]
+    assert np.all(np.diff(windowed) >= 0.0)
+    # Breakpoints inside the window are still added.
+    assert len(windowed) >= len(requested)
+
+    closed = _with_adaptive_waveform_breakpoints(periodic, requested, period)
+    assert closed[-1] == pytest.approx(period)

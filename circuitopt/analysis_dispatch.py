@@ -122,8 +122,16 @@ def _time_grid(cfg, *, default_stop=None, default_points=101):
     return out
 
 
-def _with_adaptive_waveform_breakpoints(periodic, tgrid, period):
-    """Add pulse/square discontinuity and edge boundary times for adaptive runs."""
+def _with_adaptive_waveform_breakpoints(periodic, tgrid, period, *,
+                                        close_period=True):
+    """Add pulse/square discontinuity and edge boundary times for adaptive runs.
+
+    ``close_period`` extends the grid to a whole period, which is what a PSS
+    orbit needs. A transient asked for its own window and must not be given
+    samples beyond it: the MDAC signoff decks run 5 ns of a 10 ns period, and
+    closing the period there doubled the solved span and returned an accepted
+    grid reaching past ``tstop``.
+    """
     extras = []
     for spec in (periodic or {}).get("inputs", {}).values():
         if not isinstance(spec, dict):
@@ -146,10 +154,14 @@ def _with_adaptive_waveform_breakpoints(periodic, tgrid, period):
                 extras.append(period)
     if not extras:
         return tgrid
-    out = np.unique(np.concatenate([np.asarray(tgrid, float), np.asarray(extras, float)]))
-    out = out[(out >= -1e-15) & (out <= period + 1e-15)]
+    tgrid = np.asarray(tgrid, float)
+    stop = float(period) if close_period else float(tgrid[-1])
+    out = np.unique(np.concatenate([tgrid, np.asarray(extras, float)]))
+    out = out[(out >= -1e-15) & (out <= stop + 1e-15)]
     out[0] = 0.0
-    if not np.isclose(out[-1], period, rtol=1e-12, atol=max(1e-18, period * 1e-12)):
+    if close_period and not np.isclose(
+        out[-1], period, rtol=1e-12, atol=max(1e-18, period * 1e-12)
+    ):
         out = np.append(out, period)
     return out
 
@@ -383,7 +395,8 @@ def _run_transient(spec, binding, cfg):
         context = build_periodic_context(spec, periodic, tgrid=tgrid)
         kwargs = _pack_adaptive_config(solver_kwargs("transient", cfg))
         if bool(kwargs.get("adaptive", False)):
-            tgrid = _with_adaptive_waveform_breakpoints(periodic, context["tgrid"], period)
+            tgrid = _with_adaptive_waveform_breakpoints(
+                periodic, context["tgrid"], period, close_period=False)
             if len(tgrid) != len(context["tgrid"]):
                 context = build_periodic_context(spec, periodic, tgrid=tgrid)
         if "corner" in kwargs:

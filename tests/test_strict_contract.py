@@ -399,6 +399,28 @@ def test_phase_margin_rejects_ordinary_ac_drive():
         evaluate_signoff(spec, results)
 
 
+def test_settling_already_inside_the_band_reports_zero_not_float_noise():
+    # When the signal is already within tolerance as the window opens, nothing
+    # had to settle. Reporting `first_sample_at_or_after(start) - start` instead
+    # measured the gap between the declared start and the grid, which is float
+    # noise: the TSMC28 MDAC residue_zero case declares start_time=2e-11 against
+    # a grid sample one ULP above it and reported 3.2e-27 s.
+    spec, results = _signoff_fixture(final_output=1.0)
+    start = 2e-11
+    sample = float(np.nextafter(start, np.inf))
+    assert 0.0 < sample - start < 1e-25
+    results["transient"]["t"] = np.array([0.0, sample, 1e-9, 2e-9])
+    results["transient"]["output"] = np.full(4, 1.0)
+    results["transient"]["nodes"]["OUTP"] = np.full(4, 0.5)
+    results["transient"]["nodes"]["OUTN"] = np.full(4, -0.5)
+    spec.signoff["measurements"]["settling_time"]["start_time"] = start
+
+    settling = evaluate_signoff(spec, results)["measurements"]["settling_time"]
+
+    assert settling["status"] == "valid"
+    assert settling["value"] == 0.0
+
+
 def test_settling_uses_declared_target_not_last_sample():
     spec, results = _signoff_fixture(final_output=0.99)
     signoff = evaluate_signoff(spec, results)
