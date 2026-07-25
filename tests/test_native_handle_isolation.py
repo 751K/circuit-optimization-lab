@@ -1,16 +1,15 @@
-"""Native handle leases must not carry state between independent units of work.
+"""Native handle ownership and independent-work cache isolation.
 
 A BSIM instance keeps its internal drain/source node solution as the next
-call's warm start and the ``state0`` voltages the next load limits against, so
-whoever shares a handle shares that history. A signoff campaign used to lease
-one handle for every point with the same card -- same corner and temperature,
-different supply -- which made a point's result depend on what ran beside it:
-two runs of the same 45-point campaign on eight workers moved 559 of 1260
-measured values, while one worker reproduced exactly.
+call's warm start and the ``state0`` voltages the next load limits against.
+Overlapping backend leases must therefore own different handles. Sequential
+leases retain warm-cache reuse by default, while an isolated cache scope also
+prevents separate units such as signoff points from inheriting that history.
 """
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 from circuitopt.compact_models.bsim4 import isolated_native_device_cache
 from circuitopt.pdk.freepdk45.device import Fp45Nfet
@@ -66,3 +65,26 @@ def test_unscoped_leases_still_share_the_process_cache():
     # Ordinary single-run callers keep the warm handle they always had.
     device = Fp45Nfet(W=1.0, L=0.05)
     assert _lease_identity(device) == _lease_identity(device)
+
+
+def test_concurrent_unscoped_leases_never_share_an_active_handle():
+    # This is a backend invariant, not something each concurrent driver must
+    # remember to request. Per-call native locking would only serialize the
+    # individual evaluations while still interleaving two solver histories.
+    device = Fp45Nfet(W=1.0, L=0.05)
+    barrier = Barrier(2)
+
+    def unit(_):
+        lease = device.lease_native_solver_handle()
+        try:
+            barrier.wait()
+            identity = id(lease.device)
+            barrier.wait()
+            return identity
+        finally:
+            lease.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        identities = list(pool.map(unit, range(2)))
+
+    assert len(set(identities)) == len(identities)

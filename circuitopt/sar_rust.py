@@ -1,13 +1,11 @@
 """Marshalling for the compiled SAR conversion batch (rewrite step R8).
 
 Builds a :class:`circuitopt_core.CompiledSarConversion` template once from a SAR
-spec and drives a whole mismatch Monte-Carlo trial sweep through it under one
-``py.detach`` with a single Rayon pool. The frozen Python loops in
-:mod:`circuitopt.sar`/:mod:`circuitopt.sar_mc` remain the reference and the
-fallback: :func:`build_sar_batch` raises :class:`SarRustUnavailable` for any spec
-the compiled path does not reproduce bit-for-bit (non-native devices, an
-incomplete DC seed, an unmapped waveform), and the caller drops back to the
-reference loop.
+spec and drives public conversions, sweeps, signals, exploration, and complete
+mismatch Monte-Carlo trial sweeps through it. The frozen Python loop remains the
+reference and unsupported-topology fallback: :func:`build_sar_batch` raises
+:class:`SarRustUnavailable` for any spec the compiled path cannot reproduce
+bit-for-bit (non-native devices, an incomplete DC seed, an unmapped waveform).
 
 The compiled path reproduces the reference codes exactly: the device cards are
 the frozen :func:`circuitopt.device_factory.build_devices` model/instance
@@ -121,7 +119,8 @@ class CompiledSarBatch:
 
 
 def build_sar_batch(spec, cfg: Mapping | None = None, *,
-                    corner: str | None = None) -> CompiledSarBatch:
+                    corner: str | None = None,
+                    vins: Sequence[float] | None = None) -> CompiledSarBatch:
     """Compile a SAR conversion template for ``spec``.
 
     Raises :class:`SarRustUnavailable` when the compiled path would not reproduce
@@ -205,8 +204,22 @@ def build_sar_batch(spec, cfg: Mapping | None = None, *,
     elif v0.shape[0] > n_aug:
         v0 = v0[:n_aug]
 
-    levels = 1 << cfg["n_bits"]
-    vins = (np.arange(levels) + 0.5) / levels * cfg["vref"]
+    if vins is None:
+        levels = 1 << cfg["n_bits"]
+        vins = (np.arange(levels) + 0.5) / levels * cfg["vref"]
+    else:
+        vins = np.asarray(vins, dtype=float)
+        if (
+            vins.ndim != 1
+            or not len(vins)
+            or not np.all(np.isfinite(vins))
+            or np.any(vins < 0.0)
+            or np.any(vins > cfg["vref"])
+        ):
+            raise ValueError(
+                "compiled SAR inputs must be a non-empty finite 1D array "
+                "inside [0, vref]"
+            )
 
     clock = None
     if cfg["clock"] is not None:

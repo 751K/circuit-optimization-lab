@@ -280,15 +280,16 @@ Main flags:
 | `--corner` | The current ADC CLI accepts `nom/ss/ff` |
 | `-n`, `--n` | Number of candidates in `--explore` mode, default `50` |
 | `--seed` | RNG seed in `--explore` mode, default `0` |
-| `--workers` | Concurrency for conversions or candidates; bit decisions within a single conversion stay serial. `--mc` prefers the compiled Rust batch path (`circuitopt_core.CompiledSarConversion.evaluate_batch`, a single Rayon pool, results byte-identical regardless of worker count); when the conditions aren't met (non-native devices, an incomplete DC seed, etc.) it falls back to `ThreadPoolExecutor` per-trial solving; `--sweep`/`--sine`/`--explore` use `ThreadPoolExecutor` per-candidate solving |
+| `--workers` | Concurrency for independent final transients, MC trials, or exploration candidates. Native-BSIM single conversions, sweeps, sine tests, MC, and exploration all use the compiled Rust SAR continuation kernel for bit decisions; each input then runs one final transient for waveform and power reporting. MC batches trials in one Rayon pool. Unsupported topologies or incomplete seeds explicitly fall back to Python replay. |
 | `--plot [DIR]` | Write the corresponding PNG; needs the `plot` extra |
 | `--csv` / `--jsonl` | ADC explore output |
 | `-o`, `--output` | JSON result |
 
-The ADC control state machine runs in Python; the comparator, CDAC, and
-switches are still computed by transistor-level transient analysis. The
-current flow is not equivalent to a full transistor-level digital SAR
-controller.
+The closed-loop bit-decision state machine runs in the Rust continuation
+kernel; Python handles workflow orchestration and final result/power assembly.
+The comparator, CDAC, and switches are still computed by transistor-level
+transient analysis. The flow is not equivalent to a full transistor-level
+digital SAR controller.
 
 ## `plot`
 

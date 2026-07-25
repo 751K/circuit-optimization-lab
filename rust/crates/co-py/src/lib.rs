@@ -1805,6 +1805,42 @@ impl Bsim4TransientProblem {
         ))
     }
 
+    #[pyo3(signature = (times, integration_method="be"))]
+    fn fixed_grid_coefficients<'py>(
+        &self,
+        py: Python<'py>,
+        times: PyReadonlyArray1<'py, f64>,
+        integration_method: &str,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let gear2 = match integration_method {
+            "be" => false,
+            "gear2" | "bdf2" => true,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown BSIM4 integration method {other:?}"
+                )));
+            }
+        };
+        let times = times
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("times must be a contiguous float64 array"))?;
+        let coefficients = bsim_transient::fixed_grid_integration_coefficients(times, gear2)
+            .ok_or_else(|| {
+                PyValueError::new_err(
+                    "fixed-grid coefficient times must be finite and strictly increasing",
+                )
+            })?;
+        rows_into_array2(
+            py,
+            coefficients
+                .into_iter()
+                .map(|values| values.to_vec())
+                .collect(),
+            3,
+            "BSIM4 fixed-grid coefficients",
+        )
+    }
+
     #[pyo3(signature = (
         initial, times, inputs, max_step=-1.0, reltol=1e-4,
         voltage_abstol=1e-6, current_abstol=1e-12, max_steps=200000,

@@ -26,7 +26,11 @@ import numpy as np
 import pytest
 
 from circuitopt.compact_models.bsim4 import native
-from circuitopt.compact_models.bsim4.native import Bsim4NativeError, NativeBsim4Backend
+from circuitopt.compact_models.bsim4.native import (
+    Bsim4NativeError,
+    NativeBsim4Backend,
+    isolated_native_device_cache,
+)
 from circuitopt.compact_models.bsim4.abi import (
     Bsim4Bias,
     Bsim4InstanceCard,
@@ -322,6 +326,82 @@ def test_rust_cache_never_evicts_active_handles(monkeypatch):
             np.testing.assert_array_equal(value.conductance, reference[index].conductance)
     # Unscoped leases come from the backend's shared namespace.
     assert len(backend._shared.devices) <= 2
+
+
+@requires_rust
+def test_backend_never_leases_one_active_handle_twice(monkeypatch):
+    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
+    model, instance = _cards(1)
+    backend = NativeBsim4Backend(cache_size=2)
+
+    first = backend.lease_device(model, instance, 300.15)
+    overlapping = backend.lease_device(model, instance, 300.15)
+    cached_device = first.device
+    try:
+        assert overlapping.device is not cached_device
+    finally:
+        overlapping.close()
+        first.close()
+
+    resumed = backend.lease_device(model, instance, 300.15)
+    try:
+        # Sequential callers retain normal cache reuse after the exclusive
+        # lease returns.
+        assert resumed.device is cached_device
+    finally:
+        resumed.close()
+
+
+@requires_rust
+def test_backend_close_releases_all_stores_and_is_idempotent(monkeypatch):
+    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
+    model, instance = _cards(1)
+    backend = NativeBsim4Backend(cache_size=2)
+
+    backend.evaluate(
+        model,
+        instance,
+        Bsim4Bias(drain=0.6, gate=0.55, source=0.0, bulk=0.0),
+    )
+    assert backend._shared.devices
+
+    with isolated_native_device_cache():
+        backend.evaluate(
+            model,
+            instance,
+            Bsim4Bias(drain=0.6, gate=0.55, source=0.0, bulk=0.0),
+        )
+        assert backend._scoped
+        backend.close()
+    backend.close()
+
+    assert backend._closed
+    assert not backend._shared.devices
+    assert not backend._scoped
+    with pytest.raises(Bsim4NativeError, match="backend is closed"):
+        backend.evaluate(
+            model,
+            instance,
+            Bsim4Bias(drain=0.6, gate=0.55, source=0.0, bulk=0.0),
+        )
+    with pytest.raises(Bsim4NativeError, match="backend is closed"):
+        backend.create_device(model, instance, 300.15)
+
+
+@requires_rust
+def test_backend_close_rejects_an_active_cached_or_uncached_lease(monkeypatch):
+    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
+    model, instance = _cards(1)
+
+    for cache_size in (0, 2):
+        backend = NativeBsim4Backend(cache_size=cache_size)
+        lease = backend.lease_device(model, instance, 300.15)
+        try:
+            with pytest.raises(Bsim4NativeError, match="evaluations are active"):
+                backend.close()
+        finally:
+            lease.close()
+        backend.close()
 
 
 def test_unknown_backend_is_rejected(monkeypatch):

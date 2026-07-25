@@ -67,9 +67,9 @@ dummy 的 CDAC 控制波形;`render_freepdk45_transient_netlist` 的 `waveform()
 
 **如何在判决抽取约束下驱动它——新增 `adc.clock`(向后兼容的 machinery 扩展)**:
 
-- 观察:harness 每个 bit 都从 t=0 **重放**整条瞬态,且只在**被试 bit** 的 `decision_time` 读一次
-  比较器。所以我只需要一路**固定的、逐 bit 的选通模式**(与 `trial_index`、与已定判决无关),
-  它在每个 `decision_time` 附近拉高即可服务所有重放。
+- 观察:每个 bit 只在自身 `decision_time` 读取一次比较器，而选通时刻与 `trial_index` 和已定
+  判决无关。因此只需要一路**固定的、逐 bit 的选通模式**。编译式 SAR 内核在判决后更新未来
+  CDAC 激励并从最后有效状态续算；仅不支持的拓扑使用从 t=0 重放的 reference fallback。
 - 实现:`_sar_config` 解析可选 `adc.clock` 块;`sar_input_waveforms` 生成一路选通波形键(`clk`):
   静息在 `low`(复位),在每个 `decision_time` 前 `eval_before` 拉高到 `high`(评估)、
   `decision_time` 后 `reset_hold` 复位。该键经 `transient_inputs` 驱动 StrongARM 的时钟尾管与

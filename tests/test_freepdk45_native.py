@@ -216,9 +216,9 @@ def test_native_5t_ota_adaptive_gear2_uses_nonuniform_grid(monkeypatch):
 
     monkeypatch.setenv("NGSPICE_BIN", "/definitely/not/ngspice")
     spec, _ = _spec(driven=True)
-    source_time = np.linspace(0.0, 20e-9, 101)
-    vip = np.where(source_time < 5e-9, 0.55, 0.56)
-    vin = np.where(source_time < 5e-9, 0.55, 0.54)
+    source_time = np.linspace(10e-9, 30e-9, 101)
+    vip = np.where(source_time < 15e-9, 0.55, 0.56)
+    vin = np.where(source_time < 15e-9, 0.55, 0.54)
     result = transient(
         spec.sizes,
         spec.bias,
@@ -247,7 +247,7 @@ def test_native_5t_ota_adaptive_gear2_uses_nonuniform_grid(monkeypatch):
         rtol=1e-10,
         atol=0.0,
     )
-    assert np.any(np.isclose(accepted_time, 5e-9, rtol=0.0, atol=1e-18))
+    assert np.any(np.isclose(accepted_time, 15e-9, rtol=0.0, atol=1e-18))
     assert result["adaptive_accepted_steps"] == len(accepted_time) - 1
     assert result["transient_profile"]["trial_solves"] == (
         result["adaptive_accepted_steps"] + result["adaptive_rejected_steps"]

@@ -259,3 +259,28 @@ def test_jsonable_keeps_complex_and_array_values():
     assert ready["drive"] == complex(1, 0)
     assert ready["corner"] is None
     assert ready["converged"] is True
+
+
+def test_jsonable_drops_opaque_objects_from_nested_sequences_and_arrays():
+    import numpy as np
+
+    from circuitopt.__main__ import _jsonable
+    from circuitopt.topology import AFE_TOPO
+
+    ready = _jsonable({
+        "items": [
+            AFE_TOPO,
+            {"nested": (1, AFE_TOPO, 2)},
+            lambda: None,
+        ],
+        "object_array": np.asarray(
+            [AFE_TOPO, "kept", {"opaque": AFE_TOPO, "value": 3}],
+            dtype=object,
+        ),
+    })
+
+    assert ready == {
+        "items": [{"nested": [1, 2]}],
+        "object_array": ["kept", {"value": 3}],
+    }
+    assert "0x" not in json.dumps(ready)

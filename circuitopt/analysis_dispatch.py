@@ -130,8 +130,14 @@ def _with_adaptive_waveform_breakpoints(periodic, tgrid, period, *,
     orbit needs. A transient asked for its own window and must not be given
     samples beyond it: the MDAC signoff decks run 5 ns of a 10 ns period, and
     closing the period there doubled the solved span and returned an accepted
-    grid reaching past ``tstop``.
+    grid reaching past ``tstop``. Breakpoints are generated in absolute time so
+    a transient beginning after zero retains its requested start and still hits
+    every periodic edge inside its window.
     """
+    tgrid = np.asarray(tgrid, float)
+    start = float(tgrid[0])
+    stop = start + float(period) if close_period else float(tgrid[-1])
+    tolerance = max(1e-18, abs(float(period)) * 1e-12)
     extras = []
     for spec in (periodic or {}).get("inputs", {}).values():
         if not isinstance(spec, dict):
@@ -148,21 +154,24 @@ def _with_adaptive_waveform_breakpoints(periodic, tgrid, period, *,
             fall = max(0.0, float(spec.get("fall", 0.0)))
             offsets.extend([rise, width + fall])
         for off in offsets:
-            tm = np.mod(delay + off, period)
-            extras.append(tm)
-            if tm == 0.0:
-                extras.append(period)
+            phase = float(np.mod(delay + off, period))
+            first_cycle = int(np.ceil((start - phase - tolerance) / period))
+            last_cycle = int(np.floor((stop - phase + tolerance) / period))
+            extras.extend(
+                phase + cycle * period
+                for cycle in range(first_cycle, last_cycle + 1)
+            )
     if not extras:
         return tgrid
-    tgrid = np.asarray(tgrid, float)
-    stop = float(period) if close_period else float(tgrid[-1])
-    out = np.unique(np.concatenate([tgrid, np.asarray(extras, float)]))
-    out = out[(out >= -1e-15) & (out <= stop + 1e-15)]
-    out[0] = 0.0
-    if close_period and not np.isclose(
-        out[-1], period, rtol=1e-12, atol=max(1e-18, period * 1e-12)
-    ):
-        out = np.append(out, period)
+    out = np.unique(np.concatenate([
+        tgrid,
+        np.asarray(extras, float),
+        np.asarray([start, stop]),
+    ]))
+    out = out[(out >= start - tolerance) & (out <= stop + tolerance)]
+    out = np.unique(np.clip(out, start, stop))
+    out[0] = start
+    out[-1] = stop
     return out
 
 

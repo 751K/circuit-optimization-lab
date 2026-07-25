@@ -66,16 +66,15 @@ release checklist.
 
   **English:** Rebuilding branch currents after a native BSIM transient walked
   the time grid in Python, once per device and per capacitor. It is now array
-  arithmetic over the whole run. The reconstruction is bit-identical, not merely
-  close: every value applies the same sequence of floating-point operations the
-  per-sample form did. A FreePDK45 SAR6 conversion went from 754.5 ms to
-  503.2 ms, and the Python share of one TSMC28 MDAC transient from 72 ms to
-  27 ms.
+  arithmetic over the whole run and consumes the integration coefficients
+  selected by the Rust solver. A FreePDK45 SAR6 conversion went from 754.5 ms
+  to 503.2 ms, and the Python share of one TSMC28 MDAC transient from 72 ms
+  to 27 ms.
 
   **中文：** 原生 BSIM 瞬态之后重建支路电流时，过去按每个器件、每个电容分别用
-  Python 遍历时间网格，现在整段用数组运算完成。重建结果是位一致而非近似：每个值
-  施加的浮点运算序列与原逐点形式完全相同。FreePDK45 SAR6 单次转换由 754.5 ms 降至
-  503.2 ms，单次 TSMC28 MDAC 瞬态中 Python 占用由 72 ms 降至 27 ms。
+  Python 遍历时间网格，现在整段用数组运算完成，并直接使用 Rust 求解器实际选择的
+  积分系数。FreePDK45 SAR6 单次转换由 754.5 ms 降至 503.2 ms，单次 TSMC28 MDAC
+  瞬态中 Python 占用由 72 ms 降至 27 ms。
 
 - **MDAC signoff runs its transients adaptively / MDAC 签核瞬态改用自适应步长**
 
@@ -95,29 +94,75 @@ release checklist.
 
 ### Fixed / 修复
 
-- **Signoff campaigns now reproduce at any worker count / 签核 campaign 在任意 worker 数下可复现**
+- **Native backend shutdown and reproducible CLI payloads / 原生后端关闭与 CLI 输出可复现**
 
-  **English:** Running the same campaign twice gave different numbers unless it
-  ran on a single worker: two eight-worker runs of the 45-point TSMC28HPC+ MDAC
-  campaign disagreed on 559 of 1260 measured values. Simulations reuse compiled
-  device instances from a shared cache, and those instances carry state from one
-  evaluation to the next, so PVT points that share a device — the three supply
-  points of a corner and temperature — were reading each other's history
-  whenever they ran side by side. Each PVT point now gets its own instances,
-  released when the point finishes; reuse within a point is unchanged. Two
-  eight-worker runs are now identical, and eight workers agree with one. The
-  reference numbers barely move: 90 of 1260 values differ from the previous
-  single-worker run, the largest by 3e-10 relative, with no verdict change. The
-  campaign costs about 5% more at eight workers.
+  **English:** `NativeBsim4Backend.close()` now manages the current shared and
+  scoped handle stores instead of referring to fields removed by the card-cache
+  refactor. Shutdown is idempotent, rejects active leases, releases every cached
+  handle, and prevents later evaluation. CLI result serialization now removes
+  opaque objects and callables recursively from mappings, sequences, and object
+  arrays, so internal sentinels and process-specific memory addresses cannot
+  leak into output files.
 
-  **中文：** 同一个 campaign 跑两遍会得到不同数字，除非只用单 worker：45 点
-  TSMC28HPC+ MDAC campaign 在 8 worker 下的两次运行，1260 个测量值中有 559 个不
-  一致。仿真会从共享缓存复用已编译的器件实例，而这些实例会把状态从一次求值带到
-  下一次；于是共用同一器件的 PVT 点——同一 corner 与温度下的三个电压点——只要并排
-  运行就会读到彼此的历史。现在每个 PVT 点使用自己的实例，点结束即释放，点内复用
-  不变。两次 8 worker 运行现在完全一致，且 8 worker 与单 worker 结果相同。参考
-  数值几乎未动：1260 个值中有 90 个与此前单 worker 结果不同，最大相对差 3e-10，
-  且无任何判定变化。代价是 8 worker 下约慢 5%。
+  **中文：** `NativeBsim4Backend.close()` 现按当前 card cache 架构管理 shared 与
+  scoped handle store，不再引用重构中已删除的字段。关闭操作可重复调用，会拒绝仍有
+  活动租约的后端、释放全部缓存 handle，并阻止后续求值。CLI 结果序列化也会从映射、
+  序列和 object array 中递归移除 opaque 对象与 callable，内部哨兵和进程相关内存
+  地址不会再泄漏到输出文件。
+
+- **SAR continuation now serves the public ADC workflow / SAR 续算现已接入公开 ADC 工作流**
+
+  **English:** The Rust SAR kernel already continued one trajectory across bit
+  decisions, but only the mismatch Monte-Carlo batch called it. The public
+  `run_sar_conversion`, sweep, signal, CLI `adc`, and SAR exploration paths
+  still replayed a complete transient for every bit. These entry points now
+  obtain all decisions from the compiled continuation kernel and run exactly
+  one final transient per input to retain the existing waveform, comparator
+  trace, and power result contract. Sweeps compile their complete input vector
+  once. Unsupported topologies retain an explicit Python replay fallback.
+
+  **中文：** Rust SAR 内核早已能在各 bit 判决之间续算同一条轨迹，但此前只有失配
+  蒙特卡洛 batch 调用了它。公开的 `run_sar_conversion`、sweep、signal、CLI `adc`
+  和 SAR 探索路径仍然每个 bit 重跑一次完整瞬态。现在这些入口统一从编译式续算内核
+  获得全部判决，每个输入只再运行一次最终瞬态，以保留原有波形、比较器 trace 与功耗
+  返回契约；sweep 会一次编译完整输入向量。不支持的拓扑仍显式回退 Python replay。
+
+- **Fixed-grid Gear2 now uses one integration formula end to end / 固定步长 Gear2 全流程统一积分公式**
+
+  **English:** The Rust Newton solve previously used variable-step BDF2 at
+  every fixed-grid Gear2 sample, while Python branch-current reconstruction
+  independently fell back to backward Euler when the step ratio exceeded two.
+  The Rust solver is now the single source of truth: the first step uses
+  backward Euler, later steps use variable-step BDF2 for
+  `h_n / h_(n-1) <= 2`, and larger growth falls back to backward Euler. The
+  exact selected coefficients are returned to Python for device-charge,
+  capacitor-current, and source-current reconstruction.
+
+  **中文：** 此前固定网格 Gear2 的 Rust Newton 求解在每个后续采样点都使用变步长
+  BDF2，而 Python 支路电流重构会在步长比大于 2 时自行回退后向欧拉，导致状态求解
+  与电流重构使用不同离散式。现在 Rust 求解器是唯一规则来源：首步使用后向欧拉，
+  后续在 `h_n / h_(n-1) <= 2` 时使用变步长 BDF2，增长更快时回退后向欧拉；实际
+  选中的系数原样返回 Python，用于器件电荷、电容电流和电源支路电流重构。
+
+- **Native handles are isolated across concurrent solvers / 原生 handle 在并发求解器之间隔离**
+
+  **English:** Native BSIM handles carry internal-node and voltage-limiting
+  history. A per-call mutex prevents memory races but does not make it valid for
+  two solvers to alternately advance the same handle. The backend now treats an
+  active lease as exclusive and gives overlapping callers independent temporary
+  handles, while sequential callers retain normal cache reuse. Signoff PVT
+  points additionally keep private cache namespaces so history cannot leak
+  between consecutive independent points. Two eight-worker runs of the
+  45-point TSMC28HPC+ MDAC campaign are now identical, and eight workers agree
+  with one. The guarantee no longer depends on every concurrent driver
+  remembering a signoff-specific scope.
+
+  **中文：** 原生 BSIM handle 会携带内部节点与电压限幅历史。单次调用互斥锁只能
+  防止内存数据竞争，不能允许两个求解器轮流推进同一 handle。现在 backend 将 active
+  lease 视为独占租约：重叠调用者获得独立的临时 handle，顺序调用仍正常复用缓存。
+  signoff PVT 点另外保留私有缓存命名空间，防止连续的独立点继承历史。45 点
+  TSMC28HPC+ MDAC campaign 的两次 8 worker 运行现在完全一致，且 8 worker 与单
+  worker 结果相同；其他并发驱动也不再需要记住 signoff 专用 scope 才有基本隔离。
 
 - **Adaptive transients no longer fail at t=0 / 自适应瞬态不再在 t=0 失败**
 
@@ -146,16 +191,21 @@ release checklist.
   end of the period rather than to its own `tstop`, and returned the extra
   samples. The MDAC signoff cases ask for 5 ns of a 10 ns period and got results
   out to 10 ns, which looked like a gross disagreement with the fixed grid when
-  it was only a different window. The transient path now keeps the caller's
-  window; a PSS orbit still closes its period. Those cases also stopped
-  simulating twice as far as asked, which is most of why adaptive is now under
-  half the cost of the fixed grid.
+  it was only a different window. The breakpoint merger also forced the first
+  sample to zero and generated edges only in the first period, so a requested
+  nonzero start was lost. The transient path now preserves both absolute
+  endpoints and generates every repeated edge inside that window; a PSS orbit
+  still closes exactly one period. Those MDAC cases also stopped simulating
+  twice as far as asked, which is most of why adaptive is now under half the
+  cost of the fixed grid.
 
   **中文：** 由周期性激励驱动的自适应瞬态会一直解到周期末尾而不是自己的 `tstop`，
   并把多出来的采样一并返回。MDAC 签核用例请求 10 ns 周期中的 5 ns，却拿回直到
-  10 ns 的结果，看起来像与固定网格严重不符，实际只是窗口不同。瞬态路径现在保持
-  调用方的窗口，PSS 轨道仍然闭合其周期。这些用例也因此不再多算一倍时长——这正是
-  自适应现在能降到固定网格一半以下的主要原因。
+  10 ns 的结果，看起来像与固定网格严重不符，实际只是窗口不同。断点合并器还会把
+  首点强制改为零，并且只生成第一个周期内的边沿，因此非零起始时间会丢失。现在瞬态
+  路径保持两个绝对时间端点，并生成窗口内每一次重复边沿；PSS 轨道仍然精确闭合一个
+  周期。这些 MDAC 用例也因此不再多算一倍时长——这正是自适应现在能降到固定网格
+  一半以下的主要原因。
 
 - **Settling time reports zero when nothing had to settle / 无需建立时 settling time 报零**
 

@@ -3,7 +3,7 @@
 This is the ADC-metric sibling of :mod:`circuitopt.explore`. That module screens an
 analog block on *AC* metrics (gain/bw/irn/power/area) from ``ac_solve``; those
 numbers say nothing about an ADC's linearity, so a SAR needs its own evaluation
-loop over the closed-loop ngspice conversion oracle. Everything that is not
+loop over the closed-loop transistor-level conversion kernel. Everything that is not
 ADC-specific is reused verbatim from :mod:`circuitopt.explore` — the :class:`Variable`
 range/targets mechanism, Latin-hypercube :func:`sample`, :func:`pareto_front`,
 :func:`is_feasible` and the ``write_csv``/``write_jsonl`` writers — so the two
@@ -58,7 +58,7 @@ from .circuit_loader import CircuitSpec, load_circuit_json
 from .adc import dynamic_metrics, static_ramp_metrics
 from .explore import (Variable, apply_variables, is_feasible, pareto_front,
                       sample, write_csv, write_jsonl)
-from .sar import _sar_config, run_sar_conversion
+from .sar import _run_sar_conversions, _sar_config
 from .sar_mc import _copy_with_capacitors
 
 
@@ -252,9 +252,9 @@ def _dynamic_sar_metrics(spec, scfg, dyn, corner):
     amplitude = 0.45 * vref if dyn.get("amplitude") is None else float(dyn["amplitude"])
     phase = 2.0 * np.pi * cycles * np.arange(n_samples) / n_samples
     vin = np.clip(offset + amplitude * np.sin(phase), 0.0, vref)
-    codes = np.array(
-        [run_sar_conversion(spec, float(v), config=scfg, corner=corner)["code"]
-         for v in vin], dtype=np.int64)
+    conversions = _run_sar_conversions(
+        spec, vin, scfg, corner, None, workers=1)
+    codes = np.array([item["code"] for item in conversions], dtype=np.int64)
     m = dynamic_metrics(codes, 1.0, fundamental_bin=cycles)
     return {"enob": float(m["enob"]), "sndr_db": float(m["sndr_db"]),
             "sfdr_db": float(m["sfdr_db"])}
@@ -287,8 +287,8 @@ def evaluate_sar(spec: CircuitSpec, cfg: SarExploreConfig, *, corner=None) -> di
         vin = vin_full
 
     try:
-        convs = [run_sar_conversion(spec, float(v), config=scfg, corner=corner)
-                 for v in vin]
+        convs = _run_sar_conversions(
+            spec, vin, scfg, corner, None, workers=1)
     except Exception as exc:                       # pragma: no cover - candidate skip
         diagnostics.note("sar_explore.conversion_fail", exc)
         return None

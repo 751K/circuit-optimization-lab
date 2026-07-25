@@ -264,13 +264,13 @@ circuit-opt adc examples/freepdk45_sar6.json \
 | `--corner` | 当前 ADC CLI 接受 `nom/ss/ff` |
 | `-n`, `--n` | `--explore` 模式下的候选数量，默认 `50` |
 | `--seed` | `--explore` 模式下的随机种子，默认 `0` |
-| `--workers` | conversion 或 candidate 并发数；单次转换内 bit 判决仍串行。`--mc` 优先走编译 Rust 批处理（`circuitopt_core.CompiledSarConversion.evaluate_batch`，单 Rayon 池，结果与 worker 数无关、逐字节确定），不满足条件（非原生器件、DC seed 不完整等）时退回 `ThreadPoolExecutor` 逐 trial 求解；`--sweep`/`--sine`/`--explore` 走 `ThreadPoolExecutor` 逐 candidate 求解 |
+| `--workers` | 独立最终瞬态、MC trial 或探索 candidate 的并发数。原生 BSIM 的单次转换、sweep、正弦测试、MC 和探索都使用编译式 Rust SAR 续算内核完成 bit 判决；随后每个输入只运行一次最终瞬态来报告波形和功耗。MC 在单个 Rayon 池中批处理 trial。不支持的拓扑或不完整 DC seed 会显式回退 Python replay。 |
 | `--plot [DIR]` | 输出对应 PNG，需要 `plot` extra |
 | `--csv` / `--jsonl` | ADC explore 输出 |
 | `-o`, `--output` | JSON 结果 |
 
-ADC 控制状态机在 Python 中，比较器、CDAC 和开关仍由晶体管级瞬态计算。当前流程不等价于
-完整晶体管级数字 SAR 控制器。
+闭环 bit 判决状态机在 Rust 续算内核中运行；Python 负责工作流编排以及最终结果和功耗组装。
+比较器、CDAC 和开关仍由晶体管级瞬态计算。当前流程不等价于完整晶体管级数字 SAR 控制器。
 
 ## `plot`
 

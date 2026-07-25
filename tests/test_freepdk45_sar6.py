@@ -87,5 +87,13 @@ def test_sar6_subsampled_sweep_monotonic():
     ideal_centers = np.array([8, 24, 40, 56])
     vin = (ideal_centers + 0.5) / 64.0
     result = run_sar_sweep(spec, vin, workers=4)
-    np.testing.assert_array_equal(result["codes"], [8, 24, 41, 56])
+    # Pinned against both the Rust continuation kernel and independent
+    # fresh-handle Python replays after the fixed-grid Gear2 formula correction.
+    np.testing.assert_array_equal(result["codes"], [9, 25, 41, 54])
     assert np.all(np.diff(result["codes"]) > 0)
+    assert {
+        item["decision_backend"] for item in result["conversions"]
+    } == {"rust_continuation"}
+    assert {
+        item["transient"]["backend"] for item in result["conversions"]
+    } == {"bsim4_native"}

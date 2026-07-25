@@ -571,6 +571,53 @@ pub fn solve_dc<E: Evaluator>(
 
 const GEAR2_PREDICTOR_MAX_STEP_RATIO: f64 = 4.0;
 const GEAR2_PREDICTOR_INPUT_CURVATURE: f64 = 0.25;
+const FIXED_GRID_GEAR2_MAX_STEP_RATIO: f64 = 2.0;
+
+fn fixed_grid_step_coefficients(times: &[f64], sample: usize, gear2: bool) -> Option<[f64; 3]> {
+    if sample == 0 || sample >= times.len() {
+        return None;
+    }
+    let h = times[sample] - times[sample - 1];
+    if !h.is_finite() || h <= 0.0 {
+        return None;
+    }
+    let backward_euler = [1.0 / h, -1.0 / h, 0.0];
+    if !gear2 || sample < 2 {
+        return Some(backward_euler);
+    }
+    let h_previous = times[sample - 1] - times[sample - 2];
+    if !h_previous.is_finite() || h_previous <= 0.0 {
+        return None;
+    }
+    let ratio = h / h_previous;
+    if !ratio.is_finite() || ratio > FIXED_GRID_GEAR2_MAX_STEP_RATIO {
+        return Some(backward_euler);
+    }
+    Some([
+        (2.0 * h + h_previous) / (h * (h + h_previous)),
+        -(h + h_previous) / (h * h_previous),
+        h / (h_previous * (h + h_previous)),
+    ])
+}
+
+/// Integration coefficients used by every sample of a fixed-grid solve.
+///
+/// Row zero has no derivative and is `[0, 0, 0]`. Gear2 starts with one
+/// backward-Euler step and falls back to backward Euler whenever the new step
+/// exceeds twice the previous step.
+pub fn fixed_grid_integration_coefficients(times: &[f64], gear2: bool) -> Option<Vec<[f64; 3]>> {
+    if times.len() < 2
+        || times.iter().any(|value| !value.is_finite())
+        || times.windows(2).any(|window| window[1] <= window[0])
+    {
+        return None;
+    }
+    let mut coefficients = vec![[0.0; 3]; times.len()];
+    for (sample, row) in coefficients.iter_mut().enumerate().skip(1) {
+        *row = fixed_grid_step_coefficients(times, sample, gear2)?;
+    }
+    Some(coefficients)
+}
 
 fn gear2_predictor_enabled() -> bool {
     std::env::var("CIRCUITOPT_BSIM_GEAR2_PREDICTOR")
@@ -1340,15 +1387,12 @@ pub fn advance_fixed_grid<E: Evaluator>(
 
     for sample in samples {
         let h = times[sample] - times[sample - 1];
-        let coefficients = if options.gear2 && sample >= 2 {
-            let h_previous = times[sample - 1] - times[sample - 2];
-            [
-                (2.0 * h + h_previous) / (h * (h + h_previous)),
-                -(h + h_previous) / (h * h_previous),
-                h / (h_previous * (h + h_previous)),
-            ]
-        } else {
-            [1.0 / h, -1.0 / h, 0.0]
+        let Some(coefficients) = fixed_grid_step_coefficients(times, sample, options.gear2) else {
+            if options.profile {
+                profile.failed_steps.push(sample);
+            }
+            *first_failure = Some(sample);
+            return false;
         };
         let input_now = input_at(sample);
         let input_previous = input_at(sample - 1);
@@ -2337,6 +2381,25 @@ mod tests {
         assert_eq!(result.profile.bsim_evaluations, 3);
         assert_eq!(result.profile.bsim_batches, 3);
         assert!(result.profile.failed_steps.is_empty());
+    }
+
+    #[test]
+    fn fixed_grid_coefficients_fall_back_to_be_after_large_step_growth() {
+        let times = [0.0, 1.0, 3.0, 8.0, 9.0];
+        let coefficients = fixed_grid_integration_coefficients(&times, true).unwrap();
+
+        assert_eq!(coefficients[0], [0.0; 3]);
+        assert_eq!(coefficients[1], [1.0, -1.0, 0.0]);
+        // h/h_previous == 2 stays on variable-step BDF2.
+        assert_eq!(coefficients[2], [5.0 / 6.0, -1.5, 2.0 / 3.0]);
+        // h/h_previous == 2.5 falls back to backward Euler.
+        assert_eq!(coefficients[3], [0.2, -0.2, 0.0]);
+        // Shrinking the step resumes Gear2.
+        assert_eq!(coefficients[4], [7.0 / 6.0, -6.0 / 5.0, 1.0 / 30.0]);
+
+        let backward_euler = fixed_grid_integration_coefficients(&times, false).unwrap();
+        assert_eq!(backward_euler[2], [0.5, -0.5, 0.0]);
+        assert_eq!(backward_euler[3], [0.2, -0.2, 0.0]);
     }
 
     #[test]

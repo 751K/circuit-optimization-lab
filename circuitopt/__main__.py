@@ -893,19 +893,27 @@ def _jsonable(value):
     reader and different on every run, which also makes the payload
     irreproducible. Complex values are kept; their text form is stable.
     """
+    if callable(value):
+        return _DROP
     if isinstance(value, dict):
         ready = {}
         for key, item in value.items():
-            if callable(item) or str(key).startswith("_"):
+            if str(key).startswith("_"):
                 continue
             converted = _jsonable(item)
             if converted is not _DROP:
                 ready[str(key)] = converted
         return ready
     if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
+        ready = []
+        for item in value:
+            converted = _jsonable(item)
+            if converted is not _DROP:
+                ready.append(converted)
+        return ready
     if hasattr(value, "tolist"):
-        return value.tolist()
+        converted = value.tolist()
+        return _DROP if converted is value else _jsonable(converted)
     if value is None or isinstance(value, (str, int, float, bool, complex)):
         return value
     return _DROP

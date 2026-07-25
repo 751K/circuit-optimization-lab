@@ -153,7 +153,13 @@ def solve_bsim4_rust(
             )
             accepted_times = np.asarray(tgrid, dtype=float)
             accepted_inputs = np.asarray(input_values, dtype=float)
-            integration_coefficients = None
+            integration_coefficients = np.asarray(
+                problem.fixed_grid_coefficients(
+                    np.asarray(tgrid, dtype=float),
+                    integration_method=method,
+                ),
+                dtype=float,
+            )
             accepted_steps = len(accepted_times) - 1
             rejected_steps = 0
             trial_solves = accepted_steps

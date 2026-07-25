@@ -55,13 +55,13 @@ def test_compiled_batch_matches_reference_codes_bit_for_bit():
     A large Vth/cap sigma forces bit flips and non-monotonic sweeps, so this is a
     discrete-decision (non-tolerance) parity check, not a numeric one.
     """
-    from circuitopt.sar import run_sar_conversion
+    from circuitopt.sar import _run_sar_conversion_reference
     from circuitopt.sar_rust import build_sar_batch
     spec = _spec()
     cfg, draws, vin = _draws(spec, {"sigma_vth0": 0.05, "sigma_cu": 0.05}, 3, 3)
     reference = [
-        np.array([run_sar_conversion(trial_spec, float(v), config=cfg,
-                                     mismatch=delvto)["code"] for v in vin],
+        np.array([_run_sar_conversion_reference(
+            trial_spec, float(v), config=cfg, mismatch=delvto)["code"] for v in vin],
                  dtype=np.int64)
         for delvto, trial_spec in draws
     ]

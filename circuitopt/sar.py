@@ -77,10 +77,9 @@ def _clock_config(cfg: Mapping) -> dict | None:
     single strobe waveform (key ``clock.input``) is generated that rests at
     ``low`` and pulses to ``high`` around every bit's ``decision_time`` so a
     dynamic latch (StrongARM) precharges during CDAC settling and evaluates at the
-    decision instant. Because ``run_sar_conversion`` reads the comparator only at
-    the trial bit's ``decision_time`` and replays each bit from t=0, one fixed
-    per-bit strobe pattern (independent of ``trial_index`` and the decisions)
-    serves every replay.
+    decision instant. The strobe schedule is independent of the trial index and
+    decisions, so the same waveform serves both the compiled continuation loop
+    and the frozen replay fallback.
     """
     clock = cfg.get("clock")
     if clock is None:
@@ -206,34 +205,23 @@ def sar_input_waveforms(spec: CircuitSpec, vin: float, decisions: Sequence[int |
     return out
 
 
-def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
-                       corner: str | None = None,
-                       mismatch: Mapping[str, float] | None = None) -> dict:
-    """Run one closed-loop SAR conversion using physical comparator decisions.
+def _sar_initial_state(binding) -> np.ndarray | None:
+    if not isinstance(binding.dc_seed, Mapping):
+        return None
+    try:
+        return np.asarray(
+            [binding.dc_seed[name] for name in binding.topo.solved],
+            dtype=float,
+        )
+    except KeyError:
+        return None
 
-    Each bit replays the conversion from sampling through that decision. Replaying
-    preserves the simulator's device and capacitor state exactly while allowing
-    Python to update future CDAC controls from the comparator result.
 
-    ``mismatch`` is an optional ``{device: delvto[V]}`` per-instance Vth-offset map
-    threaded to every replayed transient (see :mod:`circuitopt.sar_mc`); ``None``
-    reproduces the nominal conversion exactly. Capacitor mismatch is applied
-    upstream by perturbing ``spec`` itself, so it needs no argument here.
-    """
-    cfg = _sar_config(spec, config)
-    if not 0.0 <= vin <= cfg["vref"]:
-        raise ValueError("vin must lie between 0 and adc.vref")
+def _run_sar_decisions_replayed(spec, vin, cfg, corner, mismatch):
+    """Frozen Python reference: replay one complete transient per decision."""
     tgrid = sar_time_grid(spec, cfg)
     binding = spec.binding().at_corner(corner)
-    initial = None
-    if isinstance(binding.dc_seed, Mapping):
-        try:
-            initial = np.asarray(
-                [binding.dc_seed[name] for name in binding.topo.solved],
-                dtype=float,
-            )
-        except KeyError:
-            initial = None
+    initial = _sar_initial_state(binding)
     decisions: list[int | None] = [None] * cfg["n_bits"]
     trace = []
     for bit in range(cfg["n_bits"]):
@@ -258,6 +246,25 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
             "comparator_v": comparator_v,
             "kept": bool(decisions[bit]),
         })
+    return np.asarray(decisions, np.int8), trace
+
+
+def _finalize_sar_conversion(
+    spec,
+    vin,
+    cfg,
+    corner,
+    mismatch,
+    bits,
+    *,
+    trace=None,
+    decision_backend,
+):
+    """Run the one final waveform needed for power and the public transient."""
+    tgrid = sar_time_grid(spec, cfg)
+    binding = spec.binding().at_corner(corner)
+    initial = _sar_initial_state(binding)
+    decisions = [int(value) for value in np.asarray(bits, np.int8)]
     waveforms = sar_input_waveforms(
         spec, vin, decisions, cfg["n_bits"] - 1, config=cfg, tgrid=tgrid)
     result = transient(
@@ -267,6 +274,26 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
     )
     bits = np.asarray(decisions, np.int8)
     weights = 1 << np.arange(cfg["n_bits"] - 1, -1, -1, dtype=np.int64)
+    if trace is None:
+        node = cfg["comparator_node"]
+        if node not in result["nodes"]:
+            raise ValueError(
+                f"comparator node {node!r} is absent from transient result")
+        trace = []
+        for bit, kept in enumerate(bits):
+            decision_time = cfg["sample_end"] + (bit + 1.0) * cfg["bit_period"]
+            comparator_v = float(np.interp(
+                decision_time,
+                result["t"],
+                result["nodes"][node],
+            ))
+            trace.append({
+                "bit": bit,
+                "weight": int(weights[bit]),
+                "decision_time": decision_time,
+                "comparator_v": comparator_v,
+                "kept": bool(kept),
+            })
     rail_values = spec.topology.rail_values(spec.bias)
     supply_rails = cfg.get("power_rails", ("VDD",))
     supply_power = average_supply_power(
@@ -295,23 +322,123 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
         "supply_power": supply_power,
         "driver_power": driver_power,
         "total_power_w": supply_power["total_w"] + driver_power["total_w"],
+        "decision_backend": decision_backend,
     }
+
+
+def _run_sar_conversion_reference(spec: CircuitSpec, vin: float, *, config=None,
+                                  corner: str | None = None,
+                                  mismatch: Mapping[str, float] | None = None) -> dict:
+    """Run the frozen full-replay SAR path for parity and unsupported circuits."""
+    cfg = _sar_config(spec, config)
+    if not 0.0 <= vin <= cfg["vref"]:
+        raise ValueError("vin must lie between 0 and adc.vref")
+    bits, trace = _run_sar_decisions_replayed(
+        spec, float(vin), cfg, corner, mismatch)
+    return _finalize_sar_conversion(
+        spec,
+        float(vin),
+        cfg,
+        corner,
+        mismatch,
+        bits,
+        trace=trace,
+        decision_backend="python_replay",
+    )
+
+
+def _compiled_sar_codes(spec, cfg, vin, corner, mismatch):
+    from .sar_rust import build_sar_batch
+
+    batch = build_sar_batch(spec, cfg, corner=corner, vins=vin)
+    cap_values = [float(capacitor[3]) for capacitor in spec.topology.capacitors]
+    return batch.run([(mismatch or {}, cap_values)], workers=1)[0]
+
+
+def _run_sar_conversions(spec, vin, cfg, corner, mismatch, workers):
+    """Run an ordered input batch through Rust continuation plus final transients."""
+    from .sar_rust import SarRustUnavailable
+
+    if workers is None or workers < 1:
+        raise ValueError("workers must be a positive integer")
+    values = np.asarray(vin, dtype=float)
+    if (
+        values.ndim != 1
+        or not len(values)
+        or not np.all(np.isfinite(values))
+        or np.any(values < 0.0)
+        or np.any(values > cfg["vref"])
+    ):
+        raise ValueError("SAR inputs must be a non-empty finite 1D array inside [0, vref]")
+    try:
+        codes = _compiled_sar_codes(
+            spec, cfg, values, corner, mismatch)
+    except SarRustUnavailable:
+        return _run_independent_conversions(
+            lambda value: _run_sar_conversion_reference(
+                spec,
+                float(value),
+                config=cfg,
+                corner=corner,
+                mismatch=mismatch,
+            ),
+            values,
+            workers,
+        )
+
+    weights = 1 << np.arange(cfg["n_bits"] - 1, -1, -1, dtype=np.int64)
+
+    def finalize(item):
+        value, code = item
+        bits = ((int(code) & weights) != 0).astype(np.int8)
+        return _finalize_sar_conversion(
+            spec,
+            float(value),
+            cfg,
+            corner,
+            mismatch,
+            bits,
+            decision_backend="rust_continuation",
+        )
+
+    return _run_independent_conversions(
+        finalize,
+        zip(values, codes, strict=True),
+        workers,
+    )
+
+
+def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
+                       corner: str | None = None,
+                       mismatch: Mapping[str, float] | None = None) -> dict:
+    """Run one physical SAR conversion using the compiled continuation loop.
+
+    Rust advances one trajectory across all bit decisions. Python then runs the
+    final decided waveform once to preserve the public transient, source-power,
+    and comparator-trace results. Unsupported topologies use the frozen replay
+    path explicitly.
+    """
+    cfg = _sar_config(spec, config)
+    return _run_sar_conversions(
+        spec,
+        np.asarray([vin], dtype=float),
+        cfg,
+        corner,
+        mismatch,
+        workers=1,
+    )[0]
 
 
 def _run_independent_conversions(run, values, workers: int) -> list:
     """Evaluate an ordered batch of *independent* conversions, optionally threaded.
 
-    Every SAR conversion here (one sweep/signal sample) is independent of the others
-    — no shared mutable state, since :func:`run_sar_conversion` rebuilds its
-    ``spec.binding().at_corner(corner)`` per call and every ngspice ``.tran`` runs in
-    its own :class:`TemporaryDirectory`. The work is ngspice-subprocess-bound (the
-    subprocess ``wait`` releases the GIL), so a :class:`ThreadPoolExecutor` gives a
-    near-linear speed-up without the pickling cost of processes.
+    Every final SAR transient here is independent of the others and owns its
+    native handles. A :class:`ThreadPoolExecutor` therefore parallelises the
+    result/power reconstruction without sharing mutable solver state.
 
-    ``workers == 1`` keeps today's exact serial list-comprehension path.
-    ``ex.map`` preserves input order, so any worker count returns a byte-identical,
-    order-preserving result. Bit decisions *within* a conversion stay sequential —
-    only whole conversions are parallelised.
+    ``ex.map`` preserves input order, so any worker count returns an ordered
+    result. Bit decisions within one conversion stay in the Rust continuation
+    kernel; only independent final transients are parallelised here.
     """
     if workers is None or workers < 1:
         raise ValueError("workers must be a positive integer")
@@ -346,10 +473,8 @@ def run_sar_sweep(spec: CircuitSpec, vin_values, *, config=None,
     vin = np.asarray(vin_values, float)
     if vin.ndim != 1 or len(vin) < 2 or np.any(np.diff(vin) <= 0.0):
         raise ValueError("vin_values must be a strictly increasing one-dimensional array")
-    conversions = _run_independent_conversions(
-        lambda value: run_sar_conversion(spec, value, config=cfg, corner=corner,
-                                         mismatch=mismatch),
-        vin, workers)
+    conversions = _run_sar_conversions(
+        spec, vin, cfg, corner, mismatch, workers)
     codes = np.array([item["code"] for item in conversions], np.int64)
     metrics = static_ramp_metrics(
         vin, codes, cfg["n_bits"], vmin=0.0, vmax=cfg["vref"])
@@ -376,9 +501,8 @@ def run_sar_signal(spec: CircuitSpec, vin_values, sample_rate: float, *, config=
     vin = np.asarray(vin_values, float)
     if vin.ndim != 1 or len(vin) < 8:
         raise ValueError("vin_values must contain at least eight samples")
-    conversions = _run_independent_conversions(
-        lambda value: run_sar_conversion(spec, value, config=cfg, corner=corner),
-        vin, workers)
+    conversions = _run_sar_conversions(
+        spec, vin, cfg, corner, None, workers)
     codes = np.array([item["code"] for item in conversions], np.int64)
     return {
         "vin": vin,

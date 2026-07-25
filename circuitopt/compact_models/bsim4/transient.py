@@ -34,32 +34,20 @@ def _subdivision_counts(intervals, max_step):
     ).astype(int)
 
 
-def _integration_coefficient_columns(tgrid, method, provided):
-    """Return the ``(a0, a1, a2)`` BDF columns for samples ``1 .. len(tgrid)-1``.
-
-    Each entry applies the same sequence of IEEE double operations the
-    per-sample scalar form used, so reconstructed branch currents stay
-    bit-identical while the per-sample Python call disappears.
-    """
-    if provided is not None:
-        coefficients = np.asarray(provided, dtype=float)
-        return coefficients[1:, 0], coefficients[1:, 1], coefficients[1:, 2]
-    times = np.asarray(tgrid, dtype=float)
-    h = np.diff(times)
-    a0 = 1.0 / h
-    a1 = -1.0 / h
-    a2 = np.zeros(len(h), dtype=float)
-    if method == "be" or len(h) < 2:
-        # Backward Euler everywhere; sample 1 also stays BE under gear2.
-        return a0, a1, a2
-    h_step = h[1:]
-    rho = h_step / h[:-1]
-    denominator = (1.0 + rho) * h_step
-    gear2 = rho <= 2.0
-    a0[1:] = np.where(gear2, (1.0 + 2.0 * rho) / denominator, a0[1:])
-    a1[1:] = np.where(gear2, -(1.0 + rho) / h_step, a1[1:])
-    a2[1:] = np.where(gear2, (rho * rho) / denominator, 0.0)
-    return a0, a1, a2
+def _integration_coefficient_columns(tgrid, _method, provided):
+    """Validate and split integration coefficients returned by the native solver."""
+    if provided is None:
+        raise RuntimeError(
+            "native BSIM4 transient did not return its integration coefficients")
+    coefficients = np.asarray(provided, dtype=float)
+    if coefficients.shape != (len(tgrid), 3):
+        raise RuntimeError(
+            "native BSIM4 transient returned invalid integration coefficients: "
+            f"{coefficients.shape}, expected {(len(tgrid), 3)}")
+    if not np.all(np.isfinite(coefficients)):
+        raise RuntimeError(
+            "native BSIM4 transient returned non-finite integration coefficients")
+    return coefficients[1:, 0], coefficients[1:, 1], coefficients[1:, 2]
 
 
 def _shift_two(values):

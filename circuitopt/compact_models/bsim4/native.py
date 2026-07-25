@@ -422,16 +422,14 @@ def isolated_native_device_cache():
 
     A handle carries state between calls: a BSIM instance keeps its internal
     drain/source node solution as the next call's warm start and the ``state0``
-    voltages the next load limits against. Sharing one across independent units
-    of work therefore makes each unit's answer depend on what ran before it.
-    That is why a signoff campaign only reproduced at a single worker — running
-    the same 45-point campaign twice on eight workers moved 559 of 1260 measured
-    values, because points sharing a card (same corner and temperature, three
-    supplies) leased the same handle and interleaved.
+    voltages the next load limits against. The backend gives overlapping leases
+    independent handles, but ordinary sequential leases intentionally reuse an
+    idle cached handle and its warm history.
 
-    Inside this scope a unit leases from its own namespace, so its result is a
-    function of that unit alone at any worker count. Handles opened here are
-    closed on exit; reuse *within* the unit is unaffected.
+    This stronger scope is for independent units such as signoff points: a unit
+    leases from its own namespace, so it cannot inherit history even from a
+    previously completed unit. Handles opened here are closed on exit; reuse
+    *within* the unit is unaffected.
     """
     token = object()
     previous = _current_scope_token()
@@ -445,7 +443,7 @@ def isolated_native_device_cache():
 
 
 class _NativeDeviceLease:
-    """Pins one cached native handle until the lease leaves scope."""
+    """Own one native handle exclusively until the lease is released."""
 
     def __init__(self, backend, device, cached, store):
         self._backend = backend
@@ -482,14 +480,18 @@ class NativeBsim4Backend:
         self._shared = _DeviceStore()
         self._scoped: dict[object, _DeviceStore] = {}
         self._lock = threading.RLock()
+        self._active_leases = 0
+        self._closed = False
         _BACKENDS.add(self)
 
     def _store(self) -> _DeviceStore:
         """The handle namespace this thread leases from."""
-        token = _current_scope_token()
-        if token is None:
-            return self._shared
         with self._lock:
+            if self._closed:
+                raise Bsim4NativeError("BSIM4 native backend is closed")
+            token = _current_scope_token()
+            if token is None:
+                return self._shared
             store = self._scoped.get(token)
             if store is None:
                 store = _DeviceStore()
@@ -538,25 +540,42 @@ class NativeBsim4Backend:
         temperature_k: float,
         backend: str,
     ) -> tuple[_NativeDevice, bool, _DeviceStore | None]:
-        if self._cache_size == 0:
-            return (
-                _NativeDevice(model, instance, temperature_k, backend=backend),
-                False,
-                None,
-            )
-        key = self._key(model, instance, temperature_k, backend)
-        store = self._store()
-        with store.lock:
-            device = store.devices.get(key)
-            if device is not None:
-                store.devices.move_to_end(key)
-            else:
-                device = _NativeDevice(model, instance, temperature_k, backend=backend)
-                store.devices[key] = device
-            identity = id(device)
-            store.active[identity] = store.active.get(identity, 0) + 1
-            self._evict_idle_locked(store)
-            return device, True, store
+        with self._lock:
+            if self._closed:
+                raise Bsim4NativeError("BSIM4 native backend is closed")
+            if self._cache_size == 0:
+                device = _NativeDevice(
+                    model, instance, temperature_k, backend=backend)
+                self._active_leases += 1
+                return device, False, None
+
+            key = self._key(model, instance, temperature_k, backend)
+            store = self._store()
+            with store.lock:
+                device = store.devices.get(key)
+                if device is not None and store.active.get(id(device), 0) == 0:
+                    store.devices.move_to_end(key)
+                    identity = id(device)
+                    store.active[identity] = 1
+                    self._evict_idle_locked(store)
+                    self._active_leases += 1
+                    return device, True, store
+                if device is None:
+                    device = _NativeDevice(
+                        model, instance, temperature_k, backend=backend)
+                    store.devices[key] = device
+                    store.active[id(device)] = 1
+                    self._evict_idle_locked(store)
+                    self._active_leases += 1
+                    return device, True, store
+
+                # A BSIM handle carries mutable internal-node and limiting
+                # history for a whole solver trajectory. Never hand an active
+                # cached handle to a second lease.
+                device = _NativeDevice(
+                    model, instance, temperature_k, backend=backend)
+                self._active_leases += 1
+                return device, False, None
 
     def _release_device(
         self,
@@ -564,17 +583,17 @@ class NativeBsim4Backend:
         cached: bool,
         store: _DeviceStore | None,
     ) -> None:
-        if not cached or store is None:
-            device.close()
-            return
-        with store.lock:
-            identity = id(device)
-            remaining = store.active.get(identity, 0) - 1
-            if remaining > 0:
-                store.active[identity] = remaining
-            else:
-                store.active.pop(identity, None)
-            self._evict_idle_locked(store)
+        with self._lock:
+            try:
+                if not cached or store is None:
+                    device.close()
+                    return
+                with store.lock:
+                    identity = id(device)
+                    store.active.pop(identity, None)
+                    self._evict_idle_locked(store)
+            finally:
+                self._active_leases -= 1
 
     def evaluate(
         self,
@@ -605,8 +624,11 @@ class NativeBsim4Backend:
         must close it. A dedicated handle avoids sharing mutable BSIM state
         between concurrent transient simulations.
         """
-        return _NativeDevice(
-            model, instance, float(temperature_k), backend=_backend_choice())
+        with self._lock:
+            if self._closed:
+                raise Bsim4NativeError("BSIM4 native backend is closed")
+            return _NativeDevice(
+                model, instance, float(temperature_k), backend=_backend_choice())
 
     def lease_device(
         self,
@@ -614,7 +636,12 @@ class NativeBsim4Backend:
         instance: Bsim4InstanceCard,
         temperature_k: float,
     ) -> _NativeDeviceLease:
-        """Pin a cached, already-setup handle for one whole solver call."""
+        """Lease an exclusive handle for one whole solver call.
+
+        An idle cached handle is reused when available. If the matching cache
+        entry is already leased, the overlapping caller receives a temporary
+        independent handle so mutable BSIM history cannot cross trajectories.
+        """
         device, cached, store = self._lease_device(
             model, instance, float(temperature_k), _backend_choice())
         return _NativeDeviceLease(self, device, cached, store)
@@ -730,9 +757,14 @@ class NativeBsim4Backend:
 
     def close(self) -> None:
         with self._lock:
-            if self._active:
+            if self._closed:
+                return
+            if self._active_leases:
                 raise Bsim4NativeError(
                     "cannot close BSIM4 backend while evaluations are active")
-            for device in self._devices.values():
-                device.close()
-            self._devices.clear()
+            self._shared.close()
+            for store in self._scoped.values():
+                store.close()
+            self._scoped.clear()
+            self._closed = True
+            _BACKENDS.discard(self)

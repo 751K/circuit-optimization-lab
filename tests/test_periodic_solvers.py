@@ -634,3 +634,35 @@ def test_adaptive_transient_stays_inside_the_requested_window():
 
     closed = _with_adaptive_waveform_breakpoints(periodic, requested, period)
     assert closed[-1] == pytest.approx(period)
+
+
+def test_adaptive_breakpoints_preserve_nonzero_absolute_time_window():
+    import numpy as np
+
+    from circuitopt.analysis_dispatch import _with_adaptive_waveform_breakpoints
+
+    period = 10e-9
+    periodic = {
+        "inputs": {
+            "clk": {
+                "type": "square",
+                "delay": 3e-9,
+                "duty": 0.2,
+            }
+        }
+    }
+    requested = np.linspace(12e-9, 16e-9, 17)
+
+    merged = _with_adaptive_waveform_breakpoints(
+        periodic,
+        requested,
+        period,
+        close_period=False,
+    )
+
+    assert merged[0] == requested[0]
+    assert merged[-1] == requested[-1]
+    assert np.all(np.diff(merged) > 0.0)
+    # The 3 ns and 5 ns phase edges repeat at 13 ns and 15 ns in this window.
+    assert np.any(np.isclose(merged, 13e-9, rtol=0.0, atol=1e-18))
+    assert np.any(np.isclose(merged, 15e-9, rtol=0.0, atol=1e-18))

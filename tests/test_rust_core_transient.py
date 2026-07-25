@@ -309,7 +309,8 @@ def test_rust_adaptive_gear2_matches_analytic_rc():
         solved=["OUT"], devices=[], rails={"GND": 0.0},
         resistors=[("R", "OUT", "GND", 1e3)],
         capacitors=[("C", "OUT", "GND", 1e-9)], outputs=("OUT",))
-    times = np.array([0.0, 2e-6, 2.1e-6, 5e-6])
+    start = 7e-6
+    times = start + np.array([0.0, 2e-6, 2.1e-6, 5e-6])
     current = np.array([0.0, 0.0, 1e-3, 1e-3])
     marshalled = _marshal_transient(
         {}, {}, times, topo=topo, V0=np.array([0.0]),
@@ -342,13 +343,13 @@ def test_rust_adaptive_gear2_matches_analytic_rc():
     assert np.all(np.diff(t) > 0)
     assert got_substeps >= len(t) - 1
     assert got_rejected >= 0
-    # Analytic RC response to the 1 mA step ramped over 2.0-2.1us; use the
-    # ramp midpoint 2.05us as the effective step time.
+    # Analytic RC response to the 1 mA step ramped over relative time
+    # 2.0-2.1 us; use the ramp midpoint as the effective step time.
     v = np.asarray(got_states)[:, 0]
     tau = 1e-6
-    late = t >= 2.1e-6
-    analytic_late = 1.0 - np.exp(-(t[late] - 2.05e-6) / tau)
-    np.testing.assert_allclose(v[t <= 2e-6], 0.0, atol=1e-12)
+    late = t >= start + 2.1e-6
+    analytic_late = 1.0 - np.exp(-(t[late] - (start + 2.05e-6)) / tau)
+    np.testing.assert_allclose(v[t <= start + 2e-6], 0.0, atol=1e-12)
     np.testing.assert_allclose(v[late], analytic_late, atol=6e-2)
 
 

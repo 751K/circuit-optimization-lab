@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -36,44 +37,14 @@ def test_expanded_grid_preserves_integer_subdivision_and_real_excess():
     assert above_indices.tolist() == [0, 2]
 
 
-def _scalar_coefficients(tgrid, method, sample):
-    """The per-sample BDF form the vectorized columns replaced.
-
-    Kept as an independent oracle: branch-current reconstruction must stay
-    bit-identical to this recurrence, not merely close to it.
-    """
-    h = float(tgrid[sample] - tgrid[sample - 1])
-    if method == "be" or sample == 1:
-        return (1.0 / h, -1.0 / h, 0.0)
-    h_prev = float(tgrid[sample - 1] - tgrid[sample - 2])
-    rho = h / h_prev
-    if rho > 2.0:
-        return (1.0 / h, -1.0 / h, 0.0)
-    return (
-        (1.0 + 2.0 * rho) / ((1.0 + rho) * h),
-        -(1.0 + rho) / h,
-        (rho * rho) / ((1.0 + rho) * h),
-    )
-
-
-@pytest.mark.parametrize("method", ["be", "gear2"])
-def test_integration_coefficient_columns_are_bit_identical_to_scalar_form(method):
+def test_integration_coefficient_columns_require_solver_rows():
     from circuitopt.compact_models.bsim4.transient import (
         _integration_coefficient_columns,
     )
 
-    # Uniform, gently stretched (rho <= 2 -> BDF2), and abruptly stretched
-    # (rho > 2 -> BE fallback) intervals in one grid.
-    steps = [1e-11] * 3 + [1.5e-11, 2.0e-11, 1e-11, 5e-11, 1e-12, 3e-12]
-    tgrid = np.concatenate(([0.0], np.cumsum(steps)))
-    ratios = np.diff(tgrid)[1:] / np.diff(tgrid)[:-1]
-    assert np.any(ratios > 2.0) and np.any(ratios <= 2.0)
-
-    a0, a1, a2 = _integration_coefficient_columns(tgrid, method, None)
-    for sample in range(1, len(tgrid)):
-        expected = _scalar_coefficients(tgrid, method, sample)
-        actual = (a0[sample - 1], a1[sample - 1], a2[sample - 1])
-        assert actual == expected, f"sample {sample}: {actual} != {expected}"
+    with pytest.raises(RuntimeError, match="did not return"):
+        _integration_coefficient_columns(
+            np.asarray([0.0, 1.0]), "gear2", None)
 
 
 def test_integration_coefficient_columns_pass_through_solver_rows():
@@ -85,11 +56,84 @@ def test_integration_coefficient_columns_pass_through_solver_rows():
     a0, a1, a2 = _integration_coefficient_columns(
         np.asarray([0.0, 1.0, 2.0]), "gear2", provided)
 
-    # The adaptive solver reports its own accepted-step coefficients; sample 0
-    # carries no derivative and is dropped.
+    # Both fixed and adaptive Rust solvers report the coefficients they actually
+    # stamped; sample 0 carries no derivative and is dropped.
     np.testing.assert_array_equal(a0, provided[1:, 0])
     np.testing.assert_array_equal(a1, provided[1:, 1])
     np.testing.assert_array_equal(a2, provided[1:, 2])
+
+
+def test_fixed_grid_wrapper_returns_native_integration_coefficients(monkeypatch):
+    from circuitopt.compact_models.bsim4 import rust_transient
+
+    coefficients = np.asarray([
+        [0.0, 0.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [0.2, -0.2, 0.0],
+    ])
+    handles = []
+
+    class FakeHandle:
+        def __init__(self, *_args, **_kwargs):
+            self.pointer = 1
+            self.closed = False
+            handles.append(self)
+
+        def close(self):
+            self.closed = True
+
+    class FakeProblem:
+        def solve_fixed_grid(self, initial, times, inputs, **kwargs):
+            assert kwargs["integration_method"] == "gear2"
+            count = len(times)
+            return (
+                True,
+                np.zeros((count, len(initial))),
+                np.zeros((count, 1, 4)),
+                np.zeros((count, 1, 4)),
+                0,
+                -1,
+                3,
+                4,
+                5,
+                0,
+                [],
+            )
+
+        def fixed_grid_coefficients(self, times, **kwargs):
+            assert kwargs["integration_method"] == "gear2"
+            np.testing.assert_array_equal(times, [0.0, 1.0, 6.0])
+            return coefficients
+
+    monkeypatch.setattr(rust_transient, "_NativeDevice", FakeHandle)
+    monkeypatch.setattr(
+        rust_transient,
+        "build_bsim4_problem",
+        lambda *_args, **_kwargs: FakeProblem(),
+    )
+    wrapper = SimpleNamespace(
+        model_card=object(),
+        instance_card=object(),
+        temperature=300.15,
+    )
+    plan = SimpleNamespace(devices=[SimpleNamespace(name="M1")])
+
+    result = rust_transient.solve_bsim4_rust(
+        plan,
+        {"M1": wrapper},
+        np.asarray([0.0]),
+        np.asarray([0.0, 1.0, 6.0]),
+        np.empty((0, 3)),
+        (),
+        method="gear2",
+        newton_maxit=10,
+        newton_vtol=1e-8,
+        newton_step_limit=0.25,
+        gmin=1e-12,
+    )
+
+    np.testing.assert_array_equal(result[2], coefficients)
+    assert handles and handles[0].closed
 
 
 def test_shift_two_reuses_first_sample_for_the_opening_step():

@@ -30,24 +30,75 @@ def test_differential_sar_waveforms_stay_inside_rails():
     np.testing.assert_allclose(wave["sample"] + wave["sample_b"], 1.0)
 
 
-def test_sar_physical_comparator_conversion():
+def test_sar_physical_comparator_conversion(monkeypatch):
+    import circuitopt.sar as sar
     from circuitopt.circuit_loader import load_circuit_json
-    from circuitopt.sar import run_sar_conversion
+
     spec = load_circuit_json(EXAMPLE)
-    result = run_sar_conversion(spec, 0.7)
+    calls = 0
+    real_transient = sar.transient
+
+    def counting_transient(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_transient(*args, **kwargs)
+
+    monkeypatch.setattr(sar, "transient", counting_transient)
+    result = sar.run_sar_conversion(spec, 0.7)
     assert result["code"] == 5
     np.testing.assert_array_equal(result["bits"], [1, 0, 1])
+    assert result["decision_backend"] == "rust_continuation"
+    assert calls == 1
     assert result["transient"]["backend"] == "bsim4_native"
     assert len(result["decisions"]) == 3
     assert result["supply_power"]["total_w"] > 0.0
     assert np.isfinite(result["total_power_w"])
 
 
-def test_sar_code_center_sweep_has_every_code():
+def test_sar_continuation_matches_frozen_replay():
     from circuitopt.circuit_loader import load_circuit_json
-    from circuitopt.sar import run_sar_sweep
+    from circuitopt.sar import (
+        _run_sar_conversion_reference,
+        run_sar_conversion,
+    )
+
+    spec = load_circuit_json(EXAMPLE)
+    expected = _run_sar_conversion_reference(spec, 0.7)
+    actual = run_sar_conversion(spec, 0.7)
+
+    assert actual["code"] == expected["code"]
+    np.testing.assert_array_equal(actual["bits"], expected["bits"])
+    np.testing.assert_array_equal(
+        actual["transient"]["output"],
+        expected["transient"]["output"],
+    )
+    np.testing.assert_array_equal(
+        [item["comparator_v"] for item in actual["decisions"]],
+        [item["comparator_v"] for item in expected["decisions"]],
+    )
+    assert actual["total_power_w"] == expected["total_power_w"]
+
+
+def test_sar_code_center_sweep_has_every_code(monkeypatch):
+    import circuitopt.sar as sar
+    from circuitopt.circuit_loader import load_circuit_json
+
     spec = load_circuit_json(EXAMPLE)
     vin = (np.arange(8) + 0.5) / 8.0
-    result = run_sar_sweep(spec, vin)
+    calls = 0
+    real_transient = sar.transient
+
+    def counting_transient(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_transient(*args, **kwargs)
+
+    monkeypatch.setattr(sar, "transient", counting_transient)
+    result = sar.run_sar_sweep(spec, vin)
     np.testing.assert_array_equal(result["codes"], np.arange(8))
     assert len(result["metrics"]["missing_codes"]) == 0
+    assert calls == len(vin)
+    assert all(
+        item["decision_backend"] == "rust_continuation"
+        for item in result["conversions"]
+    )
