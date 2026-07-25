@@ -13,6 +13,7 @@ import math
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from ._parallel import worker_device_eval
 from .analysis_dispatch import run_analysis_suite
 from .circuit_loader import circuit_from_dict
 from .run_contract import (
@@ -420,6 +421,22 @@ def _run_point(
     }
 
 
+def _run_point_worker(
+    point_index: int,
+    point: tuple[str, float, float],
+    cases: list[dict[str, Any]],
+    pvt: Mapping[str, Any],
+    workers: int,
+) -> tuple[int, dict[str, Any]]:
+    """:func:`_run_point` on a worker thread of a parallel campaign.
+
+    Points are the parallel level here, so each one evaluates its device
+    batches inline rather than contending for the shared pool.
+    """
+    with worker_device_eval(workers):
+        return _run_point(point_index, point, cases, pvt)
+
+
 def _global_worst(points: list[Mapping[str, Any]]) -> dict[str, Any] | None:
     candidates = [point["worst_case"] for point in points
                   if point["worst_case"] is not None]
@@ -503,7 +520,8 @@ def run_signoff_campaign(
         executor = ThreadPoolExecutor(max_workers=workers)
         try:
             futures = {
-                executor.submit(_run_point, index, point, cases, pvt): index
+                executor.submit(_run_point_worker, index, point, cases, pvt,
+                                workers): index
                 for index, point in enumerate(points)
             }
             for future in as_completed(futures):

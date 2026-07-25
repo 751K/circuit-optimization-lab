@@ -40,6 +40,7 @@ import numpy as np
 
 from . import diagnostics
 from .adc import static_ramp_metrics
+from ._parallel import worker_device_eval
 from .circuit_loader import CircuitSpec
 from .sar import _sar_config, run_sar_conversion
 
@@ -326,7 +327,12 @@ def sar_mismatch_mc(spec: CircuitSpec, *, n: int = 50, seed: int = 0,
                 progress(i + 1, n, _summarize(ordered, mcfg))
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(_run_trial, i) for i in range(n)]
+            def run_trial_worker(index):
+                # Trials are the parallel level here.
+                with worker_device_eval(workers, n):
+                    return _run_trial(index)
+
+            futures = [ex.submit(run_trial_worker, i) for i in range(n)]
             done: list[dict] = []
             for completed, fut in enumerate(as_completed(futures), start=1):
                 row = fut.result()

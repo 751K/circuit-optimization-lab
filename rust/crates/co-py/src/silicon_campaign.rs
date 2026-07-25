@@ -302,6 +302,9 @@ pub struct SiliconEvaluator<'a> {
     pub template: &'a SiliconTemplate,
     pub candidates: &'a [SiliconCandidate],
     pub compute_noise: bool,
+    /// Whether the batch runs candidates concurrently, so a candidate should
+    /// leave the shared device pool alone.
+    pub outer_parallel: bool,
 }
 
 /// Candidate state retained between campaign stages.
@@ -714,6 +717,12 @@ impl CandidateEvaluator for SiliconEvaluator<'_> {
     type Output = SiliconMetrics;
 
     fn evaluate(&self, index: usize, inner_parallel: bool) -> CandidateOutcome<SiliconMetrics> {
+        // Candidates are the parallel level unless the batch handed the pool to
+        // the inner frequency sweep, so this candidate's device batches are
+        // evaluated inline rather than contending for the shared BSIM pool. A
+        // single-worker batch has no outer parallelism to protect.
+        let _serial =
+            (self.outer_parallel && !inner_parallel).then(co_bsim4::SerialEvalGuard::enter);
         let cand = self
             .candidates
             .get(index)

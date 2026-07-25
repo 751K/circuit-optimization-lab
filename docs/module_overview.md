@@ -588,6 +588,14 @@ Solves the time-domain response of the topology-defined system using backward Eu
   `CIRCUITOPT_BSIM_BATCH_THREADS=1..10`. Repeated cached handles are grouped
   onto one worker and evaluated serially; distinct handles remain parallel, so
   mutable compact-model state is never entered concurrently. Stamping remains deterministic.
+  The pool is process-wide, so parallelism belongs to the outermost level: a
+  driver already running solves concurrently (signoff PVT points, SAR
+  conversions and Monte-Carlo trials, corner/PVT slices, exploration
+  candidates) has its workers evaluate batches inline and leaves the cores to
+  that level. This applies only when the outer work is at least as wide as the
+  worker count, matching the compiled campaign's own axis rule, so a single
+  solve keeps the pool. `CIRCUITOPT_BSIM_NESTED_POOL=1` restores the previous
+  scheduling; results are unaffected either way.
   Profiling disabled leaves these counters and the result field absent. The
   original `eval_batch` ABI remains as a compatibility wrapper.
 - Accepted-state device-current and charge history reuses the final converged

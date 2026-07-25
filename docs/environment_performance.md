@@ -22,6 +22,15 @@
 > `CIRCUITOPT_BSIM_BATCH_THREADS=1..10` 显式降低并行度；该值高于 10 时仍会限制为
 > 10。线程池在进程内首次使用时建立一次，之后修改环境变量不会重建。
 >
+> 该池是进程级共享的，因此**并行归外层所有**：当驱动本身在并发跑多次求解
+> （signoff PVT 点、SAR 转换与蒙特卡洛 trial、corner/PVT 切片、探索候选），
+> 其 worker 会内联求值器件批次，把核让给外层。判定与编译式 campaign 的轴策略
+> 一致——仅当外层任务数不少于 worker 数时生效，单次求解或填不满机器的小批次
+> 仍然使用池。实测 16 次 TSMC28 MDAC residue 瞬态：用池时单线程 4.90 s 即占满
+> 7.8 核、八线程仅 4.03 s；内联时单线程 10.54 s、八线程 3.19 s（6.0 核）。
+> 设置 `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复原调度做 A/B；该开关在进程内
+> 首次使用时读取一次。调度不影响数值：批次槽位相互独立写入。
+>
 > 原生 BSIM Gear2 transient 默认启用状态外推 predictor。需要进行数值回归 A/B 时，
 > 可设置 `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` 关闭；profile 中的
 > `gear2_predictor_steps` 表示实际使用预测初值的步数。该开关按每次 solve 读取，

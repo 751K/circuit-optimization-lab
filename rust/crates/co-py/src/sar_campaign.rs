@@ -184,13 +184,22 @@ fn build_handle(card: &DeviceCard, delvto: f64) -> Result<HandleGuard, String> {
 struct SarEvaluator<'a> {
     template: &'a SarTemplate,
     trials: &'a [SarTrial],
+    /// Whether the batch runs trials concurrently, so a trial should leave the
+    /// shared device pool alone.
+    outer_parallel: bool,
 }
 
 impl CandidateEvaluator for SarEvaluator<'_> {
     /// One trial's code-center sweep: the integer code per input in `vins`.
     type Output = Vec<i64>;
 
-    fn evaluate(&self, index: usize, _inner_parallel: bool) -> CandidateOutcome<Vec<i64>> {
+    fn evaluate(&self, index: usize, inner_parallel: bool) -> CandidateOutcome<Vec<i64>> {
+        // Trials are the parallel level unless the batch handed the pool to the
+        // inner sweep, so a trial's device batches are evaluated inline rather
+        // than contending for the shared BSIM pool. A single-worker batch has no
+        // outer parallelism to protect and keeps the pool.
+        let _serial =
+            (self.outer_parallel && !inner_parallel).then(co_bsim4::SerialEvalGuard::enter);
         let t = self.template;
         let trial = self
             .trials
@@ -275,6 +284,7 @@ impl PyCompiledSarConversion {
             let evaluator = SarEvaluator {
                 template: &template,
                 trials: &parsed,
+                outer_parallel: workers > 1,
             };
             let progress = BatchProgress::new();
             evaluate_batch(

@@ -1416,6 +1416,62 @@ pub unsafe fn noise(
 const EVAL_BATCH_PARALLEL_MIN: usize = 8;
 const EVAL_BATCH_DEFAULT_MAX_THREADS: usize = 10;
 
+thread_local! {
+    /// Whether this thread evaluates device batches inline instead of handing
+    /// them to the shared pool. See [`SerialEvalGuard`].
+    static SERIAL_EVAL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the calling thread as already running inside a parallel region, so its
+/// device batches are evaluated inline.
+///
+/// The batch pool speeds up one isolated transient, but it is a single process-
+/// wide pool: when several transients run at once — signoff PVT points, a ramp
+/// of SAR conversions, Monte-Carlo trials — every one of them submits into it,
+/// and the pool becomes the funnel. Measured on the reference machine, sixteen
+/// TSMC28 MDAC residue transients took 4.90 s on one thread while keeping 7.8
+/// cores busy, and eight threads only reached 4.03 s because there was no idle
+/// core left to give them. The same sixteen with inline evaluation took 10.54 s
+/// on one thread but 3.19 s on eight, at 6.0 cores. So the outer level should
+/// claim the parallelism and the inner one should step aside.
+///
+/// Evaluation order does not affect results — each slot is written
+/// independently — so this only changes scheduling.
+#[must_use = "the scope ends when the guard is dropped"]
+pub struct SerialEvalGuard {
+    previous: bool,
+}
+
+impl SerialEvalGuard {
+    /// Evaluate this thread's device batches inline until the guard is dropped.
+    pub fn enter() -> Self {
+        Self {
+            previous: SERIAL_EVAL.with(|flag| flag.replace(true)),
+        }
+    }
+}
+
+impl Drop for SerialEvalGuard {
+    fn drop(&mut self) {
+        SERIAL_EVAL.with(|flag| flag.set(self.previous));
+    }
+}
+
+/// Kill switch: `CIRCUITOPT_BSIM_NESTED_POOL=1` keeps the pool even inside a
+/// serial-eval scope, restoring the pre-change scheduling for A/B runs.
+fn nested_pool_forced() -> bool {
+    static FORCED: OnceLock<bool> = OnceLock::new();
+    *FORCED.get_or_init(|| {
+        std::env::var("CIRCUITOPT_BSIM_NESTED_POOL")
+            .map(|value| value != "0")
+            .unwrap_or(false)
+    })
+}
+
+fn serial_eval_requested() -> bool {
+    SERIAL_EVAL.with(Cell::get) && !nested_pool_forced()
+}
+
 /// Reusable storage for full four-terminal BSIM evaluation batches.
 ///
 /// One workspace belongs to one transient evaluator. Handles and statuses are
@@ -1560,29 +1616,31 @@ pub unsafe fn eval_batch_into(
     let groups = &workspace.groups;
     let statuses = &mut workspace.statuses;
 
-    let ran_parallel = if handles.len() >= EVAL_BATCH_PARALLEL_MIN && groups.len() > 1 {
-        let Some(pool) = eval_batch_pool() else {
-            return eval_batch_serial(handles, terminals, results, statuses);
-        };
-        let results_address = results.as_mut_ptr() as usize;
-        let statuses_address = statuses.as_mut_ptr() as usize;
-        pool.install(|| {
-            groups.par_iter().for_each(|group| {
-                for &index in &group.indices {
-                    // Workspace construction places every slot in exactly
-                    // one group. Groups run in parallel, while repeated
-                    // uses of one mutable BSIM handle stay serial.
-                    let result =
-                        unsafe { &mut *((results_address as *mut EvalBatchResult).add(index)) };
-                    let status = unsafe { &mut *((statuses_address as *mut c_int).add(index)) };
-                    eval_batch_slot(group.handle, &terminals[index], result, status);
-                }
+    let ran_parallel =
+        if handles.len() >= EVAL_BATCH_PARALLEL_MIN && groups.len() > 1 && !serial_eval_requested()
+        {
+            let Some(pool) = eval_batch_pool() else {
+                return eval_batch_serial(handles, terminals, results, statuses);
+            };
+            let results_address = results.as_mut_ptr() as usize;
+            let statuses_address = statuses.as_mut_ptr() as usize;
+            pool.install(|| {
+                groups.par_iter().for_each(|group| {
+                    for &index in &group.indices {
+                        // Workspace construction places every slot in exactly
+                        // one group. Groups run in parallel, while repeated
+                        // uses of one mutable BSIM handle stay serial.
+                        let result =
+                            unsafe { &mut *((results_address as *mut EvalBatchResult).add(index)) };
+                        let status = unsafe { &mut *((statuses_address as *mut c_int).add(index)) };
+                        eval_batch_slot(group.handle, &terminals[index], result, status);
+                    }
+                });
             });
-        });
-        true
-    } else {
-        false
-    };
+            true
+        } else {
+            false
+        };
     if !ran_parallel {
         return eval_batch_serial(handles, terminals, results, statuses);
     }
@@ -1756,7 +1814,7 @@ pub unsafe fn noise_batch(
         }
         result
     };
-    let results: Vec<DeviceNoise> = if count >= 2 {
+    let results: Vec<DeviceNoise> = if count >= 2 && !serial_eval_requested() {
         handles.par_iter().map(evaluate).collect()
     } else {
         handles.iter().map(evaluate).collect()

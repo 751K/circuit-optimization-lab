@@ -318,6 +318,40 @@ fn engine_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     Ok(info)
 }
 
+/// Evaluate this thread's device batches inline for the duration of a `with`
+/// block, leaving the parallelism to the caller.
+///
+/// The BSIM batch pool is process-wide, so concurrent transients all funnel
+/// into it and starve each other. A driver that is itself running points,
+/// conversions or trials in parallel enters this scope on each worker thread
+/// and keeps the cores for its own level. Results are unaffected: batch slots
+/// are written independently, so only the schedule changes.
+#[pyclass(name = "serial_device_eval", module = "circuitopt_core")]
+struct SerialDeviceEval {
+    guard: Option<co_bsim4::SerialEvalGuard>,
+}
+
+#[pymethods]
+impl SerialDeviceEval {
+    #[new]
+    fn new() -> Self {
+        Self { guard: None }
+    }
+
+    fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        if slf.guard.is_none() {
+            slf.guard = Some(co_bsim4::SerialEvalGuard::enter());
+        }
+        slf
+    }
+
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&mut self, _args: &Bound<'_, pyo3::types::PyTuple>) -> bool {
+        self.guard = None;
+        false
+    }
+}
+
 /// Raw address of the `co_bsim4_eval_vp` C ABI entry, for callers that prefer
 /// not to reopen the module with `ctypes.CDLL`.
 #[pyfunction]
@@ -3839,6 +3873,7 @@ impl PyCompiledCampaign {
                         template: &template,
                         candidates: &parsed,
                         compute_noise,
+                        outer_parallel: config.workers > 1,
                     };
                     let progress = campaign::BatchProgress::new();
                     campaign::evaluate_batch(&evaluator, n, config, &progress)
@@ -3875,6 +3910,7 @@ fn circuitopt_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(engine_info, m)?)?;
     m.add_function(wrap_pyfunction!(bsim4_eval_vp_address, m)?)?;
+    m.add_class::<SerialDeviceEval>()?;
     m.add_function(wrap_pyfunction!(otft_device_batch, m)?)?;
     m.add_function(wrap_pyfunction!(otft_terminal_derivatives_batch, m)?)?;
     m.add_function(wrap_pyfunction!(otft_newton_batch, m)?)?;

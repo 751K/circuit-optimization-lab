@@ -515,7 +515,11 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   线程池默认最多使用 10 个 worker，可通过
   `CIRCUITOPT_BSIM_BATCH_THREADS=1..10` 向下调节。重复的缓存 handle 会归入同一
   worker 串行求值，不同 handle 仍可并行，避免并发进入同一可变 compact-model
-  状态；盖章顺序仍保持确定。关闭
+  状态；盖章顺序仍保持确定。该池是进程级共享的，因此并行归最外层所有：驱动本身
+  已在并发求解时（signoff PVT 点、SAR 转换与蒙特卡洛 trial、corner/PVT 切片、
+  探索候选），其 worker 会内联求值批次，把核让给外层。此规则仅在外层任务数不少于
+  worker 数时生效（与编译式 campaign 的轴策略一致），单次求解仍使用池；
+  `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复原调度，两种调度的数值结果相同。关闭
   profile 时不累计这些计数，也不返回该字段；原 `eval_batch` ABI 作为兼容包装保留。
 - 接受状态的器件电流和电荷历史直接复用最后一轮收敛 Newton 的 `Evaluation`
   数组。收敛分支不会写回小于容差的 correction，因此这些 I/G/Q/C 已与接受状态

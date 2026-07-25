@@ -25,6 +25,7 @@ import numpy as np
 
 from .ac_solver import ac_solve
 from ._campaign_sweep import silicon_campaign_for
+from ._parallel import worker_device_eval
 from .circuit_loader import circuit_from_dict
 from .device_factory import CORNERS, is_silicon_model_types
 from .noise_solver import band_rms, noise_analysis
@@ -448,8 +449,15 @@ def _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs, band,
     if workers == 1 or len(slice_keys) == 1:
         slice_tables = [run_slice(key) for key in slice_keys]
     else:
-        with ThreadPoolExecutor(max_workers=min(workers, len(slice_keys))) as executor:
-            slice_tables = list(executor.map(run_slice, slice_keys))
+        slice_workers = min(workers, len(slice_keys))
+
+        def run_slice_worker(key):
+            # Slices are the parallel level here.
+            with worker_device_eval(slice_workers, len(slice_keys)):
+                return run_slice(key)
+
+        with ThreadPoolExecutor(max_workers=slice_workers) as executor:
+            slice_tables = list(executor.map(run_slice_worker, slice_keys))
 
     out = {c: {} for c in corner_names}
     for (tc, vs), tbl in zip(slice_keys, slice_tables):
@@ -556,6 +564,11 @@ def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
                        freqs=freqs, band=band, include_noise=include_noise,
                        noise_gate=lambda out: out["latch_dV"] <= latch_dV)
 
+    def evaluate_sample_worker(cm):
+        # Samples are the parallel level here.
+        with worker_device_eval(workers, n):
+            return evaluate_sample(cm)
+
     if workers == 1:
         for i in range(n):
             if should_stop is not None and should_stop():
@@ -587,7 +600,7 @@ def mismatch_mc(sizes, bias, nf=None, topo=AFE_TOPO, base="slow", n=300, seed=0,
                 if should_stop is not None and should_stop():
                     stopped_early = True
                     return
-                future = executor.submit(evaluate_sample, draws[next_index])
+                future = executor.submit(evaluate_sample_worker, draws[next_index])
                 pending[future] = next_index
                 next_index += 1
 

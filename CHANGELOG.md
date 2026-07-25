@@ -21,6 +21,41 @@ release checklist.
 
 ### Changed / 变更
 
+- **Outer-level parallelism owns the cores / 并行归外层所有**
+
+  **English:** The compiled core evaluates a transient's device batch through one
+  process-wide pool. That is right for a single isolated solve, but every driver
+  that runs solves concurrently — signoff PVT points, SAR conversions and
+  Monte-Carlo trials, corner and PVT slices, exploration candidates — submitted
+  into that same pool, so the outer workers queued behind each other. Measured
+  with sixteen TSMC28 MDAC residue transients, the pool finished one thread's
+  worth in 4.90 s while keeping 7.8 of ten cores busy, and eight threads only
+  reached 4.03 s because no idle core was left; evaluating the batches inline
+  took 10.54 s on one thread but 3.19 s on eight, at 6.0 cores. Drivers that own
+  an outer parallel level now declare it, and their workers evaluate device
+  batches inline. The rule matches the compiled campaign's existing axis policy:
+  it applies only when there is more outer work than there are workers, so a
+  single solve, or a batch too small to fill the machine, keeps the pool. Set
+  `CIRCUITOPT_BSIM_NESTED_POOL=1` to restore the previous scheduling. Results are
+  unaffected — batch slots are written independently, so only the schedule
+  changes, and SAR codes, corner tables and mismatch summaries were checked
+  identical either way. An eight-trial FreePDK45 SAR6 mismatch Monte-Carlo at
+  eight workers improved from about 21-31 s to 17-20 s while its CPU time fell
+  from about 200-260 s to 130-160 s, lifting worker scaling from 1.8x to 2.4x.
+
+  **中文：** 编译核通过一个进程级线程池求值瞬态的器件批次。对单次孤立求解这是对的，
+  但所有并发驱动——signoff PVT 点、SAR 转换与蒙特卡洛 trial、corner 与 PVT 切片、
+  探索候选——都提交进同一个池，外层 worker 因而相互排队。以 16 次 TSMC28 MDAC
+  residue 瞬态实测：用池时单线程 4.90 s 就占满十核中的 7.8 核，八线程只到 4.03 s，
+  因为已无空闲核可用；改为内联求值后单线程 10.54 s，八线程 3.19 s，占 6.0 核。
+  现在拥有外层并行的驱动会显式声明，其 worker 内联求值器件批次。判定规则与编译式
+  campaign 既有的轴策略一致：仅当外层任务数不少于 worker 数时生效，因此单次求解或
+  不足以填满机器的小批次仍然使用池。设置 `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复
+  原调度。结果不受影响——批次槽位相互独立写入，改变的只是调度；SAR 码、corner 表和
+  失配汇总均已核对两种调度下完全一致。8 trial 的 FreePDK45 SAR6 失配蒙特卡洛在
+  8 worker 下由约 21-31 s 降至 17-20 s，CPU 时间由约 200-260 s 降至 130-160 s，
+  worker 扩展比由 1.8 倍提升至 2.4 倍。
+
 - **Continued SAR conversion / SAR 转换续算**
 
   **English:** The compiled SAR conversion no longer replays the whole expanded

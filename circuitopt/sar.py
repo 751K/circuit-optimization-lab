@@ -8,6 +8,7 @@ import numpy as np
 
 from .adc import (average_supply_power, average_waveform_source_power,
                   dynamic_metrics, static_ramp_metrics)
+from ._parallel import worker_device_eval
 from .circuit_loader import CircuitSpec
 from .transient_solver import transient
 
@@ -314,10 +315,18 @@ def _run_independent_conversions(run, values, workers: int) -> list:
     """
     if workers is None or workers < 1:
         raise ValueError("workers must be a positive integer")
+    values = list(values)
     if workers == 1:
         return [run(value) for value in values]
+
+    def run_worker(value):
+        # Conversions are the parallel level, so each one evaluates its device
+        # batches inline instead of contending for the shared pool.
+        with worker_device_eval(workers, len(values)):
+            return run(value)
+
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        return list(ex.map(run, values))
+        return list(ex.map(run_worker, values))
 
 
 def run_sar_sweep(spec: CircuitSpec, vin_values, *, config=None,

@@ -53,6 +53,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 
 from . import diagnostics
+from ._parallel import worker_device_eval
 from .circuit_loader import CircuitSpec, load_circuit_json
 from .adc import dynamic_metrics, static_ramp_metrics
 from .explore import (Variable, apply_variables, is_feasible, pareto_front,
@@ -377,7 +378,12 @@ def sar_explore(spec: CircuitSpec, cfg: SarExploreConfig, *, n=50, seed=0,
                 progress(i + 1, n)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(_eval, i) for i in range(n)]
+            def eval_worker(index):
+                # Candidates are the parallel level here.
+                with worker_device_eval(workers, n):
+                    return _eval(index)
+
+            futures = [ex.submit(eval_worker, i) for i in range(n)]
             for done, fut in enumerate(as_completed(futures), start=1):
                 i, cand = fut.result()
                 candidates[i] = cand           # final order stays by candidate index
