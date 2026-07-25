@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 from ...adaptive_config import resolve_adaptive_config
-from ...compiled_topology import CompiledTopology, TERM_SOLVED
+from ...compiled_topology import CompiledTopology, TERM_INPUT, TERM_SOLVED
 from ...device_factory import build_devices
 
 
@@ -23,16 +23,72 @@ def _subdivision_count(interval, max_step):
     return max(1, int(np.ceil(ratio)))
 
 
+def _subdivision_counts(intervals, max_step):
+    """:func:`_subdivision_count` over a whole interval array."""
+    ratio = np.asarray(intervals, dtype=float) / float(max_step)
+    nearest = np.round(ratio)
+    tolerance = _STEP_RATIO_RTOL * np.maximum(1.0, np.abs(ratio))
+    snapped = (nearest >= 1.0) & (np.abs(ratio - nearest) <= tolerance)
+    return np.where(
+        snapped, nearest, np.maximum(1.0, np.ceil(ratio))
+    ).astype(int)
+
+
+def _integration_coefficient_columns(tgrid, method, provided):
+    """Return the ``(a0, a1, a2)`` BDF columns for samples ``1 .. len(tgrid)-1``.
+
+    Each entry applies the same sequence of IEEE double operations the
+    per-sample scalar form used, so reconstructed branch currents stay
+    bit-identical while the per-sample Python call disappears.
+    """
+    if provided is not None:
+        coefficients = np.asarray(provided, dtype=float)
+        return coefficients[1:, 0], coefficients[1:, 1], coefficients[1:, 2]
+    times = np.asarray(tgrid, dtype=float)
+    h = np.diff(times)
+    a0 = 1.0 / h
+    a1 = -1.0 / h
+    a2 = np.zeros(len(h), dtype=float)
+    if method == "be" or len(h) < 2:
+        # Backward Euler everywhere; sample 1 also stays BE under gear2.
+        return a0, a1, a2
+    h_step = h[1:]
+    rho = h_step / h[:-1]
+    denominator = (1.0 + rho) * h_step
+    gear2 = rho <= 2.0
+    a0[1:] = np.where(gear2, (1.0 + 2.0 * rho) / denominator, a0[1:])
+    a1[1:] = np.where(gear2, -(1.0 + rho) / h_step, a1[1:])
+    a2[1:] = np.where(gear2, (rho * rho) / denominator, 0.0)
+    return a0, a1, a2
+
+
+def _shift_two(values):
+    """``values[sample - 2]``, with sample 1 reusing ``values[0]``.
+
+    Mirrors the scalar ``charges[sample - 2] if sample > 1 else
+    charges[sample - 1]`` selection for the whole ``1 ..`` slice at once.
+    """
+    shifted = np.empty_like(values[1:])
+    shifted[0] = values[0]
+    shifted[1:] = values[:-2]
+    return shifted
+
+
 def _expanded_grid(tgrid, inputs, max_step):
     if max_step is None:
         return tgrid, inputs, np.arange(len(tgrid))
     max_step = float(max_step)
     if max_step <= 0.0:
         raise ValueError("max_step must be positive")
+    counts = _subdivision_counts(np.diff(np.asarray(tgrid, dtype=float)), max_step)
+    if not np.any(counts > 1):
+        # Every interval already satisfies max_step, so the expansion is the
+        # identity and the requested grid carries the waveforms unchanged.
+        return tgrid, inputs, np.arange(len(tgrid))
     times = [float(tgrid[0])]
     requested = [0]
     for k in range(1, len(tgrid)):
-        count = _subdivision_count(tgrid[k] - tgrid[k - 1], max_step)
+        count = counts[k - 1]
         times.extend(np.linspace(tgrid[k - 1], tgrid[k], count + 1)[1:])
         requested.append(len(times) - 1)
     expanded = np.asarray(times, dtype=float)
@@ -190,28 +246,9 @@ def transient_native_bsim4(
             plan.input_index[key],
         ))
 
-    def term_value(term, x, sample):
-        return plan.term_value(term, x, input_matrix[:, sample])
-
     def add_derivative(matrix, row, term, value):
         if row is not None and term[0] == TERM_SOLVED:
             matrix[row, term[1]] += value
-
-    def coefficients(sample):
-        if integration_coefficients is not None:
-            return tuple(integration_coefficients[sample])
-        h = float(tgrid[sample] - tgrid[sample - 1])
-        if method == "be" or sample == 1:
-            return (1.0 / h, -1.0 / h, 0.0)
-        h_prev = float(tgrid[sample - 1] - tgrid[sample - 2])
-        rho = h / h_prev
-        if rho > 2.0:
-            return (1.0 / h, -1.0 / h, 0.0)
-        return (
-            (1.0 + 2.0 * rho) / ((1.0 + rho) * h),
-            -(1.0 + rho) / h,
-            (rho * rho) / ((1.0 + rho) * h),
-        )
 
     nnear = 0
     failed_residuals = []
@@ -250,6 +287,18 @@ def transient_native_bsim4(
         input_matrix = solved_inputs
         requested_t = solved_times
         requested_index = np.arange(len(solved_times))
+    a0_col, a1_col, a2_col = _integration_coefficient_columns(
+        tgrid, method, integration_coefficients)
+
+    def term_series(term):
+        """The whole-transient sample series for one compiled terminal."""
+        kind, ref = term
+        if kind == TERM_SOLVED:
+            return xhist[:, ref]
+        if kind == TERM_INPUT:
+            return input_matrix[ref]
+        return np.full(len(tgrid), float(ref))
+
     rail_values = topo.rail_values(bias)
     rail_currents = {
         name: np.zeros(len(tgrid), dtype=float)
@@ -271,18 +320,19 @@ def transient_native_bsim4(
         ]
         return matches[0] if matches else None
 
+    # Terminal charge derivatives for every device at once. The scalar form
+    # applied one (a0, a1, a2) row per sample; broadcasting the same columns
+    # over the device and terminal axes keeps the arithmetic elementwise.
+    device_totals = device_currents.copy()
+    if len(tgrid) > 1:
+        device_totals[1:] += (
+            a0_col[:, None, None] * device_charges[1:]
+            + a1_col[:, None, None] * device_charges[:-1]
+            + a2_col[:, None, None] * _shift_two(device_charges)
+        )
+
     for position, item in enumerate(plan.devices):
-        currents = device_currents[:, position, :]
-        charges = device_charges[:, position, :]
-        total = currents.copy()
-        for sample in range(1, len(tgrid)):
-            a0, a1, a2 = coefficients(sample)
-            previous2 = charges[sample - 2] if sample > 1 else charges[sample - 1]
-            total[sample] += (
-                a0 * charges[sample]
-                + a1 * charges[sample - 1]
-                + a2 * previous2
-            )
+        total = device_totals[:, position, :]
         terminals = (
             rail_for_node(item.d_node),
             rail_for_node(item.g_node),
@@ -306,15 +356,7 @@ def transient_native_bsim4(
                     waveform_currents[key] -= total[:, terminal_index]
 
     for item in plan.resistors:
-        a = np.asarray([
-            term_value(item.a, xhist[sample], sample)
-            for sample in range(len(tgrid))
-        ])
-        b = np.asarray([
-            term_value(item.b, xhist[sample], sample)
-            for sample in range(len(tgrid))
-        ])
-        current = (a - b) * item.g
+        current = (term_series(item.a) - term_series(item.b)) * item.g
         rail_a = rail_for_node(item.a_node)
         rail_b = rail_for_node(item.b_node)
         if rail_a is not None:
@@ -327,19 +369,13 @@ def transient_native_bsim4(
             waveform_currents[f"node:{item.b_node}"] += current
 
     for item in plan.capacitors:
-        voltage = np.asarray([
-            term_value(item.a, xhist[sample], sample)
-            - term_value(item.b, xhist[sample], sample)
-            for sample in range(len(tgrid))
-        ])
+        voltage = term_series(item.a) - term_series(item.b)
         current = np.zeros(len(tgrid), dtype=float)
-        for sample in range(1, len(tgrid)):
-            a0, a1, a2 = coefficients(sample)
-            previous2 = voltage[sample - 2] if sample > 1 else voltage[sample - 1]
-            current[sample] = item.value * (
-                a0 * voltage[sample]
-                + a1 * voltage[sample - 1]
-                + a2 * previous2
+        if len(tgrid) > 1:
+            current[1:] = item.value * (
+                a0_col * voltage[1:]
+                + a1_col * voltage[:-1]
+                + a2_col * _shift_two(voltage)
             )
         rail_a = rail_for_node(item.a_node)
         rail_b = rail_for_node(item.b_node)
