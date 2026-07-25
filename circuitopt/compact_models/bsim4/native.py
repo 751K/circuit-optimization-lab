@@ -13,7 +13,9 @@ from __future__ import annotations
 import ctypes as C
 import os
 import threading
+import weakref
 from collections import OrderedDict
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -388,19 +390,74 @@ class _NativeDevice:
         )
 
 
+class _DeviceStore:
+    """One namespace of leased native handles."""
+
+    def __init__(self):
+        self.devices: OrderedDict[tuple, _NativeDevice] = OrderedDict()
+        self.active: dict[int, int] = {}
+        self.lock = threading.RLock()
+
+    def close(self) -> None:
+        with self.lock:
+            for device in self.devices.values():
+                device.close()
+            self.devices.clear()
+            self.active.clear()
+
+
+# Backends live as per-PDK module globals; the isolation scope has to reach all
+# of them, including any imported after it was entered.
+_BACKENDS: weakref.WeakSet = weakref.WeakSet()
+_SCOPE = threading.local()
+
+
+def _current_scope_token():
+    return getattr(_SCOPE, "token", None)
+
+
+@contextmanager
+def isolated_native_device_cache():
+    """Lease native handles into a namespace private to the calling thread.
+
+    A handle carries state between calls: a BSIM instance keeps its internal
+    drain/source node solution as the next call's warm start and the ``state0``
+    voltages the next load limits against. Sharing one across independent units
+    of work therefore makes each unit's answer depend on what ran before it.
+    That is why a signoff campaign only reproduced at a single worker — running
+    the same 45-point campaign twice on eight workers moved 559 of 1260 measured
+    values, because points sharing a card (same corner and temperature, three
+    supplies) leased the same handle and interleaved.
+
+    Inside this scope a unit leases from its own namespace, so its result is a
+    function of that unit alone at any worker count. Handles opened here are
+    closed on exit; reuse *within* the unit is unaffected.
+    """
+    token = object()
+    previous = _current_scope_token()
+    _SCOPE.token = token
+    try:
+        yield
+    finally:
+        _SCOPE.token = previous
+        for backend in list(_BACKENDS):
+            backend._discard_scope(token)
+
+
 class _NativeDeviceLease:
     """Pins one cached native handle until the lease leaves scope."""
 
-    def __init__(self, backend, device, cached):
+    def __init__(self, backend, device, cached, store):
         self._backend = backend
         self.device = device
         self._cached = cached
+        self._store = store
 
     def close(self):
         device = self.device
         if device is not None:
             self.device = None
-            self._backend._release_device(device, self._cached)
+            self._backend._release_device(device, self._cached, self._store)
 
     def __del__(self):  # pragma: no cover - CPython scope exit is the normal path
         try:
@@ -422,9 +479,28 @@ class NativeBsim4Backend:
         if cache_size < 0:
             raise ValueError("cache_size must be non-negative")
         self._cache_size = cache_size
-        self._devices: OrderedDict[tuple, _NativeDevice] = OrderedDict()
-        self._active: dict[int, int] = {}
+        self._shared = _DeviceStore()
+        self._scoped: dict[object, _DeviceStore] = {}
         self._lock = threading.RLock()
+        _BACKENDS.add(self)
+
+    def _store(self) -> _DeviceStore:
+        """The handle namespace this thread leases from."""
+        token = _current_scope_token()
+        if token is None:
+            return self._shared
+        with self._lock:
+            store = self._scoped.get(token)
+            if store is None:
+                store = _DeviceStore()
+                self._scoped[token] = store
+            return store
+
+    def _discard_scope(self, token) -> None:
+        with self._lock:
+            store = self._scoped.pop(token, None)
+        if store is not None:
+            store.close()
 
     @staticmethod
     def _key(
@@ -442,12 +518,12 @@ class NativeBsim4Backend:
             float(temperature_k),
         )
 
-    def _evict_idle_locked(self) -> None:
+    def _evict_idle_locked(self, store: _DeviceStore) -> None:
         """Trim the LRU without closing a handle leased by another worker."""
-        while len(self._devices) > self._cache_size:
-            for key, device in self._devices.items():
-                if self._active.get(id(device), 0) == 0:
-                    self._devices.pop(key)
+        while len(store.devices) > self._cache_size:
+            for key, device in store.devices.items():
+                if store.active.get(id(device), 0) == 0:
+                    store.devices.pop(key)
                     device.close()
                     break
             else:
@@ -461,34 +537,44 @@ class NativeBsim4Backend:
         instance: Bsim4InstanceCard,
         temperature_k: float,
         backend: str,
-    ) -> tuple[_NativeDevice, bool]:
+    ) -> tuple[_NativeDevice, bool, _DeviceStore | None]:
         if self._cache_size == 0:
-            return _NativeDevice(model, instance, temperature_k, backend=backend), False
+            return (
+                _NativeDevice(model, instance, temperature_k, backend=backend),
+                False,
+                None,
+            )
         key = self._key(model, instance, temperature_k, backend)
-        with self._lock:
-            device = self._devices.get(key)
+        store = self._store()
+        with store.lock:
+            device = store.devices.get(key)
             if device is not None:
-                self._devices.move_to_end(key)
+                store.devices.move_to_end(key)
             else:
                 device = _NativeDevice(model, instance, temperature_k, backend=backend)
-                self._devices[key] = device
+                store.devices[key] = device
             identity = id(device)
-            self._active[identity] = self._active.get(identity, 0) + 1
-            self._evict_idle_locked()
-            return device, True
+            store.active[identity] = store.active.get(identity, 0) + 1
+            self._evict_idle_locked(store)
+            return device, True, store
 
-    def _release_device(self, device: _NativeDevice, cached: bool) -> None:
-        if not cached:
+    def _release_device(
+        self,
+        device: _NativeDevice,
+        cached: bool,
+        store: _DeviceStore | None,
+    ) -> None:
+        if not cached or store is None:
             device.close()
             return
-        with self._lock:
+        with store.lock:
             identity = id(device)
-            remaining = self._active.get(identity, 0) - 1
+            remaining = store.active.get(identity, 0) - 1
             if remaining > 0:
-                self._active[identity] = remaining
+                store.active[identity] = remaining
             else:
-                self._active.pop(identity, None)
-            self._evict_idle_locked()
+                store.active.pop(identity, None)
+            self._evict_idle_locked(store)
 
     def evaluate(
         self,
@@ -500,12 +586,12 @@ class NativeBsim4Backend:
     ) -> Bsim4Evaluation:
         # Backend is chosen per call (CIRCUIT_BSIM4_BACKEND), never at import.
         backend = _backend_choice()
-        device, cached = self._lease_device(
+        device, cached, store = self._lease_device(
             model, instance, bias.temperature_k, backend)
         try:
             return device.evaluate(bias, frequency_hz)
         finally:
-            self._release_device(device, cached)
+            self._release_device(device, cached, store)
 
     def create_device(
         self,
@@ -529,9 +615,9 @@ class NativeBsim4Backend:
         temperature_k: float,
     ) -> _NativeDeviceLease:
         """Pin a cached, already-setup handle for one whole solver call."""
-        device, cached = self._lease_device(
+        device, cached, store = self._lease_device(
             model, instance, float(temperature_k), _backend_choice())
-        return _NativeDeviceLease(self, device, cached)
+        return _NativeDeviceLease(self, device, cached, store)
 
     @staticmethod
     def evaluate_batch(

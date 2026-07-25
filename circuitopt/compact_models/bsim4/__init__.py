@@ -17,7 +17,11 @@ from .card_cache import (
     freeze_card_parameters,
     make_bsim4_card_cache_key,
 )
-from .native import Bsim4NativeError, NativeBsim4Backend
+from .native import (
+    Bsim4NativeError,
+    NativeBsim4Backend,
+    isolated_native_device_cache,
+)
 
 __all__ = [
     "Bsim4Backend",
@@ -30,6 +34,7 @@ __all__ = [
     "Bsim4ModelCard",
     "Bsim4Noise",
     "Bsim4NativeError",
+    "isolated_native_device_cache",
     "Bsim4SourceFingerprint",
     "Bsim4ValidationError",
     "NativeBsim4Backend",

@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 
 from ._parallel import worker_device_eval
 from .analysis_dispatch import run_analysis_suite
+from .compact_models.bsim4 import isolated_native_device_cache
 from .circuit_loader import circuit_from_dict
 from .run_contract import (
     SimulationInvalid,
@@ -354,6 +355,24 @@ def _select_worst(cases: list[Mapping[str, Any]]) -> dict[str, Any] | None:
 
 
 def _run_point(
+    point_index: int,
+    point: tuple[str, float, float],
+    cases: list[dict[str, Any]],
+    pvt: Mapping[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    """Evaluate one PVT point, isolated from every other point.
+
+    Native BSIM handles carry state between calls, so points that share a card
+    -- same corner and temperature, different supply -- would otherwise lease
+    the same handle and see each other's warm start. That made the campaign
+    reproduce only at one worker. Leasing into a per-point namespace makes a
+    point's result a function of that point alone at any worker count.
+    """
+    with isolated_native_device_cache():
+        return _run_point_isolated(point_index, point, cases, pvt)
+
+
+def _run_point_isolated(
     point_index: int,
     point: tuple[str, float, float],
     cases: list[dict[str, Any]],

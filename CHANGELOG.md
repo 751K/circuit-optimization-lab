@@ -118,6 +118,37 @@ release checklist.
 
 ### Fixed / 修复
 
+- **Signoff campaigns reproduce at any worker count / 签核 campaign 在任意 worker 数下可复现**
+
+  **English:** A campaign only reproduced at one worker. Running the same
+  45-point TSMC28HPC+ MDAC campaign twice on eight workers moved 559 of its 1260
+  measured values, worst on the CMFB loop gains, while one worker reproduced
+  exactly. Native BSIM handles are leased from a process-wide cache keyed by the
+  device card, so the three supply points of a given corner and temperature —
+  which share a card — leased the *same* handle. A handle carries state between
+  calls (its internal node solution seeds the next call's warm start, and its
+  `state0` voltages are what the next load limits against), so concurrent points
+  saw each other's history and each point's result depended on what ran beside
+  it. Each PVT point now leases into a namespace of its own, closed when the
+  point finishes; reuse within a point, which is what the cache is for, is
+  unchanged. Two eight-worker runs are now identical, and eight workers agree
+  with one. The reference values barely move: of 1260 measurements 90 differ
+  from the previous single-worker run, the largest by 2.9e-10 relative, and no
+  verdict changes. The 45-point campaign costs about 5% more at eight workers
+  and 17% more at one.
+
+  **中文：** campaign 此前只在单 worker 下可复现。同一个 45 点 TSMC28HPC+ MDAC
+  campaign 在 8 worker 下跑两次，1260 个测量值中有 559 个发生变化（CMFB 环路增益
+  最甚），而单 worker 完全可复现。原生 BSIM handle 从进程级缓存中按器件 card 租借，
+  因此同一 corner 与温度下的三个电压点——它们的 card 相同——租到的是**同一个**
+  handle。handle 会跨调用携带状态（内部节点解作为下次调用的热启动，`state0` 电压
+  是下次 load 的限幅基准），于是并发的点互相看到对方的历史，每个点的结果取决于与它
+  并行的是谁。现在每个 PVT 点租借到自己的命名空间，点结束时关闭；点内复用（缓存的
+  意义所在）不受影响。两次 8 worker 运行现在完全一致，且 8 worker 与 1 worker 结果
+  相同。参考值几乎未动：1260 个测量中有 90 个与此前的单 worker 结果不同，最大相对
+  差 2.9e-10，且无任何判定变化。45 点 campaign 在 8 worker 下约慢 5%，单 worker
+  下约慢 17%。
+
 - **Adaptive transient stays inside the requested window / 自适应瞬态不再越出请求窗口**
 
   **English:** Adding waveform breakpoints for an adaptive transient closed the

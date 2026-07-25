@@ -320,7 +320,8 @@ def test_rust_cache_never_evicts_active_handles(monkeypatch):
             np.testing.assert_array_equal(
                 value.terminal_currents, reference[index].terminal_currents)
             np.testing.assert_array_equal(value.conductance, reference[index].conductance)
-    assert len(backend._devices) <= 2
+    # Unscoped leases come from the backend's shared namespace.
+    assert len(backend._shared.devices) <= 2
 
 
 def test_unknown_backend_is_rejected(monkeypatch):

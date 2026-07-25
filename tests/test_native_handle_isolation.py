@@ -1,0 +1,68 @@
+"""Native handle leases must not carry state between independent units of work.
+
+A BSIM instance keeps its internal drain/source node solution as the next
+call's warm start and the ``state0`` voltages the next load limits against, so
+whoever shares a handle shares that history. A signoff campaign used to lease
+one handle for every point with the same card -- same corner and temperature,
+different supply -- which made a point's result depend on what ran beside it:
+two runs of the same 45-point campaign on eight workers moved 559 of 1260
+measured values, while one worker reproduced exactly.
+"""
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+
+from circuitopt.compact_models.bsim4 import isolated_native_device_cache
+from circuitopt.pdk.freepdk45.device import Fp45Nfet
+
+
+def _lease_identity(device):
+    lease = device.lease_native_solver_handle()
+    try:
+        return id(lease.device)
+    finally:
+        lease.close()
+
+
+def test_leases_reuse_one_handle_inside_a_scope():
+    # Isolation is per unit of work, not per call: reuse within the unit is
+    # what makes the cache worth having.
+    device = Fp45Nfet(W=1.0, L=0.05)
+    with isolated_native_device_cache():
+        first = _lease_identity(device)
+        second = _lease_identity(device)
+    assert first == second
+
+
+def test_a_scope_releases_its_handles_when_it_exits():
+    # Nothing may survive a unit of work; otherwise the next unit inherits it
+    # and the result depends on execution order again. (Object identity cannot
+    # be compared across scopes: CPython reuses the address of a freed handle.)
+    from circuitopt.pdk.freepdk45.device import _BACKEND
+
+    device = Fp45Nfet(W=1.0, L=0.05)
+    with isolated_native_device_cache():
+        _lease_identity(device)
+        assert _BACKEND._scoped, "the scope leased into no namespace of its own"
+    assert not _BACKEND._scoped
+
+
+def test_concurrent_scopes_never_share_a_handle():
+    # The campaign case: several units running at once, all wanting the same
+    # card. Without isolation they all get one handle and interleave on it.
+    device = Fp45Nfet(W=1.0, L=0.05)
+
+    def unit(_):
+        with isolated_native_device_cache():
+            return _lease_identity(device)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        identities = list(pool.map(unit, range(4)))
+
+    assert len(set(identities)) == len(identities)
+
+
+def test_unscoped_leases_still_share_the_process_cache():
+    # Ordinary single-run callers keep the warm handle they always had.
+    device = Fp45Nfet(W=1.0, L=0.05)
+    assert _lease_identity(device) == _lease_identity(device)
