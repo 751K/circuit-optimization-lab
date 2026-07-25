@@ -8,11 +8,22 @@ prevents separate units such as signoff points from inheriting that history.
 """
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
+import pytest
+
 from circuitopt.compact_models.bsim4 import isolated_native_device_cache
 from circuitopt.pdk.freepdk45.device import Fp45Nfet
+from circuitopt.toolchain import pdk_root
+
+
+# Leasing a handle builds a real BSIM instance from a real model card, so the
+# whole file needs the FreePDK45 cards installed.
+_CARD = os.path.join(pdk_root(), "freepdk45", "models_nom", "NMOS_VTG.inc")
+pytestmark = pytest.mark.skipif(
+    not os.path.isfile(_CARD), reason="FreePDK45 cards not present")
 
 
 def _lease_identity(device):
