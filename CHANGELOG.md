@@ -19,6 +19,8 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+## [2.3.0] - 2026-07-26
+
 ### Changed / 变更
 
 - **Much faster SAR conversions and Monte-Carlo / SAR 转换与蒙特卡洛大幅加速**
@@ -1648,7 +1650,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.1.5...v2.2.0
 [2.1.5]: https://github.com/751K/circuit-optimization-lab/compare/v2.1.0...v2.1.5
 [2.1.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.2...v2.1.0
