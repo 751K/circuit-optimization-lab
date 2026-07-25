@@ -19,6 +19,43 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Changed / 变更
+
+- **Continued SAR conversion / SAR 转换续算**
+
+  **English:** The compiled SAR conversion no longer replays the whole expanded
+  grid once per bit. Resolving a bit only changes the stimulus after its
+  decision instant, so each bit now resumes from the last original grid point at
+  or before its predecessor's decision. The fixed-grid kernel became resumable
+  for this: the stepping loop moved into `advance_fixed_grid`, which takes an
+  explicit carry (two-step device charge history, the converged streak gating
+  the Gear2 predictor, failure bookkeeping) over a sample range, and
+  `solve_fixed_grid` is that plus one whole-grid advance. Because a BSIM
+  instance keeps its internal-node warm start and the `state0` voltages the next
+  load limits against, rolling back the host state alone was not enough — the
+  steps solved to bracket the comparator read leave that memory ahead, which
+  moved a node by one ULP and the regenerative latch turned it into a flipped
+  code. `resync_evaluator` re-runs the device evaluation at the resume point's
+  accepted state, restoring exactly what a solve stopping there would have left.
+  Verified bit-exact against the previous kernel over 576 ramp codes and a
+  mismatch Monte-Carlo. On the reference machine an eight-trial FreePDK45 SAR6
+  ramp improved from 235.1 s to 34.7 s, SAR3 from 4.3 s to 1.2 s, and a mismatch
+  trial from about 32 s to 4.5 s, putting a 200-trial Monte-Carlo at roughly
+  8.6 minutes on eight workers instead of about 106 minutes.
+
+  **中文：** 编译式 SAR 转换不再为每个 bit 重放整条展开网格。一个 bit 定下来只会
+  改变其判决时刻之后的激励，因此每个 bit 现在从"不晚于前一位判决时刻的最后一个原始
+  网格点"续算。为此固定网格内核改为可续算：步进循环移入 `advance_fixed_grid`，它按
+  样本区间接收显式 carry（两步器件电荷历史、门控 Gear2 预测器的连续收敛计数、失败
+  记账），`solve_fixed_grid` 即"它 + 一次整段推进"。由于 BSIM 实例会保留内部节点热
+  启动和下一次 load 用于限幅的 `state0` 电压，只回滚主机状态并不够——为读取比较器而
+  多解的那几步会把这份记忆推到续算点之后，导致某节点偏离 1 ULP，再生锁存把它放大成
+  翻码。`resync_evaluator` 在续算点的接受态上重新求值一次，精确还原"求解到此为止"
+  会留下的状态。已对 576 个斜坡码和一次失配蒙特卡洛与改前内核做位一致比对。在参考机
+  上，8 trial 的 FreePDK45 SAR6 斜坡由 235.1 s 降至 34.7 s，SAR3 由 4.3 s 降至
+  1.2 s，单次失配 trial 由约 32 s 降至 4.5 s；200 trial 蒙特卡洛在 8 worker 下由
+  约 106 分钟降至约 8.6 分钟。
+
 ### Fixed / 修复
 
 - **Non-converging default DC seed no longer fails the analysis / 默认 DC 种子不收敛不再判失败**
