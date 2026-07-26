@@ -17,8 +17,6 @@
     "A2",
     "O1",
     "O2",
-    "B1",
-    "B2",
     "OUTP",
     "OUTN",
     "MZ1",
@@ -32,6 +30,12 @@
     "NSNS2",
     "INP",
     "INN",
+    "GBN1",
+    "GBN2",
+    "GBP1",
+    "GBP2",
+    "NN1",
+    "NN2",
     "CMS1",
     "CMPC1",
     "CMPC2",
@@ -101,18 +105,18 @@
       "drain": "VBNC",
       "gate": "VBNC",
       "source": "NBC",
-      "W": 3.15,
-      "L": 0.3,
-      "NF": 3
+      "W": 4.8,
+      "L": 0.4,
+      "NF": 5
     },
     {
       "name": "MCPD",
       "drain": "VBPC",
       "gate": "VBPC",
       "source": "PX",
-      "W": 4.35,
+      "W": 4.9,
       "L": 0.3,
-      "NF": 4
+      "NF": 5
     },
     {
       "name": "MNC",
@@ -137,9 +141,9 @@
       "drain": "VREF1",
       "gate": "VREF1",
       "source": "GND",
-      "W": 11.43,
+      "W": 10.5,
       "L": 0.2,
-      "NF": 11
+      "NF": 10
     },
     {
       "name": "MCMP",
@@ -174,8 +178,8 @@
       "drain": "A1",
       "gate": "INP",
       "source": "TAIL",
-      "W": 315.0,
-      "L": 0.35,
+      "W": 260.0,
+      "L": 0.18,
       "NF": 200
     },
     {
@@ -183,49 +187,49 @@
       "drain": "A2",
       "gate": "INN",
       "source": "TAIL",
-      "W": 315.0,
-      "L": 0.35,
+      "W": 260.0,
+      "L": 0.18,
       "NF": 200
     },
     {
       "name": "M3",
       "drain": "O1",
-      "gate": "VBNC",
-      "source": "A1",
-      "W": 290.0,
+      "gate": "GBN1",
+      "source": "NN1",
+      "W": 400.0,
       "L": 0.4,
       "NF": 200
     },
     {
       "name": "M4",
       "drain": "O2",
-      "gate": "VBNC",
-      "source": "A2",
-      "W": 290.0,
+      "gate": "GBN2",
+      "source": "NN2",
+      "W": 400.0,
       "L": 0.4,
       "NF": 200
     },
     {
       "name": "M5",
       "drain": "O1",
-      "gate": "VBPC",
-      "source": "B1",
-      "W": 300.0,
+      "gate": "GBP1",
+      "source": "A1",
+      "W": 400.0,
       "L": 0.3,
       "NF": 200
     },
     {
       "name": "M6",
       "drain": "O2",
-      "gate": "VBPC",
-      "source": "B2",
-      "W": 300.0,
+      "gate": "GBP2",
+      "source": "A2",
+      "W": 400.0,
       "L": 0.3,
       "NF": 200
     },
     {
       "name": "M7",
-      "drain": "B1",
+      "drain": "A1",
       "gate": "CTRL1",
       "source": "VDD",
       "W": 225.0,
@@ -234,7 +238,7 @@
     },
     {
       "name": "M8",
-      "drain": "B2",
+      "drain": "A2",
       "gate": "CTRL1",
       "source": "VDD",
       "W": 225.0,
@@ -372,6 +376,96 @@
       "NF": 1
     },
     {
+      "name": "MFN1",
+      "drain": "NN1",
+      "gate": "IB",
+      "source": "GND",
+      "W": 60.0,
+      "L": 0.5,
+      "NF": 60
+    },
+    {
+      "name": "MFN2",
+      "drain": "NN2",
+      "gate": "IB",
+      "source": "GND",
+      "W": 60.0,
+      "L": 0.5,
+      "NF": 60
+    },
+    {
+      "name": "MBN1",
+      "drain": "GBN1",
+      "gate": "NN1",
+      "source": "VDD",
+      "W": 15.0,
+      "L": 0.3,
+      "NF": 15
+    },
+    {
+      "name": "MBN2",
+      "drain": "GBN2",
+      "gate": "NN2",
+      "source": "VDD",
+      "W": 15.0,
+      "L": 0.3,
+      "NF": 15
+    },
+    {
+      "name": "MBN1L",
+      "drain": "GBN1",
+      "gate": "IB",
+      "source": "GND",
+      "W": 40.0,
+      "L": 0.2,
+      "NF": 40
+    },
+    {
+      "name": "MBN2L",
+      "drain": "GBN2",
+      "gate": "IB",
+      "source": "GND",
+      "W": 40.0,
+      "L": 0.2,
+      "NF": 40
+    },
+    {
+      "name": "MBP1",
+      "drain": "GBP1",
+      "gate": "A1",
+      "source": "GND",
+      "W": 8.0,
+      "L": 0.3,
+      "NF": 8
+    },
+    {
+      "name": "MBP2",
+      "drain": "GBP2",
+      "gate": "A2",
+      "source": "GND",
+      "W": 8.0,
+      "L": 0.3,
+      "NF": 8
+    },
+    {
+      "name": "MBP1L",
+      "drain": "GBP1",
+      "gate": "PB",
+      "source": "VDD",
+      "W": 14.0,
+      "L": 0.3,
+      "NF": 14
+    },
+    {
+      "name": "MBP2L",
+      "drain": "GBP2",
+      "gate": "PB",
+      "source": "VDD",
+      "W": 14.0,
+      "L": 0.3,
+      "NF": 14
+    },
+    {
       "name": "MSWPN",
       "drain": "RDCP",
       "gate": "DCH",
@@ -410,134 +504,312 @@
   ],
   "models": {
     "MBN": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MPRN": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MPR": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MPC": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MCND": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MCPD": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MNC": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MREPP": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MREP": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MCMP": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MCMD": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "M0": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "M1": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "M2": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "M3": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "M4": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "M5": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "M6": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "M7": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "M8": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "M9": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "M10": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "M11": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "M12": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MS1": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MS2": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MT1": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MDL1": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MDS1": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MRA": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MRB": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MTB": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MDL2": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MDS2": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
+      "vb": 0.9
+    },
+    "MFN1": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "MFN2": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "MBN1": {
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
+      "vb": 0.9
+    },
+    "MBN2": {
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
+      "vb": 0.9
+    },
+    "MBN1L": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "MBN2L": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "MBP1": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "MBP2": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "MBP1L": {
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
+      "vb": 0.9
+    },
+    "MBP2L": {
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MSWPN": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MSWPP": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     },
     "MSWNN": {
-      "pdk": "tsmc28hpcp", "model": "nmos", "section": "inherit", "bin": "auto"
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
     },
     "MSWNP": {
-      "pdk": "tsmc28hpcp", "model": "pmos", "section": "inherit", "bin": "auto",
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
       "vb": 0.9
     }
   },
@@ -718,13 +990,13 @@
       "name": "RNC",
       "a": "NBC",
       "b": "GND",
-      "R": 34000.0
+      "R": 14600.0
     },
     {
       "name": "RCP",
       "a": "VDD",
       "b": "PX",
-      "R": 10000.0
+      "R": 11000.0
     },
     {
       "name": "RCM",
@@ -890,7 +1162,7 @@
   "dc_guesses": [
     {
       "IB": 0.55,
-      "NBC": 0.3,
+      "NBC": 0.27,
       "VBNC": 0.77,
       "PB": 0.33000000000000007,
       "PX": 0.7,
@@ -900,12 +1172,10 @@
       "VCMIN": 0.6,
       "CMR": 0.16,
       "TAIL": 0.15,
-      "A1": 0.27,
-      "A2": 0.27,
-      "O1": 0.55,
-      "O2": 0.55,
-      "B1": 0.72,
-      "B2": 0.72,
+      "A1": 0.6,
+      "A2": 0.6,
+      "O1": 0.5,
+      "O2": 0.5,
       "OUTP": 0.45,
       "OUTN": 0.45,
       "MZ1": 0.55,
@@ -927,6 +1197,12 @@
       "CMPC2": 0.9,
       "CMRA": 0.07,
       "CMRB": 0.07,
+      "GBN1": 0.6,
+      "GBN2": 0.6,
+      "GBP1": 0.3,
+      "GBP2": 0.3,
+      "NN1": 0.2,
+      "NN2": 0.2,
       "RDCP": 0.6,
       "RDCN": 0.6,
       "DCH": 0.9,

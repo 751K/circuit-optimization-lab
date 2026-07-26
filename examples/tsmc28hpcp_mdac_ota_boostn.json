@@ -1,6 +1,6 @@
 {
-  "name": "tsmc28hpcp_mdac_ota_ac",
-  "description": "Open-loop differential AC of the MDAC two-stage OTA. Inputs bias to the on-chip VCMIN reference via 2 Mohm; the stimulus AC-couples through 100 pF from TB vsources VACP/VACN (+-0.5 differential). Gain/UGBW/PM from v(OUTP,OUTN) above the ~800 Hz coupling corner. 500 fF load per output. One ideal 20 uA reference at IB.",
+  "name": "tsmc28hpcp_mdac_ota_boostn",
+  "description": "Stage-1 NMOS-cascode gain-boost loop gain. Vinj breaks the +side cascode gate (GBN1G/GBN1); Emir mirrors the -side gate anti-phase. Tian double injection is mandatory (both break terminals are high-Z). PM must be > 60 deg and the UGF sits between the main-loop UGF and ~2x it.",
   "solved": [
     "IB",
     "NBC",
@@ -42,7 +42,9 @@
     "CMPC1",
     "CMPC2",
     "CMRA",
-    "CMRB"
+    "CMRB",
+    "GBN1G",
+    "GBN2G"
   ],
   "rails": {
     "VDD": "VDD",
@@ -182,7 +184,7 @@
     {
       "name": "M3",
       "drain": "O1",
-      "gate": "GBN1",
+      "gate": "GBN1G",
       "source": "NN1",
       "W": 400.0,
       "L": 0.4,
@@ -191,7 +193,7 @@
     {
       "name": "M4",
       "drain": "O2",
-      "gate": "GBN2",
+      "gate": "GBN2G",
       "source": "NN2",
       "W": 400.0,
       "L": 0.4,
@@ -943,6 +945,12 @@
       "ACN",
       "GND",
       0.0
+    ],
+    [
+      "Vinj",
+      "GBN1G",
+      "GBN1",
+      0.0
     ]
   ],
   "outputs": [
@@ -992,7 +1000,9 @@
       "GBP1": 0.3,
       "GBP2": 0.3,
       "NN1": 0.2,
-      "NN2": 0.2
+      "NN2": 0.2,
+      "GBN1G": 0.6,
+      "GBN2G": 0.6
     }
   ],
   "analyses": {
@@ -1004,5 +1014,15 @@
         "scale": "log"
       }
     }
-  }
+  },
+  "vcvs": [
+    {
+      "name": "Emir",
+      "p": "GBN2G",
+      "q": "GBN2",
+      "cp": "GBN1",
+      "cn": "GBN1G",
+      "mu": 1.0
+    }
+  ]
 }
