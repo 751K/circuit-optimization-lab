@@ -85,18 +85,18 @@ SZ = {
     "M5": (400.0, 0.30),
     "M6": (400.0, 0.30),
     # C2b: M7/M8 are the PMOS FOLD current sources (VDD -> A1/A2), gated by CTRL1 so
-    # CMFB1 steers the fold current to regulate the stage-1 CM.  iter5 lengthens
-    # 0.30 -> 0.45: the up-branch output impedance gm5*ro5*(ro7 || ro1) was the
-    # slow/cold-corner gain floor (sf/-40 measured 83.2 dB no-boost), and a longer
-    # fold source raises ro7 AND cuts its gm (a direct output-noise contributor).
-    "M7": (225.0, 0.45),
-    "M8": (225.0, 0.45),
+    # CMFB1 steers the fold current to regulate the stage-1 CM.  L is pinned by the
+    # CMFB1 actuator range: lengthening 0.30 -> 0.45 at fixed W needs |Vgs| ~0.60,
+    # i.e. CTRL1 ~0.30 -- BELOW the CMFB1 diode's measured output floor (~0.334), so
+    # the loop rails, M7 starves the fold node and M5 cuts off (measured full
+    # collapse, iter5a).  Any ro7 lever must co-scale W with L (constant density).
+    "M7": (225.0, 0.30),
+    "M8": (225.0, 0.30),
     # C2b: bottom NMOS cascode-mirror sinks (NN1/NN2 -> GND, gate = IB).  Long L /
     # low gm -- a fold-branch current-source device is a direct input-referred noise
-    # contributor; ~80 uA branch at a low-Vov point.  iter5: 0.50 -> 0.60 for the
-    # down-branch ro (same slow-corner gain floor).
-    "MFN1": (60.0, 0.60),
-    "MFN2": (60.0, 0.60),
+    # contributor; ~57 uA branch at a low-Vov point.
+    "MFN1": (60.0, 0.50),
+    "MFN2": (60.0, 0.50),
     "M9": (200.0, 0.20),
     "M10": (200.0, 0.20),
     "M11": (371.428571, 0.40),
