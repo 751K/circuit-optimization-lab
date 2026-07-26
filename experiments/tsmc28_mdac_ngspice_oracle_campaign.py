@@ -21,7 +21,8 @@ sys.path.insert(0, str(ROOT / "examples"))
 sys.path.insert(0, str(ROOT / "experiments"))
 
 import freepdk45_mdac_ngspice_oracle_campaign as campaign  # noqa: E402
-import tsmc28_mdac_ota_gen as G  # noqa: E402
+import tsmc28_mdac_ota_gen as _G_raw  # noqa: E402
+import circuitopt.tsmc28_model  # noqa: E402,F401  registers tsmc28hpcp_ngspice
 from circuitopt.circuit_loader import circuit_from_dict  # noqa: E402
 from circuitopt.ngspice_ac import (  # noqa: E402
     ac_ngspice as _ac_ngspice,
@@ -35,6 +36,31 @@ from circuitopt.ngspice_transient import (  # noqa: E402
 )
 
 
+class _OracleGen:
+    """Generator proxy that re-points every deck at the ngspice oracle classes.
+
+    The model refactor split the TSMC28 registry: ``tsmc28hpcp`` binds the
+    native-engine device classes (no ngspice process adapter, used by
+    ``circuit-opt signoff``), while ``tsmc28hpcp_ngspice`` binds the foundry-deck
+    adapter classes this oracle campaign needs.  The portable JSONs stay
+    engine-neutral on ``tsmc28hpcp``; this proxy rewrites the pdk key on every
+    freshly built deck, so every ``circuit_from_dict``/``binding()`` in the base
+    campaign and in this wrapper resolves to the ngspice adapter."""
+
+    def __getattr__(self, name):
+        attr = getattr(_G_raw, name)
+        if name.startswith("build_") and callable(attr):
+            def wrapped(*args, **kwargs):
+                deck = attr(*args, **kwargs)
+                for model in deck.get("models", {}).values():
+                    if model.get("pdk") == "tsmc28hpcp":
+                        model["pdk"] = "tsmc28hpcp_ngspice"
+                return deck
+            return wrapped
+        return attr
+
+
+G = _OracleGen()
 campaign.G = G
 campaign.CORNERS = ["tt", "ss", "ff", "sf", "fs"]
 campaign.TEMPS_C = [-40.0, 27.0, 125.0]

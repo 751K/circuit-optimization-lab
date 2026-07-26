@@ -184,6 +184,29 @@ def test_pass_noise_spec_boundary_is_le(monkeypatch):
         assert row["pass_noise"] is expected, f"wideband {value} -> {expected}"
 
 
+# ── oracle model binding: campaign decks must resolve the ngspice adapter ───────
+def test_campaign_decks_bind_ngspice_oracle_classes():
+    """The registry maps ``tsmc28hpcp`` to the native-engine classes (no ngspice
+    adapter) and ``tsmc28hpcp_ngspice`` to the foundry-deck adapter classes.  The
+    portable JSONs stay engine-neutral; the oracle campaign's generator proxy must
+    re-point every model at build time or every oracle call dies with the
+    mixed-model NotImplementedError (regression: model-refactor split)."""
+    deck = tsmc.G.build_ac(0.9)
+    pdks = {model["pdk"] for model in deck["models"].values()}
+    assert pdks == {"tsmc28hpcp_ngspice"}
+
+    import tsmc28_mdac_ota_gen as raw
+    neutral = {model["pdk"] for model in raw.build_ac(0.9)["models"].values()}
+    assert neutral == {"tsmc28hpcp"}
+
+    from circuitopt.device_model import get_model_class
+    from circuitopt.circuit_loader import circuit_from_dict
+    spec = circuit_from_dict(deck)
+    for model_type in spec.binding().model_types.values():
+        cls = get_model_class(str(model_type))
+        assert getattr(cls, "NGSPICE_ADAPTER", None) is not None, model_type
+
+
 # ── boost-loop columns + pass_boostpm gate ───────────────────────────────────────
 def test_boost_columns_populated_and_pass_when_both_stable(monkeypatch):
     _install_fake_base(monkeypatch, settle_flags=[True] * 5, wideband_uv=100.0)
