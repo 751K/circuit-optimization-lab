@@ -515,25 +515,38 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   线程池默认最多使用 10 个 worker，可通过
   `CIRCUITOPT_BSIM_BATCH_THREADS=1..10` 向下调节。重复的缓存 handle 会归入同一
   worker 串行求值，不同 handle 仍可并行，避免并发进入同一可变 compact-model
-  状态；盖章顺序仍保持确定。该池是进程级共享的，因此并行归最外层所有：驱动本身
+  状态。transient lease 或 campaign worker 会在整个 solve 期间独占这些 handle，
+  因而热路径可调用内部无锁求值入口；公共标量/C ABI 仍保留逐 handle mutex，batch
+  内重复 handle 也继续串行。盖章顺序仍保持确定。该池是进程级共享的，因此并行归最外层所有：驱动本身
   已在并发求解时（signoff PVT 点、SAR 转换与蒙特卡洛 trial、corner/PVT 切片、
   探索候选），其 worker 会内联求值批次，把核让给外层。此规则仅在外层任务数不少于
   worker 数时生效（与编译式 campaign 的轴策略一致），单次求解仍使用池；
-  `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复原调度，两种调度的数值结果相同。关闭
+  `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复原调度，两种调度的数值结果相同。单次
+  求值使用一次连续写入清零固定 BSIM 矩阵；外层并行 worker 只清零到
+  `CKTmaxEqNum` 的有效行列，以降低共享内存流量。设置
+  `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` 可强制整帧清零。关闭
   profile 时不累计这些计数，也不返回该字段；原 `eval_batch` ABI 作为兼容包装保留。
+- 未显式提供 `V0` 的 native transient 会先通过 transient 自己使用的编译
+  topology、device wrapper 和租用 handle 尝试拓扑声明的 DC guesses。只有 Rust
+  DC Newton 收敛、残差有限且小于 `dc_tol`，并在拓扑要求时落在 voltage box 内，
+  才会接受该状态；困难点仍回退到完整 `ac_solve`。正常路径因此不再重复构建整套
+  device，也不再执行无人使用的 1 Hz 小信号 reduction。
 - 接受状态的器件电流和电荷历史直接复用最后一轮收敛 Newton 的 `Evaluation`
   数组。收敛分支不会写回小于容差的 correction，因此这些 I/G/Q/C 已与接受状态
   对应；失败步仍会在最后一次状态更新后刷新 batch。由此，成功 transient 只需要
   一次初始历史 batch 和每轮 Newton 各一次 batch，不再逐步重放接受状态求值。
-- Gear2 会在每次原生 BSIM Newton 求解前使用受保护的变步长状态预测：
-  `x[n] + h[n+1]/h[n] * (x[n] - x[n-1])`。它要求前两个状态连续收敛，拒绝超过
-  4 倍的步长增长，并在检测到输入斜率突变时禁用，因此时钟和 DAC 边沿仍以上一
-  接受状态为初值，同时加速平滑建立段。transient profile 的
+- Gear2 会在每次原生 BSIM Newton 求解前使用受保护的变步长状态预测。固定网格
+  使用两状态线性外推 `x[n] + h[n+1]/h[n] * (x[n] - x[n-1])`；adaptive Gear2
+  在三个已接受状态可用后升级为变步长二阶外推，重启后先回退到线性外推。步长增长
+  超过 4 倍或检测到输入斜率突变时会禁用预测，因此时钟和 DAC 边沿仍以上一接受
+  状态为初值，同时加速平滑建立段。transient profile 的
   `gear2_predictor_steps` 记录实际启用步数；设置
-  `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` 可关闭并进行回归对比。
+  `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` 可同时关闭两种模式并进行回归 A/B。
 - 原生 BSIM 派发也会在 Rust 内完整执行 `adaptive=True`。每个候选步只执行一次
   Gear2 非线性求解。Rust 核从已接受的 BSIM 端电荷历史构造变步长
-  BDF3−BDF2 defect，再通过收敛的 BDF2 Jacobian 做一次线性投影。PI controller
+  BDF3−BDF2 defect，再通过收敛的 BDF2 Jacobian 做一次线性投影。该投影会复用
+  最后一轮 Newton 的 LU 因子，仅求解第二个右端项，不再重复 stamp 或分解同一个
+  Jacobian。PI controller
   在 LTE 超差或 Newton 不收敛时缩步，增长最多 2 倍，拒步后禁止立即增步，并在
   输入斜率断点保守重启。LTE 只对动态节点电压形成；理想源的 MNA 支路电流是代数
   乘子，不进入误差范数。返回的 `t` 是接受后的非均匀网格，profile 额外报告
@@ -695,6 +708,23 @@ PDK/model/instance card，不缓存可变器件对象或运行时端口偏置。
 single-flight 构建既保留并行 PVT 能力，也避免同一冷 card 被重复展开；模型源的
 路径、mtime 或大小变化会使对应派生项自动失效。
 
+`compact_models/bsim4/native.py` 另行维护有界的 setup 完成可变 native handle 池。
+一个不可变 card key 可以对应多个 handle 槽位，使匹配 MOS 实例并发求值时不会共享
+内部节点或 limiting 历史。求解器在整条轨迹期间独占租用每个 handle，结束后归还，
+后续串行求解可复用 setup 成本和 warm history；活动 handle 永不驱逐。
+`BSIM4_DEVICE_CACHE_SIZE` 限制每个 PDK namespace 的 handle 槽位总数（默认 128），
+而不是不同 card key 的数量。
+不可变 card 会在构造时预先生成规范化、已排序的参数元组，因此重复租用 handle
+不会再次排序整张 model card。该变更只优化 cache key 构造，SKY130、FreePDK45
+和 TSMC28 共用此路径。
+
+TSMC28 MDAC signoff 清单只为六个 adaptive residue/code-transition case 显式设置
+`newton_vtol=3e-8 V`。求解器全局默认值仍为 `1e-8 V`；其他电路必须完成自己的
+轨迹和 signoff 对照后再选择是否启用。这六个 case 还设置
+`bsim_model_bypass_tolerance=3e-9 V`，在 Newton 中启用紧凑模型自带的有界标准
+bypass。该选项默认值为 0，且不得超过 `newton_vtol`；每次独占 transient 求值后
+都会恢复 handle 设置，scalar 分析和再生式 SAR 仍走精确路径。
+
 - **`pdk/sky130/library.py` / `device.py`** ——加载随包的按几何展开 BSIM4.5
   参数卡，注册原生 `sky130.nmos` / `sky130.pmos`。`extract_w` 选择参考宽度卡，
   实例仍使用实际几何；缺卡时清晰报错，不自动启动外部仿真器。
@@ -710,9 +740,23 @@ FreePDK45 现与 TSMC28HPC+ 共用原生 Berkeley BSIM4.5 内核。
 该字段作为元数据，回归测试以 ngspice 核对单管工作点/噪声和五管 OTA。
 
 原生 host 使用带主元的小型线性求解消去 FreePDK45 的漏源、栅和体电阻内部节点；
-四端电荷聚合包含分布式体结电荷，并统一 PMOS 电荷符号。因此 N/P 两种极性的
-AC 电容与电荷有限差分一致，DC、AC、noise、transient、PSS、PAC、PNoise
-可以共用同一进程内紧凑模型路径。
+同一次 Schur 分解会服务四个外部端子右端项，不再为每个行列组合重复分解内部矩阵。
+四端电荷聚合包含分布式体结电荷，并统一 PMOS 电荷符号。因此 N/P 两种极性的 AC
+电容与电荷有限差分一致，DC、AC、noise、transient、PSS、PAC、PNoise 可以共用
+同一进程内紧凑模型路径。完整求值会把最终 floating-point model load 已生成的电荷
+与小信号字段直接交给 `acLoad`，省去一次重复 `MODEINITSMSIG` load；设置
+`CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD=0` 可恢复旧顺序。实验性开关
+`CIRCUITOPT_BSIM_REUSE_FINAL_LOAD=1` 可让 Newton 更新低于 1 pV 的私有内部节点
+线性化直接完成端口消元；由于个别标量 PDK 点会超出公共 API 的位级 golden 契约，
+该开关默认关闭。与该实验模式无关，当私有节点解和当前 load 使用值的位模式完全
+一致（或不存在私有节点）时，host 总会安全省略 reload。外部/内部节点布局也会在
+setup 后缓存；这两项优化保持公共结果逐位不变。
+
+编译式 SAR 单 trial 路径会把输入转换严格分成 `min(workers, inputs)` 个均衡连续
+区间，避免 ceil 分块偶然少于 worker 数时让 campaign Auto 误选串行轴。一次转换
+只在开始时渲染完整激励；之后每个 bit 仅更新新激活的试探行，并在需要时更新上一
+清零 bit 的行。code-only sweep 不记录端口历史，详细转换则保留完整的已接受
+state/current/charge 轨迹。
 
 原生 host 还提供带版本号的守恒求值 ABI、全 `void *` 入口和批量求值器。
 固定网格 BSIM4 瞬态把矩阵盖章、Newton 与时间步循环整体放在编译 Rust core 内

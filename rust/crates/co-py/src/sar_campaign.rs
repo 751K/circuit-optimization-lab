@@ -18,9 +18,11 @@
 use std::ffi::CString;
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use numpy::IntoPyArray;
+use numpy::ndarray::Array2;
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 use co_bsim4::CoBsim4;
 use co_core::bsim_transient::{self, Options};
@@ -241,11 +243,142 @@ impl CandidateEvaluator for SarEvaluator<'_> {
                 &t.tgrid,
                 &t.grid,
                 vin,
+                false,
             )
             .ok_or_else(|| format!("trial {index}: SAR conversion failed to converge"))?;
             codes.push(conversion.code as i64);
         }
         Ok(codes)
+    }
+}
+
+struct SarTrajectoryEvaluator {
+    template: Arc<SarTemplate>,
+    trial: Arc<SarTrial>,
+    ranges: Vec<core::ops::Range<usize>>,
+    outer_parallel: bool,
+    record_trajectory: bool,
+}
+
+fn balanced_ranges(item_count: usize, requested_workers: usize) -> Vec<core::ops::Range<usize>> {
+    let chunk_count = requested_workers.max(1).min(item_count);
+    (0..chunk_count)
+        .map(|index| {
+            let start = index * item_count / chunk_count;
+            let end = (index + 1) * item_count / chunk_count;
+            start..end
+        })
+        .collect()
+}
+
+impl CandidateEvaluator for SarTrajectoryEvaluator {
+    type Output = Vec<co_core::sar::Conversion>;
+
+    fn evaluate(&self, index: usize, _inner_parallel: bool) -> CandidateOutcome<Self::Output> {
+        let _serial = self.outer_parallel.then(co_bsim4::SerialEvalGuard::enter);
+        let range = self
+            .ranges
+            .get(index)
+            .cloned()
+            .ok_or_else(|| format!("SAR trajectory chunk {index} out of range"))?;
+        let t = &self.template;
+        let trial = &self.trial;
+        let mut circuit = t.circuit.clone();
+        for (capacitor, &value) in circuit.capacitors.iter_mut().zip(&trial.cap_values) {
+            capacitor.capacitance = value;
+        }
+        let mut evaluator = GuardEvaluator::new(&t.cards, &trial.delvto)
+            .map_err(|error| format!("trajectory chunk {index}: {error}"))?;
+        range
+            .map(|vin_index| {
+                co_core::sar::run_conversion(
+                    &circuit,
+                    &t.devices,
+                    &mut evaluator,
+                    &t.config,
+                    &t.v0,
+                    &t.tgrid,
+                    &t.grid,
+                    t.vins[vin_index],
+                    self.record_trajectory,
+                )
+                .ok_or_else(|| format!("SAR conversion {vin_index} failed to converge"))
+            })
+            .collect()
+    }
+}
+
+fn evaluate_trial_conversions(
+    template: Arc<SarTemplate>,
+    trial: SarTrial,
+    workers: usize,
+    record_trajectory: bool,
+) -> Result<Vec<co_core::sar::Conversion>, String> {
+    if trial.delvto.len() != template.cards.len() {
+        return Err(format!(
+            "trial has {} delvto entries, template has {} devices",
+            trial.delvto.len(),
+            template.cards.len()
+        ));
+    }
+    if trial.cap_values.len() != template.circuit.capacitors.len() {
+        return Err(format!(
+            "trial has {} cap values, template has {}",
+            trial.cap_values.len(),
+            template.circuit.capacitors.len()
+        ));
+    }
+    // Produce exactly one non-empty, contiguous range per usable worker. The
+    // former ceil-sized step occasionally produced fewer ranges than workers
+    // (64 inputs / 12 workers became 11 ranges); campaign Auto then selected
+    // its serial-candidate axis and turned that worker count into a performance
+    // cliff. Quotient boundaries are also maximally balanced.
+    let ranges = balanced_ranges(template.vins.len(), workers);
+    let evaluator = SarTrajectoryEvaluator {
+        template,
+        trial: Arc::new(trial),
+        outer_parallel: ranges.len() > 1,
+        record_trajectory,
+        ranges,
+    };
+    let progress = BatchProgress::new();
+    let effective_workers = evaluator.ranges.len();
+    let outcomes = evaluate_batch(
+        &evaluator,
+        evaluator.ranges.len(),
+        BatchConfig::new(effective_workers),
+        &progress,
+    );
+    let mut conversions = Vec::new();
+    for (index, slot) in outcomes.into_iter().enumerate() {
+        match slot {
+            Some(Ok(mut chunk)) => conversions.append(&mut chunk),
+            Some(Err(message)) => {
+                return Err(format!("SAR trajectory chunk {index}: {message}"));
+            }
+            None => return Err(format!("SAR trajectory chunk {index} was skipped")),
+        }
+    }
+    Ok(conversions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::balanced_ranges;
+
+    #[test]
+    fn sar_ranges_are_exactly_counted_balanced_and_contiguous() {
+        for (items, workers, expected_count) in [(64, 12, 12), (64, 10, 10), (8, 16, 8), (1, 0, 1)]
+        {
+            let ranges = balanced_ranges(items, workers);
+            assert_eq!(ranges.len(), expected_count);
+            assert_eq!(ranges.first().unwrap().start, 0);
+            assert_eq!(ranges.last().unwrap().end, items);
+            assert!(ranges.iter().all(|range| !range.is_empty()));
+            assert!(ranges.windows(2).all(|pair| pair[0].end == pair[1].start));
+            let lengths = ranges.iter().map(core::ops::Range::len).collect::<Vec<_>>();
+            assert!(lengths.iter().max().unwrap() - lengths.iter().min().unwrap() <= 1);
+        }
     }
 }
 
@@ -267,6 +400,79 @@ impl PyCompiledSarConversion {
     /// Number of code-center inputs each trial converts.
     fn levels(&self) -> usize {
         self.template.vins.len()
+    }
+
+    /// Expanded integration grid shared by every conversion in this template.
+    fn expanded_times(&self) -> Vec<f64> {
+        self.template.grid.times.clone()
+    }
+
+    /// Expanded-grid positions corresponding to the public requested time grid.
+    fn requested_index(&self) -> Vec<usize> {
+        self.template.grid.requested_index.clone()
+    }
+
+    /// Exact Gear2/BE coefficients used on the expanded integration grid.
+    fn integration_coefficients(&self) -> PyResult<Vec<Vec<f64>>> {
+        bsim_transient::fixed_grid_integration_coefficients(
+            &self.template.grid.times,
+            self.template.config.newton.gear2,
+        )
+        .map(|rows| rows.into_iter().map(|row| row.to_vec()).collect::<Vec<_>>())
+        .ok_or_else(|| PyRuntimeError::new_err("invalid SAR expanded time grid"))
+    }
+
+    /// Lightweight counter profile for one input in one physical trial.
+    #[pyo3(signature = (trial, vin_index=0))]
+    fn profile_conversion<'py>(
+        &self,
+        py: Python<'py>,
+        trial: &Bound<'py, PyDict>,
+        vin_index: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let trial = parse_trial(trial)?;
+        if vin_index >= self.template.vins.len() {
+            return Err(PyValueError::new_err("vin_index out of range"));
+        }
+        if trial.delvto.len() != self.template.cards.len()
+            || trial.cap_values.len() != self.template.circuit.capacitors.len()
+        {
+            return Err(PyValueError::new_err("trial shape does not match template"));
+        }
+        let template = Arc::clone(&self.template);
+        let conversion = py
+            .detach(move || -> Result<co_core::sar::Conversion, String> {
+                let mut circuit = template.circuit.clone();
+                for (capacitor, &value) in circuit.capacitors.iter_mut().zip(&trial.cap_values) {
+                    capacitor.capacitance = value;
+                }
+                let mut evaluator = GuardEvaluator::new(&template.cards, &trial.delvto)?;
+                let mut config = template.config.clone();
+                config.newton.profile = true;
+                co_core::sar::run_conversion(
+                    &circuit,
+                    &template.devices,
+                    &mut evaluator,
+                    &config,
+                    &template.v0,
+                    &template.tgrid,
+                    &template.grid,
+                    template.vins[vin_index],
+                    false,
+                )
+                .ok_or_else(|| format!("SAR conversion {vin_index} failed to converge"))
+            })
+            .map_err(PyValueError::new_err)?;
+        let profile = conversion.profile;
+        let result = PyDict::new(py);
+        result.set_item("code", conversion.code)?;
+        result.set_item("grid_points", self.template.grid.times.len())?;
+        result.set_item("newton_iterations", profile.newton_iterations)?;
+        result.set_item("bsim_evaluations", profile.bsim_evaluations)?;
+        result.set_item("bsim_batches", profile.bsim_batches)?;
+        result.set_item("gear2_predictor_steps", profile.gear2_predictor_steps)?;
+        result.set_item("failed_steps", profile.failed_steps)?;
+        Ok(result)
     }
 
     /// Evaluate a batch of mismatch trials, returning each trial's code sweep in
@@ -309,6 +515,100 @@ impl PyCompiledSarConversion {
                     )));
                 }
             }
+        }
+        Ok(results)
+    }
+
+    /// Evaluate one trial's input sweep without waveform history. Unlike
+    /// `evaluate_batch`, this parallelizes within the trial when workers > 1.
+    #[pyo3(signature = (trial, workers=1))]
+    fn evaluate_codes(
+        &self,
+        py: Python<'_>,
+        trial: &Bound<'_, PyDict>,
+        workers: usize,
+    ) -> PyResult<Vec<i64>> {
+        if workers == 0 {
+            return Err(PyValueError::new_err("workers must be positive"));
+        }
+        let trial = parse_trial(trial)?;
+        let template = Arc::clone(&self.template);
+        py.detach(move || evaluate_trial_conversions(template, trial, workers, false))
+            .map(|conversions| {
+                conversions
+                    .into_iter()
+                    .map(|conversion| conversion.code as i64)
+                    .collect()
+            })
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Evaluate one physical trial and return each input's complete accepted
+    /// trajectory. This is the public ADC path: code-only campaign/MC callers
+    /// continue to use `evaluate_batch` and allocate no waveform history.
+    #[pyo3(signature = (trial, workers=1))]
+    fn evaluate_trajectories<'py>(
+        &self,
+        py: Python<'py>,
+        trial: &Bound<'py, PyDict>,
+        workers: usize,
+    ) -> PyResult<Bound<'py, PyList>> {
+        if workers == 0 {
+            return Err(PyValueError::new_err("workers must be positive"));
+        }
+        let trial = parse_trial(trial)?;
+        let template = Arc::clone(&self.template);
+        let sample_count = template.grid.times.len();
+        let state_width = template.circuit.size;
+        let device_count = template.devices.len();
+        let input_count = template.config.roles.len();
+        let conversions = py
+            .detach(move || evaluate_trial_conversions(template, trial, workers, true))
+            .map_err(PyValueError::new_err)?;
+
+        let results = PyList::empty(py);
+        for conversion in conversions {
+            let trajectory = conversion.trajectory.ok_or_else(|| {
+                PyRuntimeError::new_err("SAR detailed solve omitted its trajectory")
+            })?;
+            let inputs = Array2::from_shape_vec((input_count, sample_count), trajectory.inputs)
+                .map_err(|error| {
+                    PyRuntimeError::new_err(format!("invalid SAR input history shape: {error}"))
+                })?
+                .into_pyarray(py);
+            let states = crate::rows_into_array2(
+                py,
+                trajectory.states,
+                state_width,
+                "SAR transient states",
+            )?;
+            let currents = crate::terminal_history_into_array3(
+                py,
+                trajectory.device_currents,
+                sample_count,
+                device_count,
+                "SAR transient device currents",
+            )?;
+            let charges = crate::terminal_history_into_array3(
+                py,
+                trajectory.device_charges,
+                sample_count,
+                device_count,
+                "SAR transient device charges",
+            )?;
+            let item = PyDict::new(py);
+            item.set_item("code", conversion.code)?;
+            item.set_item("bits", conversion.bits)?;
+            item.set_item("inputs", inputs)?;
+            item.set_item("states", states)?;
+            item.set_item("device_currents", currents)?;
+            item.set_item("device_charges", charges)?;
+            item.set_item("failures", trajectory.failures)?;
+            item.set_item(
+                "first_failure",
+                trajectory.first_failure.map_or(-1, |value| value as i64),
+            )?;
+            results.append(item)?;
         }
         Ok(results)
     }

@@ -87,6 +87,22 @@ def test_compiled_batch_is_worker_count_invariant():
             np.testing.assert_array_equal(expected, actual)
 
 
+def test_single_trial_code_sweep_is_worker_count_invariant():
+    """The compact within-trial path matches the established batch ABI."""
+    from circuitopt.sar_rust import build_sar_batch
+    spec = _spec()
+    cfg, draws, _ = _draws(spec, {}, 1, 4)
+    batch = build_sar_batch(spec, cfg)
+    trial = _trials(draws)[0]
+    expected = batch.run([trial], workers=1)[0]
+    np.testing.assert_array_equal(batch.run_codes(trial, workers=1), expected)
+    np.testing.assert_array_equal(batch.run_codes(trial, workers=4), expected)
+    # Eight inputs / five workers used to form only four ceil-sized chunks,
+    # which made campaign Auto select its serial axis. Keep a non-divisible
+    # worker count on the same deterministic code path.
+    np.testing.assert_array_equal(batch.run_codes(trial, workers=5), expected)
+
+
 def test_zero_sigma_compiled_batch_is_nominal():
     """An all-zero-sigma batch reproduces the nominal ramp (every code present)."""
     from circuitopt.sar_rust import build_sar_batch

@@ -48,7 +48,7 @@ def test_sar_physical_comparator_conversion(monkeypatch):
     assert result["code"] == 5
     np.testing.assert_array_equal(result["bits"], [1, 0, 1])
     assert result["decision_backend"] == "rust_continuation"
-    assert calls == 1
+    assert calls == 0
     assert result["transient"]["backend"] == "bsim4_native"
     assert len(result["decisions"]) == 3
     assert result["supply_power"]["total_w"] > 0.0
@@ -76,6 +76,12 @@ def test_sar_continuation_matches_frozen_replay():
         [item["comparator_v"] for item in actual["decisions"]],
         [item["comparator_v"] for item in expected["decisions"]],
     )
+    for name, values in expected["input_waveforms"].items():
+        np.testing.assert_array_equal(actual["input_waveforms"][name], values)
+    for group in ("nodes", "branch_currents"):
+        assert actual["transient"][group].keys() == expected["transient"][group].keys()
+        for name, values in expected["transient"][group].items():
+            np.testing.assert_array_equal(actual["transient"][group][name], values)
     assert actual["total_power_w"] == expected["total_power_w"]
 
 
@@ -97,8 +103,27 @@ def test_sar_code_center_sweep_has_every_code(monkeypatch):
     result = sar.run_sar_sweep(spec, vin)
     np.testing.assert_array_equal(result["codes"], np.arange(8))
     assert len(result["metrics"]["missing_codes"]) == 0
-    assert calls == len(vin)
+    assert calls == 0
     assert all(
         item["decision_backend"] == "rust_continuation"
         for item in result["conversions"]
     )
+
+
+def test_sar_compact_sweep_skips_terminal_history(monkeypatch):
+    import circuitopt.sar as sar
+    from circuitopt.circuit_loader import load_circuit_json
+
+    spec = load_circuit_json(EXAMPLE)
+    vin = (np.arange(8) + 0.5) / 8.0
+    monkeypatch.setattr(
+        sar,
+        "transient",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("compact native sweep must not replay transient")),
+    )
+    result = sar.run_sar_sweep(
+        spec, vin, workers=2, include_transients=False)
+    np.testing.assert_array_equal(result["codes"], np.arange(8))
+    assert all("transient" not in item for item in result["conversions"])
+    assert all("total_power_w" not in item for item in result["conversions"])

@@ -74,17 +74,23 @@ def test_fixed_grid_wrapper_returns_native_integration_coefficients(monkeypatch)
     handles = []
 
     class FakeHandle:
-        def __init__(self, *_args, **_kwargs):
+        def __init__(self):
             self.pointer = 1
             self.closed = False
             handles.append(self)
 
+    class FakeLease:
+        def __init__(self):
+            self.device = FakeHandle()
+
         def close(self):
-            self.closed = True
+            self.device.closed = True
 
     class FakeProblem:
         def solve_fixed_grid(self, initial, times, inputs, **kwargs):
             assert kwargs["integration_method"] == "gear2"
+            assert kwargs["final_load_tolerance"] == 5e-13
+            assert kwargs["model_bypass_tolerance"] == 2e-9
             count = len(times)
             return (
                 True,
@@ -105,17 +111,12 @@ def test_fixed_grid_wrapper_returns_native_integration_coefficients(monkeypatch)
             np.testing.assert_array_equal(times, [0.0, 1.0, 6.0])
             return coefficients
 
-    monkeypatch.setattr(rust_transient, "_NativeDevice", FakeHandle)
     monkeypatch.setattr(
         rust_transient,
         "build_bsim4_problem",
         lambda *_args, **_kwargs: FakeProblem(),
     )
-    wrapper = SimpleNamespace(
-        model_card=object(),
-        instance_card=object(),
-        temperature=300.15,
-    )
+    wrapper = SimpleNamespace(lease_native_solver_handle=FakeLease)
     plan = SimpleNamespace(devices=[SimpleNamespace(name="M1")])
 
     result = rust_transient.solve_bsim4_rust(
@@ -130,10 +131,235 @@ def test_fixed_grid_wrapper_returns_native_integration_coefficients(monkeypatch)
         newton_vtol=1e-8,
         newton_step_limit=0.25,
         gmin=1e-12,
+        final_load_tolerance=5e-13,
+        model_bypass_tolerance=2e-9,
     )
 
     np.testing.assert_array_equal(result[2], coefficients)
+    assert result[-1]["final_load_tolerance_v"] == 5e-13
+    assert result[-1]["model_bypass_tolerance_v"] == 2e-9
     assert handles and handles[0].closed
+
+
+def test_adaptive_wrapper_passes_final_load_tolerance(monkeypatch):
+    from circuitopt.compact_models.bsim4 import rust_transient
+
+    class FakeHandle:
+        pointer = 1
+
+    class FakeLease:
+        device = FakeHandle()
+
+        @staticmethod
+        def close():
+            pass
+
+    class FakeProblem:
+        def solve_adaptive_gear2(self, initial, times, inputs, **kwargs):
+            assert kwargs["final_load_tolerance"] == 2e-13
+            assert kwargs["model_bypass_tolerance"] == 1e-9
+            count = len(times)
+            return (
+                True,
+                np.asarray(times),
+                np.zeros((count, len(initial))),
+                np.asarray(inputs).T,
+                np.zeros((count, 1, 4)),
+                np.zeros((count, 1, 4)),
+                np.zeros((count, 3)),
+                (count - 1, 0, count - 1, 3, 4, 5, 0, 0, 0, 0, 0),
+            )
+
+    monkeypatch.setattr(
+        rust_transient,
+        "build_bsim4_problem",
+        lambda *_args, **_kwargs: FakeProblem(),
+    )
+    wrapper = SimpleNamespace(lease_native_solver_handle=FakeLease)
+    plan = SimpleNamespace(devices=[SimpleNamespace(name="M1")])
+    config = SimpleNamespace(
+        reltol=1e-4,
+        vabstol=1e-6,
+        iabstol=1e-12,
+        max_steps=100,
+        h0=None,
+    )
+
+    result = rust_transient.solve_bsim4_rust(
+        plan,
+        {"M1": wrapper},
+        np.asarray([0.0]),
+        np.asarray([0.0, 1.0]),
+        np.empty((0, 2)),
+        (),
+        method="gear2",
+        newton_maxit=10,
+        newton_vtol=1e-8,
+        newton_step_limit=0.25,
+        gmin=1e-12,
+        final_load_tolerance=2e-13,
+        model_bypass_tolerance=1e-9,
+        adaptive=True,
+        adaptive_config=config,
+    )
+
+    assert result[-1]["final_load_tolerance_v"] == 2e-13
+    assert result[-1]["model_bypass_tolerance_v"] == 1e-9
+
+
+def test_wrapper_releases_partial_handle_batch_if_leasing_fails():
+    from circuitopt.compact_models.bsim4 import rust_transient
+
+    closed = []
+
+    class Lease:
+        device = SimpleNamespace(pointer=1)
+
+        @staticmethod
+        def close():
+            closed.append(True)
+
+    good = SimpleNamespace(lease_native_solver_handle=Lease)
+
+    def fail():
+        raise RuntimeError("lease failed")
+
+    bad = SimpleNamespace(lease_native_solver_handle=fail)
+    plan = SimpleNamespace(
+        devices=[
+            SimpleNamespace(name="M1"),
+            SimpleNamespace(name="M2"),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="lease failed"):
+        rust_transient.solve_bsim4_rust(
+            plan,
+            {"M1": good, "M2": bad},
+            np.asarray([0.0]),
+            np.asarray([0.0, 1.0]),
+            np.empty((0, 2)),
+            (),
+            method="gear2",
+            newton_maxit=10,
+            newton_vtol=1e-8,
+            newton_step_limit=0.25,
+            gmin=1e-12,
+        )
+
+    assert closed == [True]
+
+
+def test_fast_dc_tries_valid_guesses_and_releases_handles(monkeypatch):
+    from circuitopt.compact_models.bsim4 import rust_transient
+
+    closed = []
+    calls = []
+
+    class Lease:
+        device = SimpleNamespace(pointer=1)
+
+        @staticmethod
+        def close():
+            closed.append(True)
+
+    class FakeProblem:
+        @staticmethod
+        def solve_dc(initial, inputs, **kwargs):
+            calls.append(np.asarray(initial).copy())
+            assert inputs.size == 0
+            assert kwargs["voltage_tolerance"] == 1e-10
+            if initial[0] == 0.0:
+                return False, initial, 2, 1e-3
+            return True, np.asarray(initial) + 0.25, 3, 1e-12
+
+    monkeypatch.setattr(
+        rust_transient,
+        "build_bsim4_problem",
+        lambda *_args, **_kwargs: FakeProblem(),
+    )
+    plan = SimpleNamespace(
+        devices=[SimpleNamespace(name="M1")],
+        n_aug=2,
+    )
+    devices = {
+        "M1": SimpleNamespace(lease_native_solver_handle=Lease),
+    }
+
+    result = rust_transient.solve_bsim4_dc_rust(
+        plan,
+        devices,
+        [
+            [np.nan, 0.0],
+            [0.0, 0.0],
+            [1.0, 2.0],
+        ],
+    )
+
+    np.testing.assert_array_equal(result, [1.25, 2.25])
+    assert len(calls) == 2
+    assert closed == [True]
+
+
+def test_fast_dc_rejects_converged_result_with_loose_residual(monkeypatch):
+    from circuitopt.compact_models.bsim4 import rust_transient
+
+    class Lease:
+        device = SimpleNamespace(pointer=1)
+
+        @staticmethod
+        def close():
+            pass
+
+    class FakeProblem:
+        @staticmethod
+        def solve_dc(initial, _inputs, **_kwargs):
+            return True, initial, 1, 1e-6
+
+    monkeypatch.setattr(
+        rust_transient,
+        "build_bsim4_problem",
+        lambda *_args, **_kwargs: FakeProblem(),
+    )
+    plan = SimpleNamespace(
+        devices=[SimpleNamespace(name="M1")],
+        n_aug=1,
+    )
+    devices = {
+        "M1": SimpleNamespace(lease_native_solver_handle=Lease),
+    }
+
+    assert rust_transient.solve_bsim4_dc_rust(
+        plan, devices, [[0.5]], dc_tolerance=1e-10) is None
+
+
+@pytest.mark.parametrize("value", [-1.0, 1.1e-12, np.inf, np.nan])
+def test_final_load_tolerance_rejects_unsafe_values(value):
+    from circuitopt.compact_models.bsim4.transient import transient_native_bsim4
+
+    with pytest.raises(ValueError, match=r"within \[0, 1e-12\] V"):
+        transient_native_bsim4(
+            {},
+            {},
+            np.asarray([0.0, 1.0]),
+            topo=None,
+            bsim_final_load_tolerance=value,
+        )
+
+
+@pytest.mark.parametrize("value", [-1.0, 1.1e-8, np.inf, np.nan])
+def test_model_bypass_tolerance_rejects_unsafe_values(value):
+    from circuitopt.compact_models.bsim4.transient import transient_native_bsim4
+
+    with pytest.raises(ValueError, match=r"within \[0, newton_vtol\] V"):
+        transient_native_bsim4(
+            {},
+            {},
+            np.asarray([0.0, 1.0]),
+            topo=None,
+            newton_vtol=1e-8,
+            bsim_model_bypass_tolerance=value,
+        )
 
 
 def test_shift_two_reuses_first_sample_for_the_opening_step():
@@ -219,6 +445,8 @@ def test_native_inverter_charge_transient_without_ngspice(monkeypatch, adaptive)
     output = result["nodes"]["OUT"]
     assert result["backend"] == "bsim4_native"
     assert result["adaptive"] is adaptive
+    assert result["bsim_final_load_tolerance"] == 0.0
+    assert result["bsim_model_bypass_tolerance"] == 0.0
     assert result["nfail"] == 0
     assert output[0] > 0.85
     assert output[-1] < 0.05

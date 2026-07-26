@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, RLock
 
 import numpy as np
 import pytest
@@ -353,6 +353,28 @@ def test_backend_never_leases_one_active_handle_twice(monkeypatch):
 
 
 @requires_rust
+def test_backend_pools_duplicate_card_handles_across_solver_runs(monkeypatch):
+    monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
+    model, instance = _cards(1)
+    backend = NativeBsim4Backend(cache_size=4)
+
+    first = [backend.lease_device(model, instance, 300.15) for _ in range(3)]
+    first_devices = {id(lease.device) for lease in first}
+    assert len(first_devices) == 3
+    for lease in first:
+        lease.close()
+
+    second = [backend.lease_device(model, instance, 300.15) for _ in range(3)]
+    try:
+        assert {id(lease.device) for lease in second} == first_devices
+        assert len(backend._shared.devices) == 3
+    finally:
+        for lease in second:
+            lease.close()
+        backend.close()
+
+
+@requires_rust
 def test_backend_close_releases_all_stores_and_is_idempotent(monkeypatch):
     monkeypatch.setenv("CIRCUIT_BSIM4_BACKEND", "rust")
     model, instance = _cards(1)
@@ -402,6 +424,55 @@ def test_backend_close_rejects_an_active_cached_or_uncached_lease(monkeypatch):
         finally:
             lease.close()
         backend.close()
+
+
+def test_backend_close_stays_terminal_if_native_teardown_fails():
+    backend = NativeBsim4Backend(cache_size=2)
+    closed = []
+
+    class Device:
+        def __init__(self, name, *, broken=False):
+            self.name = name
+            self.broken = broken
+
+        def close(self):
+            closed.append(self.name)
+            if self.broken:
+                raise RuntimeError("destroy failed")
+
+    backend._shared.devices["broken"] = Device("broken", broken=True)
+    backend._shared.devices["following"] = Device("following")
+    backend._shared.active[id(backend._shared.devices["broken"])] = 0
+
+    with pytest.raises(RuntimeError, match="destroy failed"):
+        backend.close()
+
+    assert backend._closed
+    assert closed == ["broken", "following"]
+    assert not backend._shared.devices
+    assert not backend._shared.active
+    backend.close()
+
+
+def test_native_device_close_is_terminal_if_destroy_raises():
+    calls = []
+
+    class BrokenLibrary:
+        @staticmethod
+        def co_bsim4_destroy(pointer):
+            calls.append(pointer)
+            raise RuntimeError("destroy failed")
+
+    device = native._NativeDevice.__new__(native._NativeDevice)
+    device._lock = RLock()
+    device._library = BrokenLibrary()
+    device._pointer = 123
+
+    with pytest.raises(RuntimeError, match="destroy failed"):
+        device.close()
+    assert device._pointer is None
+    device.close()
+    assert calls == [123]
 
 
 def test_unknown_backend_is_rejected(monkeypatch):

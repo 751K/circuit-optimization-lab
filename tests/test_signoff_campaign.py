@@ -276,3 +276,34 @@ def test_tsmc28_mdac_manifest_defines_11_cases_over_45_valid_pvt_points():
                 supply_bias_key="VDD",
             )
             validate_signoff_config(circuit_from_dict(deck))
+
+
+def test_tsmc28_mdac_manifest_scopes_relaxed_newton_tolerance_to_transient():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "examples" / "tsmc28hpcp_mdac_ota_signoff.json"
+    config, _ = load_campaign_json(path)
+
+    transient_cases = []
+    for case in config["cases"]:
+        analyses = case["overrides"].get("analyses", {})
+        transient = analyses.get("transient")
+        if transient is None:
+            assert "newton_vtol" not in analyses
+            continue
+        transient_cases.append(case["name"])
+        assert transient["newton_vtol"] == pytest.approx(3e-8)
+        assert transient["newton_vtol"] < transient["adaptive_vabstol"]
+        assert transient["bsim_model_bypass_tolerance"] == pytest.approx(3e-9)
+        assert (
+            transient["bsim_model_bypass_tolerance"]
+            < transient["newton_vtol"]
+        )
+
+    assert transient_cases == [
+        "residue_minus_fs16",
+        "residue_minus_fs32",
+        "residue_zero",
+        "residue_plus_fs32",
+        "residue_plus_fs16",
+        "major_carry_0111_to_1000",
+    ]

@@ -587,7 +587,11 @@ Solves the time-domain response of the topology-defined system using backward Eu
   at most 10 workers and can be reduced with
   `CIRCUITOPT_BSIM_BATCH_THREADS=1..10`. Repeated cached handles are grouped
   onto one worker and evaluated serially; distinct handles remain parallel, so
-  mutable compact-model state is never entered concurrently. Stamping remains deterministic.
+  mutable compact-model state is never entered concurrently. A transient lease
+  or campaign worker owns each such handle for the complete solve, so this hot
+  path calls an internal lock-free evaluator. Public scalar/C ABI entries keep
+  the per-handle mutex, and repeated handles in a batch stay serialized.
+  Stamping remains deterministic.
   The pool is process-wide, so parallelism belongs to the outermost level: a
   driver already running solves concurrently (signoff PVT points, SAR
   conversions and Monte-Carlo trials, corner/PVT slices, exploration
@@ -595,9 +599,19 @@ Solves the time-domain response of the topology-defined system using backward Eu
   that level. This applies only when the outer work is at least as wide as the
   worker count, matching the compiled campaign's own axis rule, so a single
   solve keeps the pool. `CIRCUITOPT_BSIM_NESTED_POOL=1` restores the previous
-  scheduling; results are unaffected either way.
+  scheduling; results are unaffected either way. Isolated evaluations clear the
+  fixed BSIM matrix frame with one contiguous write. Outer-parallel workers
+  clear only rows and columns through `CKTmaxEqNum`, reducing shared memory
+  traffic; `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` forces full-frame clearing.
   Profiling disabled leaves these counters and the result field absent. The
   original `eval_batch` ABI remains as a compatibility wrapper.
+- A native transient without an explicit `V0` first tries the topology's
+  declared DC guesses through the same compiled topology, device wrappers, and
+  leased handles used by the transient. A state is accepted only when Rust DC
+  Newton converges to a finite residual within `dc_tol` and, when requested by
+  the topology, remains inside its voltage box. Difficult points retain the
+  complete `ac_solve` fallback. This avoids constructing the device set twice
+  and avoids an unused 1 Hz small-signal reduction on the normal path.
 - Accepted-state device-current and charge history reuses the final converged
   Newton `Evaluation` array. The convergence branch does not apply its
   sub-tolerance correction, so those I/G/Q/C values already match the accepted
@@ -605,16 +619,20 @@ Solves the time-domain response of the topology-defined system using backward Eu
   Consequently, a successful transient uses one initial-history batch plus one
   batch per Newton iteration, with no per-step accepted-state replay.
 - Gear2 uses a guarded variable-step state predictor before each native BSIM
-  Newton solve: `x[n] + h[n+1]/h[n] * (x[n] - x[n-1])`. It requires two
-  consecutive converged states, rejects step growth above 4x, and suppresses
-  prediction across detected input-slope discontinuities. This keeps clock and
-  DAC edges on the previous accepted-state seed while accelerating smooth
-  settling. `gear2_predictor_steps` records actual use in the transient profile;
-  `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` disables it for regression comparison.
+  Newton solve. Fixed grids use the two-state linear extrapolation
+  `x[n] + h[n+1]/h[n] * (x[n] - x[n-1])`; adaptive Gear2 upgrades to the
+  three-state variable-step quadratic extrapolation once that history exists
+  and falls back to linear after a restart. Prediction rejects step growth
+  above 4x and input-slope discontinuities, keeping clock and DAC edges on the
+  previous accepted-state seed while accelerating smooth settling.
+  `gear2_predictor_steps` records actual use in the transient profile;
+  `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` disables both modes for regression A/B.
 - Native BSIM dispatch also implements `adaptive=True` entirely in Rust. Each
   trial performs one nonlinear Gear2 solve. A variable-step BDF3-minus-BDF2
   defect is formed from the accepted BSIM terminal-charge history and projected
-  through the converged BDF2 Jacobian with one linear solve. A PI controller
+  through the converged BDF2 Jacobian with one linear solve. That projection
+  reuses the final Newton LU factors and solves only a second right-hand side;
+  it does not stamp or factor the same Jacobian again. A PI controller
   shrinks on LTE or Newton rejection, caps growth at 2x, suppresses growth
   immediately after rejection, and restarts conservatively at input-slope
   breakpoints. LTE is formed over dynamic node voltages; ideal-source MNA branch
@@ -841,6 +859,28 @@ construction preserves parallel PVT work while preventing duplicate cold-card
 elaboration; path/mtime/size fingerprints invalidate entries when a model source
 is replaced.
 
+`compact_models/bsim4/native.py` separately owns a bounded pool of
+setup-complete mutable native handles. Each immutable card key may have several
+handle slots so matched MOS instances can be evaluated concurrently without
+sharing internal-node or limiting history. A solver leases every handle
+exclusively for its complete trajectory and returns it afterward; the next
+sequential solve can reuse the setup cost and warm history. Active handles are
+never evicted. `BSIM4_DEVICE_CACHE_SIZE` limits the total number of handle slots
+per PDK namespace (default 128), not the number of distinct card keys.
+Immutable cards precompute their normalized, sorted parameter tuples at
+construction, so repeated handle leases do not re-sort the full model card.
+This changes only cache-key construction and is shared by SKY130, FreePDK45,
+and TSMC28.
+
+The TSMC28 MDAC signoff manifest deliberately sets `newton_vtol=3e-8 V` only
+for its six adaptive residue/code-transition cases. The solver-wide default
+remains `1e-8 V`; other circuits must opt in after their own trajectory and
+signoff comparison. Those six cases also set
+`bsim_model_bypass_tolerance=3e-9 V`, enabling the compact model's bounded
+standard bypass during Newton. This option defaults to zero, may not exceed
+`newton_vtol`, and is restored after every exclusive transient evaluation;
+scalar analyses and regenerative SAR remain on the exact path.
+
 - **`pdk/sky130/library.py` / `device.py`** — loads the bundled geometry-resolved
   BSIM4.5 cards and registers native `sky130.nmos` / `sky130.pmos`. `extract_w`
   selects a reference-width card while the instance keeps its actual geometry.
@@ -858,11 +898,32 @@ Berkeley source treats that field as metadata, and regression tests compare
 single-device operating points/noise plus a 5T OTA against ngspice.
 
 The native host reduces the complete FreePDK45 internal drain/source, gate, and
-body-resistance network with a small pivoted linear solve. Four-terminal charge
-aggregation includes distributed body-junction charge and normalizes PMOS charge
-signs, so AC capacitance and finite-difference charge derivatives agree for both
-polarities. DC, AC, noise, transient, PSS, PAC, and PNoise therefore share one
-in-process compact-model path.
+body-resistance network with a small pivoted linear solve. One Schur
+factorization serves all four external-terminal right-hand sides instead of
+refactoring the same internal matrix for every row and column. Four-terminal
+charge aggregation includes distributed body-junction charge and normalizes
+PMOS charge signs, so AC capacitance and finite-difference charge derivatives
+agree for both polarities. DC, AC, noise, transient, PSS, PAC, and PNoise
+therefore share one in-process compact-model path. Full evaluations feed
+`acLoad` from the charge and small-signal fields produced by their final
+floating-point model load, avoiding a duplicate `MODEINITSMSIG` load; set
+`CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD=0` to restore the legacy sequence. The
+experimental `CIRCUITOPT_BSIM_REUSE_FINAL_LOAD=1` mode also lets a private-node
+linearization whose Newton update is below 1 pV supply terminal reduction
+directly. It remains opt-in because isolated scalar PDK points can move beyond
+the public bit-level golden contract. Independently of that experimental mode,
+the host always omits the reload when the solved private-node voltages are
+bit-identical to those used by the current load (or no private nodes exist).
+The external/internal node layout is cached after setup, so both optimizations
+preserve the public bit-level result.
+
+The compiled SAR single-trial path partitions input conversions into exactly
+`min(workers, inputs)` balanced contiguous ranges; this prevents campaign Auto
+from selecting its serial axis when ceil-sized chunks happen to produce fewer
+ranges than workers. Within one conversion, the full stimulus is rendered once.
+Each later bit updates only the newly active trial rows and, when needed, the
+previous cleared-bit rows. Code-only sweeps omit terminal history, while detailed
+conversions retain the complete accepted state/current/charge trajectory.
 
 The native host also exports a versioned conserved-evaluation ABI, an all-`void *`
 entry point, and a batch evaluator. The fixed-grid BSIM4 transient runs matrix

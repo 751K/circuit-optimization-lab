@@ -160,6 +160,16 @@ TRANSIENT_OPTIONS = (
     _opt("rail_margin", cast=_float, schema={"type": "number"}),
     _opt("corner", schema=CORNER),
     _opt("integration_method", schema=INTEGRATION_METHOD),
+    _opt(
+        "bsim_final_load_tolerance",
+        cast=_float,
+        schema={"type": "number", "minimum": 0.0, "maximum": 1e-12},
+    ),
+    _opt(
+        "bsim_model_bypass_tolerance",
+        cast=_float,
+        schema={"type": "number", "minimum": 0.0},
+    ),
     _opt("be_rerun_on_step_failures", cast=_bool,
          schema={"type": "boolean"}, aliases=("gear2_be_fallback",)),
     _opt("cap_mode", schema=CAP_MODE),

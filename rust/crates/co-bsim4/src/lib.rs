@@ -143,6 +143,9 @@ pub struct CoBsim4 {
     nodes: [*mut ffi::CKTnode; CO_MAX_NODES],
     noise_sources: [CoNoiseSource; CO_MAX_NOISE_SOURCES],
     noise_source_count: c_int,
+    external_nodes: [c_int; CO_TERMINALS],
+    internal_nodes: [c_int; CO_MAX_INTERNAL],
+    internal_count: c_int,
     setup_done: c_int,
 }
 
@@ -579,6 +582,15 @@ pub unsafe fn setup(device: *mut CoBsim4) -> c_int {
         addr_of_mut!((*device).ckt),
     );
     if status == OK {
+        let mut external = [0; CO_TERMINALS];
+        let mut internal = [0; CO_MAX_INTERNAL];
+        let internal_count = discover_device_nodes(device, &mut external, &mut internal);
+        if internal_count < 0 {
+            return E_UNSUPP;
+        }
+        (*device).external_nodes = external;
+        (*device).internal_nodes = internal;
+        (*device).internal_count = internal_count;
         (*device).setup_done = 1;
     }
     status
@@ -598,13 +610,44 @@ pub unsafe fn node_count(device: *const CoBsim4) -> c_int {
 // ---------------------------------------------------------------------------
 
 unsafe fn co_clear(device: *mut CoBsim4) {
-    std::ptr::write_bytes(
-        addr_of_mut!((*device).matrix) as *mut u8,
-        0,
-        std::mem::size_of::<MatrixFrame>(),
-    );
-    (*device).rhs = [0.0; CO_MAX_NODES];
-    (*device).irhs = [0.0; CO_MAX_NODES];
+    // One contiguous memset is fastest for an isolated transient. Inside an
+    // outer-parallel campaign/SAR conversion, however, clearing only the active
+    // block reduces aggregate memory traffic enough to win despite the row
+    // loop. SerialEvalGuard is already the scheduler's nested-parallel marker,
+    // so use the same signal rather than introducing another public knob.
+    if full_frame_clear_forced() || !serial_eval_requested() {
+        std::ptr::write_bytes(
+            addr_of_mut!((*device).matrix) as *mut u8,
+            0,
+            std::mem::size_of::<MatrixFrame>(),
+        );
+        (*device).rhs = [0.0; CO_MAX_NODES];
+        (*device).irhs = [0.0; CO_MAX_NODES];
+        return;
+    }
+    // The vendor only stamps nodes allocated through CKTmkVolt, whose largest
+    // index is CKTmaxEqNum.
+    let active = ((*device).ckt.CKTmaxEqNum + 1).clamp(1, CO_MAX_NODES as c_int) as usize;
+    for row in 0..active {
+        std::ptr::write_bytes((*device).matrix.value[row].as_mut_ptr(), 0, active);
+    }
+    std::ptr::write_bytes((*device).rhs.as_mut_ptr(), 0, active);
+    std::ptr::write_bytes((*device).irhs.as_mut_ptr(), 0, active);
+}
+
+fn full_frame_clear_forced() -> bool {
+    static FORCED: OnceLock<bool> = OnceLock::new();
+    *FORCED.get_or_init(|| {
+        std::env::var_os("CIRCUITOPT_BSIM_FULL_FRAME_CLEAR")
+            .map(|value| {
+                let value = value.to_string_lossy();
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn solve_real(
@@ -654,6 +697,61 @@ fn solve_real(
             value = (-work[row][col]).mul_add(solution[col], value);
         }
         solution[row] = value / work[row][row];
+    }
+    OK
+}
+
+fn solve_real_columns<const COLUMNS: usize>(
+    size: usize,
+    matrix: &[[f64; CO_MAX_INTERNAL]; CO_MAX_INTERNAL],
+    rhs: &[[f64; CO_MAX_INTERNAL]; COLUMNS],
+    solutions: &mut [[f64; CO_MAX_INTERNAL]; COLUMNS],
+) -> c_int {
+    let mut work = *matrix;
+    let mut values = *rhs;
+
+    for pivot in 0..size {
+        let mut best = pivot;
+        let mut magnitude = work[pivot][pivot].abs();
+        for row in (pivot + 1)..size {
+            let candidate = work[row][pivot].abs();
+            if candidate > magnitude {
+                magnitude = candidate;
+                best = row;
+            }
+        }
+        if magnitude < 1.0e-30 {
+            return E_PANIC;
+        }
+        if best != pivot {
+            for col in pivot..size {
+                let temporary = work[pivot][col];
+                work[pivot][col] = work[best][col];
+                work[best][col] = temporary;
+            }
+            for column in &mut values {
+                column.swap(pivot, best);
+            }
+        }
+        for row in (pivot + 1)..size {
+            let factor = work[row][pivot] / work[pivot][pivot];
+            work[row][pivot] = 0.0;
+            for col in (pivot + 1)..size {
+                work[row][col] = (-factor).mul_add(work[pivot][col], work[row][col]);
+            }
+            for column in &mut values {
+                column[row] = (-factor).mul_add(column[pivot], column[row]);
+            }
+        }
+    }
+    for column in 0..COLUMNS {
+        for row in (0..size).rev() {
+            let mut value = values[column][row];
+            for col in (row + 1)..size {
+                value = (-work[row][col]).mul_add(solutions[column][col], value);
+            }
+            solutions[column][row] = value / work[row][row];
+        }
     }
     OK
 }
@@ -761,6 +859,61 @@ fn solve_complex(
     OK
 }
 
+fn solve_complex_columns<const COLUMNS: usize>(
+    size: usize,
+    matrix: &[[CoComplex; CO_MAX_INTERNAL]; CO_MAX_INTERNAL],
+    rhs: &[[CoComplex; CO_MAX_INTERNAL]; COLUMNS],
+    solutions: &mut [[CoComplex; CO_MAX_INTERNAL]; COLUMNS],
+) -> c_int {
+    let mut work = *matrix;
+    let mut values = *rhs;
+
+    for pivot in 0..size {
+        let mut best = pivot;
+        let mut magnitude = work[pivot][pivot].abs2();
+        for row in (pivot + 1)..size {
+            let candidate = work[row][pivot].abs2();
+            if candidate > magnitude {
+                magnitude = candidate;
+                best = row;
+            }
+        }
+        if magnitude < 1.0e-60 {
+            return E_PANIC;
+        }
+        if best != pivot {
+            for col in pivot..size {
+                let temporary = work[pivot][col];
+                work[pivot][col] = work[best][col];
+                work[best][col] = temporary;
+            }
+            for column in &mut values {
+                column.swap(pivot, best);
+            }
+        }
+        for row in (pivot + 1)..size {
+            let factor = work[row][pivot].div(work[pivot][pivot]);
+            work[row][pivot] = CoComplex::ZERO;
+            for col in (pivot + 1)..size {
+                work[row][col] = work[row][col].sub(factor.mul(work[pivot][col]));
+            }
+            for column in &mut values {
+                column[row] = column[row].sub(factor.mul(column[pivot]));
+            }
+        }
+    }
+    for column in 0..COLUMNS {
+        for row in (0..size).rev() {
+            let mut value = values[column][row];
+            for col in (row + 1)..size {
+                value = value.sub(work[row][col].mul(solutions[column][col]));
+            }
+            solutions[column][row] = value.div(work[row][row]);
+        }
+    }
+    OK
+}
+
 #[inline]
 unsafe fn matrix_value(device: *const CoBsim4, row: c_int, col: c_int) -> CoComplex {
     CoComplex {
@@ -769,7 +922,7 @@ unsafe fn matrix_value(device: *const CoBsim4, row: c_int, col: c_int) -> CoComp
     }
 }
 
-unsafe fn device_nodes(
+unsafe fn discover_device_nodes(
     device: *const CoBsim4,
     external: &mut [c_int; CO_TERMINALS],
     internal: &mut [c_int; CO_MAX_INTERNAL],
@@ -802,18 +955,31 @@ unsafe fn device_nodes(
     count as c_int
 }
 
+unsafe fn device_nodes(
+    device: *const CoBsim4,
+    external: &mut [c_int; CO_TERMINALS],
+    internal: &mut [c_int; CO_MAX_INTERNAL],
+) -> c_int {
+    if (*device).setup_done != 0 {
+        *external = (*device).external_nodes;
+        *internal = (*device).internal_nodes;
+        (*device).internal_count
+    } else {
+        discover_device_nodes(device, external, internal)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DC + small-signal core (host.c `co_bsim4_dc`). Requires the lock to be held.
 // ---------------------------------------------------------------------------
 
-/// Small-signal extraction tail of `co_bsim4_dc`: the `MODEINITSMSIG` reload that
-/// fills the instance charge/capacitance fields, the terminal charge read-back,
-/// and the `acLoad` + complex Schur reduction yielding the 4x4 terminal
-/// capacitance. Split verbatim out of `dc_inner` so the DC-Newton path can skip
-/// it (D6 acLoad-skip). Its only persistent effect is the instance small-signal
-/// fields the next full eval overwrites; `acLoad` writes solely into the
-/// per-call-cleared matrix, so skipping it is bit-neutral to the Newton
-/// trajectory. Requires the lock held and the DC operating point already loaded.
+/// Small-signal extraction tail of `co_bsim4_dc`: optional legacy
+/// `MODEINITSMSIG` reload, terminal charge read-back, and `acLoad` plus complex
+/// Schur reduction yielding the 4x4 terminal capacitance. The final floating
+/// load already filled the same instance fields, so production evaluation
+/// reuses them; raw `dc` requests the reload as an oracle. Split out of
+/// `dc_inner` so the DC-Newton path can skip the whole tail (D6 acLoad-skip).
+/// Requires the lock held and the DC operating point already loaded.
 unsafe fn extract_small_signal(
     device: *mut CoBsim4,
     external: &[c_int; CO_TERMINALS],
@@ -821,15 +987,18 @@ unsafe fn extract_small_signal(
     internal_count: usize,
     charges: *mut f64,
     capacitance: *mut f64,
+    reload_operating_point: bool,
 ) -> c_int {
-    (*device).ckt.CKTmode = MODEDCOP | MODEINITSMSIG;
-    co_clear(device);
-    let status = ffi::BSIM4v5load(
-        addr_of_mut!((*device).model).cast(),
-        addr_of_mut!((*device).ckt),
-    );
-    if status != OK {
-        return status;
+    if reload_operating_point {
+        (*device).ckt.CKTmode = MODEDCOP | MODEINITSMSIG;
+        co_clear(device);
+        let status = ffi::BSIM4v5load(
+            addr_of_mut!((*device).model).cast(),
+            addr_of_mut!((*device).ckt),
+        );
+        if status != OK {
+            return status;
+        }
     }
     let state_base = (*device).instance.BSIM4v5states;
     *charges.add(0) = (*device).state0[(state_base + OFF_QD) as usize];
@@ -854,27 +1023,34 @@ unsafe fn extract_small_signal(
     if status != OK {
         return status;
     }
+    let mut internal_solutions = [[CoComplex::ZERO; CO_MAX_INTERNAL]; CO_TERMINALS];
+    if internal_count > 0 {
+        let mut system = [[CoComplex::ZERO; CO_MAX_INTERNAL]; CO_MAX_INTERNAL];
+        for i in 0..internal_count {
+            for j in 0..internal_count {
+                system[i][j] = matrix_value(device, internal[i], internal[j]);
+            }
+        }
+        let mut rights = [[CoComplex::ZERO; CO_MAX_INTERNAL]; CO_TERMINALS];
+        for (col, right) in rights.iter_mut().enumerate() {
+            for i in 0..internal_count {
+                right[i] = matrix_value(device, internal[i], external[col]);
+            }
+        }
+        let status =
+            solve_complex_columns(internal_count, &system, &rights, &mut internal_solutions);
+        if status != OK {
+            return status;
+        }
+    }
     for row in 0..CO_TERMINALS {
         for col in 0..CO_TERMINALS {
             let mut reduced = matrix_value(device, external[row], external[col]);
-            if internal_count > 0 {
-                let mut system = [[CoComplex::ZERO; CO_MAX_INTERNAL]; CO_MAX_INTERNAL];
-                let mut right = [CoComplex::ZERO; CO_MAX_INTERNAL];
-                let mut solution = [CoComplex::ZERO; CO_MAX_INTERNAL];
-                for i in 0..internal_count {
-                    right[i] = matrix_value(device, internal[i], external[col]);
-                    for j in 0..internal_count {
-                        system[i][j] = matrix_value(device, internal[i], internal[j]);
-                    }
-                }
-                let status = solve_complex(internal_count, &system, &right, &mut solution);
-                if status != OK {
-                    return status;
-                }
-                for i in 0..internal_count {
-                    reduced = reduced
-                        .sub(matrix_value(device, external[row], internal[i]).mul(solution[i]));
-                }
+            for i in 0..internal_count {
+                reduced = reduced.sub(
+                    matrix_value(device, external[row], internal[i])
+                        .mul(internal_solutions[col][i]),
+                );
             }
             *capacitance.add(row * CO_TERMINALS + col) = reduced.imag;
         }
@@ -892,6 +1068,8 @@ unsafe fn dc_inner(
     capacitance: *mut f64,
     op: *mut f64,
     want_caps: bool,
+    final_load_reuse_tolerance: f64,
+    reload_small_signal: bool,
 ) -> c_int {
     if device.is_null() || (*device).setup_done == 0 {
         return E_BADPARM;
@@ -922,6 +1100,8 @@ unsafe fn dc_inner(
     }
 
     (*device).ckt.CKTmode = MODEDCOP | MODEINITFLOAT;
+    let mut loaded_at_final_internal_state = internal_count == 0;
+    let mut final_internal_error = 0.0;
     for iteration in 0..40 {
         co_clear(device);
         let status = ffi::BSIM4v5load(
@@ -954,11 +1134,16 @@ unsafe fn dc_inner(
             return status;
         }
         let mut error = 0.0f64;
+        let mut unchanged = true;
         for i in 0..internal_count {
-            error = error.max((next[i] - (*device).rhs_old[internal[i] as usize]).abs());
+            let previous = (*device).rhs_old[internal[i] as usize];
+            error = error.max((next[i] - previous).abs());
+            unchanged &= next[i].to_bits() == previous.to_bits();
             (*device).rhs_old[internal[i] as usize] = next[i];
         }
+        final_internal_error = error;
         if error < 1.0e-12 {
+            loaded_at_final_internal_state = unchanged;
             break;
         }
         if iteration == 39 {
@@ -966,13 +1151,15 @@ unsafe fn dc_inner(
         }
     }
 
-    co_clear(device);
-    let status = ffi::BSIM4v5load(
-        addr_of_mut!((*device).model).cast(),
-        addr_of_mut!((*device).ckt),
-    );
-    if status != OK {
-        return status;
+    if !loaded_at_final_internal_state && final_internal_error > final_load_reuse_tolerance {
+        co_clear(device);
+        let status = ffi::BSIM4v5load(
+            addr_of_mut!((*device).model).cast(),
+            addr_of_mut!((*device).ckt),
+        );
+        if status != OK {
+            return status;
+        }
     }
 
     for row in 0..CO_TERMINALS {
@@ -989,30 +1176,33 @@ unsafe fn dc_inner(
         *currents.add(row) = residual;
     }
 
+    let mut internal_solutions = [[0.0f64; CO_MAX_INTERNAL]; CO_TERMINALS];
+    if internal_count > 0 {
+        let mut system = [[0.0f64; CO_MAX_INTERNAL]; CO_MAX_INTERNAL];
+        for i in 0..internal_count {
+            for j in 0..internal_count {
+                system[i][j] =
+                    (*device).matrix.value[internal[i] as usize][internal[j] as usize][0];
+            }
+        }
+        let mut rights = [[0.0f64; CO_MAX_INTERNAL]; CO_TERMINALS];
+        for (col, right) in rights.iter_mut().enumerate() {
+            for i in 0..internal_count {
+                right[i] = (*device).matrix.value[internal[i] as usize][external[col] as usize][0];
+            }
+        }
+        let status = solve_real_columns(internal_count, &system, &rights, &mut internal_solutions);
+        if status != OK {
+            return status;
+        }
+    }
     for row in 0..CO_TERMINALS {
         for col in 0..CO_TERMINALS {
             let mut reduced =
                 (*device).matrix.value[external[row] as usize][external[col] as usize][0];
-            if internal_count > 0 {
-                let mut system = [[0.0f64; CO_MAX_INTERNAL]; CO_MAX_INTERNAL];
-                let mut right = [0.0f64; CO_MAX_INTERNAL];
-                let mut solution = [0.0f64; CO_MAX_INTERNAL];
-                for i in 0..internal_count {
-                    right[i] =
-                        (*device).matrix.value[internal[i] as usize][external[col] as usize][0];
-                    for j in 0..internal_count {
-                        system[i][j] =
-                            (*device).matrix.value[internal[i] as usize][internal[j] as usize][0];
-                    }
-                }
-                let status = solve_real(internal_count, &system, &right, &mut solution);
-                if status != OK {
-                    return status;
-                }
-                for i in 0..internal_count {
-                    let m = (*device).matrix.value[external[row] as usize][internal[i] as usize][0];
-                    reduced = (-m).mul_add(solution[i], reduced);
-                }
+            for i in 0..internal_count {
+                let m = (*device).matrix.value[external[row] as usize][internal[i] as usize][0];
+                reduced = (-m).mul_add(internal_solutions[col][i], reduced);
             }
             *conductance.add(row * CO_TERMINALS + col) = reduced;
         }
@@ -1026,6 +1216,7 @@ unsafe fn dc_inner(
             internal_count,
             charges,
             capacitance,
+            reload_small_signal,
         );
         if status != OK {
             return status;
@@ -1132,6 +1323,70 @@ pub unsafe fn dc(
         capacitance,
         op,
         true,
+        0.0,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn eval_configured_unlocked(
+    device: *mut CoBsim4,
+    terminals: *const f64,
+    currents: *mut f64,
+    conductance: *mut f64,
+    charges: *mut f64,
+    capacitance: *mut f64,
+    op: *mut f64,
+    want_caps: bool,
+    reuse_final_load_by_default: bool,
+) -> c_int {
+    if device.is_null() {
+        return E_BADPARM;
+    }
+    let status = dc_inner(
+        device,
+        terminals,
+        currents,
+        conductance,
+        charges,
+        capacitance,
+        op,
+        want_caps,
+        final_load_reuse_tolerance(reuse_final_load_by_default),
+        !reuse_loaded_small_signal(),
+    );
+    if status != OK {
+        return status;
+    }
+    enforce_terminal_conservation(currents, conductance, charges, capacitance)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn eval_configured(
+    device: *mut CoBsim4,
+    terminals: *const f64,
+    currents: *mut f64,
+    conductance: *mut f64,
+    charges: *mut f64,
+    capacitance: *mut f64,
+    op: *mut f64,
+    want_caps: bool,
+    reuse_final_load_by_default: bool,
+) -> c_int {
+    if device.is_null() {
+        return E_BADPARM;
+    }
+    let _guard = lock_device(device);
+    eval_configured_unlocked(
+        device,
+        terminals,
+        currents,
+        conductance,
+        charges,
+        capacitance,
+        op,
+        want_caps,
+        reuse_final_load_by_default,
     )
 }
 
@@ -1145,11 +1400,7 @@ pub unsafe fn eval(
     capacitance: *mut f64,
     op: *mut f64,
 ) -> c_int {
-    if device.is_null() {
-        return E_BADPARM;
-    }
-    let _guard = lock_device(device);
-    let status = dc_inner(
+    eval_configured(
         device,
         terminals,
         currents,
@@ -1158,11 +1409,8 @@ pub unsafe fn eval(
         capacitance,
         op,
         true,
-    );
-    if status != OK {
-        return status;
-    }
-    enforce_terminal_conservation(currents, conductance, charges, capacitance)
+        false,
+    )
 }
 
 /// DC-Newton evaluation (host.c `co_bsim4_dc` + conservation snap) with the D6
@@ -1183,11 +1431,7 @@ pub unsafe fn eval_dc(
     op: *mut f64,
     want_caps: bool,
 ) -> c_int {
-    if device.is_null() {
-        return E_BADPARM;
-    }
-    let _guard = lock_device(device);
-    let status = dc_inner(
+    eval_configured(
         device,
         terminals,
         currents,
@@ -1196,11 +1440,8 @@ pub unsafe fn eval_dc(
         capacitance,
         op,
         want_caps,
-    );
-    if status != OK {
-        return status;
-    }
-    enforce_terminal_conservation(currents, conductance, charges, capacitance)
+        false,
+    )
 }
 
 /// All-`void*` evaluation ABI (host.c `co_bsim4_eval_vp`), for the Numba bridge.
@@ -1222,6 +1463,112 @@ pub unsafe fn eval_vp(
         capacitance,
         op.as_mut_ptr(),
     )
+}
+
+/// Full evaluation for an exclusively owned compiled-transient handle.
+///
+/// The caller must guarantee that no other thread can evaluate or destroy
+/// `device` until this call returns. Public scalar/C ABI evaluation retains the
+/// per-handle mutex.
+pub unsafe fn eval_vp_transient(
+    device: *mut CoBsim4,
+    terminals: *const f64,
+    currents: *mut f64,
+    conductance: *mut f64,
+    charges: *mut f64,
+    capacitance: *mut f64,
+) -> c_int {
+    eval_vp_transient_with_tolerance(
+        device,
+        terminals,
+        currents,
+        conductance,
+        charges,
+        capacitance,
+        final_load_reuse_tolerance(false),
+    )
+}
+
+/// [`eval_vp_transient`] with an explicit bound on the final private-node
+/// correction whose reload may be omitted.
+///
+/// A zero tolerance preserves the exact path. Positive values are intended for
+/// continuous analog-settling workloads that explicitly accept the bounded
+/// compact-model perturbation; regenerative comparators should keep zero.
+pub unsafe fn eval_vp_transient_with_tolerance(
+    device: *mut CoBsim4,
+    terminals: *const f64,
+    currents: *mut f64,
+    conductance: *mut f64,
+    charges: *mut f64,
+    capacitance: *mut f64,
+    final_load_tolerance: f64,
+) -> c_int {
+    eval_vp_transient_with_tolerances(
+        device,
+        terminals,
+        currents,
+        conductance,
+        charges,
+        capacitance,
+        final_load_tolerance,
+        0.0,
+    )
+}
+
+/// Transient evaluation with bounded private-node reload and BSIM bypass.
+///
+/// A positive `bypass_voltage_tolerance` enables the compact model's standard
+/// device bypass only for this call. Relative voltage tolerance is disabled so
+/// the absolute bound is never enlarged by terminal magnitude. The handle's
+/// public scalar settings are restored before return.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn eval_vp_transient_with_tolerances(
+    device: *mut CoBsim4,
+    terminals: *const f64,
+    currents: *mut f64,
+    conductance: *mut f64,
+    charges: *mut f64,
+    capacitance: *mut f64,
+    final_load_tolerance: f64,
+    bypass_voltage_tolerance: f64,
+) -> c_int {
+    if device.is_null()
+        || final_load_tolerance.is_nan()
+        || final_load_tolerance < 0.0
+        || !bypass_voltage_tolerance.is_finite()
+        || bypass_voltage_tolerance < 0.0
+    {
+        return E_BADPARM;
+    }
+    let saved_bypass = (*device).ckt.CKTbypass;
+    let saved_reltol = (*device).ckt.CKTreltol;
+    let saved_volt_tol = (*device).ckt.CKTvoltTol;
+    if bypass_voltage_tolerance > 0.0 {
+        (*device).ckt.CKTbypass = 1;
+        (*device).ckt.CKTreltol = 0.0;
+        (*device).ckt.CKTvoltTol = bypass_voltage_tolerance;
+    }
+    let mut op = [0.0f64; 8];
+    let status = dc_inner(
+        device,
+        terminals,
+        currents,
+        conductance,
+        charges,
+        capacitance,
+        op.as_mut_ptr(),
+        true,
+        final_load_tolerance,
+        !reuse_loaded_small_signal(),
+    );
+    (*device).ckt.CKTbypass = saved_bypass;
+    (*device).ckt.CKTreltol = saved_reltol;
+    (*device).ckt.CKTvoltTol = saved_volt_tol;
+    if status != OK {
+        return status;
+    }
+    enforce_terminal_conservation(currents, conductance, charges, capacitance)
 }
 
 /// All-`void*` DC-Newton evaluation with the D6 acLoad-skip (`eval_dc` behind the
@@ -1248,6 +1595,85 @@ pub unsafe fn eval_vp_dc(
         op.as_mut_ptr(),
         want_caps,
     )
+}
+
+/// DC-only counterpart of [`eval_vp_transient`], with the same exclusive-handle
+/// requirement.
+pub unsafe fn eval_vp_dc_transient(
+    device: *mut CoBsim4,
+    terminals: *const f64,
+    currents: *mut f64,
+    conductance: *mut f64,
+    charges: *mut f64,
+    capacitance: *mut f64,
+    want_caps: bool,
+) -> c_int {
+    let mut op = [0.0f64; 8];
+    eval_configured_unlocked(
+        device,
+        terminals,
+        currents,
+        conductance,
+        charges,
+        capacitance,
+        op.as_mut_ptr(),
+        want_caps,
+        false,
+    )
+}
+
+/// Reuse the charge/capacitance fields produced by the final floating-point
+/// load. The legacy path repeats that same operating point in `MODEINITSMSIG`
+/// before `acLoad`; set `CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD=0` to restore it for
+/// numerical A/B checks. The raw `dc` entry point always retains the reload as
+/// an in-process oracle.
+fn reuse_loaded_small_signal() -> bool {
+    static REUSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REUSE.get_or_init(|| {
+        std::env::var_os("CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD")
+            .map(|value| {
+                let value = value.to_string_lossy();
+                let value = value.trim();
+                !(value.is_empty()
+                    || value == "0"
+                    || value.eq_ignore_ascii_case("false")
+                    || value.eq_ignore_ascii_case("no"))
+            })
+            .unwrap_or(true)
+    })
+}
+
+/// Select the maximum converged internal-node correction for final-load reuse,
+/// honoring explicit process-level A/B overrides.
+///
+/// Production entries currently pass `default = false`, preserving the exact
+/// reload unless the internal solution was already bit-identical. The numeric
+/// tolerance override supports bounded transient A/B runs; the older boolean
+/// switch retains its all-or-nothing behavior. Raw `dc` always reloads and
+/// remains the in-process oracle.
+fn final_load_reuse_tolerance(default: bool) -> f64 {
+    static TOLERANCE: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    TOLERANCE
+        .get_or_init(|| {
+            if let Some(value) = std::env::var_os("CIRCUITOPT_BSIM_FINAL_LOAD_TOL") {
+                let parsed = value.to_string_lossy().trim().parse::<f64>().ok();
+                return parsed.filter(|value| value.is_finite() && *value >= 0.0);
+            }
+            std::env::var_os("CIRCUITOPT_BSIM_REUSE_FINAL_LOAD").map(|value| {
+                let value = value.to_string_lossy();
+                let value = value.trim();
+                if value.is_empty()
+                    || value == "0"
+                    || value.eq_ignore_ascii_case("false")
+                    || value.eq_ignore_ascii_case("no")
+                {
+                    0.0
+                } else {
+                    f64::INFINITY
+                }
+            })
+        })
+        .unwrap_or(if default { f64::INFINITY } else { 0.0 })
 }
 
 /// Process-level kill switch for the D6 acLoad-skip. `CIRCUIT_BSIM4_FULL_EVAL`
@@ -1481,6 +1907,8 @@ pub struct EvalBatchWorkspace {
     handles: Vec<usize>,
     groups: Vec<EvalBatchGroup>,
     statuses: Vec<c_int>,
+    final_load_tolerance: f64,
+    bypass_voltage_tolerance: f64,
 }
 
 struct EvalBatchGroup {
@@ -1508,6 +1936,32 @@ impl EvalBatchWorkspace {
     /// lifetime. Repeated handles are allowed and are evaluated serially within
     /// one worker; distinct handles must refer to independent instances.
     pub unsafe fn new(handles: Vec<usize>) -> Self {
+        unsafe { Self::new_with_final_load_tolerance(handles, 0.0) }
+    }
+
+    /// Build a workspace whose transient entries may omit a final private-node
+    /// reload below `final_load_tolerance`.
+    ///
+    /// # Safety
+    ///
+    /// The handle lifetime and exclusivity contract is the same as [`Self::new`].
+    pub unsafe fn new_with_final_load_tolerance(
+        handles: Vec<usize>,
+        final_load_tolerance: f64,
+    ) -> Self {
+        unsafe { Self::new_with_transient_tolerances(handles, final_load_tolerance, 0.0) }
+    }
+
+    /// Build a workspace with transient-only compact-model tolerances.
+    ///
+    /// # Safety
+    ///
+    /// The handle lifetime and exclusivity contract is the same as [`Self::new`].
+    pub unsafe fn new_with_transient_tolerances(
+        handles: Vec<usize>,
+        final_load_tolerance: f64,
+        bypass_voltage_tolerance: f64,
+    ) -> Self {
         let count = handles.len();
         let mut group_for_handle = HashMap::with_capacity(count);
         let mut groups: Vec<EvalBatchGroup> = Vec::with_capacity(count);
@@ -1525,6 +1979,8 @@ impl EvalBatchWorkspace {
             handles,
             groups,
             statuses: vec![OK; count],
+            final_load_tolerance,
+            bypass_voltage_tolerance,
         }
     }
 
@@ -1581,29 +2037,40 @@ fn eval_batch_slot(
     terminals: &[f64; CO_TERMINALS],
     result: &mut EvalBatchResult,
     status: &mut c_int,
+    transient: bool,
+    final_load_tolerance: f64,
+    bypass_voltage_tolerance: f64,
 ) {
     *status = unsafe {
-        eval_vp(
-            handle as *mut CoBsim4,
-            terminals.as_ptr(),
-            result.currents.as_mut_ptr(),
-            result.conductance.as_mut_ptr(),
-            result.charges.as_mut_ptr(),
-            result.capacitance.as_mut_ptr(),
-        )
+        if transient {
+            eval_vp_transient_with_tolerances(
+                handle as *mut CoBsim4,
+                terminals.as_ptr(),
+                result.currents.as_mut_ptr(),
+                result.conductance.as_mut_ptr(),
+                result.charges.as_mut_ptr(),
+                result.capacitance.as_mut_ptr(),
+                final_load_tolerance,
+                bypass_voltage_tolerance,
+            )
+        } else {
+            eval_vp(
+                handle as *mut CoBsim4,
+                terminals.as_ptr(),
+                result.currents.as_mut_ptr(),
+                result.conductance.as_mut_ptr(),
+                result.charges.as_mut_ptr(),
+                result.capacitance.as_mut_ptr(),
+            )
+        }
     };
 }
 
-/// Evaluate one terminal row per persistent handle directly into reusable slots.
-///
-/// # Safety
-///
-/// All handles retained by `workspace` must still be live. Distinct handle
-/// values must refer to independent instances.
-pub unsafe fn eval_batch_into(
+unsafe fn eval_batch_into_configured(
     workspace: &mut EvalBatchWorkspace,
     terminals: &[[f64; CO_TERMINALS]],
     results: &mut [EvalBatchResult],
+    transient: bool,
 ) -> c_int {
     if workspace.len() != terminals.len() || workspace.len() != results.len() {
         return E_BADPARM;
@@ -1615,12 +2082,22 @@ pub unsafe fn eval_batch_into(
     let handles = &workspace.handles;
     let groups = &workspace.groups;
     let statuses = &mut workspace.statuses;
+    let final_load_tolerance = workspace.final_load_tolerance;
+    let bypass_voltage_tolerance = workspace.bypass_voltage_tolerance;
 
     let ran_parallel =
         if handles.len() >= EVAL_BATCH_PARALLEL_MIN && groups.len() > 1 && !serial_eval_requested()
         {
             let Some(pool) = eval_batch_pool() else {
-                return eval_batch_serial(handles, terminals, results, statuses);
+                return eval_batch_serial(
+                    handles,
+                    terminals,
+                    results,
+                    statuses,
+                    transient,
+                    final_load_tolerance,
+                    bypass_voltage_tolerance,
+                );
             };
             let results_address = results.as_mut_ptr() as usize;
             let statuses_address = statuses.as_mut_ptr() as usize;
@@ -1633,7 +2110,15 @@ pub unsafe fn eval_batch_into(
                         let result =
                             unsafe { &mut *((results_address as *mut EvalBatchResult).add(index)) };
                         let status = unsafe { &mut *((statuses_address as *mut c_int).add(index)) };
-                        eval_batch_slot(group.handle, &terminals[index], result, status);
+                        eval_batch_slot(
+                            group.handle,
+                            &terminals[index],
+                            result,
+                            status,
+                            transient,
+                            final_load_tolerance,
+                            bypass_voltage_tolerance,
+                        );
                     }
                 });
             });
@@ -1642,7 +2127,15 @@ pub unsafe fn eval_batch_into(
             false
         };
     if !ran_parallel {
-        return eval_batch_serial(handles, terminals, results, statuses);
+        return eval_batch_serial(
+            handles,
+            terminals,
+            results,
+            statuses,
+            transient,
+            final_load_tolerance,
+            bypass_voltage_tolerance,
+        );
     }
     statuses
         .iter()
@@ -1651,12 +2144,50 @@ pub unsafe fn eval_batch_into(
         .unwrap_or(OK)
 }
 
+/// Evaluate one terminal row per persistent handle directly into reusable slots.
+///
+/// This compatibility path matches public scalar [`eval`] semantics.
+///
+/// # Safety
+///
+/// All handles retained by `workspace` must still be live. Distinct handle
+/// values must refer to independent instances.
+pub unsafe fn eval_batch_into(
+    workspace: &mut EvalBatchWorkspace,
+    terminals: &[[f64; CO_TERMINALS]],
+    results: &mut [EvalBatchResult],
+) -> c_int {
+    eval_batch_into_configured(workspace, terminals, results, false)
+}
+
+/// Exclusive-handle transient hot-loop variant of [`eval_batch_into`].
+///
+/// It has a distinct entry for future transient-only policies while preserving
+/// the same workspace and output layout. Final-load reuse remains opt-in through
+/// `CIRCUITOPT_BSIM_REUSE_FINAL_LOAD=1`.
+///
+/// # Safety
+///
+/// In addition to the base workspace contract, every distinct handle must be
+/// exclusively owned by this transient for the complete call. Repeated handles
+/// are allowed and remain serial within one workspace group.
+pub unsafe fn eval_batch_into_transient(
+    workspace: &mut EvalBatchWorkspace,
+    terminals: &[[f64; CO_TERMINALS]],
+    results: &mut [EvalBatchResult],
+) -> c_int {
+    eval_batch_into_configured(workspace, terminals, results, true)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn eval_batch_serial(
     handles: &[usize],
     terminals: &[[f64; CO_TERMINALS]],
     results: &mut [EvalBatchResult],
     statuses: &mut [c_int],
+    transient: bool,
+    final_load_tolerance: f64,
+    bypass_voltage_tolerance: f64,
 ) -> c_int {
     for index in 0..handles.len() {
         eval_batch_slot(
@@ -1664,6 +2195,9 @@ fn eval_batch_serial(
             &terminals[index],
             &mut results[index],
             &mut statuses[index],
+            transient,
+            final_load_tolerance,
+            bypass_voltage_tolerance,
         );
     }
     statuses
@@ -1884,6 +2418,108 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
 
+    #[test]
+    fn shared_schur_factorization_matches_independent_column_solves_bitwise() {
+        let size = 4;
+        let mut real_matrix = [[0.0; CO_MAX_INTERNAL]; CO_MAX_INTERNAL];
+        for (row, values) in [
+            [0.0, 2.0, 0.2, -0.1],
+            [3.0, 1.0, 0.4, 0.2],
+            [0.1, 0.2, 4.0, 0.3],
+            [0.2, -0.1, 0.4, 5.0],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            real_matrix[row][..size].copy_from_slice(&values);
+        }
+        let mut real_rhs = [[0.0; CO_MAX_INTERNAL]; CO_TERMINALS];
+        for (column, values) in [
+            [1.0, 2.0, 3.0, 4.0],
+            [-1.0, 0.5, 2.5, -3.0],
+            [0.25, -2.0, 1.5, 8.0],
+            [4.0, 3.0, 2.0, 1.0],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            real_rhs[column][..size].copy_from_slice(&values);
+        }
+        let mut expected_real = [[0.0; CO_MAX_INTERNAL]; CO_TERMINALS];
+        for column in 0..CO_TERMINALS {
+            assert_eq!(
+                solve_real(
+                    size,
+                    &real_matrix,
+                    &real_rhs[column],
+                    &mut expected_real[column],
+                ),
+                OK
+            );
+        }
+        let mut actual_real = [[0.0; CO_MAX_INTERNAL]; CO_TERMINALS];
+        assert_eq!(
+            solve_real_columns(size, &real_matrix, &real_rhs, &mut actual_real),
+            OK
+        );
+        for column in 0..CO_TERMINALS {
+            for row in 0..size {
+                assert_eq!(
+                    actual_real[column][row].to_bits(),
+                    expected_real[column][row].to_bits()
+                );
+            }
+        }
+
+        let mut complex_matrix = [[CoComplex::ZERO; CO_MAX_INTERNAL]; CO_MAX_INTERNAL];
+        let mut complex_rhs = [[CoComplex::ZERO; CO_MAX_INTERNAL]; CO_TERMINALS];
+        for row in 0..size {
+            for column in 0..size {
+                complex_matrix[row][column] = CoComplex {
+                    real: real_matrix[row][column],
+                    imag: if row == column { 0.125 } else { -0.03125 },
+                };
+            }
+        }
+        for column in 0..CO_TERMINALS {
+            for row in 0..size {
+                complex_rhs[column][row] = CoComplex {
+                    real: real_rhs[column][row],
+                    imag: (column + row + 1) as f64 * 0.0625,
+                };
+            }
+        }
+        let mut expected_complex = [[CoComplex::ZERO; CO_MAX_INTERNAL]; CO_TERMINALS];
+        for column in 0..CO_TERMINALS {
+            assert_eq!(
+                solve_complex(
+                    size,
+                    &complex_matrix,
+                    &complex_rhs[column],
+                    &mut expected_complex[column],
+                ),
+                OK
+            );
+        }
+        let mut actual_complex = [[CoComplex::ZERO; CO_MAX_INTERNAL]; CO_TERMINALS];
+        assert_eq!(
+            solve_complex_columns(size, &complex_matrix, &complex_rhs, &mut actual_complex,),
+            OK
+        );
+        for column in 0..CO_TERMINALS {
+            for row in 0..size {
+                assert_eq!(
+                    actual_complex[column][row].real.to_bits(),
+                    expected_complex[column][row].real.to_bits()
+                );
+                assert_eq!(
+                    actual_complex[column][row].imag.to_bits(),
+                    expected_complex[column][row].imag.to_bits()
+                );
+            }
+        }
+    }
+
     /// A minimal but valid NMOS card: create sets the polarity, then a couple of
     /// geometry/oxide parameters keep BSIM4's defaults in a working regime.
     unsafe fn make_device(polarity: c_int) -> *mut CoBsim4 {
@@ -1978,6 +2614,234 @@ mod tests {
             charges.map(f64::to_bits),
             capacitance.map(f64::to_bits),
         )
+    }
+
+    unsafe fn eval_vp_bits(
+        device: *mut CoBsim4,
+        terminals: &[f64; 4],
+        transient: bool,
+    ) -> ([u64; 4], [u64; 16], [u64; 4], [u64; 16]) {
+        let mut currents = [0.0f64; 4];
+        let mut conductance = [0.0f64; 16];
+        let mut charges = [0.0f64; 4];
+        let mut capacitance = [0.0f64; 16];
+        let evaluate = if transient {
+            eval_vp_transient
+        } else {
+            eval_vp
+        };
+        assert_eq!(
+            evaluate(
+                device,
+                terminals.as_ptr(),
+                currents.as_mut_ptr(),
+                conductance.as_mut_ptr(),
+                charges.as_mut_ptr(),
+                capacitance.as_mut_ptr(),
+            ),
+            OK
+        );
+        (
+            currents.map(f64::to_bits),
+            conductance.map(f64::to_bits),
+            charges.map(f64::to_bits),
+            capacitance.map(f64::to_bits),
+        )
+    }
+
+    #[test]
+    fn exclusive_transient_entry_matches_locked_evaluation_bitwise() {
+        unsafe {
+            for (polarity, trajectory) in [
+                (
+                    1,
+                    [
+                        [0.6, 0.6, 0.0, 0.0],
+                        [0.7, 0.5, 0.0, 0.0],
+                        [0.65, 0.55, 0.0, 0.0],
+                        [0.9, 0.45, 0.0, 0.0],
+                    ],
+                ),
+                (
+                    -1,
+                    [
+                        [0.3, 0.3, 0.9, 0.9],
+                        [0.2, 0.4, 0.9, 0.9],
+                        [0.25, 0.35, 0.9, 0.9],
+                        [0.0, 0.45, 0.9, 0.9],
+                    ],
+                ),
+            ] {
+                let locked = make_device(polarity);
+                let exclusive = make_device(polarity);
+                for (step, terminals) in trajectory.iter().enumerate() {
+                    assert_eq!(
+                        eval_vp_bits(exclusive, terminals, true),
+                        eval_vp_bits(locked, terminals, false),
+                        "exclusive evaluation differs for polarity {polarity} at step {step}",
+                    );
+                }
+                destroy(locked);
+                destroy(exclusive);
+            }
+        }
+    }
+
+    #[test]
+    fn transient_bypass_is_bounded_and_restores_public_handle_settings() {
+        unsafe {
+            let device = make_device(1);
+            let reference = make_device(1);
+            let initial = [0.6, 0.6, 0.0, 0.0];
+            assert_eq!(
+                eval_vp_bits(device, &initial, true),
+                eval_vp_bits(reference, &initial, true),
+            );
+
+            let nearby = [initial[0] + 1.0e-10, initial[1], initial[2], initial[3]];
+            let mut currents = [0.0; 4];
+            let mut conductance = [0.0; 16];
+            let mut charges = [0.0; 4];
+            let mut capacitance = [0.0; 16];
+            assert_eq!(
+                eval_vp_transient_with_tolerances(
+                    device,
+                    nearby.as_ptr(),
+                    currents.as_mut_ptr(),
+                    conductance.as_mut_ptr(),
+                    charges.as_mut_ptr(),
+                    capacitance.as_mut_ptr(),
+                    0.0,
+                    1.0e-9,
+                ),
+                OK,
+            );
+            assert_eq!((*device).ckt.CKTbypass, 0);
+            assert_eq!((*device).ckt.CKTreltol, 1.0e-6);
+            assert_eq!((*device).ckt.CKTvoltTol, 1.0e-6);
+
+            // A later public evaluation must see the original handle policy and
+            // follow the same state trajectory as an untouched reference.
+            let far = [0.75, 0.55, 0.0, 0.0];
+            assert_eq!(
+                eval_vp_bits(device, &far, false),
+                eval_vp_bits(reference, &far, false),
+            );
+            destroy(device);
+            destroy(reference);
+        }
+    }
+
+    unsafe fn eval_reload_bits(
+        device: *mut CoBsim4,
+        terminals: &[f64; 4],
+        reload_converged_internal: bool,
+        reload_small_signal: bool,
+    ) -> ([u64; 4], [u64; 16], [u64; 4], [u64; 16]) {
+        let _guard = lock_device(device);
+        let mut currents = [0.0f64; 4];
+        let mut conductance = [0.0f64; 16];
+        let mut charges = [0.0f64; 4];
+        let mut capacitance = [0.0f64; 16];
+        let mut op = [0.0f64; 8];
+        assert_eq!(
+            dc_inner(
+                device,
+                terminals.as_ptr(),
+                currents.as_mut_ptr(),
+                conductance.as_mut_ptr(),
+                charges.as_mut_ptr(),
+                capacitance.as_mut_ptr(),
+                op.as_mut_ptr(),
+                true,
+                if reload_converged_internal {
+                    0.0
+                } else {
+                    f64::INFINITY
+                },
+                reload_small_signal,
+            ),
+            OK
+        );
+        assert_eq!(
+            enforce_terminal_conservation(
+                currents.as_mut_ptr(),
+                conductance.as_mut_ptr(),
+                charges.as_mut_ptr(),
+                capacitance.as_mut_ptr(),
+            ),
+            OK
+        );
+        (
+            currents.map(f64::to_bits),
+            conductance.map(f64::to_bits),
+            charges.map(f64::to_bits),
+            capacitance.map(f64::to_bits),
+        )
+    }
+
+    #[test]
+    fn final_load_small_signal_fields_match_explicit_smsig_reload() {
+        unsafe {
+            for (polarity, trajectory) in [
+                (
+                    1,
+                    [
+                        [0.6, 0.6, 0.0, 0.0],
+                        [0.7, 0.5, 0.0, 0.0],
+                        [0.65, 0.55, 0.0, 0.0],
+                        [0.9, 0.45, 0.0, 0.0],
+                    ],
+                ),
+                (
+                    -1,
+                    [
+                        [0.3, 0.3, 0.9, 0.9],
+                        [0.2, 0.4, 0.9, 0.9],
+                        [0.25, 0.35, 0.9, 0.9],
+                        [0.0, 0.45, 0.9, 0.9],
+                    ],
+                ),
+            ] {
+                let reload = make_device(polarity);
+                let reuse = make_device(polarity);
+                for (step, terminals) in trajectory.iter().enumerate() {
+                    assert_eq!(
+                        eval_reload_bits(reuse, terminals, true, false),
+                        eval_reload_bits(reload, terminals, true, true),
+                        "small-signal reuse differs for polarity {polarity} at step {step}",
+                    );
+                }
+                destroy(reload);
+                destroy(reuse);
+            }
+        }
+    }
+
+    #[test]
+    fn converged_internal_linearization_matches_final_reload_at_simple_biases() {
+        unsafe {
+            let reload = make_device(1);
+            let reuse = make_device(1);
+            for (step, terminals) in [
+                [0.6, 0.6, 0.0, 0.0],
+                [0.7, 0.5, 0.0, 0.0],
+                [0.65, 0.55, 0.0, 0.0],
+                [0.9, 0.45, 0.0, 0.0],
+                [0.55, 0.75, 0.0, 0.0],
+            ]
+            .iter()
+            .enumerate()
+            {
+                assert_eq!(
+                    eval_reload_bits(reuse, terminals, false, false),
+                    eval_reload_bits(reload, terminals, true, false),
+                    "final-load reuse differs at step {step}",
+                );
+            }
+            destroy(reload);
+            destroy(reuse);
+        }
     }
 
     /// D6 acLoad-skip safety probe. Two independent, identically-built handles are

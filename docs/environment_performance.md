@@ -31,8 +31,10 @@
 > 设置 `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复原调度做 A/B；该开关在进程内
 > 首次使用时读取一次。调度不影响数值：批次槽位相互独立写入。
 >
-> 原生 BSIM Gear2 transient 默认启用状态外推 predictor。需要进行数值回归 A/B 时，
-> 可设置 `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` 关闭；profile 中的
+> 原生 BSIM Gear2 transient 默认启用状态外推 predictor。固定网格使用两点线性
+> 外推；adaptive 路径在三个已接受状态可用后使用变步长二阶外推，重启后先线性
+> fallback，并继续在输入斜率断点禁用预测。需要进行数值回归 A/B 时，可设置
+> `CIRCUITOPT_BSIM_GEAR2_PREDICTOR=0` 关闭；profile 中的
 > `gear2_predictor_steps` 表示实际使用预测初值的步数。该开关按每次 solve 读取，
 > 不需要重启 Python 进程。
 >
@@ -45,6 +47,79 @@
 > 固定网格参考，默认容差的峰值/最终差分输出误差约为 `2.04 mV / 50 uV`；
 > 把 `adaptive_reltol`/`adaptive_vabstol` 收紧至 `1e-5`/`1e-7 V` 后约为
 > `0.42 mV / 12 uV`。这是特定电路的快照，不是固定 SLA。
+>
+> 2026-07-26 的 5 ns residue 热测进一步让 adaptive predictor 使用三点二阶
+> 外推，并让 LTE 的第二个 RHS 复用收敛 Newton 的 LU：FreePDK45 中位数
+> `55.6 -> 50.4 ms`、Newton `873 -> 801`；TSMC28 中位数
+> `139.2 -> 106.4 ms`、Newton `2644 -> 1995`。将新轨迹插值回旧 accepted grid
+> 后，全节点最大差分别为 `0.249 mV` 与 `0.137 mV`，最终输出变化分别为
+> `1.5 uV` 与 `12.0 uV`。同机 TSMC28 batch 线程 sweep 的 1/4/8/10 线程中位数为
+> `368/188/142/140 ms`，因此默认 10 线程上限保持不变。
+>
+> 同日继续优化了 BSIM 内部节点的 Schur reduction。旧实现按外部端子
+> `row × column` 循环，对同一个内部矩阵执行 16 次独立分解；新实现只分解一次，
+> 同时回代四个外部列。专门的位模式单测确认它与旧的逐列独立求解逐位一致。
+> 同一进程 TSMC28 5 ns MDAC A/B 中，热中位数 `113.1 -> 97.4 ms`，约快 14%；
+> accepted grid、41 条节点历史、5 条支路电流历史、输出及最终状态全部逐位相同。
+> 此后完整器件求值也直接复用最终 floating load 已产生的电荷/电容字段，不再于
+> `acLoad` 前额外执行一次 `MODEINITSMSIG` model load。TSMC28 继续由
+> `97.1 -> 90.1 ms`，FreePDK45 由 `38.5 -> 36.1 ms`；两者的 transient、AC 和
+> noise A/B 均逐位相同。原始 `dc` ABI 保留旧 reload 作为 oracle；设置
+> `CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD=0` 可让生产 `eval` 也恢复旧路径。
+>
+> 可设置 `CIRCUITOPT_BSIM_REUSE_FINAL_LOAD=1`，让内部节点 Newton 更新低于
+> `1 pV` 后直接消费最后一次收敛线性化，不再为亚皮伏修正额外执行完整 model load。
+> TSMC28 `84.8 -> 77.7 ms`、FreePDK45
+> `33.7 -> 31.1 ms`，均再快约 8%；最大 MDAC 节点变化分别为 `0.36 nV` 与
+> `42 pV`。不过个别 PMOS 电流/噪声点会超过公共 API 的位级 golden 契约，因此
+> 该模式默认关闭；原始 `dc` ABI 无论如何都保留 reload 作为 oracle。
+>
+> 随后的精确版本只在内部节点解与当前 load 使用值的 IEEE-754 位模式完全相同
+> （或没有内部节点）时自动跳过最终 load，并在 setup 后缓存节点布局。该条件下
+> FreePDK45 SAR6 的 64-code、8 条完整节点/支路轨迹和 TSMC28 MDAC 轨迹都与旧路径
+> 逐位一致。矩阵清零也按调度选择：单次求解使用一次连续的 `24×24` 整帧清零；
+> 外层并行 worker 只清零 `CKTmaxEqNum` 有效块，减少并发内存流量。设置
+> `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` 可强制使用整帧路径。transient lease 与
+> campaign worker 已独占其 handle，因此热循环会直接调用无锁内部入口；公共
+> scalar/C ABI 仍保留逐 handle mutex，batch 内重复 handle 仍被归组串行。64-code
+> SAR6 热运行中位数由约 `574.3 ms` 降至 `559.8 ms`，约快 2.5%，码流及完整轨迹
+> 逐位不变。
+>
+> SAR 单 trial sweep 改为严格均衡的连续分块。旧的 ceil 分块在 64 输入、12 worker
+> 时只产生 11 块，使 campaign Auto 误选串行轴，本机耗时约 `3.44 s`；修复后约
+> `0.59 s`。10 worker 由约 `0.74 s` 降至 `0.57 s`。每次 bit 判决后也只重建
+> 当前试探位与上一清零位的波形行。全部性能数字均在相同 64-code 码流下测得。
+>
+> 原生 transient 随后接入公共 BSIM handle pool。旧路径每次求解都会为全部 MOS
+> 重跑 `setup/temp`；旧 cache 对同一 card 也只能保留一个可变 handle，匹配器件在
+> 同一轨迹中仍会反复创建临时实例。现在每个 card 可缓存多个彼此独立的 handle，
+> 一条轨迹独占租用、归还后由下一条轨迹复用；`BSIM4_DEVICE_CACHE_SIZE` 按每个 PDK
+> namespace 的 handle 总数限制该池，默认 128。TSMC28 `residue_plus_fs16` 热中位数
+> `124.6 -> 101.9 ms`，单 PVT 点六个 transient case `0.815 -> 0.692 s`；
+> FreePDK45 `42.7 -> 38.7 ms`。相对每次新建 handle 的旧路径，插值后最大输出差
+> 分别为 `0.15 uV` 与 `8.6 pV`；六 case signoff 状态和 SAR6 64-code 回归不变。
+> 未提供显式 `V0` 时，native transient 现在还会用同一批已构造 device/handle
+> 直接运行 Rust DC Newton，并严格检查有限值、KCL residual 和 voltage box；失败
+> 才回退到原完整 `ac_solve`。这避免了重复构建设备和只为取得 `dc_op` 而执行的
+> 1 Hz AC reduction。池化后的 TSMC28 单 residue 继续由
+> `102.3 -> 94.4 ms`，六 case 单点由 `0.699 -> 0.645 s`；A/B 最大输出差
+> 约 `38 pV`。
+>
+> TSMC28 MDAC signoff 的六个 transient case 进一步显式使用
+> `newton_vtol=3e-8 V`；求解器全局默认值仍保持 `1e-8 V`。完整 45 PVT 点、
+> 270 次 transient 的同机 A/B 为 `13.848 -> 10.247 s`（1.35 倍），没有
+> case 或 PVT 状态翻转。相对默认容差，排除直接 PWL 驱动节点后的最大输出轨迹
+> 差异为 `0.116 mV`，最终输出最大差异为 `18.3 uV`。此外，model/instance card
+> 在构造时缓存规范化参数元组，避免每次 handle lease 重排数百个参数；600 参数
+> card 的 20,000 次 key 微基准由 `350.9 ms` 降至 `1.35 ms`。后者不改变任何
+> 浮点求值，并对 TSMC28、FreePDK45 和 SKY130 的公共 BSIM 路径生效。
+>
+> 同一组六个 MDAC case 还显式设置
+> `bsim_model_bypass_tolerance=3e-9 V`，启用 BSIM4 自带的标准 device bypass；
+> 该值是 `newton_vtol` 的十分之一。默认值仍为 0，配置值不得超过 Newton 容差，
+> scalar/DC/AC/noise 与未显式启用的 transient 不受影响。45 点 8-worker 的
+> 270 次 transient A/B 为 `12.025 -> 8.377 s`（1.43 倍），状态无变化；输出轨迹
+> 最大/P99 差异为 `8.77/6.25 uV`，最终输出最大差异为 `2.74 uV`。
 
 > **文档状态：带日期的性能快照。** 本页记录特定机器、Python/Numba 版本和缓存状态
 > 下的历史测量，用于定位性能数量级，不是当前版本的固定 SLA。功能和命令以维护中

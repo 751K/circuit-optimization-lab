@@ -11,7 +11,7 @@ from ..._rust_transient import (
     passive_problem_spec,
 )
 from ...compiled_topology import TERM_RAIL
-from .native import Bsim4NativeError, _NativeDevice
+from .native import Bsim4NativeError
 
 
 def build_bsim4_problem(plan, devices, handles, dynamic_sources=()):
@@ -40,6 +40,57 @@ def build_bsim4_problem(plan, devices, handles, dynamic_sources=()):
         circuit, device_records, [handle.pointer for handle in handles])
 
 
+def solve_bsim4_dc_rust(
+    plan,
+    devices,
+    guesses,
+    *,
+    dc_tolerance=1e-10,
+    max_iterations=100,
+    step_limit=0.25,
+    gmin=1e-12,
+):
+    """Return the first converged native DC state, reusing transient devices.
+
+    This is the narrow fast path used before a native transient. Callers retain
+    the full AC/DC fallback for difficult or topology-specific operating points.
+    """
+    wrappers = [devices[item.name] for item in plan.devices]
+    if not wrappers:
+        return None
+    leases = []
+    try:
+        for wrapper in wrappers:
+            leases.append(wrapper.lease_native_solver_handle())
+        problem = build_bsim4_problem(
+            plan, devices, [lease.device for lease in leases])
+        for guess in guesses:
+            values = np.ascontiguousarray(guess, dtype=float)
+            if values.shape != (plan.n_aug,) or not np.all(np.isfinite(values)):
+                continue
+            converged, candidate, _, residual_inf = problem.solve_dc(
+                values,
+                np.empty(0, dtype=float),
+                max_iterations=int(max_iterations),
+                voltage_tolerance=min(float(dc_tolerance), 1e-10),
+                step_limit=float(step_limit),
+                gmin=float(gmin),
+            )
+            candidate = np.asarray(candidate, dtype=float)
+            if (
+                converged
+                and candidate.shape == (plan.n_aug,)
+                and np.all(np.isfinite(candidate))
+                and np.isfinite(residual_inf)
+                and float(residual_inf) <= float(dc_tolerance)
+            ):
+                return candidate
+        return None
+    finally:
+        for lease in reversed(leases):
+            lease.close()
+
+
 def solve_bsim4_rust(
     plan,
     devices,
@@ -53,6 +104,8 @@ def solve_bsim4_rust(
     newton_vtol,
     newton_step_limit,
     gmin,
+    final_load_tolerance=0.0,
+    model_bypass_tolerance=0.0,
     adaptive=False,
     adaptive_config=None,
     max_step=None,
@@ -62,16 +115,11 @@ def solve_bsim4_rust(
     wrappers = [devices[item.name] for item in plan.devices]
     if not wrappers:
         raise ValueError("native BSIM4 transient requires at least one device")
-    handles = [
-        _NativeDevice(
-            wrapper.model_card,
-            wrapper.instance_card,
-            wrapper.temperature,
-            backend="rust",
-        )
-        for wrapper in wrappers
-    ]
+    leases = []
     try:
+        for wrapper in wrappers:
+            leases.append(wrapper.lease_native_solver_handle())
+        handles = [lease.device for lease in leases]
         problem = build_bsim4_problem(
             plan, devices, handles, dynamic_sources)
         started = time.perf_counter() if profile else 0.0
@@ -105,6 +153,8 @@ def solve_bsim4_rust(
                 voltage_tolerance=float(newton_vtol),
                 step_limit=float(newton_step_limit),
                 gmin=float(gmin),
+                final_load_tolerance=float(final_load_tolerance),
+                model_bypass_tolerance=float(model_bypass_tolerance),
                 profile=bool(profile),
             )
             (
@@ -149,6 +199,8 @@ def solve_bsim4_rust(
                 voltage_tolerance=float(newton_vtol),
                 step_limit=float(newton_step_limit),
                 gmin=float(gmin),
+                final_load_tolerance=float(final_load_tolerance),
+                model_bypass_tolerance=float(model_bypass_tolerance),
                 profile=bool(profile),
             )
             accepted_times = np.asarray(tgrid, dtype=float)
@@ -216,8 +268,10 @@ def solve_bsim4_rust(
                 "lte_linear_solves": int(lte_linear_solves),
                 "lte_rejections": int(lte_rejections),
                 "newton_rejections": int(newton_rejections),
+                "final_load_tolerance_v": float(final_load_tolerance),
+                "model_bypass_tolerance_v": float(model_bypass_tolerance),
             },
         )
     finally:
-        for handle in handles:
-            handle.close()
+        for lease in reversed(leases):
+            lease.close()

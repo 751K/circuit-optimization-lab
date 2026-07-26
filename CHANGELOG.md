@@ -19,6 +19,218 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Changed / 变更
+
+- **Faster adaptive MDAC Newton and LTE solves / 更快的自适应 MDAC Newton 与 LTE**
+
+  **English:** Native BSIM adaptive Gear2 now uses a guarded variable-step
+  quadratic state predictor once three accepted states are available, retaining
+  the linear predictor after restarts and disabling prediction at input edges.
+  The charge-defect LTE projection also solves its second right-hand side with
+  the converged Newton LU factors instead of stamping and factoring the same
+  Jacobian again. On the local 5 ns residue benchmark, warm median runtime moved
+  from 55.6 ms to 50.4 ms for FreePDK45 and from 139.2 ms to 106.4 ms for
+  TSMC28; Newton iterations moved from 873 to 801 and 2,644 to 1,995. Regridding
+  the new trajectories onto the previous accepted grids gave maximum all-node
+  differences of 0.249 mV and 0.137 mV respectively, with final-output changes
+  of 1.5 uV and 12.0 uV.
+
+  **中文：** 原生 BSIM 自适应 Gear2 在获得三个已接受状态后，现使用带保护的变步长
+  二阶状态外推；重启后仍先使用线性 predictor，输入边沿处继续禁用预测。基于电荷
+  defect 的 LTE 投影也会复用收敛 Newton 的 LU 因子，仅求解第二个右端项，不再重新
+  stamp 并分解同一个 Jacobian。本机 5 ns residue 基准中，FreePDK45 热运行中位数
+  由 55.6 ms 降至 50.4 ms，TSMC28 由 139.2 ms 降至 106.4 ms；Newton 次数分别由
+  873 降至 801、2,644 降至 1,995。将新轨迹重采样到旧 accepted grid 后，全节点
+  最大差异分别为 0.249 mV 和 0.137 mV，最终输出变化为 1.5 uV 和 12.0 uV。
+
+- **Exact BSIM internal-node and small-signal reuse / 精确复用 BSIM 内部节点与小信号状态**
+
+  **English:** Native BSIM evaluation now factors each internal-node Schur
+  matrix once and solves its four external-terminal right-hand sides together.
+  The previous row/column loop rebuilt and solved the same column four times,
+  performing 16 factorizations per real or complex reduction. A dedicated
+  bit-pattern test pins the shared-factor result to the former independent
+  solves. The TSMC28 5 ns MDAC warm median moved from 113.1 ms to 97.4 ms in a
+  same-session A/B (about 14% faster), with identical accepted grid, all 41 node
+  histories, all five branch-current histories, output, and final state.
+  A full evaluation also reuses the charge and capacitance fields already
+  produced by its final floating-point BSIM load instead of repeating that
+  operating point in `MODEINITSMSIG` before `acLoad`. This moved TSMC28 from
+  97.1 ms to 90.1 ms and FreePDK45 from 38.5 ms to 36.1 ms; transient histories
+  and AC/noise arrays remained bit-identical for both PDKs. The raw `dc` entry
+  retains the reload as an oracle, and
+  `CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD=0` restores it for external A/B checks.
+  An opt-in `CIRCUITOPT_BSIM_REUSE_FINAL_LOAD=1` mode also consumes the
+  converged private-node linearization directly once its Newton update is below
+  1 pV. TSMC28 moved from 84.8 ms to 77.7 ms and FreePDK45 from 33.7 ms to
+  31.1 ms (about another 8%). Maximum MDAC node differences were 0.36 nV and
+  42 pV, but isolated PMOS current/noise points exceed the public bit-level
+  golden contract, so this mode remains disabled by default.
+
+  **中文：** 原生 BSIM 求值现在只分解一次内部节点 Schur 矩阵，并一起求解四个外部
+  端子的右端项。旧的行列循环会把同一列重复构建、求解四次，使每次实数或复数消元
+  执行 16 次分解；新增的位模式测试将共享分解结果锁定为与原独立求解逐位一致。
+  同一进程内 A/B 中，TSMC28 的 5 ns MDAC 热运行中位数由 113.1 ms 降至
+  97.4 ms，约快 14%；accepted grid、全部 41 条节点历史、5 条支路电流历史、输出
+  和最终状态均完全相同。完整求值还会直接复用最终 floating-point BSIM load 已生成
+  的电荷与电容字段，不再在 `acLoad` 前以 `MODEINITSMSIG` 重复同一工作点。
+  TSMC28 因此进一步由 97.1 ms 降至 90.1 ms，FreePDK45 由 38.5 ms 降至
+  36.1 ms；两个 PDK 的瞬态历史和 AC/noise 数组均逐位相同。原始 `dc` 入口保留
+  reload 作为 oracle，也可设置 `CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD=0` 恢复旧路径
+  做外部 A/B。还可显式设置 `CIRCUITOPT_BSIM_REUSE_FINAL_LOAD=1`：私有内部节点
+  Newton 更新低于 1 pV 后直接使用收敛线性化，不再额外执行一次完整 model load。
+  TSMC28 由 84.8 ms 降至 77.7 ms，FreePDK45 由 33.7 ms 降至 31.1 ms，均再快约
+  8%；MDAC 最大节点差只有 0.36 nV 和 42 pV，但个别 PMOS 电流/噪声点会超出公共
+  API 的位级 golden 契约，因此该模式默认关闭。
+
+- **Bit-exact BSIM host and SAR throughput / BSIM 宿主与 SAR 吞吐量逐位精确优化**
+
+  **English:** The BSIM host now caches each setup-complete terminal/internal
+  node layout. A converged private-node load is skipped automatically only when
+  the solved internal voltages are bit-identical to those used by the current
+  load (or no private nodes exist); this preserves exact scalar, SAR, and MDAC
+  trajectories while avoiding provably redundant work. Isolated solves retain
+  the faster contiguous full-frame clear, whereas outer-parallel campaign/SAR
+  workers clear only the active matrix block to reduce aggregate memory
+  traffic. `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` restores full-frame clearing for
+  A/B runs. Transient batches also bypass the per-call handle mutex after the
+  backend or campaign worker has granted exclusive ownership for the whole
+  solve. Public scalar/C ABI calls remain locked, and repeated handles inside a
+  batch remain serialized. A dedicated NMOS/PMOS trajectory test pins the
+  exclusive entry to the locked entry bit-for-bit; the local 64-code SAR6 warm
+  median improved by about 2.5% (`574.3 ms -> 559.8 ms`).
+
+  The compiled SAR single-trial sweep now creates exactly
+  `min(workers, inputs)` balanced contiguous chunks. This removes an Auto-axis
+  cliff where 64 inputs with 12 workers formed 11 chunks and ran serially
+  (`3.44 s -> 0.59 s` locally); 10-worker runtime moved from about 0.74 s to
+  0.57 s. Continuation also rebuilds only the newly active bit and the previous
+  cleared bit waveform instead of all input rows. The 64-code stream and full
+  eight-conversion node/branch/final-state histories remain bit-identical to the
+  previous exact path.
+
+  **中文：** BSIM host 现在会缓存 setup 完成后的外部/内部节点布局。只有在内部节点
+  解与当前 model load 使用的电压在位模式上完全相同（或器件没有私有节点）时，才会
+  自动省略最终 load；因此标量、SAR 与 MDAC 轨迹保持逐位一致，同时去掉可证明冗余
+  的工作。单次求解继续使用更快的一次性整帧清零；外层并行的 campaign/SAR worker
+  仅清零有效矩阵块，以降低汇总内存流量。设置
+  `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` 可强制恢复整帧清零做 A/B。backend 或
+  campaign worker 为整个 solve 授予 handle 独占所有权后，transient batch 还会
+  跳过逐调用 mutex；公共标量/C ABI 入口仍保留锁，batch 内重复 handle 也仍然串行。
+  专门的 NMOS/PMOS 轨迹测试将独占入口锁定为与加锁入口逐位一致；本机 64-code
+  SAR6 热运行中位数约提升 2.5%，由 `574.3 ms` 降至 `559.8 ms`。
+
+  编译式 SAR 的单 trial sweep 现在严格生成 `min(workers, inputs)` 个均衡连续分块。
+  这消除了 64 输入、12 worker 被错误切成 11 块后触发串行 Auto 轴的性能悬崖，本机
+  由 `3.44 s` 降至 `0.59 s`；10 worker 由约 `0.74 s` 降至 `0.57 s`。
+  continuation 也只重建新激活 bit 与上一清零 bit 的波形，不再重建全部输入行。
+  64-code 码流以及 8 次完整转换的节点、支路和最终状态历史均与旧精确路径逐位一致。
+
+- **Pooled setup-complete BSIM handles / 池化复用 setup 完成的 BSIM handle**
+
+  **English:** Native transient now leases its per-MOS handles from the common
+  BSIM backend instead of rebuilding every C instance for every solve. The
+  backend cache is a real per-card pool: matched devices with the same model and
+  W/L/NF receive separate mutable handles during a trajectory, then all idle
+  handles can be reused by the next trajectory. The configured
+  `BSIM4_DEVICE_CACHE_SIZE` remains a global handle-count bound per PDK
+  namespace, and active handles are never evicted or shared. On the local
+  TSMC28 `residue_plus_fs16` benchmark the warm median moved from 124.6 ms to
+  101.9 ms (1.22x); the six residue/code-transition cases at one PVT point moved
+  from 0.815 s to 0.692 s (1.18x). FreePDK45 moved from 42.7 ms to 38.7 ms
+  (1.10x). Maximum interpolated output differences against freshly constructed
+  handles were 0.15 uV and 8.6 pV respectively, with identical signoff status;
+  compiled regenerative SAR continues to own independent Rust handles and its
+  64-code regression remains unchanged. When no explicit transient initial
+  state is supplied, native BSIM also attempts the declared DC guesses directly
+  through the already-built Rust topology and leased handles. It accepts only a
+  finite solution within the configured residual and voltage-box contracts,
+  otherwise falling back to the full AC/DC path. This removes duplicate device
+  construction and unused 1 Hz AC reduction: the same TSMC28 residue moved from
+  102.3 ms to 94.4 ms and the six-case point from 0.699 s to 0.645 s, with a
+  maximum output difference of 38 pV.
+
+  **中文：** 原生 transient 现在从公共 BSIM backend 租用逐 MOS handle，不再为
+  每次求解重新构造全部 C 实例。backend cache 已提升为真正的逐 card handle 池：
+  相同 model 与 W/L/NF 的匹配器件在一条轨迹中仍获得彼此独立的可变 handle，归还
+  后则可由下一条轨迹整体复用。`BSIM4_DEVICE_CACHE_SIZE` 仍按每个 PDK namespace
+  的 handle 总数设上限；活动 handle 永不驱逐、永不共享。本机 TSMC28
+  `residue_plus_fs16` 热运行中位数由 124.6 ms 降至 101.9 ms（1.22 倍），单个
+  PVT 点的六个 residue/code-transition case 由 0.815 s 降至 0.692 s
+  （1.18 倍）；FreePDK45 由 42.7 ms 降至 38.7 ms（1.10 倍）。相对每次新建
+  handle 的旧路径，两者插值后最大输出差分别为 0.15 uV 与 8.6 pV，signoff 状态
+  不变；再生式编译 SAR 仍独占 Rust handle，64-code 回归保持不变。未显式提供
+  transient 初始状态时，原生 BSIM 还会直接复用已构造的 Rust topology 和租用
+  handle 尝试声明的 DC guesses；只有有限、满足残差及 voltage-box 契约的解才会
+  接受，否则回退到完整 AC/DC 路径。由此去掉重复 device 构造和无用的 1 Hz AC
+  reduction：同一 TSMC28 residue 由 102.3 ms 降至 94.4 ms，六 case 单点由
+  0.699 s 降至 0.645 s，最大输出差约 38 pV。
+
+- **Scoped MDAC Newton tolerance and cached card keys / 限定 MDAC Newton 容差并缓存 card key**
+
+  **English:** The six TSMC28 MDAC residue/code-transition signoff cases now
+  declare `newton_vtol=3e-8 V`, while the global solver default remains
+  `1e-8 V`. Across all 45 PVT points this reduced the 270 transient runs from
+  13.848 s to 10.247 s (1.35x) without changing any case or point status.
+  Against the original tolerance, the maximum output-trajectory and final-output
+  differences were 0.116 mV and 18.3 uV; direct PWL-driven nodes were excluded
+  from the regridded trajectory comparison because adaptive grids sample their
+  discontinuities on opposite sides. Immutable model and instance cards also
+  precompute their sorted parameter tuples once. A 600-parameter key
+  microbenchmark reduced 20,000 key builds from 350.9 ms to 1.35 ms; this exact
+  control-plane optimization applies to every native BSIM PDK.
+
+  **中文：** 六个 TSMC28 MDAC residue/code-transition signoff case 现显式声明
+  `newton_vtol=3e-8 V`，全局求解器默认值仍为 `1e-8 V`。完整 45 点、270 次
+  transient 由 13.848 s 降至 10.247 s（1.35 倍），所有 case 和 PVT 点的状态均
+  未改变。相对原容差，输出轨迹最大差异为 0.116 mV，最终输出最大差异为
+  18.3 uV；直接由 PWL 驱动的节点未纳入重采样轨迹比较，因为不同 adaptive grid
+  会落在不连续边沿的两侧。不可变 model/instance card 还会在构造时一次性缓存已
+  排序参数元组。600 参数 card 的微基准中，20,000 次 key 构建由 350.9 ms 降至
+  1.35 ms；该逐位精确的控制面优化适用于所有原生 BSIM PDK。
+
+- **Bounded BSIM Newton bypass / 有界 BSIM Newton bypass**
+
+  **English:** Native transient can now opt into the vendored BSIM4 model's
+  standard device-bypass path with `bsim_model_bypass_tolerance`. The default is
+  exactly zero, the configured value may not exceed `newton_vtol`, relative
+  voltage tolerance is disabled during bypass, and each exclusive call restores
+  the handle's public settings before returning. The six validated TSMC28 MDAC
+  transient cases use `3e-9 V` (one tenth of their Newton tolerance). Across
+  45 PVT points, the 270-run 8-worker campaign moved from 12.025 s to 8.377 s
+  (1.43x) with no case or point status changes. The maximum/P99 regridded output
+  differences were 8.77/6.25 uV and the maximum final-output difference was
+  2.74 uV. Other transient, scalar, DC, AC, noise, and regenerative SAR paths
+  retain exact bypass-off behavior unless they explicitly opt in.
+
+  **中文：** 原生 transient 现可通过 `bsim_model_bypass_tolerance` 显式启用
+  vendored BSIM4 的标准 device-bypass 路径。默认值严格为 0，配置值不得超过
+  `newton_vtol`；bypass 期间关闭相对电压容差，并在每次独占调用返回前恢复 handle
+  的公共设置。六个已验证 TSMC28 MDAC transient case 使用 `3e-9 V`，即其 Newton
+  容差的十分之一。完整 45 PVT 点、270 次、8 worker campaign 由 12.025 s 降至
+  8.377 s（1.43 倍），没有 case 或 PVT 点状态变化。重采样输出轨迹的最大/P99
+  差异为 8.77/6.25 uV，最终输出最大差异为 2.74 uV。其他 transient、scalar、
+  DC、AC、noise 与再生式 SAR 路径除非显式启用，否则继续保持精确的 bypass-off
+  行为。
+
+### Fixed / 修复
+
+- **Lifecycle, payload, and SAR input guards / 生命周期、输出与 SAR 输入校验**
+
+  **English:** Native BSIM backend shutdown now becomes terminal before native
+  handles are destroyed and continues cleaning remaining handles and stores if
+  one teardown fails. CLI payload filtering applies recursively to arbitrary
+  mappings, sequences, sets, and object arrays, including opaque mapping keys.
+  The compiled SAR path now rejects unknown or non-finite per-device mismatch
+  offsets before simulation, restoring the input contract that the reference
+  transient path already enforced.
+
+  **中文：** 原生 BSIM 后端现在会先原子地进入永久关闭状态，再销毁 native handle；
+  即使某个 handle 清理失败，也会继续清理同一 store 内的其余 handle 和其他 store。
+  CLI 输出过滤现会递归处理通用 mapping、sequence、set 和 object array，并过滤
+  opaque mapping key。编译式 SAR 路径也会在仿真前拒绝未知器件或非有限的逐器件
+  失配偏移，恢复 reference transient 路径原有的输入契约。
+
 ## [2.3.0] - 2026-07-26
 
 ### Changed / 变更

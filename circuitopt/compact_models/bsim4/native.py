@@ -277,8 +277,11 @@ class _NativeDevice:
         with self._lock:
             pointer = getattr(self, "_pointer", None)
             if pointer:
-                self._library.co_bsim4_destroy(pointer)
+                # Make closure terminal before entering foreign code. A native
+                # teardown exception leaves an unknown handle state, so retrying
+                # it would risk either reuse-after-free or a double destroy.
                 self._pointer = None
+                self._library.co_bsim4_destroy(pointer)
 
     def __del__(self):  # pragma: no cover - deterministic cache eviction handles normal use
         try:
@@ -299,6 +302,8 @@ class _NativeDevice:
         op = np.empty(8, dtype=np.float64)
         pointer = C.POINTER(C.c_double)
         with self._lock:
+            if not self._pointer:
+                raise Bsim4NativeError("BSIM4 native device is closed")
             status = self._library.co_bsim4_eval(
                 self._pointer,
                 terminals.ctypes.data_as(pointer),
@@ -394,16 +399,34 @@ class _DeviceStore:
     """One namespace of leased native handles."""
 
     def __init__(self):
-        self.devices: OrderedDict[tuple, _NativeDevice] = OrderedDict()
+        # One immutable card can occur on several MOS instances in the same
+        # circuit. Keep a pool of setup-complete mutable handles per card key;
+        # ``devices`` remains the global LRU across all pools.
+        self.devices: OrderedDict[int, _NativeDevice] = OrderedDict()
+        self.device_keys: dict[int, tuple] = {}
+        self.device_slots: dict[int, int] = {}
+        self.available: dict[tuple, list[int]] = {}
+        self.next_slot = 0
         self.active: dict[int, int] = {}
         self.lock = threading.RLock()
 
     def close(self) -> None:
         with self.lock:
-            for device in self.devices.values():
-                device.close()
+            devices = tuple(self.devices.values())
             self.devices.clear()
+            self.device_keys.clear()
+            self.device_slots.clear()
+            self.available.clear()
             self.active.clear()
+        first_error = None
+        for device in devices:
+            try:
+                device.close()
+            except Exception as exc:  # pragma: no cover - native destroy is infallible today
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
 
 # Backends live as per-PDK module globals; the isolation scope has to reach all
@@ -530,17 +553,27 @@ class NativeBsim4Backend:
             backend,
             model.polarity,
             model.version,
-            tuple(sorted(model.parameters.items())),
-            tuple(sorted(instance.parameters.items())),
+            model._parameter_items,
+            instance._parameter_items,
             float(temperature_k),
         )
 
     def _evict_idle_locked(self, store: _DeviceStore) -> None:
         """Trim the LRU without closing a handle leased by another worker."""
         while len(store.devices) > self._cache_size:
-            for key, device in store.devices.items():
+            for slot, device in store.devices.items():
                 if store.active.get(id(device), 0) == 0:
-                    store.devices.pop(key)
+                    store.devices.pop(slot)
+                    key = store.device_keys.pop(slot)
+                    store.device_slots.pop(id(device), None)
+                    available = store.available.get(key)
+                    if available is not None:
+                        try:
+                            available.remove(slot)
+                        except ValueError:
+                            pass
+                        if not available:
+                            store.available.pop(key, None)
                     device.close()
                     break
             else:
@@ -567,30 +600,40 @@ class NativeBsim4Backend:
             key = self._key(model, instance, temperature_k, backend)
             store = self._store()
             with store.lock:
-                device = store.devices.get(key)
-                if device is not None and store.active.get(id(device), 0) == 0:
-                    store.devices.move_to_end(key)
+                available = store.available.get(key)
+                device = None
+                slot = None
+                while available:
+                    candidate = available.pop()
+                    cached = store.devices.get(candidate)
+                    if cached is not None and store.active.get(id(cached), 0) == 0:
+                        slot = candidate
+                        device = cached
+                        break
+                if available is not None and not available:
+                    store.available.pop(key, None)
+                if device is not None:
+                    store.devices.move_to_end(slot)
                     identity = id(device)
                     store.active[identity] = 1
                     self._evict_idle_locked(store)
                     self._active_leases += 1
                     return device, True, store
-                if device is None:
-                    device = _NativeDevice(
-                        model, instance, temperature_k, backend=backend)
-                    store.devices[key] = device
-                    store.active[id(device)] = 1
-                    self._evict_idle_locked(store)
-                    self._active_leases += 1
-                    return device, True, store
 
-                # A BSIM handle carries mutable internal-node and limiting
-                # history for a whole solver trajectory. Never hand an active
-                # cached handle to a second lease.
+                # Every overlapping instance gets its own cached slot. This is
+                # essential for circuits where several MOS share one W/L/card:
+                # one slot cannot be reused until its whole trajectory returns.
                 device = _NativeDevice(
                     model, instance, temperature_k, backend=backend)
+                slot = store.next_slot
+                store.next_slot += 1
+                store.devices[slot] = device
+                store.device_keys[slot] = key
+                store.device_slots[id(device)] = slot
+                store.active[id(device)] = 1
+                self._evict_idle_locked(store)
                 self._active_leases += 1
-                return device, False, None
+                return device, True, store
 
     def _release_device(
         self,
@@ -606,6 +649,11 @@ class NativeBsim4Backend:
                 with store.lock:
                     identity = id(device)
                     store.active.pop(identity, None)
+                    slot = store.device_slots.get(identity)
+                    if slot is not None:
+                        key = store.device_keys[slot]
+                        store.available.setdefault(key, []).append(slot)
+                        store.devices.move_to_end(slot)
                     self._evict_idle_locked(store)
             finally:
                 self._active_leases -= 1
@@ -771,15 +819,26 @@ class NativeBsim4Backend:
         return total_real + 1j * total_imag, flicker_real + 1j * flicker_imag
 
     def close(self) -> None:
+        """Permanently close the backend and release every cached handle."""
         with self._lock:
             if self._closed:
                 return
             if self._active_leases:
                 raise Bsim4NativeError(
                     "cannot close BSIM4 backend while evaluations are active")
-            self._shared.close()
-            for store in self._scoped.values():
-                store.close()
-            self._scoped.clear()
+            # Seal the backend before invoking native destructors. If one of
+            # those ever raises, callers must not be able to lease from a
+            # partially destroyed cache.
             self._closed = True
+            stores = (self._shared, *self._scoped.values())
+            self._scoped.clear()
             _BACKENDS.discard(self)
+        first_error = None
+        for store in stores:
+            try:
+                store.close()
+            except Exception as exc:  # pragma: no cover - native destroy is infallible today
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error

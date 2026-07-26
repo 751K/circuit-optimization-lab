@@ -24,7 +24,8 @@ from ._rust_transient import _optional_index, _term_record, passive_problem_spec
 from .compiled_topology import TERM_RAIL, CompiledTopology
 from .device_factory import (apply_silicon_corner, build_devices,
                              resolve_binding)
-from .sar import _sar_config, sar_input_waveforms, sar_time_grid
+from .sar import (_SAR_NEWTON_VTOL, _sar_config, sar_input_waveforms,
+                  sar_time_grid)
 from .transient_solver import native_bsim4_model_names
 
 # Role kind codes shared with ``co_core::sar::Role`` (order = enum discriminants).
@@ -86,36 +87,120 @@ class CompiledSarBatch:
     device slots; ``cap_count`` is the CDAC capacitor count each trial supplies.
     """
 
-    def __init__(self, rust_obj, device_names: Sequence[str], cap_count: int):
+    def __init__(
+        self,
+        rust_obj,
+        device_names: Sequence[str],
+        cap_count: int,
+        *,
+        plan,
+        devices,
+        topo,
+        bias,
+        input_keys,
+        requested_t,
+    ):
         self._rust = rust_obj
         self._device_names = tuple(device_names)
         self._cap_count = int(cap_count)
+        self._plan = plan
+        self._devices = devices
+        self._topo = topo
+        self._bias = bias
+        self._input_keys = tuple(input_keys)
+        self._requested_t = np.asarray(requested_t, dtype=float)
+        self._expanded_t = np.asarray(self._rust.expanded_times(), dtype=float)
+        self._requested_index = np.asarray(
+            self._rust.requested_index(), dtype=int)
+        self._integration_coefficients = np.asarray(
+            self._rust.integration_coefficients(), dtype=float)
 
     @property
     def levels(self) -> int:
         return int(self._rust.levels())
 
+    def _trial_record(self, trial):
+        delvto_map, cap_values = trial
+        unknown = sorted(set(delvto_map) - set(self._device_names))
+        if unknown:
+            raise ValueError(
+                "mismatch references unknown devices: " + ", ".join(unknown))
+        cap_values = list(cap_values)
+        if len(cap_values) != self._cap_count:
+            raise SarRustUnavailable("trial cap count does not match template")
+        delvto = [float(delvto_map.get(name, 0.0))
+                  for name in self._device_names]
+        if not np.all(np.isfinite(delvto)):
+            raise ValueError("mismatch offsets must be finite")
+        return {
+            "delvto": delvto,
+            "cap_values": [float(v) for v in cap_values],
+        }
+
     def run(self, trials: Sequence[tuple[Mapping[str, float], Sequence[float]]],
             workers: int) -> list[np.ndarray]:
-        """Convert every trial's code-center sweep, returning per-trial codes.
-
-        ``trials`` is a sequence of ``(delvto_map, cap_values)``; the result is a
-        list of ``int64`` code arrays in trial order (byte-identical for any
-        worker count).
-        """
-        records = []
-        for delvto_map, cap_values in trials:
-            cap_values = list(cap_values)
-            if len(cap_values) != self._cap_count:
-                raise SarRustUnavailable(
-                    "trial cap count does not match template")
-            records.append({
-                "delvto": [float(delvto_map.get(name, 0.0))
-                           for name in self._device_names],
-                "cap_values": [float(v) for v in cap_values],
-            })
+        """Convert every trial's code-center sweep, returning per-trial codes."""
+        records = [self._trial_record(trial) for trial in trials]
         codes = self._rust.evaluate_batch(records, int(workers))
         return [np.asarray(row, dtype=np.int64) for row in codes]
+
+    def run_codes(
+        self,
+        trial: tuple[Mapping[str, float], Sequence[float]],
+        workers: int = 1,
+    ) -> np.ndarray:
+        """Convert one input sweep without recording waveform history."""
+        return np.asarray(
+            self._rust.evaluate_codes(
+                self._trial_record(trial), int(workers)),
+            dtype=np.int64,
+        )
+
+    def run_trajectories(
+        self,
+        trial: tuple[Mapping[str, float], Sequence[float]],
+        workers: int = 1,
+    ) -> list[dict]:
+        """Convert one trial and return public native-transient payloads.
+
+        Unlike :meth:`run`, this records accepted states and terminal history.
+        The continuation itself finishes the decided waveform, eliminating the
+        former Python final replay while preserving the public result schema.
+        """
+        from .compact_models.bsim4.transient import assemble_native_bsim4_result
+
+        raw = self._rust.evaluate_trajectories(
+            self._trial_record(trial), int(workers))
+        results = []
+        for item in raw:
+            input_matrix = np.asarray(item["inputs"], dtype=float)
+            transient = assemble_native_bsim4_result(
+                plan=self._plan,
+                devices=self._devices,
+                topo=self._topo,
+                bias=self._bias,
+                tgrid=self._expanded_t,
+                input_matrix=input_matrix,
+                requested_t=self._requested_t,
+                requested_index=self._requested_index,
+                integration_coefficients=self._integration_coefficients,
+                xhist=item["states"],
+                device_currents=item["device_currents"],
+                device_charges=item["device_charges"],
+                nfail=item["failures"],
+                first_fail=item["first_failure"],
+                method="gear2",
+            )
+            results.append({
+                "code": int(item["code"]),
+                "bits": np.asarray(item["bits"], dtype=np.int8),
+                "input_waveforms": {
+                    key: input_matrix[index, self._requested_index]
+                    for index, key in enumerate(self._input_keys)
+                },
+                "transient": transient,
+            })
+        return results
 
 
 def build_sar_batch(spec, cfg: Mapping | None = None, *,
@@ -229,7 +314,7 @@ def build_sar_batch(spec, cfg: Mapping | None = None, *,
 
     # Native-path Newton controls (transient() -> transient_native_bsim4):
     # gear2, maxit=max(30,40), vtol=1e-8, step_limit=min(5.0,0.25), gmin=1e-12.
-    newton = [1.0, 40.0, 1e-8, 0.25, 1e-12]
+    newton = [1.0, 40.0, _SAR_NEWTON_VTOL, 0.25, 1e-12]
 
     circuit = core.OtftTransientProblem(passive_problem_spec(plan))
     template = core.CompiledSarConversion({
@@ -253,4 +338,14 @@ def build_sar_batch(spec, cfg: Mapping | None = None, *,
         "tgrid": [float(x) for x in tgrid],
         "vins": [float(x) for x in vins],
     })
-    return CompiledSarBatch(template, plan_device_names, len(plan.capacitors))
+    return CompiledSarBatch(
+        template,
+        plan_device_names,
+        len(plan.capacitors),
+        plan=plan,
+        devices=devices,
+        topo=topo,
+        bias=spec.bias,
+        input_keys=input_keys,
+        requested_t=tgrid,
+    )

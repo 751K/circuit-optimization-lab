@@ -610,6 +610,9 @@ dispatch 会转发 `"adaptive_reltol"`、`"adaptive_vabstol"`、`"adaptive_iabst
 `"adaptive_max_steps"`、`"adaptive_h0"` 和 `"cap_mode"`；pulse/square 周期输入会在
 adaptive run 前自动补入边沿断点。`cap_mode` 只支持 `"charge"`（id 0）和
 `"average"`（id 1）及其文档别名。
+原生 BSIM transient 还接受单位为 V 的 `"bsim_model_bypass_tolerance"`。其默认值
+为 0，且不得超过 `"newton_vtol"`。正值只会在独占 transient Newton 环路内启用
+紧凑模型的标准 device bypass；应先完成对应电路的轨迹与 signoff A/B 再设置。
 需要可复现的 PAC/PNoise 转换轨迹时，可同时设置 `"adaptive": true`、
 至少一个 stabilization period 和 `"final_n_points"`。adaptive Gear2 此时只
 提供 warm start，不冻结 accepted grid；dispatch 会构造带相同时钟边沿断点的

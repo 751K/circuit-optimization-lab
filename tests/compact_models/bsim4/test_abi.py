@@ -36,6 +36,18 @@ def test_cards_normalize_and_validate_parameters():
     assert compatible.version == 4.0
 
 
+def test_cards_precompute_stable_native_cache_key_items():
+    model = Bsim4ModelCard(1, {"VTH0": 0.4, "TOXE": 1e-9})
+    instance = Bsim4InstanceCard({"W": 2e-6, "L": 1e-6, "NF": 2})
+
+    assert model._parameter_items == (("toxe", 1e-9), ("vth0", 0.4))
+    assert instance._parameter_items == (
+        ("l", 1e-6),
+        ("nf", 2.0),
+        ("w", 2e-6),
+    )
+
+
 def test_evaluation_enforces_terminal_conservation():
     currents = np.array((1e-3, 0.0, -1e-3, 0.0))
     charges = np.array((1e-15, 2e-15, -2.5e-15, -0.5e-15))

@@ -13,6 +13,30 @@ from .circuit_loader import CircuitSpec
 from .transient_solver import transient
 
 
+_SAR_NEWTON_VTOL = 1e-8
+
+
+def _normalize_sar_mismatch(
+    spec: CircuitSpec,
+    mismatch: Mapping[str, float] | None,
+) -> dict[str, float]:
+    """Validate per-device offsets before either SAR implementation runs."""
+    if not mismatch:
+        return {}
+    offsets = {str(name): float(value) for name, value in mismatch.items()}
+    unknown = sorted(set(offsets) - {item[0] for item in spec.topology.devices})
+    if unknown:
+        raise ValueError(
+            "mismatch references unknown devices: " + ", ".join(unknown))
+    non_finite = sorted(
+        name for name, value in offsets.items() if not np.isfinite(value))
+    if non_finite:
+        raise ValueError(
+            "mismatch offsets must be finite for devices: "
+            + ", ".join(non_finite))
+    return offsets
+
+
 def _required(cfg: Mapping, name: str):
     if name not in cfg:
         raise ValueError(f"adc.{name} is required")
@@ -230,7 +254,8 @@ def _run_sar_decisions_replayed(spec, vin, cfg, corner, mismatch):
         result = transient(
             spec.sizes, spec.bias, tgrid, binding=binding, inputs=waveforms,
             V0=initial, integration_method="gear2",
-            max_step=cfg["edge_time"], mismatch=mismatch,
+            max_step=cfg["edge_time"], newton_vtol=_SAR_NEWTON_VTOL,
+            mismatch=mismatch,
         )
         node = cfg["comparator_node"]
         if node not in result["nodes"]:
@@ -259,19 +284,25 @@ def _finalize_sar_conversion(
     *,
     trace=None,
     decision_backend,
+    native_trajectory=None,
 ):
-    """Run the one final waveform needed for power and the public transient."""
+    """Build the public conversion result from a decided physical trajectory."""
     tgrid = sar_time_grid(spec, cfg)
-    binding = spec.binding().at_corner(corner)
-    initial = _sar_initial_state(binding)
     decisions = [int(value) for value in np.asarray(bits, np.int8)]
-    waveforms = sar_input_waveforms(
-        spec, vin, decisions, cfg["n_bits"] - 1, config=cfg, tgrid=tgrid)
-    result = transient(
-        spec.sizes, spec.bias, tgrid, binding=binding, inputs=waveforms,
-        V0=initial, integration_method="gear2",
-        max_step=cfg["edge_time"], mismatch=mismatch,
-    )
+    if native_trajectory is None:
+        binding = spec.binding().at_corner(corner)
+        initial = _sar_initial_state(binding)
+        waveforms = sar_input_waveforms(
+            spec, vin, decisions, cfg["n_bits"] - 1, config=cfg, tgrid=tgrid)
+        result = transient(
+            spec.sizes, spec.bias, tgrid, binding=binding, inputs=waveforms,
+            V0=initial, integration_method="gear2",
+            max_step=cfg["edge_time"], newton_vtol=_SAR_NEWTON_VTOL,
+            mismatch=mismatch,
+        )
+    else:
+        waveforms = native_trajectory["input_waveforms"]
+        result = native_trajectory["transient"]
     bits = np.asarray(decisions, np.int8)
     weights = 1 << np.arange(cfg["n_bits"] - 1, -1, -1, dtype=np.int64)
     if trace is None:
@@ -331,6 +362,7 @@ def _run_sar_conversion_reference(spec: CircuitSpec, vin: float, *, config=None,
                                   mismatch: Mapping[str, float] | None = None) -> dict:
     """Run the frozen full-replay SAR path for parity and unsupported circuits."""
     cfg = _sar_config(spec, config)
+    mismatch = _normalize_sar_mismatch(spec, mismatch)
     if not 0.0 <= vin <= cfg["vref"]:
         raise ValueError("vin must lie between 0 and adc.vref")
     bits, trace = _run_sar_decisions_replayed(
@@ -355,12 +387,22 @@ def _compiled_sar_codes(spec, cfg, vin, corner, mismatch):
     return batch.run([(mismatch or {}, cap_values)], workers=1)[0]
 
 
-def _run_sar_conversions(spec, vin, cfg, corner, mismatch, workers):
-    """Run an ordered input batch through Rust continuation plus final transients."""
-    from .sar_rust import SarRustUnavailable
+def _run_sar_conversions(
+    spec,
+    vin,
+    cfg,
+    corner,
+    mismatch,
+    workers,
+    *,
+    include_transients=True,
+):
+    """Run an ordered input batch through complete Rust continuation trajectories."""
+    from .sar_rust import SarRustUnavailable, build_sar_batch
 
     if workers is None or workers < 1:
         raise ValueError("workers must be a positive integer")
+    mismatch = _normalize_sar_mismatch(spec, mismatch)
     values = np.asarray(vin, dtype=float)
     if (
         values.ndim != 1
@@ -371,9 +413,35 @@ def _run_sar_conversions(spec, vin, cfg, corner, mismatch, workers):
     ):
         raise ValueError("SAR inputs must be a non-empty finite 1D array inside [0, vref]")
     try:
-        codes = _compiled_sar_codes(
-            spec, cfg, values, corner, mismatch)
+        batch = build_sar_batch(spec, cfg, corner=corner, vins=values)
+        cap_values = [
+            float(capacitor[3]) for capacitor in spec.topology.capacitors
+        ]
+        trial = (mismatch or {}, cap_values)
+        if include_transients:
+            trajectories = batch.run_trajectories(trial, workers=workers)
+        else:
+            codes = batch.run_codes(trial, workers=workers)
     except SarRustUnavailable:
+        if not include_transients:
+            weights = 1 << np.arange(
+                cfg["n_bits"] - 1, -1, -1, dtype=np.int64)
+
+            def run_reference_code(value):
+                bits, trace = _run_sar_decisions_replayed(
+                    spec, float(value), cfg, corner, mismatch)
+                return {
+                    "vin": float(value),
+                    "code": int(bits @ weights),
+                    "bits": bits,
+                    "decisions": trace,
+                    "n_bits": cfg["n_bits"],
+                    "vref": cfg["vref"],
+                    "decision_backend": "python_replay",
+                }
+
+            return _run_independent_conversions(
+                run_reference_code, values, workers)
         return _run_independent_conversions(
             lambda value: _run_sar_conversion_reference(
                 spec,
@@ -386,26 +454,38 @@ def _run_sar_conversions(spec, vin, cfg, corner, mismatch, workers):
             workers,
         )
 
-    weights = 1 << np.arange(cfg["n_bits"] - 1, -1, -1, dtype=np.int64)
+    if not include_transients:
+        weights = 1 << np.arange(
+            cfg["n_bits"] - 1, -1, -1, dtype=np.int64)
+        return [
+            {
+                "vin": float(value),
+                "code": int(code),
+                "bits": ((int(code) & weights) != 0).astype(np.int8),
+                "n_bits": cfg["n_bits"],
+                "vref": cfg["vref"],
+                "decision_backend": "rust_continuation",
+            }
+            for value, code in zip(values, codes, strict=True)
+        ]
 
     def finalize(item):
-        value, code = item
-        bits = ((int(code) & weights) != 0).astype(np.int8)
+        value, trajectory = item
         return _finalize_sar_conversion(
             spec,
             float(value),
             cfg,
             corner,
             mismatch,
-            bits,
+            trajectory["bits"],
             decision_backend="rust_continuation",
+            native_trajectory=trajectory,
         )
 
-    return _run_independent_conversions(
-        finalize,
-        zip(values, codes, strict=True),
-        workers,
-    )
+    return [
+        finalize(item)
+        for item in zip(values, trajectories, strict=True)
+    ]
 
 
 def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
@@ -413,10 +493,10 @@ def run_sar_conversion(spec: CircuitSpec, vin: float, *, config=None,
                        mismatch: Mapping[str, float] | None = None) -> dict:
     """Run one physical SAR conversion using the compiled continuation loop.
 
-    Rust advances one trajectory across all bit decisions. Python then runs the
-    final decided waveform once to preserve the public transient, source-power,
-    and comparator-trace results. Unsupported topologies use the frozen replay
-    path explicitly.
+    Rust advances one trajectory across all bit decisions and finishes the
+    decided tail while recording terminal history. Python reconstructs the
+    public transient, source-power, and comparator-trace payload from that same
+    trajectory. Unsupported topologies use the frozen replay path explicitly.
     """
     cfg = _sar_config(spec, config)
     return _run_sar_conversions(
@@ -459,22 +539,24 @@ def _run_independent_conversions(run, values, workers: int) -> list:
 def run_sar_sweep(spec: CircuitSpec, vin_values, *, config=None,
                   corner: str | None = None,
                   mismatch: Mapping[str, float] | None = None,
-                  workers: int = 1) -> dict:
+                  workers: int = 1,
+                  include_transients: bool = True) -> dict:
     """Convert a monotonic input sweep and calculate SAR static linearity.
 
     ``mismatch`` (per-instance ``{device: delvto[V]}``) is forwarded to every
     conversion; ``None`` reproduces the nominal sweep.
 
-    ``workers`` parallelises the independent conversions across a thread pool
-    (see :func:`_run_independent_conversions`); ``workers=1`` (default) is the
-    serial path and any worker count is order-preserving and byte-identical to it.
+    ``include_transients=False`` keeps only code/bits metadata per input and
+    avoids recording terminal history. This is the fast path for DNL/INL-only
+    sweeps; the default preserves the complete public waveform payload.
     """
     cfg = _sar_config(spec, config)
     vin = np.asarray(vin_values, float)
     if vin.ndim != 1 or len(vin) < 2 or np.any(np.diff(vin) <= 0.0):
         raise ValueError("vin_values must be a strictly increasing one-dimensional array")
     conversions = _run_sar_conversions(
-        spec, vin, cfg, corner, mismatch, workers)
+        spec, vin, cfg, corner, mismatch, workers,
+        include_transients=include_transients)
     codes = np.array([item["code"] for item in conversions], np.int64)
     metrics = static_ramp_metrics(
         vin, codes, cfg["n_bits"], vmin=0.0, vmax=cfg["vref"])

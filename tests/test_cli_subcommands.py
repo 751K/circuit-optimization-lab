@@ -262,6 +262,8 @@ def test_jsonable_keeps_complex_and_array_values():
 
 
 def test_jsonable_drops_opaque_objects_from_nested_sequences_and_arrays():
+    from collections import UserDict
+
     import numpy as np
 
     from circuitopt.__main__ import _jsonable
@@ -277,10 +279,16 @@ def test_jsonable_drops_opaque_objects_from_nested_sequences_and_arrays():
             [AFE_TOPO, "kept", {"opaque": AFE_TOPO, "value": 3}],
             dtype=object,
         ),
+        "mapping": UserDict({"opaque": AFE_TOPO, "value": 4}),
+        "opaque_key": {AFE_TOPO: "dropped", "kept": 5},
+        "set": {AFE_TOPO, "kept"},
     })
 
     assert ready == {
         "items": [{"nested": [1, 2]}],
         "object_array": ["kept", {"value": 3}],
+        "mapping": {"value": 4},
+        "opaque_key": {"kept": 5},
+        "set": ["kept"],
     }
     assert "0x" not in json.dumps(ready)

@@ -651,6 +651,10 @@ adaptive timestepping. The dispatch forwards `"adaptive_reltol"`,
 `"adaptive_h0"`, and `"cap_mode"`; pulse/square periodic inputs get edge
 breakpoints inserted before the adaptive run. `cap_mode` is limited to
 `"charge"` (id 0) and `"average"` (id 1), plus their documented aliases.
+Native BSIM transient also accepts `"bsim_model_bypass_tolerance"` in volts.
+It defaults to zero and must not exceed `"newton_vtol"`. A positive value uses
+the compact model's standard device bypass only inside the exclusive transient
+Newton loop; choose it only after circuit-level trajectory and signoff A/B.
 For reproducible PAC/PNoise conversion, set `"final_n_points"` together with
 `"adaptive": true` and at least one stabilization period. Adaptive Gear2 then
 supplies only the warm start; the accepted grid is not frozen, and dispatch

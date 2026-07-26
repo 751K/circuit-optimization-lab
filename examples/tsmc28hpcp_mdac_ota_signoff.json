@@ -164,7 +164,10 @@
             "integration_method": "gear2",
             "adaptive": true,
             "adaptive_reltol": 1e-5,
-            "adaptive_vabstol": 1e-7
+            "adaptive_vabstol": 1e-7,
+            "newton_vtol": 3e-8,
+            "bsim_model_bypass_tolerance": 3e-9,
+            "bsim_final_load_tolerance": 1e-12
           }
         },
         "signoff": {
@@ -225,7 +228,10 @@
             "integration_method": "gear2",
             "adaptive": true,
             "adaptive_reltol": 1e-5,
-            "adaptive_vabstol": 1e-7
+            "adaptive_vabstol": 1e-7,
+            "newton_vtol": 3e-8,
+            "bsim_model_bypass_tolerance": 3e-9,
+            "bsim_final_load_tolerance": 1e-12
           }
         },
         "signoff": {
@@ -283,7 +289,10 @@
             "integration_method": "gear2",
             "adaptive": true,
             "adaptive_reltol": 1e-5,
-            "adaptive_vabstol": 1e-7
+            "adaptive_vabstol": 1e-7,
+            "newton_vtol": 3e-8,
+            "bsim_model_bypass_tolerance": 3e-9,
+            "bsim_final_load_tolerance": 1e-12
           }
         },
         "signoff": {
@@ -341,7 +350,10 @@
             "integration_method": "gear2",
             "adaptive": true,
             "adaptive_reltol": 1e-5,
-            "adaptive_vabstol": 1e-7
+            "adaptive_vabstol": 1e-7,
+            "newton_vtol": 3e-8,
+            "bsim_model_bypass_tolerance": 3e-9,
+            "bsim_final_load_tolerance": 1e-12
           }
         },
         "signoff": {
@@ -399,7 +411,10 @@
             "integration_method": "gear2",
             "adaptive": true,
             "adaptive_reltol": 1e-5,
-            "adaptive_vabstol": 1e-7
+            "adaptive_vabstol": 1e-7,
+            "newton_vtol": 3e-8,
+            "bsim_model_bypass_tolerance": 3e-9,
+            "bsim_final_load_tolerance": 1e-12
           }
         },
         "signoff": {
@@ -462,7 +477,10 @@
             "integration_method": "gear2",
             "adaptive": true,
             "adaptive_reltol": 1e-5,
-            "adaptive_vabstol": 1e-7
+            "adaptive_vabstol": 1e-7,
+            "newton_vtol": 3e-8,
+            "bsim_model_bypass_tolerance": 3e-9,
+            "bsim_final_load_tolerance": 1e-12
           }
         },
         "signoff": {

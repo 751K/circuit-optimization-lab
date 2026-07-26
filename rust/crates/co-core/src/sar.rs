@@ -154,18 +154,19 @@ fn wave(tgrid: &[f64], mut events: Vec<(f64, f64)>) -> Vec<f64> {
     tgrid.iter().map(|&x| np_interp(x, &xs, &ys)).collect()
 }
 
-/// Build the stage-1 (original-grid) waveform rows for the conversion of
-/// `trial_index`, given `vin` and the decisions resolved so far.
+/// Build one stage-1 (original-grid) waveform row for `trial_index`.
 ///
-/// Mirrors `sar_input_waveforms`: `decisions[b] == Some(0)` marks a cleared bit
-/// (`b < trial_index`); the bit under trial (`b == trial_index`) is `None`.
-fn build_original_rows(
+/// Mirrors the matching branch of `sar_input_waveforms`. Keeping this
+/// row-addressable lets continuation update only the previous cleared bit and
+/// the newly active trial bit instead of rebuilding every input row.
+fn build_original_row(
     cfg: &SarConfig,
     vin: f64,
     decisions: &[Option<i32>],
     trial_index: usize,
     tgrid: &[f64],
-) -> Vec<Vec<f64>> {
+    role: Role,
+) -> Vec<f64> {
     let vref = cfg.vref;
     let edge = cfg.edge_time;
     let period = cfg.bit_period;
@@ -181,17 +182,6 @@ fn build_original_rows(
         vin
     };
     let sampled_n = common_mode - 0.5 * vin;
-
-    // Sample row (needed both for Role::Sample and Role::SampleBar).
-    let sample = wave(
-        tgrid,
-        vec![
-            (0.0, vref),
-            (sample_end - edge, vref),
-            (sample_end, 0.0),
-            (tstop, 0.0),
-        ],
-    );
 
     let bit_row = |bit: usize| -> Vec<f64> {
         let baseline = if differential { common_mode } else { 0.0 };
@@ -250,34 +240,50 @@ fn build_original_rows(
         wave(tgrid, events)
     };
 
-    cfg.roles
-        .iter()
-        .map(|role| match *role {
-            Role::Sample => sample.clone(),
-            Role::SampleBar => sample.iter().map(|&s| vref - s).collect(),
-            Role::BitInput(bit) => bit_row(bit),
-            Role::BitInputBar(bit) => bit_bar_row(bit),
-            Role::Dummy => wave(
-                tgrid,
-                vec![
-                    (0.0, sampled_p),
-                    (hold_start, sampled_p),
-                    (hold_done, common_mode),
-                    (tstop, common_mode),
-                ],
-            ),
-            Role::DummyBar => wave(
-                tgrid,
-                vec![
-                    (0.0, sampled_n),
-                    (hold_start, sampled_n),
-                    (hold_done, common_mode),
-                    (tstop, common_mode),
-                ],
-            ),
-            Role::Clock => clock_row(),
-        })
-        .collect()
+    match role {
+        Role::Sample => wave(
+            tgrid,
+            vec![
+                (0.0, vref),
+                (sample_end - edge, vref),
+                (sample_end, 0.0),
+                (tstop, 0.0),
+            ],
+        ),
+        Role::SampleBar => wave(
+            tgrid,
+            vec![
+                (0.0, vref),
+                (sample_end - edge, vref),
+                (sample_end, 0.0),
+                (tstop, 0.0),
+            ],
+        )
+        .into_iter()
+        .map(|sample| vref - sample)
+        .collect(),
+        Role::BitInput(bit) => bit_row(bit),
+        Role::BitInputBar(bit) => bit_bar_row(bit),
+        Role::Dummy => wave(
+            tgrid,
+            vec![
+                (0.0, sampled_p),
+                (hold_start, sampled_p),
+                (hold_done, common_mode),
+                (tstop, common_mode),
+            ],
+        ),
+        Role::DummyBar => wave(
+            tgrid,
+            vec![
+                (0.0, sampled_n),
+                (hold_start, sampled_n),
+                (hold_done, common_mode),
+                (tstop, common_mode),
+            ],
+        ),
+        Role::Clock => clock_row(),
+    }
 }
 
 /// The constant (per-template) expanded time grid + down-sample map produced by
@@ -325,6 +331,25 @@ impl ExpandedGrid {
 pub struct Conversion {
     pub code: u64,
     pub bits: Vec<i32>,
+    pub trajectory: Option<Trajectory>,
+    pub profile: bsim_transient::Profile,
+}
+
+/// Full accepted trajectory of a closed-loop conversion.
+///
+/// Code-only campaign and mismatch paths leave this absent. Public ADC
+/// conversions request it so Python can reconstruct nodes, source currents,
+/// and power without replaying the final decided waveform from `t = 0`.
+#[derive(Clone, Debug)]
+pub struct Trajectory {
+    /// Row-major input waveforms: `n_roles * expanded_grid_len`.
+    pub inputs: Vec<f64>,
+    pub states: Vec<Vec<f64>>,
+    /// Sample-major, then device-major terminal currents and charges.
+    pub device_currents: Vec<[f64; 4]>,
+    pub device_charges: Vec<[f64; 4]>,
+    pub failures: usize,
+    pub first_failure: Option<usize>,
 }
 
 /// The original-grid samples `np_interp(x, tgrid, ..)` reads: the bracket index
@@ -373,6 +398,7 @@ pub fn run_conversion<E: Evaluator>(
     tgrid: &[f64],
     grid: &ExpandedGrid,
     vin: f64,
+    record_trajectory: bool,
 ) -> Option<Conversion> {
     let n_bits = cfg.n_bits;
     let n_rows = cfg.roles.len();
@@ -380,34 +406,53 @@ pub fn run_conversion<E: Evaluator>(
     let mut decisions: Vec<Option<i32>> = vec![None; n_bits];
     let mut comparator = vec![0.0f64; tgrid.len()];
     let mut flat = vec![0.0f64; n_rows * exp_n];
+    let identity_grid = grid.times.len() == tgrid.len()
+        && grid.requested_index.len() == tgrid.len()
+        && grid
+            .times
+            .iter()
+            .zip(tgrid)
+            .enumerate()
+            .all(|(index, (&expanded, &requested))| {
+                expanded.to_bits() == requested.to_bits() && grid.requested_index[index] == index
+            });
 
-    // The conversion never reads the per-device history, so it is not recorded.
-    // That flag only gates bookkeeping writes; the trajectory is unaffected.
     let options = bsim_transient::Options {
-        record_device_history: false,
+        record_device_history: record_trajectory,
         ..cfg.newton
     };
     let mut states = vec![vec![0.0; circuit.size]; exp_n];
     states[0].copy_from_slice(v0);
     let mut workspace = bsim_transient::FixedGridWorkspace::new(circuit, devices);
     let mut profile = bsim_transient::Profile::default();
-    // Disjoint empty sinks: the history flag is off, so nothing is written.
-    let mut no_currents: [[f64; 4]; 0] = [];
-    let mut no_charges: [[f64; 4]; 0] = [];
+    let history_len = exp_n.saturating_mul(devices.len());
+    let mut device_currents = if record_trajectory {
+        vec![[0.0; 4]; history_len]
+    } else {
+        Vec::new()
+    };
+    let mut device_charges = if record_trajectory {
+        vec![[0.0; 4]; history_len]
+    } else {
+        Vec::new()
+    };
 
     // Sample 0 of the first trial's stimulus. Every trial agrees there, so the
     // initial evaluation is shared by the whole conversion.
-    let render = |decisions: &[Option<i32>], trial: usize, flat: &mut [f64]| {
-        let orig_rows = build_original_rows(cfg, vin, decisions, trial, tgrid);
-        // Stage 2: re-interpolate each original-grid row onto the expanded grid.
-        for (r, orig) in orig_rows.iter().enumerate() {
-            let base = r * exp_n;
-            for (m, &te) in grid.times.iter().enumerate() {
-                flat[base + m] = np_interp(te, tgrid, orig);
+    let render_row = |row: usize, decisions: &[Option<i32>], trial: usize, flat: &mut [f64]| {
+        let orig = build_original_row(cfg, vin, decisions, trial, tgrid, cfg.roles[row]);
+        let base = row * exp_n;
+        if identity_grid {
+            flat[base..base + exp_n].copy_from_slice(&orig);
+        } else {
+            for (sample, &time) in grid.times.iter().enumerate() {
+                flat[base + sample] = np_interp(time, tgrid, &orig);
             }
         }
     };
-    render(&decisions, 0, &mut flat);
+    for row in 0..n_rows {
+        render_row(row, &decisions, 0, &mut flat);
+    }
     let initial_inputs = Waveforms::new(&flat, n_rows, exp_n)?.sample(0)?;
     let mut carry = bsim_transient::begin_fixed_grid(
         devices,
@@ -416,15 +461,28 @@ pub fn run_conversion<E: Evaluator>(
         v0,
         &initial_inputs,
         options,
-        &mut no_currents,
-        &mut no_charges,
+        &mut device_currents,
+        &mut device_charges,
         &mut profile,
     )?;
 
     let mut solved_upto = 0usize;
     for bit in 0..n_bits {
         if bit > 0 {
-            render(&decisions, bit, &mut flat);
+            for (row, role) in cfg.roles.iter().copied().enumerate() {
+                let newly_active = matches!(
+                    role,
+                    Role::BitInput(index) | Role::BitInputBar(index) if index == bit
+                );
+                let previous_cleared = decisions[bit - 1] == Some(0)
+                    && matches!(
+                        role,
+                        Role::BitInput(index) | Role::BitInputBar(index) if index == bit - 1
+                    );
+                if newly_active || previous_cleared {
+                    render_row(row, &decisions, bit, &mut flat);
+                }
+            }
         }
         let waveforms = Waveforms::new(&flat, n_rows, exp_n)?;
         let decision_time = cfg.sample_end + (bit as f64 + 1.0) * cfg.bit_period;
@@ -446,8 +504,8 @@ pub fn run_conversion<E: Evaluator>(
                 options,
                 solved_upto + 1..resume_at + 1,
                 &mut carry,
-                &mut no_currents,
-                &mut no_charges,
+                &mut device_currents,
+                &mut device_charges,
                 &mut profile,
             )
         {
@@ -470,8 +528,8 @@ pub fn run_conversion<E: Evaluator>(
                     options,
                     resume_at + 1..upper + 1,
                     &mut carry,
-                    &mut no_currents,
-                    &mut no_charges,
+                    &mut device_currents,
+                    &mut device_charges,
                     &mut profile,
                 )
             {
@@ -512,6 +570,52 @@ pub fn run_conversion<E: Evaluator>(
         }
     }
 
+    let trajectory = if record_trajectory {
+        // The last decision only changes future stimulus. Render that decided
+        // waveform and finish the tail from the preserved decision-time state;
+        // all earlier accepted samples already belong to the same trajectory.
+        if decisions[n_bits - 1] == Some(0) {
+            for (row, role) in cfg.roles.iter().copied().enumerate() {
+                if matches!(
+                    role,
+                    Role::BitInput(index) | Role::BitInputBar(index) if index == n_bits - 1
+                ) {
+                    render_row(row, &decisions, n_bits - 1, &mut flat);
+                }
+            }
+        }
+        let waveforms = Waveforms::new(&flat, n_rows, exp_n)?;
+        if solved_upto + 1 < exp_n
+            && !bsim_transient::advance_fixed_grid(
+                circuit,
+                devices,
+                evaluator,
+                &mut workspace,
+                &mut states,
+                &grid.times,
+                waveforms,
+                options,
+                solved_upto + 1..exp_n,
+                &mut carry,
+                &mut device_currents,
+                &mut device_charges,
+                &mut profile,
+            )
+        {
+            return None;
+        }
+        Some(Trajectory {
+            inputs: flat,
+            states,
+            device_currents,
+            device_charges,
+            failures: carry.failures(),
+            first_failure: carry.first_failure(),
+        })
+    } else {
+        None
+    };
+
     let mut code: u64 = 0;
     let bits: Vec<i32> = (0..n_bits)
         .map(|bit| {
@@ -522,7 +626,12 @@ pub fn run_conversion<E: Evaluator>(
             d
         })
         .collect();
-    Some(Conversion { code, bits })
+    Some(Conversion {
+        code,
+        bits,
+        trajectory,
+        profile,
+    })
 }
 
 #[cfg(test)]

@@ -581,6 +581,15 @@
         "profile": {"type": "boolean"},
         "rail_margin": {"type": "number"},
         "integration_method": {"type": "string", "enum": ["gear2", "be"]},
+        "bsim_final_load_tolerance": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1e-12
+        },
+        "bsim_model_bypass_tolerance": {
+          "type": "number",
+          "minimum": 0.0
+        },
         "be_rerun_on_step_failures": {"type": "boolean"},
         "gear2_be_fallback": {"type": "boolean"},
         "cap_mode": {"type": "string", "enum": ["charge", "q", "qstamp", "q-stamp", "average", "avg", "trapezoid", "trap"]},

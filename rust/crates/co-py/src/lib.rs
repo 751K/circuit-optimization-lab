@@ -1488,8 +1488,35 @@ impl RustBsimEvaluator {
     /// Handles must be non-zero and live for this evaluator's lifetime. Repeated
     /// handles are permitted; the workspace serializes each repeated group.
     pub(crate) unsafe fn new(handles: Vec<usize>) -> Self {
+        unsafe { Self::new_with_final_load_tolerance(handles, 0.0) }
+    }
+
+    /// # Safety
+    ///
+    /// Same handle lifetime and exclusivity contract as [`Self::new`].
+    pub(crate) unsafe fn new_with_final_load_tolerance(
+        handles: Vec<usize>,
+        final_load_tolerance: f64,
+    ) -> Self {
+        unsafe { Self::new_with_transient_tolerances(handles, final_load_tolerance, 0.0) }
+    }
+
+    /// # Safety
+    ///
+    /// Same handle lifetime and exclusivity contract as [`Self::new`].
+    pub(crate) unsafe fn new_with_transient_tolerances(
+        handles: Vec<usize>,
+        final_load_tolerance: f64,
+        bypass_voltage_tolerance: f64,
+    ) -> Self {
         Self {
-            workspace: unsafe { co_bsim4::EvalBatchWorkspace::new(handles) },
+            workspace: unsafe {
+                co_bsim4::EvalBatchWorkspace::new_with_transient_tolerances(
+                    handles,
+                    final_load_tolerance,
+                    bypass_voltage_tolerance,
+                )
+            },
         }
     }
 }
@@ -1506,7 +1533,7 @@ impl bsim_transient::Evaluator for RustBsimEvaluator {
         let mut charges = [0.0; 4];
         let mut capacitance = [0.0; 16];
         let status = unsafe {
-            co_bsim4::eval_vp(
+            co_bsim4::eval_vp_transient(
                 handle,
                 terminals.as_ptr(),
                 currents.as_mut_ptr(),
@@ -1558,8 +1585,9 @@ impl bsim_transient::Evaluator for RustBsimEvaluator {
                 evaluations.len(),
             )
         };
-        let status =
-            unsafe { co_bsim4::eval_batch_into(&mut self.workspace, terminals, result_slots) };
+        let status = unsafe {
+            co_bsim4::eval_batch_into_transient(&mut self.workspace, terminals, result_slots)
+        };
         if status != OK {
             return bsim_transient::BatchStatus {
                 completed: false,
@@ -1586,7 +1614,7 @@ impl bsim_transient::Evaluator for RustBsimEvaluator {
         let mut charges = [0.0; 4];
         let mut capacitance = [0.0; 16];
         let status = unsafe {
-            co_bsim4::eval_vp_dc(
+            co_bsim4::eval_vp_dc_transient(
                 handle,
                 terminals.as_ptr(),
                 currents.as_mut_ptr(),
@@ -1729,7 +1757,8 @@ impl Bsim4TransientProblem {
 
     #[pyo3(signature = (
         initial, times, inputs, integration_method="be", max_iterations=40,
-        voltage_tolerance=1e-8, step_limit=0.25, gmin=1e-12, profile=false
+        voltage_tolerance=1e-8, step_limit=0.25, gmin=1e-12,
+        final_load_tolerance=0.0, model_bypass_tolerance=0.0, profile=false
     ))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn solve_fixed_grid<'py>(
@@ -1743,6 +1772,8 @@ impl Bsim4TransientProblem {
         voltage_tolerance: f64,
         step_limit: f64,
         gmin: f64,
+        final_load_tolerance: f64,
+        model_bypass_tolerance: f64,
         profile: bool,
     ) -> PyResult<(
         bool,
@@ -1792,6 +1823,19 @@ impl Bsim4TransientProblem {
             waveforms,
         )
         .map_err(core_error)?;
+        if !final_load_tolerance.is_finite() || !(0.0..=1.0e-12).contains(&final_load_tolerance) {
+            return Err(PyValueError::new_err(
+                "final_load_tolerance must be finite and within [0, 1e-12] V",
+            ));
+        }
+        if !model_bypass_tolerance.is_finite()
+            || !(0.0..=voltage_tolerance).contains(&model_bypass_tolerance)
+        {
+            return Err(PyValueError::new_err(
+                "model_bypass_tolerance must be finite and within \
+                 [0, voltage_tolerance] V",
+            ));
+        }
         let circuit = self.circuit.clone();
         let devices = self.devices.clone();
         let handles = self.handles.clone();
@@ -1801,7 +1845,13 @@ impl Bsim4TransientProblem {
         let result = py.detach(move || {
             // Bsim4TransientProblem validates that every handle is non-zero;
             // Python owns them through this solve.
-            let mut evaluator = unsafe { RustBsimEvaluator::new(handles) };
+            let mut evaluator = unsafe {
+                RustBsimEvaluator::new_with_transient_tolerances(
+                    handles,
+                    final_load_tolerance,
+                    model_bypass_tolerance,
+                )
+            };
             bsim_transient::solve_fixed_grid(
                 &circuit,
                 &devices,
@@ -1890,7 +1940,8 @@ impl Bsim4TransientProblem {
         initial, times, inputs, max_step=-1.0, reltol=1e-4,
         voltage_abstol=1e-6, current_abstol=1e-12, max_steps=200000,
         initial_step=-1.0, max_iterations=40, voltage_tolerance=1e-8,
-        step_limit=0.25, gmin=1e-12, profile=false
+        step_limit=0.25, gmin=1e-12, final_load_tolerance=0.0,
+        model_bypass_tolerance=0.0, profile=false
     ))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn solve_adaptive_gear2<'py>(
@@ -1909,6 +1960,8 @@ impl Bsim4TransientProblem {
         voltage_tolerance: f64,
         step_limit: f64,
         gmin: f64,
+        final_load_tolerance: f64,
+        model_bypass_tolerance: f64,
         profile: bool,
     ) -> PyResult<(
         bool,
@@ -1958,6 +2011,19 @@ impl Bsim4TransientProblem {
             waveforms,
         )
         .map_err(core_error)?;
+        if !final_load_tolerance.is_finite() || !(0.0..=1.0e-12).contains(&final_load_tolerance) {
+            return Err(PyValueError::new_err(
+                "final_load_tolerance must be finite and within [0, 1e-12] V",
+            ));
+        }
+        if !model_bypass_tolerance.is_finite()
+            || !(0.0..=voltage_tolerance).contains(&model_bypass_tolerance)
+        {
+            return Err(PyValueError::new_err(
+                "model_bypass_tolerance must be finite and within \
+                 [0, voltage_tolerance] V",
+            ));
+        }
         let circuit = self.circuit.clone();
         let devices = self.devices.clone();
         let handles = self.handles.clone();
@@ -1967,7 +2033,13 @@ impl Bsim4TransientProblem {
         let result = py.detach(move || {
             // Bsim4TransientProblem validates that every handle is non-zero;
             // Python owns them through this solve.
-            let mut evaluator = unsafe { RustBsimEvaluator::new(handles) };
+            let mut evaluator = unsafe {
+                RustBsimEvaluator::new_with_transient_tolerances(
+                    handles,
+                    final_load_tolerance,
+                    model_bypass_tolerance,
+                )
+            };
             bsim_transient::solve_adaptive_gear2(
                 &circuit,
                 &devices,

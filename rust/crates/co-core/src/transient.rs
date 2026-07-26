@@ -170,6 +170,18 @@ impl<'a> Waveforms<'a> {
                 .collect()
         })
     }
+
+    /// Fill a reusable sample buffer without allocating.
+    pub fn sample_into(self, index: usize, output: &mut Vec<f64>) -> bool {
+        if index >= self.columns {
+            return false;
+        }
+        output.resize(self.rows, 0.0);
+        for (row, value) in output.iter_mut().enumerate() {
+            *value = self.data[row * self.columns + index];
+        }
+        true
+    }
 }
 
 impl Problem {

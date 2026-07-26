@@ -874,7 +874,9 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
               adaptive: bool = False, adaptive_reltol: float = 1e-4,
               adaptive_vabstol: float = 1e-6,
               adaptive_iabstol: float = 1e-12, adaptive_max_steps: int = 200000,
-              adaptive_h0: float | None = None, adaptive_config: Any = None, *,
+              adaptive_h0: float | None = None, adaptive_config: Any = None,
+              bsim_final_load_tolerance: float = 0.0,
+              bsim_model_bypass_tolerance: float = 0.0, *,
               binding: CircuitBinding | None = None,
               mismatch: Mapping[str, float] | None = None,
               gear2_be_fallback: bool | None = None) -> dict:
@@ -920,6 +922,14 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
                signed Verilog-A drain-terminal current; this argument no longer
                changes per-device behavior.
       profile : if true, include transient_profile counters in the result.
+      bsim_final_load_tolerance : maximum converged BSIM private-node correction
+               [V] whose final model reload may be omitted. The exact default is
+               0. Use only for continuous analog settling workloads; regenerative
+               comparators and SAR decisions should retain 0.
+      bsim_model_bypass_tolerance : absolute BSIM terminal-voltage threshold [V]
+               for standard compact-model bypass during Newton. Must not exceed
+               newton_vtol. The exact default is 0; enable only after circuit-level
+               trajectory and signoff comparison.
       edge_mask : optional boolean mask over tgrid points; intervals touching a
                true point are counted as edge work in transient_profile.
       rail_margin : optional voltage margin around numeric rails for topologies
@@ -1005,6 +1015,8 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
             adaptive_max_steps=adaptive_max_steps,
             adaptive_h0=adaptive_h0,
             adaptive_config=adaptive_config,
+            bsim_final_load_tolerance=bsim_final_load_tolerance,
+            bsim_model_bypass_tolerance=bsim_model_bypass_tolerance,
             profile=profile,
         )
     if ngspice_model_names(model_types):

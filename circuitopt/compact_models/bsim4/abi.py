@@ -7,7 +7,7 @@ the same terminal sign convention and ``capacitance[i, j]`` is
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping, Protocol
 
@@ -39,6 +39,8 @@ class Bsim4ModelCard:
     polarity: int
     parameters: Mapping[str, float]
     version: float = 4.5
+    _parameter_items: tuple[tuple[str, float], ...] = field(
+        init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.polarity not in {-1, 1}:
@@ -54,11 +56,15 @@ class Bsim4ModelCard:
         object.__setattr__(self, "version", version)
         object.__setattr__(
             self, "parameters", MappingProxyType(normalized))
+        object.__setattr__(
+            self, "_parameter_items", tuple(sorted(normalized.items())))
 
 
 @dataclass(frozen=True)
 class Bsim4InstanceCard:
     parameters: Mapping[str, float]
+    _parameter_items: tuple[tuple[str, float], ...] = field(
+        init=False, repr=False, compare=False)
 
     def __post_init__(self):
         normalized = _numeric_map(self.parameters, "instance")
@@ -73,6 +79,8 @@ class Bsim4InstanceCard:
                     f"instance parameter {integer_name!r} must be a positive integer")
         object.__setattr__(
             self, "parameters", MappingProxyType(normalized))
+        object.__setattr__(
+            self, "_parameter_items", tuple(sorted(normalized.items())))
 
 
 @dataclass(frozen=True)

@@ -311,6 +311,104 @@ pub fn solve_dense_neg_rhs_in_place(matrix: &mut [f64], rhs: &mut [f64]) -> bool
     true
 }
 
+/// Factor `matrix` as pivoted LU and solve `matrix * x = -rhs`.
+///
+/// Unlike [`solve_dense_neg_rhs_in_place`], the strict lower triangle retains
+/// the elimination factors and `pivots` records each row interchange. Callers
+/// can therefore solve another right-hand side with
+/// [`solve_dense_lu_neg_rhs_in_place`] without stamping or factoring the same
+/// Jacobian again.
+pub fn factor_dense_neg_rhs_in_place(
+    matrix: &mut [f64],
+    rhs: &mut [f64],
+    pivots: &mut [usize],
+) -> bool {
+    let n = rhs.len();
+    if matrix.len() != n * n || pivots.len() != n {
+        return false;
+    }
+    for value in rhs.iter_mut() {
+        *value = -*value;
+    }
+    for k in 0..n {
+        let mut pivot = k;
+        let mut pivot_abs = matrix[k * n + k].abs();
+        for row in (k + 1)..n {
+            let value = matrix[row * n + k].abs();
+            if value > pivot_abs {
+                pivot = row;
+                pivot_abs = value;
+            }
+        }
+        if pivot_abs == 0.0 || !pivot_abs.is_finite() {
+            return false;
+        }
+        pivots[k] = pivot;
+        if pivot != k {
+            for col in 0..n {
+                matrix.swap(k * n + col, pivot * n + col);
+            }
+            rhs.swap(k, pivot);
+        }
+        let diagonal = matrix[k * n + k];
+        for row in (k + 1)..n {
+            let factor = matrix[row * n + k] / diagonal;
+            matrix[row * n + k] = factor;
+            if factor != 0.0 {
+                for col in (k + 1)..n {
+                    matrix[row * n + col] -= factor * matrix[k * n + col];
+                }
+                rhs[row] -= factor * rhs[k];
+            }
+        }
+    }
+    back_substitute_lu(matrix, rhs)
+}
+
+/// Solve `LU * x = -rhs` using factors and row pivots retained by
+/// [`factor_dense_neg_rhs_in_place`].
+pub fn solve_dense_lu_neg_rhs_in_place(lu: &[f64], pivots: &[usize], rhs: &mut [f64]) -> bool {
+    let n = rhs.len();
+    if lu.len() != n * n || pivots.len() != n {
+        return false;
+    }
+    for value in rhs.iter_mut() {
+        *value = -*value;
+    }
+    for k in 0..n {
+        let pivot = pivots[k];
+        if pivot >= n {
+            return false;
+        }
+        if pivot != k {
+            rhs.swap(k, pivot);
+        }
+        for row in (k + 1)..n {
+            rhs[row] -= lu[row * n + k] * rhs[k];
+        }
+    }
+    back_substitute_lu(lu, rhs)
+}
+
+fn back_substitute_lu(lu: &[f64], rhs: &mut [f64]) -> bool {
+    let n = rhs.len();
+    for row in (0..n).rev() {
+        let mut accumulator = rhs[row];
+        for col in (row + 1)..n {
+            accumulator -= lu[row * n + col] * rhs[col];
+        }
+        let diagonal = lu[row * n + row];
+        if diagonal == 0.0 || !diagonal.is_finite() {
+            return false;
+        }
+        rhs[row] = accumulator / diagonal;
+        if !rhs[row].is_finite() {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +452,30 @@ mod tests {
         let mut rhs = vec![-4.0, -3.0];
         assert!(solve_dense_neg_rhs_in_place(&mut matrix, &mut rhs));
         assert_eq!(rhs, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn retained_lu_reuses_the_factorization_for_a_second_rhs() {
+        let matrix = vec![0.0, 2.0, 1.0, 1.0];
+        let mut lu = matrix.clone();
+        let mut first_rhs = vec![-4.0, -3.0];
+        let mut pivots = vec![0; 2];
+        assert!(factor_dense_neg_rhs_in_place(
+            &mut lu,
+            &mut first_rhs,
+            &mut pivots,
+        ));
+        assert_eq!(first_rhs, vec![1.0, 2.0]);
+
+        let mut expected_matrix = matrix;
+        let mut expected = vec![-8.0, -5.0];
+        assert!(solve_dense_neg_rhs_in_place(
+            &mut expected_matrix,
+            &mut expected,
+        ));
+        let mut reused = vec![-8.0, -5.0];
+        assert!(solve_dense_lu_neg_rhs_in_place(&lu, &pivots, &mut reused,));
+        assert_eq!(reused, expected);
     }
 
     #[test]

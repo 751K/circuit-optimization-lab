@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 
@@ -895,25 +896,40 @@ def _jsonable(value):
     """
     if callable(value):
         return _DROP
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         ready = {}
         for key, item in value.items():
-            if str(key).startswith("_"):
+            converted_key = _jsonable(key)
+            if converted_key is _DROP or isinstance(
+                converted_key, (Mapping, list, set, frozenset)
+            ):
+                continue
+            text_key = str(converted_key)
+            if text_key.startswith("_"):
                 continue
             converted = _jsonable(item)
             if converted is not _DROP:
-                ready[str(key)] = converted
+                ready[text_key] = converted
         return ready
-    if isinstance(value, (list, tuple)):
+    if hasattr(value, "tolist"):
+        converted = value.tolist()
+        return _DROP if converted is value else _jsonable(converted)
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
         ready = []
         for item in value:
             converted = _jsonable(item)
             if converted is not _DROP:
                 ready.append(converted)
         return ready
-    if hasattr(value, "tolist"):
-        converted = value.tolist()
-        return _DROP if converted is value else _jsonable(converted)
+    if isinstance(value, (set, frozenset)):
+        ready = []
+        for item in value:
+            converted = _jsonable(item)
+            if converted is not _DROP:
+                ready.append(converted)
+        return sorted(ready, key=lambda item: (type(item).__name__, repr(item)))
     if value is None or isinstance(value, (str, int, float, bool, complex)):
         return value
     return _DROP
@@ -1049,7 +1065,13 @@ def _cmd_adc(args):
             raise SystemExit("--sweep must contain at least 2**n_bits samples")
         vref = float(spec.adc["vref"])
         vin = (np.arange(args.sweep) + 0.5) * vref / args.sweep
-        result = run_sar_sweep(spec, vin, corner=args.corner, workers=args.workers)
+        result = run_sar_sweep(
+            spec,
+            vin,
+            corner=args.corner,
+            workers=args.workers,
+            include_transients=args.plot is not None or args.output is not None,
+        )
         metrics = result["metrics"]
         if not args.quiet:
             print(

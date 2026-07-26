@@ -35,6 +35,12 @@ def test_sweep_workers_match_serial():
     np.testing.assert_array_equal(serial["codes"], parallel["codes"])
     assert serial["metrics"]["max_abs_dnl"] == parallel["metrics"]["max_abs_dnl"]
     assert serial["metrics"]["max_abs_inl"] == parallel["metrics"]["max_abs_inl"]
+    for expected, actual in zip(
+        serial["conversions"], parallel["conversions"], strict=True
+    ):
+        np.testing.assert_array_equal(
+            expected["transient"]["output"], actual["transient"]["output"])
+        assert expected["total_power_w"] == actual["total_power_w"]
 
 
 def test_sweep_rejects_bad_worker_count():

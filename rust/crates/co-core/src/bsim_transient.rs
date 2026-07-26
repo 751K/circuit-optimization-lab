@@ -7,7 +7,10 @@ use crate::stimulus;
 use crate::transient::{HistoryTerms, Problem as CircuitProblem, Waveforms, fill_history_terms};
 use crate::{
     CoreError,
-    mna::{DenseSystem, Term, solve_dense_neg_rhs_in_place},
+    mna::{
+        DenseSystem, Term, factor_dense_neg_rhs_in_place, solve_dense_lu_neg_rhs_in_place,
+        solve_dense_neg_rhs_in_place,
+    },
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -686,6 +689,73 @@ fn predict_newton_seed(
     true
 }
 
+/// Upgrade the linear predictor to a variable-step quadratic extrapolation
+/// when three accepted states are available.
+///
+/// The linear predictor performs all dimension, step-ratio, and input-edge
+/// guards first. Missing or ill-conditioned older history simply keeps that
+/// already-valid linear seed.
+#[allow(clippy::too_many_arguments)]
+fn predict_adaptive_newton_seed(
+    state: &mut [f64],
+    previous: &[f64],
+    previous2: &[f64],
+    previous3: &[f64],
+    input_now: &[f64],
+    input_previous: &[f64],
+    input_previous2: &[f64],
+    h: f64,
+    h_previous: f64,
+    h_previous2: f64,
+) -> bool {
+    if !predict_newton_seed(
+        state,
+        previous,
+        previous2,
+        input_now,
+        input_previous,
+        input_previous2,
+        h,
+        h_previous,
+    ) {
+        return false;
+    }
+    if previous3.len() != previous.len()
+        || !h_previous2.is_finite()
+        || h_previous2 <= 0.0
+        || h_previous / h_previous2 > integrator::PREDICTOR_MAX_STEP_RATIO
+    {
+        return true;
+    }
+
+    let span = h_previous + h_previous2;
+    let c0 = (h + h_previous) * (h + span) / (h_previous * span);
+    let c1 = -h * (h + span) / (h_previous * h_previous2);
+    let c2 = h * (h + h_previous) / (h_previous2 * span);
+    if !c0.is_finite() || !c1.is_finite() || !c2.is_finite() {
+        return true;
+    }
+    for (((output, &value0), &value1), &value2) in
+        state.iter_mut().zip(previous).zip(previous2).zip(previous3)
+    {
+        let predicted = c0 * value0 + c1 * value1 + c2 * value2;
+        if !predicted.is_finite() {
+            return predict_newton_seed(
+                state,
+                previous,
+                previous2,
+                input_now,
+                input_previous,
+                input_previous2,
+                h,
+                h_previous,
+            );
+        }
+        *output = predicted;
+    }
+    true
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct AdaptiveOptions {
     pub newton: Options,
@@ -808,7 +878,6 @@ fn charge_defect_lte(
     devices: &[Device],
     state: &[f64],
     previous_state: &[f64],
-    input_now: &[f64],
     evaluations: &[Evaluation],
     charges1: &[[f64; 4]],
     charges2: &[[f64; 4]],
@@ -817,27 +886,14 @@ fn charge_defect_lte(
     history1: &HistoryTerms,
     history2: &HistoryTerms,
     history3: &HistoryTerms,
-    coefficients: [f64; 3],
     defect_weights: [f64; 4],
     options: AdaptiveOptions,
     system: &mut DenseSystem,
+    pivots: &[usize],
 ) -> Option<f64> {
-    if !stamp_adaptive_candidate_system(
-        circuit,
-        devices,
-        state,
-        input_now,
-        evaluations,
-        charges1,
-        charges2,
-        coefficients,
-        history1,
-        history2,
-        options.newton.gmin,
-        system,
-    ) {
-        return None;
-    }
+    // `solve_adaptive_candidate` leaves the converged candidate Jacobian in
+    // pivoted-LU form. LTE changes only the right-hand side, so reuse that
+    // factorization instead of stamping and decomposing the same matrix again.
     system.residual.fill(0.0);
     if devices.len() != charges3.len() {
         return None;
@@ -872,7 +928,7 @@ fn charge_defect_lte(
         }
     }
     if !system.residual.iter().all(|value| value.is_finite())
-        || !solve_dense_neg_rhs_in_place(&mut system.jacobian, &mut system.residual)
+        || !solve_dense_lu_neg_rhs_in_place(&system.jacobian, pivots, &mut system.residual)
     {
         return None;
     }
@@ -904,6 +960,7 @@ fn solve_adaptive_candidate<E: Evaluator>(
     terminal_batch: &mut [[f64; 4]],
     evaluation_batch: &mut [Evaluation],
     system: &mut DenseSystem,
+    pivots: &mut [usize],
     profile: &mut Profile,
 ) -> bool {
     for _iteration in 0..options.max_iterations {
@@ -936,7 +993,9 @@ fn solve_adaptive_candidate<E: Evaluator>(
                 options.gmin,
                 system,
             );
-        if !stamped || !solve_dense_neg_rhs_in_place(&mut system.jacobian, &mut system.residual) {
+        if !stamped
+            || !factor_dense_neg_rhs_in_place(&mut system.jacobian, &mut system.residual, pivots)
+        {
             return false;
         }
         let mut peak = 0.0f64;
@@ -1078,6 +1137,11 @@ pub struct FixedGridWorkspace {
     evaluation_batch: Vec<Evaluation>,
     system: DenseSystem,
     state: Vec<f64>,
+    input_now: Vec<f64>,
+    input_previous: Vec<f64>,
+    input_previous2: Vec<f64>,
+    history: HistoryTerms,
+    history2: HistoryTerms,
 }
 
 impl FixedGridWorkspace {
@@ -1091,6 +1155,11 @@ impl FixedGridWorkspace {
             evaluation_batch: vec![Evaluation::default(); devices.len()],
             system: DenseSystem::new(circuit.size),
             state: vec![0.0; circuit.size],
+            input_now: Vec::new(),
+            input_previous: Vec::new(),
+            input_previous2: Vec::new(),
+            history: HistoryTerms::new(circuit),
+            history2: HistoryTerms::new(circuit),
         }
     }
 }
@@ -1200,13 +1269,17 @@ pub fn advance_fixed_grid<E: Evaluator>(
     device_charges: &mut [[f64; 4]],
     profile: &mut Profile,
 ) -> bool {
-    let input_at = |index: usize| inputs.sample(index).unwrap_or_default();
     let FixedGridWorkspace {
         evaluator_indices,
         terminal_batch,
         evaluation_batch,
         system,
         state,
+        input_now,
+        input_previous,
+        input_previous2,
+        history,
+        history2,
     } = workspace;
     let FixedGridCarry {
         charge1,
@@ -1226,26 +1299,42 @@ pub fn advance_fixed_grid<E: Evaluator>(
             *first_failure = Some(sample);
             return false;
         };
-        let input_now = input_at(sample);
-        let input_previous = input_at(sample - 1);
-        let input_previous2 = if sample >= 2 {
-            input_at(sample - 2)
-        } else {
-            input_previous.clone()
-        };
-        let Some(history) = history_for(circuit, &states[sample - 1], &input_previous) else {
+        if !inputs.sample_into(sample, input_now) || !inputs.sample_into(sample - 1, input_previous)
+        {
             if options.profile {
                 profile.failed_steps.push(sample);
             }
             *first_failure = Some(sample);
             return false;
-        };
+        }
         let history2_state = if sample >= 2 {
+            if !inputs.sample_into(sample - 2, input_previous2) {
+                if options.profile {
+                    profile.failed_steps.push(sample);
+                }
+                *first_failure = Some(sample);
+                return false;
+            }
             &states[sample - 2]
         } else {
+            input_previous2.clone_from(input_previous);
             &states[sample - 1]
         };
-        let Some(history2) = history_for(circuit, history2_state, &input_previous2) else {
+        if !fill_history_terms(
+            circuit,
+            &mut [],
+            &states[sample - 1],
+            input_previous,
+            0,
+            history,
+        ) || !fill_history_terms(
+            circuit,
+            &mut [],
+            history2_state,
+            input_previous2,
+            0,
+            history2,
+        ) {
             if options.profile {
                 profile.failed_steps.push(sample);
             }
@@ -1260,9 +1349,9 @@ pub fn advance_fixed_grid<E: Evaluator>(
                 state,
                 &states[sample - 1],
                 &states[sample - 2],
-                &input_now,
-                &input_previous,
-                &input_previous2,
+                input_now,
+                input_previous,
+                input_previous2,
                 h,
                 times[sample - 1] - times[sample - 2],
             )
@@ -1282,7 +1371,7 @@ pub fn advance_fixed_grid<E: Evaluator>(
                 devices,
                 evaluator_indices,
                 state,
-                &input_now,
+                input_now,
                 terminal_batch,
                 evaluation_batch,
                 profile,
@@ -1323,10 +1412,10 @@ pub fn advance_fixed_grid<E: Evaluator>(
                 && stamp_linear_elements(
                     circuit,
                     state,
-                    &input_now,
+                    input_now,
                     coefficients,
-                    &history,
-                    &history2,
+                    history,
+                    history2,
                     options.gmin,
                     system,
                 );
@@ -1381,7 +1470,7 @@ pub fn advance_fixed_grid<E: Evaluator>(
                 devices,
                 evaluator_indices,
                 state,
-                &input_now,
+                input_now,
                 terminal_batch,
                 evaluation_batch,
                 profile,
@@ -1469,6 +1558,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
     }
     step = step.min(planner.max_step());
     let restart_step = step;
+    let predictor_enabled = newton_seed_predictor_enabled();
 
     let capacity = source_times.len().max(16);
     let mut times = Vec::with_capacity(capacity);
@@ -1479,6 +1569,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
     let mut device_charges = Vec::with_capacity(capacity.saturating_mul(devices.len()));
     let mut current = initial.to_vec();
     let mut previous2 = initial.to_vec();
+    let mut previous3 = initial.to_vec();
     let mut input_current = stimulus::inputs_at_time(source_times, source_inputs, start);
     let mut input_previous2 = input_current.clone();
     let mut current_time = start;
@@ -1498,6 +1589,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
     let mut evaluation_batch = vec![Evaluation::default(); devices.len()];
     let mut candidate = current.clone();
     let mut system = DenseSystem::new(circuit.size);
+    let mut pivots = vec![0; circuit.size];
 
     if !evaluate_devices(
         evaluator,
@@ -1596,6 +1688,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                 &mut terminal_batch,
                 &mut evaluation_batch,
                 &mut system,
+                &mut pivots,
                 &mut profile,
             );
             let full_state = candidate.clone();
@@ -1622,6 +1715,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                     &mut terminal_batch,
                     &mut evaluation_batch,
                     &mut system,
+                    &mut pivots,
                     &mut profile,
                 );
                 if mid_converged {
@@ -1658,6 +1752,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                     &mut terminal_batch,
                     &mut evaluation_batch,
                     &mut system,
+                    &mut pivots,
                     &mut profile,
                 );
             }
@@ -1706,6 +1801,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
 
             // Commit the midpoint sample.
             previous3_charges.clone_from(&previous2_charges);
+            previous3.clone_from(&previous2);
             previous2.clone_from(&current);
             previous2_charges.clone_from(&current_charges);
             current.clone_from(&mid_state);
@@ -1728,6 +1824,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
 
             // Commit the endpoint sample.
             previous3_charges.clone_from(&previous2_charges);
+            previous3.clone_from(&previous2);
             previous2.clone_from(&current);
             previous2_charges.clone_from(&current_charges);
             std::mem::swap(&mut current, &mut candidate);
@@ -1753,6 +1850,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
             let hit_critical = planner.hit_critical(current_time);
             if hit_critical {
                 previous2.clone_from(&current);
+                previous3.clone_from(&current);
                 previous2_charges.clone_from(&current_charges);
                 previous3_charges.clone_from(&current_charges);
                 history2.clone_from(&history_current);
@@ -1782,16 +1880,19 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
         let input_now = stimulus::inputs_at_time(source_times, source_inputs, endpoint);
         let coefficients = integrator::gear2_or_be_scaled(step, previous_step);
         candidate.clone_from(&current);
-        if previous_step > 0.0
-            && predict_newton_seed(
+        if predictor_enabled
+            && previous_step > 0.0
+            && predict_adaptive_newton_seed(
                 &mut candidate,
                 &current,
                 &previous2,
+                &previous3,
                 &input_now,
                 &input_current,
                 &input_previous2,
                 step,
                 previous_step,
+                previous2_step,
             )
             && options.newton.profile
         {
@@ -1814,6 +1915,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
             &mut terminal_batch,
             &mut evaluation_batch,
             &mut system,
+            &mut pivots,
             &mut profile,
         );
         if !converged {
@@ -1839,7 +1941,6 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                 devices,
                 &candidate,
                 &current,
-                &input_now,
                 &evaluation_batch,
                 &current_charges,
                 &previous2_charges,
@@ -1848,10 +1949,10 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                 &history_current,
                 &history2,
                 &history3,
-                coefficients,
                 weights,
                 options,
                 &mut system,
+                &pivots,
             );
             if estimate.is_some() && options.newton.profile {
                 profile.lte_linear_solves += 1;
@@ -1864,6 +1965,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
             current_time = endpoint;
             accepted_steps += 1;
             previous3_charges.clone_from(&previous2_charges);
+            previous3.clone_from(&previous2);
             previous2.clone_from(&current);
             previous2_charges.clone_from(&current_charges);
             std::mem::swap(&mut current, &mut candidate);
@@ -1887,6 +1989,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
             let hit_critical = planner.hit_critical(current_time);
             if hit_critical {
                 previous2.clone_from(&current);
+                previous3.clone_from(&current);
                 previous2_charges.clone_from(&current_charges);
                 previous3_charges.clone_from(&current_charges);
                 history2.clone_from(&history_current);
@@ -2569,6 +2672,41 @@ mod tests {
             1.0,
         ));
         assert_eq!(growth_state, previous);
+    }
+
+    #[test]
+    fn adaptive_predictor_uses_quadratic_history_and_linear_fallback() {
+        // Samples of x=t^2 at t=2,1,0 extrapolate exactly to x(3)=9.
+        let mut quadratic = [0.0];
+        assert!(predict_adaptive_newton_seed(
+            &mut quadratic,
+            &[4.0],
+            &[1.0],
+            &[0.0],
+            &[],
+            &[],
+            &[],
+            1.0,
+            1.0,
+            1.0,
+        ));
+        assert_eq!(quadratic, [9.0]);
+
+        // A restart has no third step yet, so retain the valid linear seed.
+        let mut fallback = [0.0];
+        assert!(predict_adaptive_newton_seed(
+            &mut fallback,
+            &[4.0],
+            &[1.0],
+            &[0.0],
+            &[],
+            &[],
+            &[],
+            1.0,
+            1.0,
+            -1.0,
+        ));
+        assert_eq!(fallback, [7.0]);
     }
 
     #[test]
