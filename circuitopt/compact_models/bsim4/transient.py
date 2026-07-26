@@ -284,6 +284,8 @@ def assemble_native_bsim4_result(
             native_profile.get("final_load_tolerance_v", 0.0)),
         "bsim_model_bypass_tolerance": float(
             native_profile.get("model_bypass_tolerance_v", 0.0)),
+        "newton_error_fraction": float(
+            native_profile.get("newton_error_fraction", 0.0)),
         "X_final": sampled[-1].copy(),
         "branch_currents": {
             name: sampled[:, index]
@@ -340,6 +342,7 @@ def assemble_native_bsim4_result(
                 "final_load_tolerance_v"],
             "model_bypass_tolerance_v": native_profile[
                 "model_bypass_tolerance_v"],
+            "newton_error_fraction": native_profile["newton_error_fraction"],
             "bsim_evaluations_avg_per_solver_step": (
                 native_profile["bsim_evaluations"] / solver_steps
                 if solver_steps
@@ -377,6 +380,7 @@ def transient_native_bsim4(
     gmin=1e-12,
     bsim_final_load_tolerance=0.0,
     bsim_model_bypass_tolerance=0.0,
+    newton_error_fraction=0.0,
     adaptive=False,
     adaptive_reltol=1e-4,
     adaptive_vabstol=1e-6,
@@ -434,6 +438,18 @@ def transient_native_bsim4(
         raise ValueError(
             "bsim_model_bypass_tolerance must be finite and within "
             "[0, newton_vtol] V")
+    newton_error_fraction = float(newton_error_fraction)
+    if (
+        not np.isfinite(newton_error_fraction)
+        or newton_error_fraction < 0.0
+        or newton_error_fraction > 1.0
+    ):
+        raise ValueError(
+            "newton_error_fraction must be finite and within [0, 1]")
+    if newton_error_fraction and not adaptive:
+        raise ValueError(
+            "newton_error_fraction needs the adaptive step controller, which "
+            "owns the per-node error budget it is a fraction of")
 
     raw_inputs = {
         key: np.asarray(value, dtype=float)
@@ -575,6 +591,7 @@ def transient_native_bsim4(
         gmin=gmin,
         final_load_tolerance=bsim_final_load_tolerance,
         model_bypass_tolerance=bsim_model_bypass_tolerance,
+        newton_error_fraction=newton_error_fraction,
         adaptive=adaptive,
         adaptive_config=adaptive_config,
         max_step=max_step,

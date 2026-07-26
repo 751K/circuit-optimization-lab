@@ -599,10 +599,10 @@ Solves the time-domain response of the topology-defined system using backward Eu
   that level. This applies only when the outer work is at least as wide as the
   worker count, matching the compiled campaign's own axis rule, so a single
   solve keeps the pool. `CIRCUITOPT_BSIM_NESTED_POOL=1` restores the previous
-  scheduling; results are unaffected either way. Isolated evaluations clear the
-  fixed BSIM matrix frame with one contiguous write. Outer-parallel workers
-  clear only rows and columns through `CKTmaxEqNum`, reducing shared memory
-  traffic; `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` forces full-frame clearing.
+  scheduling; results are unaffected either way. Every evaluation clears only
+  the rows and columns of the fixed BSIM matrix frame through `CKTmaxEqNum`,
+  which is the whole region the vendor stamps or reads;
+  `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` forces the old full-frame write.
   Profiling disabled leaves these counters and the result field absent. The
   original `eval_batch` ABI remains as a compatibility wrapper.
 - A native transient without an explicit `V0` first tries the topology's
@@ -926,7 +926,13 @@ previous cleared-bit rows. Code-only sweeps omit terminal history, while detaile
 conversions retain the complete accepted state/current/charge trajectory.
 
 The native host also exports a versioned conserved-evaluation ABI, an all-`void *`
-entry point, and a batch evaluator. The fixed-grid BSIM4 transient runs matrix
+entry point, and a batch evaluator. `co_bsim4_set_card` applies a whole model or
+instance card in one crossing, and the vendor keyword tables are indexed once per
+process instead of scanned per parameter; a silicon card names hundreds of
+parameters, so the two together are what keeps handle construction off the
+critical path. The single-value `co_bsim4_set_model` / `co_bsim4_set_instance`
+entries remain, and a parity test pins the whole-card path to them.
+The fixed-grid BSIM4 transient runs matrix
 assembly, Newton iteration, and time stepping inside the compiled Rust core
 (`co-core` calling `co-bsim4` in-process); `compact_models/bsim4/native.py`'s
 ctypes binding is the Python-facing entry point onto the same compiled library

@@ -19,7 +19,244 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Added / 新增
+
+- **FreePDK45 low-threshold flavors and a complemented SAR strobe / FreePDK45 低阈值型号与 SAR 反相选通**
+
+  **English:** `freepdk45.nmos_vtl` / `freepdk45.pmos_vtl` bind the kit's
+  `NMOS_VTL`/`PMOS_VTL` cards (nominal vth0 0.322 V against VTG's 0.4106 V);
+  flavored models fold onto their base polarity for corner directories, BSIM
+  polarity, and the per-polarity mismatch sigmas. `adc.clock` accepts an
+  optional `bar_input`, emitting the complemented strobe `high + low - clock`
+  as a second waveform row in both the Python builder and the compiled
+  `co_core::sar` roles, for latches whose reset devices need the opposite
+  phase. Both are additive; existing circuits render identical waveforms.
+
+  **中文：** 新增 `freepdk45.nmos_vtl` / `freepdk45.pmos_vtl`，绑定套件自带的
+  `NMOS_VTL`/`PMOS_VTL` 卡（名义 vth0 0.322 V，对 VTG 的 0.4106 V）；带型号后缀的
+  model 在 corner 目录、BSIM 极性与逐极性失配 sigma 上折叠回基础极性。
+  `adc.clock` 接受可选的 `bar_input`，在 Python 波形生成器与编译版
+  `co_core::sar` 角色中同步生成反相选通 `high + low - clock`，供复位管需要相反
+  相位的锁存器使用。两者均为增量特性；既有电路的波形逐位不变。
+
+### Fixed / 修复
+
+- **The 6-bit SAR example now converts correctly at nominal / 6-bit SAR 示例在名义点正确转换**
+
+  **English:** `freepdk45_sar6.json`'s nominal 64-code ramp was deformed and
+  nothing pinned it: the stream was non-monotonic with wild codes (inputs 1
+  and 2 read 41 and 53) and a deterministic LSB inversion (`code = i XOR 1`
+  over half the range). The engine was exonerated -- the compiled continuation,
+  the production path, and the frozen full replay agree bit-for-bit, and the
+  CDAC top-plate differentials measure exactly `trial - vin` -- the deformity
+  was the comparator design. Its StrongARM input pair sat at the CDAC common
+  mode of about 0.47 V, at the VTG threshold: with millivolt overdrives the
+  latch resolved through charge-share races between the stacked internal nodes
+  and the outputs rather than through the input signal. No single flavor
+  rescues that topology on this kit -- VTG inverts small differentials, VTL
+  fixes them but its subthreshold slide inverts large ones, and a double-tail
+  second stage either parks metastably on the 100 ps grid or locks capacitive
+  feedthrough of the wrong sign; each regime was measured, not assumed.
+
+  The comparator is now fully static: two diode-loaded differential preamp
+  stages (VTL input pairs, zero systematic offset by symmetry, soft-clipped
+  range compression) into the same five-transistor mirror stage the 3-bit
+  example has always used. The nominal ramp is the ideal staircase -- all 64
+  code centers resolve to their ideal codes, strictly monotone -- and is now
+  pinned absolutely by a new regression test, closing the gap that let the
+  deformity ship: the previous SAR tests were self-consistency checks only.
+  Pinned conversions updated to the ideal codes (0.7109375 now reads 45, not
+  44; 0.2890625 reads 18, not 19), the strobe-machinery tests inject their
+  clock block through the config override, and the explore config retargets
+  the new preamp pair. The mismatch hook still reaches the comparator: +50 mV
+  on one preamp input shifts a three-point sweep by a coherent four codes.
+
+  **中文：** `freepdk45_sar6.json` 的名义 64 码斜坡是畸形的，且没有任何测试钉住它：
+  码流非单调、带狂码（输入 1、2 读出 41、53），一半量程上还有确定性的 LSB 反相
+  （`code = i XOR 1`）。引擎已洗清——编译续算、生产路径与冻结全重放逐位一致，
+  CDAC 顶板差分实测恰为 `trial - vin`——畸形出自比较器设计本身。其 StrongARM
+  输入对栅极共模约 0.47 V，正贴 VTG 阈值：毫伏级过驱动下，锁存靠栈接内部节点与
+  输出间的电荷分享竞争而非输入信号定胜负。该拓扑在这套模型上无论换哪种阈值都
+  救不回——VTG 反转小差分，VTL 治好小差分却让亚阈值滑移反转大差分，double-tail
+  二级要么在 100 ps 网格上亚稳停车、要么锁住符号相反的容性馈通；每个 regime
+  都经实测而非推断。
+
+  比较器现改为全静态：两级二极管负载全差分前放（VTL 输入对，对称结构系统失调
+  为零，软限幅自带量程压缩）接 3-bit 示例一直使用的同款五管镜像级。名义斜坡
+  成为理想阶梯——64 个码中心全部落到理想码、严格单调——并由新增回归测试绝对
+  钉死，补上让畸形溜过的缺口：此前的 SAR 测试全部只是自洽性检验。已钉转换更新
+  为理想码（0.7109375 现读 45 而非 44；0.2890625 读 18 而非 19），选通机制测试
+  改为经 config 注入时钟块，explore 配置改指新前放对。失配钩子仍能到达比较器：
+  单侧前放输入 +50 mV 使三点扫码相干偏移 4 码。
+
+- **Device evaluation waits for the model's own convergence signal / 器件求值等待模型自己的收敛信号**
+
+  **English:** The vendored BSIM4 load limits the terminal voltages it was
+  asked for against the ones the previous load settled on, walking each large
+  bias step over several loads. The host's internal-node loop stopped as soon
+  as the internal nodes settled, and nothing checked whether that walk had
+  finished: `DEVfetlim` limits silently, and the rbodyMod junction branch
+  overwrites the core vbs/vbd `DEVpnjlim` flag with the body-network flags
+  alone, so even `CKTnoncon` stays quiet. On devices whose internal nodes are
+  insensitive to the walking voltage the loop could therefore exit mid-walk
+  and report an operating point nobody requested. A cold FreePDK45 PMOS
+  evaluation at Vg=0.66/Vd=0.88 -- forward-biased drain-body junction --
+  exited 72.7 mV short on the junction voltage and returned a source current
+  9.9% away from the converged point; approaching the same bias gradually gave
+  the converged one, so the answer depended on handle history at 8 of that
+  device's 36 grid biases.
+
+  Two exit conditions were added to the loop: `CKTnoncon` is cleared before
+  every load and must stay clear, and the limited-voltage block the load
+  stores in `CKTstate0` (`vbd..vdes`) must not have moved by more than 1 uV --
+  a walking limiter always moves it by at least one limiting step, tens of mV.
+  Every evaluation now lands on the fixed point that repeated and gradual
+  approaches reach; a regression test pins cold-equals-walked at the bias
+  above, and a subprocess test keeps it bit-identical between block and
+  full-frame matrix clears. Runtime is unchanged (45-point campaign 13.1 s,
+  single residue 55.9 ms). Numbers move where evaluations used to stop early:
+  no signoff status changes and at most 8.8e-6 relative on non-degenerate
+  campaign fields, 6 of 64 codes in the nominal FreePDK45 SAR6 ramp probe (all
+  on conversions that were already non-monotonic before the fix), and 181
+  device grids across all three PDKs in the engine-parity corpus, re-frozen
+  after verifying magnitudes: at most 5.4e-16 A absolute on currents
+  (6e-5 relative, subthreshold points), with the five circuit-level golden
+  cases bit-identical throughout.
+
+  **中文：** vendored BSIM4 的 load 会把调用者要求的端电压对上一次 load 落定的
+  电压做限幅，大的偏置跳变要分好几次 load 才走完。host 的内部节点循环只要内部
+  节点稳定就退出，没有任何东西检查这段"走步"是否完成：`DEVfetlim` 静默限幅，
+  rbodyMod 的结限幅分支又用体网络两个结的标志覆盖了核心 vbs/vbd 的 `DEVpnjlim`
+  标志，连 `CKTnoncon` 也保持沉默。在内部节点对该电压不敏感的器件上，循环因此
+  可能在半路退出，返回一个没人要求过的工作点。FreePDK45 PMOS 在 Vg=0.66/
+  Vd=0.88（漏-体结正偏）的冷求值就在结电压差 72.7 mV 时提前退出，源电流偏离
+  收敛点 9.9%；而逐步逼近同一偏置得到的是收敛值——该器件 36 个网格偏置中有 8 个
+  的答案取决于 handle 历史。
+
+  循环新增两个退出条件：每次 load 前清零 `CKTnoncon` 且必须保持为零；load 写进
+  `CKTstate0` 的限幅电压块（`vbd..vdes`）移动不得超过 1 uV——还在走步的限幅器
+  每次至少移动一个限幅步长，数十 mV。现在每次求值都落到重复求值与逐步逼近共同
+  到达的不动点上；回归测试在上述偏置钉死"冷启动 == 走过去"，子进程测试保持块
+  清零与整帧清零逐位一致。运行时间不变（45 点 campaign 13.1 s，单 residue
+  55.9 ms）。数值只在原先提前退出的地方移动：signoff 状态零变化、非退化
+  campaign 字段最大相对差 8.8e-6；名义 FreePDK45 SAR6 斜坡探针 64 码中 6 码
+  变化（全部落在修复前就已非单调的转换上）；engine-parity 语料中三个 PDK 共
+  181 个器件网格变化，核对幅度后已重新冻结：电流最大绝对差 5.4e-16 A
+  （相对 6e-5，亚阈值点），五个电路级 golden 用例全程逐位不变。
+
 ### Changed / 变更
+
+- **Whole-card BSIM handle construction / 整卡构建 BSIM handle**
+
+  **English:** `co_bsim4_set_card` applies a model or instance card in one FFI
+  crossing, and the vendor keyword tables are now indexed into a map once per
+  process rather than scanned linearly for every parameter. A TSMC28 model card
+  names 339 parameters, so building one handle cost 321 us of which the model
+  card was 97%; it is now 23.6 us, about 13.6x. The linear scan, not the
+  crossings, was the larger half: replacing 339 crossings with one took it to
+  244 us, and indexing the table took the rest. `co_bsim4_setup` itself is
+  0.9 us, so handle construction was never dominated by the model setup it
+  prepares. Because that construction runs under the backend's process-wide
+  lock, it was a serial floor on every parallel campaign: an 8-worker 45-point
+  signoff spent 3.50 s of its 14.16 s wall there, now 1.09 s, and the campaign
+  moved from 14.64 s to 13.05 s with all 45 points reproducing every signoff
+  field bit-for-bit. The single-value setters remain; a parity test pins the
+  whole-card path to them on a real card, and another checks that a rejected
+  parameter is still named. The C ABI version is now 2.
+
+  The keyword indexes are built once for the two vendor tables and read
+  lock-free afterwards. The first version kept them behind a mutex, which
+  concurrent compiled-campaign workers hit on every parameter while
+  constructing handles: the silicon campaign's 8-worker speedup sat at 1.3-1.6x
+  with occasional runs slower than one worker. Lock-free lookup takes the same
+  benchmark to a steady 5.2-5.4x.
+
+  **中文：** `co_bsim4_set_card` 在一次 FFI 穿越中应用整张 model 或 instance
+  card；vendor 关键字表也改为每进程建一次索引，不再为每个参数线性扫描。TSMC28
+  的 model card 有 339 个参数，构建单个 handle 原本需要 321 us，其中 model card
+  占 97%；现在是 23.6 us，约 13.6 倍。其中线性扫描才是较大的一半：把 339 次穿越
+  合成一次只降到 244 us，建索引才拿下其余部分。`co_bsim4_setup` 本身仅
+  0.9 us——handle 构造从来就不是被它所准备的 model setup 主导的。由于该构造在
+  backend 的进程级锁下执行，它是所有并行 campaign 的串行地板：8 worker、45 点
+  signoff 曾在其中花掉 14.16 s wall 里的 3.50 s，现为 1.09 s，campaign 由
+  14.64 s 降至 13.05 s，45 个点的全部 signoff 字段逐位不变。逐参数 setter 仍然
+  保留；一个对拍测试用真实 card 把整卡路径钉死到它们上，另一个检查被拒参数仍会
+  被具名报出。C ABI 版本升至 2。
+
+  两张 vendor 表的关键字索引只在首次使用时构建，之后的读取无锁。最初的版本把
+  索引放在一把 mutex 后面，编译式 campaign 的并发 worker 在构造 handle 时每个
+  参数都要过这把锁：硅 campaign 的 8-worker 加速比只有 1.3-1.6 倍，偶发比单
+  worker 还慢。改为无锁读取后，同一基准稳定在 5.2-5.4 倍。
+
+- **Newton converges against each node's own step budget / Newton 按各节点自己的步长预算收敛**
+
+  **English:** Adaptive native BSIM transients accept a new
+  `newton_error_fraction`. When positive, each node's Newton update must fall
+  below that fraction of its own step-error budget
+  `adaptive_reltol*|V| + adaptive_vabstol` instead of the single absolute
+  `newton_vtol`. The absolute rule holds a rail node and a node at zero to the
+  same number, so on a 0.9 V circuit with `reltol=1e-5` it converged the large
+  nodes to 0.33% of what the step controller was about to accept. The bound
+  stays per node rather than root-mean-square, so nodes near zero are held
+  *tighter* than before. The exact default is 0, which keeps the absolute
+  criterion; the value may not exceed 1, and a fixed grid rejects it because it
+  has no per-node budget to take a fraction of. The six TSMC28 MDAC signoff
+  cases now declare `0.1`: one 5 ns residue moved from 78.1 ms to 58.8 ms
+  pooled and 109.2 ms to 82.7 ms inline (both about 1.33x) as Newton dropped
+  from 6.61 to 4.58 iterations per step and 89,490 to 61,864 model
+  evaluations, with accepted and rejected step counts unchanged. Across all
+  45 PVT points no case or point status changed and the campaign moved from
+  15.89 s to 14.62 s; the smaller campaign share is expected, because
+  serialized native handle construction alone accounts for 3.50 s of that
+  wall. Against a reference run with 100x tighter step tolerances, the
+  settling-tail deviation grew from 87.6 uV to 118.9 uV while the final output
+  difference stayed at a few uV. Tightening `newton_vtol` from 3e-8 to 1e-8
+  instead changed that deviation by 0.6 uV for 19% more evaluations, which is
+  the measurement this option acts on.
+
+  **中文：** 自适应原生 BSIM transient 新增 `newton_error_fraction`。取正值时，
+  每个节点的 Newton 更新必须低于该节点自身步长误差预算
+  `adaptive_reltol*|V| + adaptive_vabstol` 的这一比例，而不再是单一的绝对
+  `newton_vtol`。绝对判据对轨电位节点和零电位节点用同一个数，因此在 0.9 V、
+  `reltol=1e-5` 的电路上，大电压节点被收敛到步长控制器即将接受的误差的 0.33%。
+  该界限按节点逐个判定而非取均方根，所以零附近的节点反而被收得**更紧**。默认值
+  严格为 0，即保持原绝对判据；配置值不得超过 1；固定网格会拒绝该选项，因为它没有
+  逐节点预算可供取比例。六个 TSMC28 MDAC signoff case 现声明 `0.1`：单个 5 ns
+  residue 在池调度下由 78.1 ms 降至 58.8 ms、inline 下由 109.2 ms 降至
+  82.7 ms（均约 1.33 倍），Newton 由每步 6.61 次迭代降至 4.58 次、模型求值由
+  89,490 降至 61,864，接受与拒绝步数均不变。完整 45 个 PVT 点没有任何 case 或
+  点的状态变化，campaign 由 15.89 s 降至 14.62 s；campaign 侧占比更小是预期的，
+  因为仅被串行化的原生 handle 构造就占去其中 3.50 s。相对步长容差收紧 100 倍的
+  参考解，建立尾段偏差由 87.6 uV 增至 118.9 uV，最终输出差仍保持在几 uV。作为
+  对照，把 `newton_vtol` 由 3e-8 收紧到 1e-8 只把该偏差改变 0.6 uV，却多花 19%
+  的模型求值——这正是本选项针对的测量结果。
+
+- **One matrix-clear path for every schedule / 所有调度共用一条矩阵清零路径**
+
+  **English:** Clearing only the active `CKTmaxEqNum` block of the BSIM matrix
+  frame is now the default everywhere, not only inside outer-parallel workers.
+  A same-machine A/B of all three candidates under both schedules showed the
+  contiguous full-frame write is the slowest under *both*, so the previous
+  schedule-dependent branch was choosing the wrong side for isolated solves;
+  clearing whole active rows in one memset landed inside run-to-run noise. A
+  single TSMC28 residue moved from 83.9 ms to 79.0 ms and the FreePDK45 SAR6
+  64-code sweep from 3.217 s to 3.134 s with an unchanged code stream, while
+  the 45-point campaign kept its runtime because it already took this path. All
+  45 points reproduce every signoff field bit-for-bit, the golden corpus now
+  exercises the block clear on its isolated AC, noise and transient cases, and
+  a subprocess test pins the block clear to the full-frame clear across
+  transient, AC and noise. `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` still restores
+  the full-frame write.
+
+  **中文：** 只清零 BSIM 矩阵帧中 `CKTmaxEqNum` 有效块现在是所有路径的默认，不再
+  限于外层并行 worker。同机对三种清零方式、两种调度做的 A/B 显示连续整帧写入在
+  **两种**调度下都最慢，因此原先按调度分岔的实现给单次求解选错了分支；而"整行块
+  一次连续 memset"落在运行间噪声内。单个 TSMC28 residue 由 83.9 ms 降至
+  79.0 ms，FreePDK45 SAR6 64-code sweep 由 3.217 s 降至 3.134 s 且码流不变；
+  45 点 campaign 耗时不变，因为它本就走这条路径。45 个 PVT 点的全部 signoff
+  字段与改动前逐位相同，golden 语料的孤立 AC/noise/transient 用例现在也真正覆盖
+  该路径，另有子进程测试在 transient、AC 和 noise 上把块清零与整帧清零逐位钉死。
+  `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` 仍可恢复整帧写入。
 
 - **Faster adaptive MDAC Newton and LTE solves / 更快的自适应 MDAC Newton 与 LTE**
 

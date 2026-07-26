@@ -185,7 +185,10 @@ examples/periodic_rc.json
 - `bulk_rail` 可选，用于显式指出给 `vb` 供电的物理 rail；当多个 rail 具有相同直流
   电压时建议填写。未填写时，功耗统计会依次尝试 source 同名 rail 和常规
   `GND`/`VSS`/`VDD` 电源名。
-- **FreePDK45**（`"freepdk45.nmos"` / `"freepdk45.pmos"`）直接解析平铺的
+- **FreePDK45**（`"freepdk45.nmos"` / `"freepdk45.pmos"`，另有低阈值型号
+  `"freepdk45.nmos_vtl"` / `"freepdk45.pmos_vtl"` 绑定 `NMOS_VTL`/`PMOS_VTL` 卡——
+  名义 vth0 0.322 V 对 0.4106 V，是共模贴近 VTG 阈值的比较器输入对的标准选择）
+  直接解析平铺的
   BSIM4 level-54 模型卡，并使用进程内 Berkeley BSIM4.5 后端求值。模型卡声明
   `version=4.0`；该元数据字段不会在内置内核中切换另一套方程，原生单管与五管 OTA
   结果已用 ngspice 回归核对。器件键包括 `vb`（NMOS 为 0，PMOS 通常为 1.0V）、
@@ -247,7 +250,8 @@ examples/periodic_rc.json
 
 执行入口是 `circuit-opt adc`；`--vin` 做单次转换，`--sweep` 计算 DNL/INL，`--sine`
 计算 SNDR/SFDR/ENOB。完整示例见 `examples/freepdk45_sar3.json`（静态 5T 比较器）与
-`examples/freepdk45_sar6.json`（6-bit，时钟同步 StrongARM 比较器）。
+`examples/freepdk45_sar6.json`（6-bit，静态三级比较器：两级二极管负载全差分前放
+接 5T 镜像级；其名义斜坡是理想的 64 码阶梯）。
 
 #### `adc.clock`
 
@@ -259,11 +263,13 @@ bit 的 `decision_time` 附近脉冲到 `high`（评估）——锁存器在 CDA
 逐字节不变）。
 
 ```json
-"clock": {"input": "clk", "high": 1.0, "low": 0.0,
+"clock": {"input": "clk", "bar_input": "clkb", "high": 1.0, "low": 0.0,
           "eval_before": 3e-9, "reset_hold": 1e-9}
 ```
 
 - `input`——必填，选通波形的 transient key。
+- `bar_input`——可选，反相选通（`high + low - clock`）的 key；供复位管需要相反
+  相位的锁存器使用（double-tail 第二级、PMOS 尾管锁存器）。
 - `high` / `low`——评估/复位电平 [V]；默认 `high = adc.vref`、`low = 0`。
 - `eval_before`——每个 `decision_time` 前多少秒拉高（默认 `0.3 * bit_period`）；必须
   小于 `bit_period/2 - edge_time`，保证被试 CDAC 电容切换完成后锁存器才采样。
@@ -613,6 +619,12 @@ adaptive run 前自动补入边沿断点。`cap_mode` 只支持 `"charge"`（id 
 原生 BSIM transient 还接受单位为 V 的 `"bsim_model_bypass_tolerance"`。其默认值
 为 0，且不得超过 `"newton_vtol"`。正值只会在独占 transient Newton 环路内启用
 紧凑模型的标准 device bypass；应先完成对应电路的轨迹与 signoff A/B 再设置。
+adaptive 运行还接受 `"newton_error_fraction"`：默认值为 0，不得超过 1，固定网格
+会拒绝该选项。取正值时，每个节点的 Newton 更新需收敛到其自身步长误差预算
+`adaptive_reltol*|V| + adaptive_vabstol` 的这一比例，而不再是对轨电位节点和零
+电位节点一视同仁的绝对 `"newton_vtol"`。因此零附近的节点被收得更紧，而大电压
+节点在其残余误差相对步长控制器已接受的误差可忽略时就停止。选值方式与 bypass
+容差相同：与步长容差大幅收紧的参考解做 A/B，而不是靠目测。
 需要可复现的 PAC/PNoise 转换轨迹时，可同时设置 `"adaptive": true`、
 至少一个 stabilization period 和 `"final_n_points"`。adaptive Gear2 此时只
 提供 warm start，不冻结 accepted grid；dispatch 会构造带相同时钟边沿断点的

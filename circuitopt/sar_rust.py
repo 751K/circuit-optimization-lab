@@ -36,6 +36,7 @@ _ROLE_BIT_BAR = 3
 _ROLE_DUMMY = 4
 _ROLE_DUMMY_BAR = 5
 _ROLE_CLOCK = 6
+_ROLE_CLOCK_BAR = 7
 
 
 class SarRustUnavailable(RuntimeError):
@@ -59,6 +60,7 @@ def _roles(cfg: Mapping, input_keys: Sequence[str]) -> list[tuple[int, int]]:
     bar_index = ({key: i for i, key in enumerate(cfg["bit_inputs_bar"])}
                  if differential else {})
     clock_key = cfg["clock"]["input"] if cfg["clock"] is not None else None
+    clock_bar_key = (cfg["clock"] or {}).get("bar_input")
     roles: list[tuple[int, int]] = []
     for key in input_keys:
         if key == cfg["sample_input"]:
@@ -75,6 +77,8 @@ def _roles(cfg: Mapping, input_keys: Sequence[str]) -> list[tuple[int, int]]:
             roles.append((_ROLE_DUMMY_BAR, 0))
         elif clock_key is not None and key == clock_key:
             roles.append((_ROLE_CLOCK, 0))
+        elif clock_bar_key is not None and key == clock_bar_key:
+            roles.append((_ROLE_CLOCK_BAR, 0))
         else:  # pragma: no cover - guarded by build_sar_batch device checks
             raise SarRustUnavailable(f"waveform key {key!r} has no SAR role")
     return roles

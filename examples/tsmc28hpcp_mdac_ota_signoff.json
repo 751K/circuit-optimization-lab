@@ -167,6 +167,7 @@
             "adaptive_vabstol": 1e-7,
             "newton_vtol": 3e-8,
             "bsim_model_bypass_tolerance": 3e-9,
+            "newton_error_fraction": 0.1,
             "bsim_final_load_tolerance": 1e-12
           }
         },
@@ -231,6 +232,7 @@
             "adaptive_vabstol": 1e-7,
             "newton_vtol": 3e-8,
             "bsim_model_bypass_tolerance": 3e-9,
+            "newton_error_fraction": 0.1,
             "bsim_final_load_tolerance": 1e-12
           }
         },
@@ -292,6 +294,7 @@
             "adaptive_vabstol": 1e-7,
             "newton_vtol": 3e-8,
             "bsim_model_bypass_tolerance": 3e-9,
+            "newton_error_fraction": 0.1,
             "bsim_final_load_tolerance": 1e-12
           }
         },
@@ -353,6 +356,7 @@
             "adaptive_vabstol": 1e-7,
             "newton_vtol": 3e-8,
             "bsim_model_bypass_tolerance": 3e-9,
+            "newton_error_fraction": 0.1,
             "bsim_final_load_tolerance": 1e-12
           }
         },
@@ -414,6 +418,7 @@
             "adaptive_vabstol": 1e-7,
             "newton_vtol": 3e-8,
             "bsim_model_bypass_tolerance": 3e-9,
+            "newton_error_fraction": 0.1,
             "bsim_final_load_tolerance": 1e-12
           }
         },
@@ -480,6 +485,7 @@
             "adaptive_vabstol": 1e-7,
             "newton_vtol": 3e-8,
             "bsim_model_bypass_tolerance": 3e-9,
+            "newton_error_fraction": 0.1,
             "bsim_final_load_tolerance": 1e-12
           }
         },

@@ -28,7 +28,16 @@ _CORNER_DIRS = {
     "sf": ("ss", "ff"),
     "fs": ("ff", "ss"),
 }
-_MODEL_NAME = {"nmos": "NMOS_VTG", "pmos": "PMOS_VTG"}
+# Model flavors this adapter exposes. VTG is the general-purpose default;
+# VTL is the low-threshold flavor (vth0 0.322 V vs 0.4106 V at nominal), the
+# standard choice for comparator input pairs whose common mode sits near the
+# VTG threshold.
+_MODEL_NAME = {
+    "nmos": "NMOS_VTG",
+    "pmos": "PMOS_VTG",
+    "nmos_vtl": "NMOS_VTL",
+    "pmos_vtl": "PMOS_VTL",
+}
 
 
 class Freepdk45ModelError(ValueError):
@@ -53,7 +62,8 @@ def normalize_polarity(polarity: str) -> str:
         key, key)
     if key not in _MODEL_NAME:
         raise Freepdk45ModelError(
-            f"unknown FreePDK45 polarity {polarity!r}; expected nmos or pmos")
+            f"unknown FreePDK45 polarity {polarity!r}; expected one of "
+            f"{sorted(_MODEL_NAME)}")
     return key
 
 
@@ -61,7 +71,7 @@ def corner_card_dir(polarity: str, corner: str) -> str:
     """Return the per-polarity ``models_*`` suffix for a process corner."""
     polarity = normalize_polarity(polarity)
     nmos_dir, pmos_dir = _CORNER_DIRS[normalize_corner(corner)]
-    return nmos_dir if polarity == "nmos" else pmos_dir
+    return nmos_dir if polarity.startswith("nmos") else pmos_dir
 
 
 def freepdk45_card_path(polarity: str, corner: str = "nom") -> str:
@@ -89,7 +99,7 @@ class Freepdk45Card:
     def to_bsim4_cards(self):
         return (
             Bsim4ModelCard(
-                polarity=1 if self.polarity == "nmos" else -1,
+                polarity=1 if self.polarity.startswith("nmos") else -1,
                 parameters=self.model_parameters,
                 version=self.source_version,
             ),
@@ -115,11 +125,14 @@ class Freepdk45Library:
                 f"{self.path} must contain exactly one .model statement")
         statement = statements[0]
         expected_name = _MODEL_NAME[self.polarity]
+        # The SPICE device-type keyword inside the card is always the bare
+        # "nmos"/"pmos", also for flavored cards such as NMOS_VTL.
+        expected_type = "nmos" if self.polarity.startswith("nmos") else "pmos"
         model_type = statement.arguments[0].lower() if statement.arguments else ""
-        if statement.name != expected_name or model_type != self.polarity:
+        if statement.name != expected_name or model_type != expected_type:
             raise Freepdk45ModelError(
                 f"{self.path} defines {statement.name!r}/{model_type!r}, expected "
-                f"{expected_name!r}/{self.polarity!r}")
+                f"{expected_name!r}/{expected_type!r}")
 
         parameters = {}
         for assignment in statement.parameters:

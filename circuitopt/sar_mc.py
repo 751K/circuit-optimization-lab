@@ -86,11 +86,19 @@ def _mismatch_config(spec: CircuitSpec, override: Mapping[str, Any] | None = Non
 
 
 def _device_polarity(spec: CircuitSpec, name: str) -> str | None:
-    """``'nmos'``/``'pmos'`` for a FreePDK45 transistor, else ``None`` (skip it)."""
+    """``'nmos'``/``'pmos'`` for a FreePDK45 transistor, else ``None`` (skip it).
+
+    Flavored models (``nmos_vtl``, ...) fold onto their base polarity so the
+    per-polarity sigma table stays two entries.
+    """
     mt = str((spec.model_types or {}).get(name, ""))
     if not mt.startswith("freepdk45."):
         return None
-    return mt.rsplit(".", 1)[-1]
+    model = mt.rsplit(".", 1)[-1]
+    for polarity in ("nmos", "pmos"):
+        if model.startswith(polarity):
+            return polarity
+    return None
 
 
 def draw_device_mismatch(spec: CircuitSpec, rng: np.random.Generator,

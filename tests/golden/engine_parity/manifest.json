@@ -1,6 +1,6 @@
 {
   "env": {
-    "commit": "eca84e2965a790ad3d82f0c886a6ca08b4fa9a36",
+    "commit": "d774c26c72c43855fe3356ac99fae7c9c821b28b",
     "machine": "arm64",
     "numpy": "2.4.6",
     "platform": "macOS-27.0-arm64-arm-64bit",
@@ -13,7 +13,7 @@
     "tests/golden/engine_parity/circuits/periodic_rc--ac-noise-pss-pac-pnoise.json": "7e16eca4e992258db8384df8d342623c0d2afe84103a735be1b00b8a29025fc8",
     "tests/golden/engine_parity/circuits/sky130_5t_ota--ac-noise.json": "1d26b77ec938adf1cf6946281e4d73a20d7fd0967f350f1d66b353540a16d6c8",
     "tests/golden/engine_parity/circuits/tsmc28hpcp_5t_ota--ac-noise.json": "31c831ba0444b5a96af91289337f9d182f8b4e7a657ee53b6ae3e0a38e1e6e3b",
-    "tests/golden/engine_parity/devices.npz": "db53402bc46d0ba1981a9c0d4d7f93afd87397f40b68914516a7e13557d88096"
+    "tests/golden/engine_parity/devices.npz": "1e97f3a0bc78d7ab14e233a75500ecc178e28eb888137af07fc52b316c58205e"
   },
   "frozen_circuit_cases": [
     [

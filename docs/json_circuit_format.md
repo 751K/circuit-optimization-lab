@@ -184,7 +184,10 @@ during parsing; there is no default-PDK fallback.
 - `bulk_rail` optionally names the physical rail that supplies `vb`. It is useful
   when several rails share the same DC voltage; source-power reporting otherwise
   resolves a source-tied bulk or conventional `GND`/`VSS`/`VDD` rail.
-- **FreePDK45** (`"freepdk45.nmos"` / `"freepdk45.pmos"`) directly parses the
+- **FreePDK45** (`"freepdk45.nmos"` / `"freepdk45.pmos"`, plus the
+  low-threshold flavors `"freepdk45.nmos_vtl"` / `"freepdk45.pmos_vtl"` binding
+  the `NMOS_VTL`/`PMOS_VTL` cards — vth0 0.322 V vs 0.4106 V at nominal, the
+  standard choice for comparator input pairs near the VTG threshold) directly parses the
   flat BSIM4 level-54 cards and evaluates them with the in-process Berkeley
   BSIM4.5 backend. The cards declare `version=4.0`; this metadata field does not
   select a separate equation path in the bundled kernel, and native device/5T
@@ -242,8 +245,9 @@ ordinary `devices`/`capacitors`/`vsources` fields. Differential `bit_inputs` and
 `bit_inputs_bar` name CDAC PWL keys from MSB to LSB; decisions are read from the
 physical transient comparator node. Run it with `circuit-opt adc --vin`, `--sweep`,
 or `--sine`. See `examples/freepdk45_sar3.json` (static 5T comparator) and
-`examples/freepdk45_sar6.json` (6-bit, clocked StrongARM comparator) for complete
-configurations.
+`examples/freepdk45_sar6.json` (6-bit, static three-stage comparator: two
+diode-loaded differential preamps into a 5T mirror stage; its nominal ramp is
+the ideal 64-code staircase) for complete configurations.
 
 #### `adc.clock`
 
@@ -256,11 +260,14 @@ the block reproduces the static-comparator behaviour (no clock waveform emitted,
 `examples/freepdk45_sar3.json` renders a byte-identical netlist).
 
 ```json
-"clock": {"input": "clk", "high": 1.0, "low": 0.0,
+"clock": {"input": "clk", "bar_input": "clkb", "high": 1.0, "low": 0.0,
           "eval_before": 3e-9, "reset_hold": 1e-9}
 ```
 
 - `input` — required transient waveform key for the strobe.
+- `bar_input` — optional key for the complemented strobe (`high + low - clock`),
+  for latches whose reset devices need the opposite phase (double-tail second
+  stages, PMOS-tail latches).
 - `high` / `low` — asserted (evaluate) / deasserted (reset) levels [V]; default
   `high = adc.vref`, `low = 0`.
 - `eval_before` — seconds before each `decision_time` that the strobe rises
@@ -655,6 +662,15 @@ Native BSIM transient also accepts `"bsim_model_bypass_tolerance"` in volts.
 It defaults to zero and must not exceed `"newton_vtol"`. A positive value uses
 the compact model's standard device bypass only inside the exclusive transient
 Newton loop; choose it only after circuit-level trajectory and signoff A/B.
+Adaptive runs also accept `"newton_error_fraction"`. It defaults to zero, may
+not exceed 1, and a fixed grid rejects it. A positive value makes each node's
+Newton update converge below that fraction of its own step-error budget
+`adaptive_reltol*|V| + adaptive_vabstol`, instead of the one absolute
+`"newton_vtol"` that holds a rail node and a node at zero to the same number.
+Nodes near zero are therefore held tighter, large ones stop once their
+remaining error is negligible against the error the step controller already
+accepts. Pick it the same way as the bypass tolerance: by A/B against a run
+with much tighter step tolerances, not by inspection.
 For reproducible PAC/PNoise conversion, set `"final_n_points"` together with
 `"adaptive": true` and at least one stabilization period. Adaptive Gear2 then
 supplies only the warm start; the accepted grid is not frozen, and dispatch

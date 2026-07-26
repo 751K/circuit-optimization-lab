@@ -362,6 +362,38 @@ def test_model_bypass_tolerance_rejects_unsafe_values(value):
         )
 
 
+@pytest.mark.parametrize("value", [-1.0, 1.5, np.inf, np.nan])
+def test_newton_error_fraction_rejects_unsafe_values(value):
+    from circuitopt.compact_models.bsim4.transient import transient_native_bsim4
+
+    with pytest.raises(ValueError, match=r"within \[0, 1\]"):
+        transient_native_bsim4(
+            {},
+            {},
+            np.asarray([0.0, 1.0]),
+            topo=None,
+            adaptive=True,
+            integration_method="gear2",
+            newton_error_fraction=value,
+        )
+
+
+def test_newton_error_fraction_needs_the_adaptive_controller():
+    # The fraction is a share of the per-node step-error budget, and only the
+    # adaptive controller has one. A fixed grid would silently ignore it.
+    from circuitopt.compact_models.bsim4.transient import transient_native_bsim4
+
+    with pytest.raises(ValueError, match="adaptive step controller"):
+        transient_native_bsim4(
+            {},
+            {},
+            np.asarray([0.0, 1.0]),
+            topo=None,
+            adaptive=False,
+            newton_error_fraction=0.1,
+        )
+
+
 def test_shift_two_reuses_first_sample_for_the_opening_step():
     from circuitopt.compact_models.bsim4.transient import _shift_two
 
@@ -451,3 +483,91 @@ def test_native_inverter_charge_transient_without_ngspice(monkeypatch, adaptive)
     assert output[0] > 0.85
     assert output[-1] < 0.05
     assert np.all(np.isfinite(output))
+
+
+# The matrix frame the vendor stamps into is cleared before every model load,
+# and only the block below CKTmaxEqNum is ever stamped or read. Clearing just
+# that block is the default on every schedule, so a leak would corrupt results
+# everywhere rather than only inside a parallel campaign. The kill switch is
+# read once per process through a OnceLock, so the two paths need two
+# processes.
+_CLEAR_AB_SCRIPT = """
+import hashlib, json, sys
+import numpy as np
+from circuitopt.circuit_loader import circuit_from_dict
+from circuitopt.transient_solver import transient
+from circuitopt.ac_solver import ac_solve
+from circuitopt.noise_solver import noise_analysis
+
+spec = circuit_from_dict(json.loads(sys.argv[1]))
+digest = hashlib.sha256()
+
+tgrid = np.linspace(0.0, 0.4e-9, 41)
+vin = np.where(tgrid < 0.1e-9, 0.0, 0.9)
+result = transient(
+    spec.sizes, spec.bias, tgrid, binding=spec.binding(),
+    inputs={"vin": vin}, corner="tt", integration_method="gear2",
+    max_step=1e-12, adaptive=True)
+digest.update(np.asarray(result["nodes"]["OUT"], float).tobytes())
+digest.update(np.asarray(result["t"], float).tobytes())
+
+freqs = np.logspace(6, 10, 21)
+ac = ac_solve(spec.sizes, spec.bias, freqs, binding=spec.binding(), corner="tt")
+for key in sorted(ac):
+    value = np.asarray(ac[key])
+    if value.dtype.kind in "fc":
+        digest.update(np.ascontiguousarray(value).tobytes())
+
+noise = noise_analysis(
+    spec.sizes, spec.bias, freqs, binding=spec.binding(), corner="tt")
+for key in sorted(noise or {}):
+    value = np.asarray(noise[key])
+    if value.dtype.kind in "fc":
+        digest.update(np.ascontiguousarray(value).tobytes())
+
+print(digest.hexdigest())
+"""
+
+
+@pytest.mark.skipif(not _model_available(), reason="TSMC28 model deck not configured")
+def test_active_block_clear_matches_the_full_frame_clear_bit_for_bit():
+    import json
+    import subprocess
+    import sys
+
+    deck = json.dumps({
+        "name": "clear_ab_inverter",
+        "solved": ["OUT"],
+        "rails": {"VDD": "VDD", "GND": 0.0, "IN": 0.0},
+        "devices": [
+            {"name": "MN", "drain": "OUT", "gate": "IN", "source": "GND",
+             "W": 1.0, "L": 0.03},
+            {"name": "MP", "drain": "OUT", "gate": "IN", "source": "VDD",
+             "W": 2.0, "L": 0.03},
+        ],
+        "models": {
+            "MN": {"pdk": "tsmc28hpcp", "model": "nmos",
+                   "section": "inherit", "bin": "auto"},
+            "MP": {"pdk": "tsmc28hpcp", "model": "pmos",
+                   "section": "inherit", "bin": "auto", "vb": 0.9},
+        },
+        "bias": {"VDD": 0.9},
+        "outputs": ["OUT"],
+        "load_caps": [["OUT", "GND", 2e-15]],
+        "transient_inputs": {"MN": "vin", "MP": "vin"},
+        "dc_guesses": [{"OUT": 0.9}],
+    })
+
+    def digest_with(full_frame):
+        environment = dict(os.environ)
+        if full_frame:
+            environment["CIRCUITOPT_BSIM_FULL_FRAME_CLEAR"] = "1"
+        else:
+            environment.pop("CIRCUITOPT_BSIM_FULL_FRAME_CLEAR", None)
+        finished = subprocess.run(
+            [sys.executable, "-c", _CLEAR_AB_SCRIPT, deck],
+            capture_output=True, text=True, env=environment, timeout=600)
+        assert finished.returncode == 0, finished.stderr[-4000:]
+        return finished.stdout.strip().splitlines()[-1]
+
+    assert digest_with(False) == digest_with(True)

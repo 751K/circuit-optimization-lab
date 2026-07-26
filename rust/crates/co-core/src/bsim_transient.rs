@@ -767,6 +767,25 @@ pub struct AdaptiveOptions {
     pub current_abstol: f64,
     pub max_steps: usize,
     pub initial_step: f64,
+    /// Fraction of each node's step-error budget the Newton update must fall
+    /// below. Exactly zero keeps the plain absolute `newton.voltage_tolerance`
+    /// criterion. See [`NewtonBudget`].
+    pub newton_error_fraction: f64,
+}
+
+impl AdaptiveOptions {
+    /// The per-node Newton budget for a step leaving `previous_state`, or
+    /// `None` when the plain absolute criterion is configured.
+    fn newton_budget<'a>(&self, previous_state: &'a [f64]) -> Option<NewtonBudget<'a>> {
+        (self.newton_error_fraction.is_finite() && self.newton_error_fraction > 0.0).then_some(
+            NewtonBudget {
+                fraction: self.newton_error_fraction,
+                reltol: self.reltol,
+                voltage_abstol: self.voltage_abstol,
+                previous_state,
+            },
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -943,6 +962,59 @@ fn charge_defect_lte(
     error.is_finite().then_some(error)
 }
 
+/// Per-node Newton convergence budget derived from the step-error weights.
+///
+/// The plain criterion bounds every node's Newton update by one absolute
+/// `voltage_tolerance`. That is the same number for a node sitting at the rail
+/// and for one near zero, so on a rail-referenced circuit it converges the
+/// large nodes far past what the step controller is about to tolerate: the
+/// step is accepted at `reltol * |V| + vabstol`, which at 0.9 V is two orders
+/// of magnitude coarser than a 1e-8 V update.
+///
+/// With this active each node instead converges to `fraction` of its own step
+/// budget, so Newton stops once its remaining error is negligible against the
+/// error the integrator already accepts. The bound stays per node rather than
+/// root-mean-square: an aggregate norm lets one badly converged node hide
+/// behind the rest, and here every node is a signoff output. Nodes near zero
+/// are held to `fraction * vabstol`, which is *tighter* than the absolute
+/// tolerance they had before.
+#[derive(Clone, Copy, Debug)]
+struct NewtonBudget<'a> {
+    fraction: f64,
+    reltol: f64,
+    voltage_abstol: f64,
+    previous_state: &'a [f64],
+}
+
+impl NewtonBudget<'_> {
+    /// Largest node update measured in units of that node's step budget.
+    fn peak_normalized(&self, update: &[f64], state: &[f64], node_count: usize) -> Option<f64> {
+        let controlled = node_count
+            .min(update.len())
+            .min(state.len())
+            .min(self.previous_state.len());
+        let mut peak = 0.0f64;
+        for index in 0..controlled {
+            let delta = update[index];
+            if !delta.is_finite() {
+                return None;
+            }
+            let scale = (self.reltol * state[index].abs().max(self.previous_state[index].abs())
+                + self.voltage_abstol)
+                .max(integrator::ADAPTIVE_SCALE_FLOOR);
+            peak = peak.max((delta / scale).abs());
+        }
+        // Rows past `controlled` still must not be NaN: they are applied to the
+        // state even though they carry no budget of their own.
+        for value in update.iter().take(node_count).skip(controlled) {
+            if !value.is_finite() {
+                return None;
+            }
+        }
+        Some(peak)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_adaptive_candidate<E: Evaluator>(
     circuit: &CircuitProblem,
@@ -957,6 +1029,7 @@ fn solve_adaptive_candidate<E: Evaluator>(
     history: &HistoryTerms,
     history2: &HistoryTerms,
     options: Options,
+    budget: Option<NewtonBudget<'_>>,
     terminal_batch: &mut [[f64; 4]],
     evaluation_batch: &mut [Evaluation],
     system: &mut DenseSystem,
@@ -1005,7 +1078,16 @@ fn solve_adaptive_candidate<E: Evaluator>(
             }
             peak = peak.max(value.abs());
         }
-        if peak <= options.voltage_tolerance {
+        let converged = match budget {
+            None => peak <= options.voltage_tolerance,
+            Some(budget) => {
+                match budget.peak_normalized(&system.residual, state, circuit.node_count) {
+                    None => return false,
+                    Some(normalized) => normalized <= budget.fraction,
+                }
+            }
+        };
+        if converged {
             return true;
         }
         if peak > options.step_limit {
@@ -1685,6 +1767,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                 &history_current,
                 &history2,
                 options.newton,
+                options.newton_budget(&current),
                 &mut terminal_batch,
                 &mut evaluation_batch,
                 &mut system,
@@ -1712,6 +1795,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                     &history_current,
                     &history2,
                     options.newton,
+                    options.newton_budget(&current),
                     &mut terminal_batch,
                     &mut evaluation_batch,
                     &mut system,
@@ -1749,6 +1833,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
                     mid_history,
                     &history_current,
                     options.newton,
+                    options.newton_budget(&mid_state),
                     &mut terminal_batch,
                     &mut evaluation_batch,
                     &mut system,
@@ -1912,6 +1997,7 @@ pub fn solve_adaptive_gear2<E: Evaluator>(
             &history_current,
             &history2,
             options.newton,
+            options.newton_budget(&current),
             &mut terminal_batch,
             &mut evaluation_batch,
             &mut system,
@@ -2223,6 +2309,7 @@ mod tests {
                 current_abstol: 1e-12,
                 max_steps: 10_000,
                 initial_step: 1e-9,
+                newton_error_fraction: 0.0,
             },
         )
     }
@@ -2259,6 +2346,7 @@ mod tests {
                 // Five RC time constants in one bite: accurate only to ~10%,
                 // far outside reltol, so an error-controlled start must refuse.
                 initial_step: 5e-6,
+                newton_error_fraction: 0.0,
             },
         );
         assert!(result.completed);
@@ -2509,6 +2597,7 @@ mod tests {
                 current_abstol: 1e-12,
                 max_steps: 200_000,
                 initial_step: -1.0,
+                newton_error_fraction: 0.0,
             },
         );
 
@@ -2675,6 +2764,87 @@ mod tests {
     }
 
     #[test]
+    fn newton_budget_scales_each_node_by_its_own_step_tolerance() {
+        // reltol 1e-5, vabstol 1e-7: a rail node's budget is 9.1e-6 while a
+        // node at zero keeps 1e-7, so the same absolute update is negligible on
+        // one and dominant on the other.
+        let previous = [0.9, 0.0];
+        let budget = NewtonBudget {
+            fraction: 0.1,
+            reltol: 1e-5,
+            voltage_abstol: 1e-7,
+            previous_state: &previous,
+        };
+        let state = [0.9, 0.0];
+
+        // 1e-6 V is 0.11 of the rail node's budget and 10 of the zero node's.
+        let peak = budget
+            .peak_normalized(&[1e-6, 0.0], &state, 2)
+            .expect("finite");
+        assert!((peak - 1e-6 / 9.1e-6).abs() < 1e-9, "{peak}");
+        assert!(peak > budget.fraction, "rail node is not yet converged");
+        let peak = budget
+            .peak_normalized(&[0.0, 1e-6], &state, 2)
+            .expect("finite");
+        assert!((peak - 10.0).abs() < 1e-9, "{peak}");
+
+        // The old absolute criterion stopped both nodes at the same 3e-8 V.
+        // That is 0.0033 of the rail node's budget -- 30x past where this
+        // criterion stops -- but 0.3 of the zero node's, which is 3x looser
+        // than this criterion allows. The weighted rule is not uniformly
+        // cheaper: it moves effort to the node that still needs it.
+        let rail_only = budget
+            .peak_normalized(&[3e-8, 0.0], &state, 2)
+            .expect("finite");
+        assert!(
+            rail_only < budget.fraction,
+            "rail node converged: {rail_only}"
+        );
+        let zero_only = budget
+            .peak_normalized(&[0.0, 3e-8], &state, 2)
+            .expect("finite");
+        assert!(
+            zero_only > budget.fraction,
+            "zero node not yet: {zero_only}"
+        );
+
+        // A non-finite update is reported, never silently accepted.
+        assert!(
+            budget
+                .peak_normalized(&[f64::NAN, 0.0], &state, 2)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn zero_newton_error_fraction_keeps_the_absolute_criterion() {
+        let previous = [0.0];
+        let mut options = AdaptiveOptions {
+            newton: Options {
+                gear2: true,
+                max_iterations: 4,
+                voltage_tolerance: 1e-8,
+                step_limit: 10.0,
+                gmin: 0.0,
+                record_device_history: false,
+                profile: false,
+            },
+            max_step: 1e-6,
+            reltol: 1e-5,
+            voltage_abstol: 1e-7,
+            current_abstol: 1e-12,
+            max_steps: 10_000,
+            initial_step: 1e-9,
+            newton_error_fraction: 0.0,
+        };
+        assert!(options.newton_budget(&previous).is_none());
+        options.newton_error_fraction = f64::NAN;
+        assert!(options.newton_budget(&previous).is_none());
+        options.newton_error_fraction = 0.1;
+        assert!(options.newton_budget(&previous).is_some());
+    }
+
+    #[test]
     fn adaptive_predictor_uses_quadratic_history_and_linear_fallback() {
         // Samples of x=t^2 at t=2,1,0 extrapolate exactly to x(3)=9.
         let mut quadratic = [0.0];
@@ -2736,6 +2906,7 @@ mod tests {
                 current_abstol: 1e-12,
                 max_steps: 100,
                 initial_step: 0.05,
+                newton_error_fraction: 0.0,
             },
         );
 
@@ -2802,6 +2973,7 @@ mod tests {
                 current_abstol: 1e-12,
                 max_steps: 100,
                 initial_step: -1.0,
+                newton_error_fraction: 0.0,
             },
         );
 

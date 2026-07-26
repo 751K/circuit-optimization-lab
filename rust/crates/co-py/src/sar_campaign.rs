@@ -633,6 +633,7 @@ fn parse_role(record: (i64, i64)) -> PyResult<Role> {
         4 => Role::Dummy,
         5 => Role::DummyBar,
         6 => Role::Clock,
+        7 => Role::ClockBar,
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown SAR role kind {other}"

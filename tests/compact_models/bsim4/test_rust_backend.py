@@ -492,3 +492,43 @@ def test_missing_core_raises_clear_error(monkeypatch):
     monkeypatch.setattr(native, "_import_circuitopt_core", _boom)
     with pytest.raises(Bsim4NativeError, match="requires the compiled circuitopt_core"):
         native._bind_rust_library()
+
+
+
+@requires_rust
+def test_cold_evaluation_lands_on_the_walked_in_operating_point():
+    """A single evaluation must land where gradual approach lands.
+
+    The vendored limiter walks each junction toward the requested bias over
+    several loads, writing every voltage it actually used into ``CKTstate0``.
+    ``DEVfetlim`` limits silently, and the rbodyMod junction branch overwrites
+    the core vbs/vbd ``DEVpnjlim`` flag, so ``CKTnoncon`` alone cannot see a
+    walk in progress. Before the limiter-settle exit criterion, a cold
+    freepdk45 PMOS evaluation at Vg=0.66/Vd=0.88 -- forward drain-body
+    junction -- exited mid-walk 72.7 mV short and reported a source current
+    9.9% away from the unique converged operating point.
+
+    Two instrumentation traps, both hit while finding this: the device pool
+    hands a warm handle to a fresh wrapper, so each side runs inside its own
+    ``isolated_native_device_cache``; and the wrapper memoizes evaluations per
+    bias, so the walked side must end on a bias it has not evaluated before.
+    """
+    from circuitopt.compact_models.bsim4 import isolated_native_device_cache
+
+    vs, vd, vg = 0.0, 0.88, 0.66
+
+    with isolated_native_device_cache():
+        cold = np.asarray(_create_or_skip(
+            "freepdk45.pmos", W=0.09, L=0.05, NF=1, corner="nom",
+        ).get_terminal_currents(vs, vd, vg))
+
+    with isolated_native_device_cache():
+        walked_device = _create_or_skip(
+            "freepdk45.pmos", W=0.09, L=0.05, NF=1, corner="nom")
+        for fraction in np.linspace(0.0, 1.0, 15)[1:-1]:
+            walked_device.get_terminal_currents(
+                vs, vd * fraction, vg * fraction)
+        walked = np.asarray(walked_device.get_terminal_currents(vs, vd, vg))
+
+    scale = np.maximum(np.maximum(np.abs(cold), np.abs(walked)), 1e-18)
+    assert float(np.max(np.abs(cold - walked) / scale)) < 1e-9

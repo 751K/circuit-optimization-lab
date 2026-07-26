@@ -1,10 +1,12 @@
 """Adversarial semantic tests for the adc.clock extension + the 6-bit SAR design.
 
-Reviewer-side verification, third round. The agent's own tests pin the strobe's
-high instants and one conversion; these attack the *contracts* it relies on:
-the comparator must be in reset while the CDAC switches, the strobe pattern must
-be replay-invariant, validation must be airtight, and the WP1 mismatch hook must
-genuinely reach the clocked comparator. ngspice-needing tests are skip-guarded.
+Reviewer-side verification, third round. These attack the *contracts* the
+decision scheme relies on: a strobe must be low while the CDAC switches, the
+strobe pattern must be replay-invariant, validation must be airtight, and the
+WP1 mismatch hook must genuinely reach the comparator. The shipped sar6 example
+now uses a static comparator, so the strobe tests inject an ``adc.clock`` block
+through the config override -- the machinery under test is the waveform
+builder, which does not care whether a device consumes the row.
 """
 import json
 from pathlib import Path
@@ -19,6 +21,7 @@ from circuitopt.toolchain import pdk_root
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "freepdk45_sar6.json"
+CLOCK = {"clock": {"input": "clk"}}
 _HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
 needs_freepdk45 = pytest.mark.skipif(
     not _HAVE, reason="FreePDK45 cards not present")
@@ -34,7 +37,7 @@ def test_clock_low_while_trial_cap_switches():
     CDAC bit cap flips — and stay low until the differential has settled. A strobe
     that overlaps the switching edge would latch a stale/incompletely-settled value."""
     spec = _spec()
-    cfg = _sar_config(spec)
+    cfg = _sar_config(spec, CLOCK)
     tgrid = sar_time_grid(spec, cfg)
     wave = sar_input_waveforms(spec, 0.7, [None] * 6, 5, config=cfg, tgrid=tgrid)
     clk = wave["clk"]
@@ -49,7 +52,7 @@ def test_clock_pattern_is_replay_invariant():
     """The whole decision-extraction scheme rests on one fixed per-bit strobe that
     is identical for every replayed trial and decision history."""
     spec = _spec()
-    cfg = _sar_config(spec)
+    cfg = _sar_config(spec, CLOCK)
     tgrid = sar_time_grid(spec, cfg)
     a = sar_input_waveforms(spec, 0.2, [None] * 6, 0, config=cfg, tgrid=tgrid)["clk"]
     b = sar_input_waveforms(spec, 0.9, [1, 0, 1, 0, 1, None], 5,
@@ -61,7 +64,7 @@ def test_clock_returns_low_between_decisions():
     """After decision_time + reset_hold the latch must be back in precharge before
     the next bit's cap switches (reset between consecutive regenerations)."""
     spec = _spec()
-    cfg = _sar_config(spec)
+    cfg = _sar_config(spec, CLOCK)
     ck = cfg["clock"]
     tgrid = sar_time_grid(spec, cfg)
     clk = sar_input_waveforms(spec, 0.5, [None] * 6, 0, config=cfg, tgrid=tgrid)["clk"]
@@ -93,7 +96,7 @@ def test_schema_rejects_unknown_clock_key():
     schema = json.loads((ROOT / "schemas" / "circuit.schema.json").read_text())
     data = json.loads(EXAMPLE.read_text())
     jsonschema.validate(data, schema)                        # sanity
-    data["adc"]["clock"]["strobe_width"] = 1e-9
+    data["adc"]["clock"] = {"input": "clk", "strobe_width": 1e-9}
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(data, schema)
 
@@ -101,41 +104,33 @@ def test_schema_rejects_unknown_clock_key():
 # ── physical interaction (ngspice) ────────────────────────────────────────────
 @needs_freepdk45
 def test_independent_pinned_code():
-    """Second opinion at a different code than the agent's pinned one.
+    """Second opinion at a different code than the sibling's pinned one.
 
-    0.2890625 is the *ideal* code-center of code 18 (18.5/64). This transistor-
-    level SAR is not an ideal quantizer: a full 64-code center sweep shows ~±1 LSB
-    INL across its usable mid-range (codes 5..61 land within ±1 of ideal), so a
-    code-center input routinely resolves to an adjacent code — exactly like the
-    sibling pin in test_freepdk45_sar6.py, where the code-center of ideal code 45
-    (0.7109375) reads 44. Here the +1 INL point reads 19, not 18.
-
-    19 is the genuine, physically-correct output of this converter, not an off-by-
-    one: the decision is deterministic and thread-invariant (repeated runs), the
-    two deciding LSB comparator reads are deeply railed (~1.2e-4 V against the
-    0.5 V threshold, not metastable) and stay flat for ~±1 ns around the decision
-    instant (robust to the clock/interp semantics), and the frozen Python
-    run_sar_conversion and the compiled Rust co_core::sar batch agree on 19 here
-    and bit-for-bit across all 64 ramp codes. The original 18 was an idealized
-    hand-computed code-center that never matched the silicon.
+    0.2890625 is the ideal code-center of code 18 (18.5/64). The static
+    three-stage comparator resolves every nominal code center to its ideal
+    code (see the full-ramp pin in test_freepdk45_sar6.py), so this reads 18.
+    The retired StrongARM example read 19 here: its ±1 LSB INL was real
+    converter behavior, but its origin -- charge-share races in a latch whose
+    input pair sat at the VTG threshold -- also produced wild codes and a
+    deterministic LSB inversion elsewhere on the ramp.
     """
     from circuitopt.sar import run_sar_conversion
-    result = run_sar_conversion(_spec(), 0.2890625)   # ideal code-center of 18; ±1 LSB INL -> 19
-    assert result["code"] == 19
-    np.testing.assert_array_equal(result["bits"], [0, 1, 0, 0, 1, 1])
+    result = run_sar_conversion(_spec(), 0.2890625)
+    assert result["code"] == 18
+    np.testing.assert_array_equal(result["bits"], [0, 1, 0, 0, 1, 0])
 
 
 @needs_freepdk45
-def test_delvto_reaches_the_clocked_comparator():
-    """A +50 mV Vth offset on one StrongARM input device is ~3 LSB of input-referred
-    offset — codes on a short sweep must shift. This proves the WP1 mismatch hook
-    composes with the WP3 dynamic comparator (offset survives the latch phase)."""
+def test_delvto_reaches_the_comparator():
+    """A +50 mV Vth offset on one preamp input device is several LSB of
+    input-referred offset — codes on a short sweep must shift coherently. This
+    proves the WP1 mismatch hook reaches the comparator front end."""
     from circuitopt.sar import run_sar_sweep
     vin = (np.array([16, 32, 48]) + 0.5) / 64.0
     nominal = run_sar_sweep(_spec(), vin, workers=3)
-    shifted = run_sar_sweep(_spec(), vin, workers=3, mismatch={"MIP": 0.05})
+    shifted = run_sar_sweep(_spec(), vin, workers=3, mismatch={"MPP": 0.05})
     assert not np.array_equal(nominal["codes"], shifted["codes"])
-    # offset polarity: higher Vth on the P-side input weakens it, biasing decisions
-    # toward "comparator saw TOPP lower" -> codes move consistently, not randomly
+    # offset polarity: higher Vth on the P-side preamp input weakens it, biasing
+    # decisions consistently in one direction, never randomly
     diffs = shifted["codes"] - nominal["codes"]
     assert np.all(diffs <= 0) or np.all(diffs >= 0), f"incoherent shift {diffs}"

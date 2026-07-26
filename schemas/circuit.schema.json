@@ -398,6 +398,7 @@
           "required": ["input"],
           "properties": {
             "input": {"$ref": "#/$defs/name"},
+            "bar_input": {"$ref": "#/$defs/name"},
             "high": {"type": "number"},
             "low": {"type": "number"},
             "eval_before": {"$ref": "#/$defs/positiveNumber"},
@@ -589,6 +590,11 @@
         "bsim_model_bypass_tolerance": {
           "type": "number",
           "minimum": 0.0
+        },
+        "newton_error_fraction": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
         },
         "be_rerun_on_step_failures": {"type": "boolean"},
         "gear2_be_fallback": {"type": "boolean"},

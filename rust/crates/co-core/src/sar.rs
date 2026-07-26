@@ -58,6 +58,8 @@ pub enum Role {
     DummyBar,
     /// `clock.input`: the strobe for a clocked (StrongARM) comparator.
     Clock,
+    /// `clock.bar_input`: the complemented strobe, `high + low - clock`.
+    ClockBar,
 }
 
 /// Resolved `adc.clock` strobe block (see `sar._clock_config`).
@@ -283,6 +285,13 @@ fn build_original_row(
             ],
         ),
         Role::Clock => clock_row(),
+        Role::ClockBar => {
+            let ck = cfg.clock.expect("clock role requires clock config");
+            clock_row()
+                .into_iter()
+                .map(|value| ck.high + ck.low - value)
+                .collect()
+        }
     }
 }
 
@@ -637,6 +646,52 @@ pub fn run_conversion<E: Evaluator>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_bar_row_is_the_complemented_strobe() {
+        // The bar row exists for latches whose reset devices need the opposite
+        // phase; it must mirror the strobe exactly, point for point.
+        let cfg = SarConfig {
+            n_bits: 2,
+            vref: 1.0,
+            sample_end: 5.0e-9,
+            bit_period: 1.0e-8,
+            edge_time: 2.0e-10,
+            input_common_mode: 0.5,
+            comparator_threshold: 0.5,
+            high_means_clear: true,
+            differential: true,
+            comparator_index: 0,
+            tstop: 3.0e-8,
+            clock: Some(ClockConfig {
+                high: 0.9,
+                low: 0.1,
+                eval_before: 3.0e-9,
+                reset_hold: 1.0e-9,
+            }),
+            roles: Vec::new(),
+            newton: Options {
+                gear2: true,
+                max_iterations: 30,
+                voltage_tolerance: 1.0e-8,
+                step_limit: 0.25,
+                gmin: 1.0e-12,
+                record_device_history: false,
+                profile: false,
+            },
+        };
+        let tgrid: Vec<f64> = (0..=300).map(|i| i as f64 * 1.0e-10).collect();
+        let clock = build_original_row(&cfg, 0.4, &[None, None], 0, &tgrid, Role::Clock);
+        let bar = build_original_row(&cfg, 0.4, &[None, None], 0, &tgrid, Role::ClockBar);
+        assert_eq!(clock.len(), bar.len());
+        for (strobe, complement) in clock.iter().zip(&bar) {
+            assert_eq!(*complement, 0.9 + 0.1 - strobe);
+        }
+        // and the strobe itself actually moves between its two levels
+        let min = clock.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = clock.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!((min, max), (0.1, 0.9));
+    }
 
     #[test]
     fn np_interp_matches_grid_points_and_clamps() {

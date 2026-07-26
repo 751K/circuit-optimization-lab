@@ -170,6 +170,11 @@ TRANSIENT_OPTIONS = (
         cast=_float,
         schema={"type": "number", "minimum": 0.0},
     ),
+    _opt(
+        "newton_error_fraction",
+        cast=_float,
+        schema={"type": "number", "minimum": 0.0, "maximum": 1.0},
+    ),
     _opt("be_rerun_on_step_failures", cast=_bool,
          schema={"type": "boolean"}, aliases=("gear2_be_fallback",)),
     _opt("cap_mode", schema=CAP_MODE),

@@ -521,10 +521,10 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   已在并发求解时（signoff PVT 点、SAR 转换与蒙特卡洛 trial、corner/PVT 切片、
   探索候选），其 worker 会内联求值批次，把核让给外层。此规则仅在外层任务数不少于
   worker 数时生效（与编译式 campaign 的轴策略一致），单次求解仍使用池；
-  `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复原调度，两种调度的数值结果相同。单次
-  求值使用一次连续写入清零固定 BSIM 矩阵；外层并行 worker 只清零到
-  `CKTmaxEqNum` 的有效行列，以降低共享内存流量。设置
-  `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` 可强制整帧清零。关闭
+  `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复原调度，两种调度的数值结果相同。每次
+  求值都只清零固定 BSIM 矩阵中到 `CKTmaxEqNum` 的有效行列——那正是 vendor 会
+  stamp 或读取的全部区域。设置
+  `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` 可恢复旧的整帧写入。关闭
   profile 时不累计这些计数，也不返回该字段；原 `eval_batch` ABI 作为兼容包装保留。
 - 未显式提供 `V0` 的 native transient 会先通过 transient 自己使用的编译
   topology、device wrapper 和租用 handle 尝试拓扑声明的 DC guesses。只有 Rust
@@ -759,6 +759,11 @@ setup 后缓存；这两项优化保持公共结果逐位不变。
 state/current/charge 轨迹。
 
 原生 host 还提供带版本号的守恒求值 ABI、全 `void *` 入口和批量求值器。
+`co_bsim4_set_card` 可在一次穿越中应用整张 model 或 instance card，vendor 的
+关键字表也改为每进程建一次索引、不再逐参数线性扫描；硅工艺 card 有数百个参数，
+这两项合起来才使 handle 构造不再位于关键路径上。逐参数的
+`co_bsim4_set_model` / `co_bsim4_set_instance` 入口仍然保留，并有对拍测试把
+整卡路径钉死到它们上。
 固定网格 BSIM4 瞬态把矩阵盖章、Newton 与时间步循环整体放在编译 Rust core 内
 执行（`co-core` 进程内直接调用 `co-bsim4`）；`compact_models/bsim4/native.py`
 的 ctypes 绑定是 Python 侧调用同一份编译库做单点 op/AC/noise 求值的入口。

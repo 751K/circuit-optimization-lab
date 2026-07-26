@@ -111,8 +111,10 @@ def _clock_config(cfg: Mapping) -> dict | None:
     clock = dict(clock)
     period = cfg["bit_period"]
     edge = cfg["edge_time"]
+    bar_input = clock.get("bar_input")
     ck = {
         "input": str(_required(clock, "input")),
+        "bar_input": None if bar_input is None else str(bar_input),
         "high": float(clock.get("high", cfg["vref"])),
         "low": float(clock.get("low", 0.0)),
         "eval_before": float(clock.get("eval_before", 0.3 * period)),
@@ -225,7 +227,12 @@ def sar_input_waveforms(spec: CircuitSpec, vin: float, decisions: Sequence[int |
                 (fall, ck["high"]), (fall + edge, ck["low"]),
             ])
         events.append((tstop, ck["low"]))
-        out[ck["input"]] = _wave(tgrid, events)
+        strobe = _wave(tgrid, events)
+        out[ck["input"]] = strobe
+        if ck["bar_input"] is not None:
+            # The complemented strobe for latches whose reset devices need the
+            # opposite phase (double-tail second stages and PMOS-tail latches).
+            out[ck["bar_input"]] = ck["high"] + ck["low"] - strobe
     return out
 
 

@@ -106,6 +106,7 @@ def solve_bsim4_rust(
     gmin,
     final_load_tolerance=0.0,
     model_bypass_tolerance=0.0,
+    newton_error_fraction=0.0,
     adaptive=False,
     adaptive_config=None,
     max_step=None,
@@ -155,6 +156,7 @@ def solve_bsim4_rust(
                 gmin=float(gmin),
                 final_load_tolerance=float(final_load_tolerance),
                 model_bypass_tolerance=float(model_bypass_tolerance),
+                newton_error_fraction=float(newton_error_fraction),
                 profile=bool(profile),
             )
             (
@@ -270,6 +272,7 @@ def solve_bsim4_rust(
                 "newton_rejections": int(newton_rejections),
                 "final_load_tolerance_v": float(final_load_tolerance),
                 "model_bypass_tolerance_v": float(model_bypass_tolerance),
+                "newton_error_fraction": float(newton_error_fraction),
             },
         )
     finally:

@@ -52,7 +52,7 @@ mod ffi {
 // ---------------------------------------------------------------------------
 
 /// Stable four-terminal C ABI version, surfaced through `co_bsim4_abi_version`.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 const CO_MAX_NODES: usize = 24;
 const CO_STATES: usize = 256;
@@ -102,6 +102,20 @@ const OFF_QD: c_int = 15;
 const OFF_QBS: c_int = 19;
 const OFF_QBD: c_int = 21;
 const OFF_QS: c_int = 28;
+
+/// Largest movement the limited-voltage state block may show on the last
+/// model load for the evaluation to count as converged, in volts.
+///
+/// Every limiter writes the voltage it actually used into `CKTstate0`
+/// (`vbd..vdes`), so a limiter that is still walking moves this block by at
+/// least one limiting step -- about `2*vt`, tens of millivolts -- per load.
+/// Once nothing limits, the block tracks the node solution, whose movement at
+/// exit is bounded by the previous iteration's node update. 1 uV sits orders
+/// of magnitude below every limiter step and above the settled node noise.
+const LIMITER_SETTLE_TOL: f64 = 1.0e-6;
+
+/// Number of `CKTstate0` entries in the limited-voltage block (`vbd..vdes`).
+const LIMITED_STATE_COUNT: usize = 11;
 
 const MODEL_NAME: &CStr = c"circuitopt_bsim4";
 const INSTANCE_NAME: &CStr = c"m1";
@@ -396,21 +410,60 @@ pub unsafe extern "C" fn BSIM4v5checkModel(
 // Parameter binding (host.c `co_find_param` / `co_set_param`).
 // ---------------------------------------------------------------------------
 
+/// Lower-cased keyword to table offset for one vendor parameter table.
+type ParamIndex = HashMap<Vec<u8>, isize>;
+
+/// Lower-cased keyword to table offset, built once per vendor table.
+///
+/// The vendor tables are static and hold several hundred entries each, while a
+/// silicon model card names hundreds of parameters, so the linear scan this
+/// replaces was the dominant cost of building a handle -- more than the model
+/// setup it prepares for. Offsets rather than pointers keep the map `Send`.
+fn build_param_index(base: *const ffi::IFparm, count: c_int) -> ParamIndex {
+    let mut map = HashMap::with_capacity(count.max(0) as usize);
+    for i in 0..count as isize {
+        // SAFETY: the caller passes a vendor table with `count` entries.
+        let keyword = unsafe { CStr::from_ptr((*base.offset(i)).keyword) };
+        // First entry wins, matching the linear scan this replaces.
+        map.entry(keyword.to_bytes().to_ascii_lowercase())
+            .or_insert(i);
+    }
+    map
+}
+
+fn param_index(base: *const ffi::IFparm, _count: c_int) -> &'static ParamIndex {
+    // Exactly two vendor tables exist, so both indexes are built on first use
+    // and every later call is a lock-free `OnceLock` read. Concurrent campaign
+    // workers apply whole cards during handle construction; putting this
+    // lookup behind a mutex measurably destabilised their scaling.
+    static INDEXES: OnceLock<[(usize, ParamIndex); 2]> = OnceLock::new();
+    let indexes = INDEXES.get_or_init(|| {
+        let (model_base, model_count) = unsafe { model_table() };
+        let (instance_base, instance_count) = unsafe { instance_table() };
+        [
+            (
+                model_base as usize,
+                build_param_index(model_base, model_count),
+            ),
+            (
+                instance_base as usize,
+                build_param_index(instance_base, instance_count),
+            ),
+        ]
+    });
+    indexes
+        .iter()
+        .find_map(|(table, index)| (*table == base as usize).then_some(index))
+        .expect("find_param is only called with the model or instance table")
+}
+
 unsafe fn find_param(
     base: *const ffi::IFparm,
     count: c_int,
     name: &[u8],
 ) -> Option<*const ffi::IFparm> {
-    for i in 0..count as isize {
-        let entry = base.offset(i);
-        if CStr::from_ptr((*entry).keyword)
-            .to_bytes()
-            .eq_ignore_ascii_case(name)
-        {
-            return Some(entry);
-        }
-    }
-    None
+    let offset = *param_index(base, count).get(&name.to_ascii_lowercase())?;
+    Some(base.offset(offset))
 }
 
 unsafe fn set_param(
@@ -546,6 +599,69 @@ pub unsafe fn set_model(device: *mut CoBsim4, name: *const c_char, value: f64) -
     }
 }
 
+/// Apply a whole card in one call, in the caller's order.
+///
+/// A silicon model card carries hundreds of parameters and each single-value
+/// setter is one FFI crossing, so building a handle used to spend almost all of
+/// its time in call overhead rather than in the model. Applying them in one
+/// crossing is arithmetically identical: the same entries take the same values
+/// in the same order, under one lock acquisition instead of `count`.
+///
+/// On failure `failed_index` receives the offending position so callers can
+/// still name the parameter.
+///
+/// # Safety
+///
+/// `names` must point to `count` valid NUL-terminated strings and `values` to
+/// `count` doubles. `failed_index` may be null.
+pub unsafe fn set_card(
+    device: *mut CoBsim4,
+    names: *const *const c_char,
+    values: *const f64,
+    count: usize,
+    instance: bool,
+    failed_index: *mut usize,
+) -> c_int {
+    if !failed_index.is_null() {
+        *failed_index = 0;
+    }
+    if device.is_null() {
+        return E_NOCHANGE;
+    }
+    if count != 0 && (names.is_null() || values.is_null()) {
+        return E_BADPARM;
+    }
+    let _guard = lock_device(device);
+    if (*device).setup_done != 0 {
+        return E_NOCHANGE;
+    }
+    let (base, table_count) = if instance {
+        instance_table()
+    } else {
+        model_table()
+    };
+    for index in 0..count {
+        let name = *names.add(index);
+        if name.is_null() {
+            if !failed_index.is_null() {
+                *failed_index = index;
+            }
+            return E_BADPARM;
+        }
+        let status = match find_param(base, table_count, CStr::from_ptr(name).to_bytes()) {
+            Some(entry) => set_param(entry, *values.add(index), !instance, device),
+            None => E_BADPARM,
+        };
+        if status != OK {
+            if !failed_index.is_null() {
+                *failed_index = index;
+            }
+            return status;
+        }
+    }
+    OK
+}
+
 pub unsafe fn set_instance(device: *mut CoBsim4, name: *const c_char, value: f64) -> c_int {
     if device.is_null() {
         return E_NOCHANGE;
@@ -610,12 +726,7 @@ pub unsafe fn node_count(device: *const CoBsim4) -> c_int {
 // ---------------------------------------------------------------------------
 
 unsafe fn co_clear(device: *mut CoBsim4) {
-    // One contiguous memset is fastest for an isolated transient. Inside an
-    // outer-parallel campaign/SAR conversion, however, clearing only the active
-    // block reduces aggregate memory traffic enough to win despite the row
-    // loop. SerialEvalGuard is already the scheduler's nested-parallel marker,
-    // so use the same signal rather than introducing another public knob.
-    if full_frame_clear_forced() || !serial_eval_requested() {
+    if full_frame_clear_forced() {
         std::ptr::write_bytes(
             addr_of_mut!((*device).matrix) as *mut u8,
             0,
@@ -626,7 +737,16 @@ unsafe fn co_clear(device: *mut CoBsim4) {
         return;
     }
     // The vendor only stamps nodes allocated through CKTmkVolt, whose largest
-    // index is CKTmaxEqNum.
+    // index is CKTmaxEqNum, so entries beyond it stay zero and are never read.
+    // One BSIM instance uses far fewer than CO_MAX_NODES, and this runs once
+    // per model load, which is the whole cost of an evaluation.
+    //
+    // Clearing the active block beats one contiguous frame memset under every
+    // schedule, not only the outer-parallel one: the frame is 24x24 complex
+    // entries while an instance needs a corner of it. Clearing whole active
+    // rows instead (one memset, still half the frame) measured inside run-to-
+    // run noise of this loop, so the narrower block is kept for the smaller
+    // footprint.
     let active = ((*device).ckt.CKTmaxEqNum + 1).clamp(1, CO_MAX_NODES as c_int) as usize;
     for row in 0..active {
         std::ptr::write_bytes((*device).matrix.value[row].as_mut_ptr(), 0, active);
@@ -635,19 +755,23 @@ unsafe fn co_clear(device: *mut CoBsim4) {
     std::ptr::write_bytes((*device).irhs.as_mut_ptr(), 0, active);
 }
 
+fn env_flag(name: &'static str) -> bool {
+    std::env::var_os(name)
+        .map(|value| {
+            let value = value.to_string_lossy();
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Kill switch: `CIRCUITOPT_BSIM_FULL_FRAME_CLEAR=1` restores the whole-frame
+/// memset for A/B runs. Both paths leave the same values behind.
 fn full_frame_clear_forced() -> bool {
     static FORCED: OnceLock<bool> = OnceLock::new();
-    *FORCED.get_or_init(|| {
-        std::env::var_os("CIRCUITOPT_BSIM_FULL_FRAME_CLEAR")
-            .map(|value| {
-                let value = value.to_string_lossy();
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false)
-    })
+    *FORCED.get_or_init(|| env_flag("CIRCUITOPT_BSIM_FULL_FRAME_CLEAR"))
 }
 
 fn solve_real(
@@ -1102,8 +1226,22 @@ unsafe fn dc_inner(
     (*device).ckt.CKTmode = MODEDCOP | MODEINITFLOAT;
     let mut loaded_at_final_internal_state = internal_count == 0;
     let mut final_internal_error = 0.0;
+    let state_base = (*device).instance.BSIM4v5states as usize;
+    let mut state_before = [0.0f64; LIMITED_STATE_COUNT];
     for iteration in 0..40 {
         co_clear(device);
+        // The vendor answers "do not treat this bias as converged" through
+        // CKTnoncon (b4v5ld.c): it fires when the limiter clamped the voltages
+        // this load was asked for -- `DEVfetlim` / `DEVlimvds` / `DEVpnjlim`
+        // against the previous call's `CKTstate0` -- and when the previous
+        // linearization failed to predict this point's terminal currents. Both
+        // mean the returned operating point is not the one at `term`. Zero it
+        // first so the flag describes this load alone rather than the whole
+        // handle's history.
+        (*device).ckt.CKTnoncon = 0;
+        for (offset, slot) in state_before.iter_mut().enumerate() {
+            *slot = (*device).state0[state_base + offset];
+        }
         let status = ffi::BSIM4v5load(
             addr_of_mut!((*device).model).cast(),
             addr_of_mut!((*device).ckt),
@@ -1111,8 +1249,38 @@ unsafe fn dc_inner(
         if status != OK {
             return status;
         }
+        // CKTnoncon alone is not sufficient: `DEVfetlim` limits silently, and
+        // the rbodyMod branch of the junction limiting overwrites the
+        // `DEVpnjlim` flag of the core vbs/vbd with the flags of the body-net
+        // junctions alone (b4v5ld.c "Check = 0"). A limiter that is still
+        // walking always betrays itself in `CKTstate0`, though: each load
+        // stores the voltages it actually used, at least one limiting step
+        // away from the previous ones. Requiring that block to stand still
+        // closes the gap -- without it, an evaluation whose internal nodes are
+        // insensitive to the walking voltage can exit on the node criterion
+        // mid-walk and report an operating point nobody asked for.
+        let mut limiter_settled = true;
+        for (offset, before) in state_before.iter().enumerate() {
+            let delta = (*device).state0[state_base + offset] - before;
+            // `!(<=)` (not `>`) is deliberate: a NaN must count as unsettled
+            // and run into the iteration cap instead of converging.
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
+            if !(delta.abs() <= LIMITER_SETTLE_TOL) {
+                limiter_settled = false;
+                break;
+            }
+        }
+        // Re-loading walks the limiter in, because each load stores the
+        // voltages it settled on and the next one limits against those.
+        let model_unconverged = (*device).ckt.CKTnoncon != 0 || !limiter_settled;
         if internal_count == 0 {
-            break;
+            if !model_unconverged {
+                break;
+            }
+            if iteration + 1 == 40 {
+                return E_PANIC;
+            }
+            continue;
         }
 
         let mut system = [[0.0f64; CO_MAX_INTERNAL]; CO_MAX_INTERNAL];
@@ -1142,7 +1310,11 @@ unsafe fn dc_inner(
             (*device).rhs_old[internal[i] as usize] = next[i];
         }
         final_internal_error = error;
-        if error < 1.0e-12 {
+        // Settled internal nodes are not enough on their own: they can stop
+        // moving while the limiter still holds the bias away from `term`, and
+        // the operating point would then be silently reported for voltages
+        // nobody asked for.
+        if !model_unconverged && error < 1.0e-12 {
             loaded_at_final_internal_state = unchanged;
             break;
         }
@@ -1151,6 +1323,9 @@ unsafe fn dc_inner(
         }
     }
 
+    // This reload lands within `final_internal_error` of a load the loop just
+    // accepted as unlimited, and that bound is below every limiting threshold,
+    // so it cannot re-arm the limiter.
     if !loaded_at_final_internal_state && final_internal_error > final_load_reuse_tolerance {
         co_clear(device);
         let status = ffi::BSIM4v5load(
@@ -2905,7 +3080,8 @@ mod tests {
     #[test]
     fn version_is_nonempty() {
         assert!(!version().is_empty());
-        assert_eq!(abi_version(), 1);
+        // Bumped to 2 by `co_bsim4_set_card`, the whole-card entry point.
+        assert_eq!(abi_version(), 2);
     }
 
     #[test]

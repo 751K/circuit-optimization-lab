@@ -205,8 +205,23 @@ class Fp45Pfet(_Fp45NativeFet):
     TYPE = -1
 
 
+class Fp45NfetVtl(_Fp45NativeFet):
+    POLARITY = "nmos_vtl"
+    TYPE = 1
+
+
+class Fp45PfetVtl(_Fp45NativeFet):
+    POLARITY = "pmos_vtl"
+    TYPE = -1
+
+
 register_pdk(
     "freepdk45",
-    {"nmos": Fp45Nfet, "pmos": Fp45Pfet},
+    {
+        "nmos": Fp45Nfet,
+        "pmos": Fp45Pfet,
+        "nmos_vtl": Fp45NfetVtl,
+        "pmos_vtl": Fp45PfetVtl,
+    },
     default=False,
 )

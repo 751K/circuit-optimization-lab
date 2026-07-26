@@ -124,6 +124,30 @@ pub unsafe extern "C" fn co_bsim4_set_instance(
     catch_unwind(|| co_bsim4::set_instance(device as *mut CoBsim4, name, value)).unwrap_or(E_PANIC)
 }
 
+/// Apply a whole model or instance card in one FFI crossing
+/// (`instance != 0` selects the instance table).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn co_bsim4_set_card(
+    device: *mut c_void,
+    names: *const *const c_char,
+    values: *const c_double,
+    count: usize,
+    instance: c_int,
+    failed_index: *mut usize,
+) -> c_int {
+    catch_unwind(|| {
+        co_bsim4::set_card(
+            device as *mut CoBsim4,
+            names,
+            values,
+            count,
+            instance != 0,
+            failed_index,
+        )
+    })
+    .unwrap_or(E_PANIC)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn co_bsim4_setup(device: *mut c_void) -> c_int {
     catch_unwind(|| co_bsim4::setup(device as *mut CoBsim4)).unwrap_or(E_PANIC)
@@ -1941,7 +1965,7 @@ impl Bsim4TransientProblem {
         voltage_abstol=1e-6, current_abstol=1e-12, max_steps=200000,
         initial_step=-1.0, max_iterations=40, voltage_tolerance=1e-8,
         step_limit=0.25, gmin=1e-12, final_load_tolerance=0.0,
-        model_bypass_tolerance=0.0, profile=false
+        model_bypass_tolerance=0.0, newton_error_fraction=0.0, profile=false
     ))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn solve_adaptive_gear2<'py>(
@@ -1962,6 +1986,7 @@ impl Bsim4TransientProblem {
         gmin: f64,
         final_load_tolerance: f64,
         model_bypass_tolerance: f64,
+        newton_error_fraction: f64,
         profile: bool,
     ) -> PyResult<(
         bool,
@@ -2024,6 +2049,13 @@ impl Bsim4TransientProblem {
                  [0, voltage_tolerance] V",
             ));
         }
+        // 1.0 would let Newton stop exactly at the error the step controller
+        // is about to measure, leaving no margin between the two.
+        if !newton_error_fraction.is_finite() || !(0.0..=1.0).contains(&newton_error_fraction) {
+            return Err(PyValueError::new_err(
+                "newton_error_fraction must be finite and within [0, 1]",
+            ));
+        }
         let circuit = self.circuit.clone();
         let devices = self.devices.clone();
         let handles = self.handles.clone();
@@ -2063,6 +2095,7 @@ impl Bsim4TransientProblem {
                     current_abstol,
                     max_steps,
                     initial_step,
+                    newton_error_fraction,
                 },
             )
         });

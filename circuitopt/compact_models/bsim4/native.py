@@ -39,7 +39,7 @@ _STATUS = {
     10: "requested BSIM4 topology is outside the native core-MOS scope",
     13: "parameters cannot be changed after BSIM4 setup",
 }
-_ABI_VERSION = 1
+_ABI_VERSION = 2
 _EVAL_VP_T = C.CFUNCTYPE(
     C.c_int,
     C.c_void_p,
@@ -77,6 +77,15 @@ def _bind_abi(library) -> None:
         C.c_double,
     )
     library.co_bsim4_set_instance.restype = C.c_int
+    library.co_bsim4_set_card.argtypes = (
+        C.c_void_p,
+        C.POINTER(C.c_char_p),
+        double_pointer,
+        C.c_size_t,
+        C.c_int,
+        C.POINTER(C.c_size_t),
+    )
+    library.co_bsim4_set_card.restype = C.c_int
     library.co_bsim4_setup.argtypes = (C.c_void_p,)
     library.co_bsim4_setup.restype = C.c_int
     library.co_bsim4_dc.argtypes = (
@@ -228,6 +237,35 @@ def _raise_status(status: int, action: str, parameter: str | None = None) -> Non
     raise Bsim4NativeError(f"BSIM4 {action}{subject} failed: {detail}")
 
 
+def _card_payload(card, attribute: str):
+    """Marshal one immutable card into reusable ``ctypes`` arrays.
+
+    A silicon model card carries hundreds of parameters, and one FFI crossing
+    per parameter dominated handle construction. The cards are frozen and
+    shared by every device that binds them, so the marshalled arrays are built
+    once and memoized on the card itself.
+
+    The order is the card's own iteration order, not the sorted one used for
+    cache keys. Precedence between overlapping parameters (`k1` over `gamma1`,
+    and so on) is resolved later in the vendor's temperature pass rather than in
+    the setters, so reordering measured as numerically neutral -- but the card's
+    order is what the parameter-at-a-time path used, and reproducing it costs
+    nothing.
+    """
+    payload = getattr(card, attribute, None)
+    if payload is None:
+        items = tuple(card.parameters.items())
+        names = [name.encode("ascii") for name, _ in items]
+        payload = (
+            (C.c_char_p * len(items))(*names),
+            (C.c_double * len(items))(*[value for _, value in items]),
+            len(items),
+            tuple(name for name, _ in items),
+        )
+        object.__setattr__(card, attribute, payload)
+    return payload
+
+
 class _NativeDevice:
     def __init__(
         self,
@@ -245,14 +283,9 @@ class _NativeDevice:
             raise Bsim4NativeError("BSIM4 native device allocation failed")
         self._lock = threading.RLock()
         try:
-            for name, value in model.parameters.items():
-                status = self._library.co_bsim4_set_model(
-                    self._pointer, name.encode("ascii"), value)
-                _raise_status(status, "model setup", name)
-            for name, value in instance.parameters.items():
-                status = self._library.co_bsim4_set_instance(
-                    self._pointer, name.encode("ascii"), value)
-                _raise_status(status, "instance setup", name)
+            self._apply_card(model, "_native_model_payload", 0, "model setup")
+            self._apply_card(
+                instance, "_native_instance_payload", 1, "instance setup")
             _raise_status(
                 self._library.co_bsim4_setup(self._pointer),
                 "temperature/setup",
@@ -260,6 +293,16 @@ class _NativeDevice:
         except Exception:
             self.close()
             raise
+
+    def _apply_card(self, card, attribute: str, is_instance: int, action: str) -> None:
+        names, values, count, order = _card_payload(card, attribute)
+        failed = C.c_size_t(0)
+        status = self._library.co_bsim4_set_card(
+            self._pointer, names, values, count, is_instance, C.byref(failed))
+        if status:
+            index = failed.value
+            parameter = order[index] if index < len(order) else None
+            _raise_status(status, action, parameter)
 
     @property
     def pointer(self) -> int:

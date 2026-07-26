@@ -876,7 +876,8 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
               adaptive_iabstol: float = 1e-12, adaptive_max_steps: int = 200000,
               adaptive_h0: float | None = None, adaptive_config: Any = None,
               bsim_final_load_tolerance: float = 0.0,
-              bsim_model_bypass_tolerance: float = 0.0, *,
+              bsim_model_bypass_tolerance: float = 0.0,
+              newton_error_fraction: float = 0.0, *,
               binding: CircuitBinding | None = None,
               mismatch: Mapping[str, float] | None = None,
               gear2_be_fallback: bool | None = None) -> dict:
@@ -930,6 +931,13 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
                for standard compact-model bypass during Newton. Must not exceed
                newton_vtol. The exact default is 0; enable only after circuit-level
                trajectory and signoff comparison.
+      newton_error_fraction : adaptive only. When positive, each node's Newton
+               update must fall below this fraction of its own step-error budget
+               ``adaptive_reltol*|V| + adaptive_vabstol`` instead of the single
+               absolute ``newton_vtol``. Newton then stops once its remaining
+               error is negligible against the error the integrator already
+               accepts, rather than converging orders of magnitude past it. The
+               exact default is 0, which keeps the absolute criterion.
       edge_mask : optional boolean mask over tgrid points; intervals touching a
                true point are counted as edge work in transient_profile.
       rail_margin : optional voltage margin around numeric rails for topologies
@@ -1017,6 +1025,7 @@ def transient(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float
             adaptive_config=adaptive_config,
             bsim_final_load_tolerance=bsim_final_load_tolerance,
             bsim_model_bypass_tolerance=bsim_model_bypass_tolerance,
+            newton_error_fraction=newton_error_fraction,
             profile=profile,
         )
     if ngspice_model_names(model_types):

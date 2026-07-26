@@ -116,7 +116,7 @@ def test_native_batch_abi_matches_individual_evaluation(monkeypatch):
     from circuitopt.device_model import create_transistor
 
     monkeypatch.setenv("NGSPICE_BIN", "/definitely/not/ngspice")
-    assert NativeBsim4Backend.abi_version == 1
+    assert NativeBsim4Backend.abi_version == 2
     nmos = create_transistor(
         "nmos", pdk="freepdk45", W=0.09, L=0.05)
     pmos = create_transistor(
