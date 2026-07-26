@@ -19,6 +19,8 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+## [2.4.0] - 2026-07-26
+
 ### Added / 新增
 
 - **FreePDK45 low-threshold flavors and a complemented SAR strobe / FreePDK45 低阈值型号与 SAR 反相选通**
@@ -38,111 +40,6 @@ release checklist.
   `adc.clock` 接受可选的 `bar_input`，在 Python 波形生成器与编译版
   `co_core::sar` 角色中同步生成反相选通 `high + low - clock`，供复位管需要相反
   相位的锁存器使用。两者均为增量特性；既有电路的波形逐位不变。
-
-### Fixed / 修复
-
-- **The 6-bit SAR example now converts correctly at nominal / 6-bit SAR 示例在名义点正确转换**
-
-  **English:** `freepdk45_sar6.json`'s nominal 64-code ramp was deformed and
-  nothing pinned it: the stream was non-monotonic with wild codes (inputs 1
-  and 2 read 41 and 53) and a deterministic LSB inversion (`code = i XOR 1`
-  over half the range). The engine was exonerated -- the compiled continuation,
-  the production path, and the frozen full replay agree bit-for-bit, and the
-  CDAC top-plate differentials measure exactly `trial - vin` -- the deformity
-  was the comparator design. Its StrongARM input pair sat at the CDAC common
-  mode of about 0.47 V, at the VTG threshold: with millivolt overdrives the
-  latch resolved through charge-share races between the stacked internal nodes
-  and the outputs rather than through the input signal. No single flavor
-  rescues that topology on this kit -- VTG inverts small differentials, VTL
-  fixes them but its subthreshold slide inverts large ones, and a double-tail
-  second stage either parks metastably on the 100 ps grid or locks capacitive
-  feedthrough of the wrong sign; each regime was measured, not assumed.
-
-  The comparator is now fully static: two diode-loaded differential preamp
-  stages (VTL input pairs, zero systematic offset by symmetry, soft-clipped
-  range compression) into the same five-transistor mirror stage the 3-bit
-  example has always used. The nominal ramp is the ideal staircase -- all 64
-  code centers resolve to their ideal codes, strictly monotone -- and is now
-  pinned absolutely by a new regression test, closing the gap that let the
-  deformity ship: the previous SAR tests were self-consistency checks only.
-  Pinned conversions updated to the ideal codes (0.7109375 now reads 45, not
-  44; 0.2890625 reads 18, not 19), the strobe-machinery tests inject their
-  clock block through the config override, and the explore config retargets
-  the new preamp pair. The mismatch hook still reaches the comparator: +50 mV
-  on one preamp input shifts a three-point sweep by a coherent four codes.
-
-  **中文：** `freepdk45_sar6.json` 的名义 64 码斜坡是畸形的，且没有任何测试钉住它：
-  码流非单调、带狂码（输入 1、2 读出 41、53），一半量程上还有确定性的 LSB 反相
-  （`code = i XOR 1`）。引擎已洗清——编译续算、生产路径与冻结全重放逐位一致，
-  CDAC 顶板差分实测恰为 `trial - vin`——畸形出自比较器设计本身。其 StrongARM
-  输入对栅极共模约 0.47 V，正贴 VTG 阈值：毫伏级过驱动下，锁存靠栈接内部节点与
-  输出间的电荷分享竞争而非输入信号定胜负。该拓扑在这套模型上无论换哪种阈值都
-  救不回——VTG 反转小差分，VTL 治好小差分却让亚阈值滑移反转大差分，double-tail
-  二级要么在 100 ps 网格上亚稳停车、要么锁住符号相反的容性馈通；每个 regime
-  都经实测而非推断。
-
-  比较器现改为全静态：两级二极管负载全差分前放（VTL 输入对，对称结构系统失调
-  为零，软限幅自带量程压缩）接 3-bit 示例一直使用的同款五管镜像级。名义斜坡
-  成为理想阶梯——64 个码中心全部落到理想码、严格单调——并由新增回归测试绝对
-  钉死，补上让畸形溜过的缺口：此前的 SAR 测试全部只是自洽性检验。已钉转换更新
-  为理想码（0.7109375 现读 45 而非 44；0.2890625 读 18 而非 19），选通机制测试
-  改为经 config 注入时钟块，explore 配置改指新前放对。失配钩子仍能到达比较器：
-  单侧前放输入 +50 mV 使三点扫码相干偏移 4 码。
-
-- **Device evaluation waits for the model's own convergence signal / 器件求值等待模型自己的收敛信号**
-
-  **English:** The vendored BSIM4 load limits the terminal voltages it was
-  asked for against the ones the previous load settled on, walking each large
-  bias step over several loads. The host's internal-node loop stopped as soon
-  as the internal nodes settled, and nothing checked whether that walk had
-  finished: `DEVfetlim` limits silently, and the rbodyMod junction branch
-  overwrites the core vbs/vbd `DEVpnjlim` flag with the body-network flags
-  alone, so even `CKTnoncon` stays quiet. On devices whose internal nodes are
-  insensitive to the walking voltage the loop could therefore exit mid-walk
-  and report an operating point nobody requested. A cold FreePDK45 PMOS
-  evaluation at Vg=0.66/Vd=0.88 -- forward-biased drain-body junction --
-  exited 72.7 mV short on the junction voltage and returned a source current
-  9.9% away from the converged point; approaching the same bias gradually gave
-  the converged one, so the answer depended on handle history at 8 of that
-  device's 36 grid biases.
-
-  Two exit conditions were added to the loop: `CKTnoncon` is cleared before
-  every load and must stay clear, and the limited-voltage block the load
-  stores in `CKTstate0` (`vbd..vdes`) must not have moved by more than 1 uV --
-  a walking limiter always moves it by at least one limiting step, tens of mV.
-  Every evaluation now lands on the fixed point that repeated and gradual
-  approaches reach; a regression test pins cold-equals-walked at the bias
-  above, and a subprocess test keeps it bit-identical between block and
-  full-frame matrix clears. Runtime is unchanged (45-point campaign 13.1 s,
-  single residue 55.9 ms). Numbers move where evaluations used to stop early:
-  no signoff status changes and at most 8.8e-6 relative on non-degenerate
-  campaign fields, 6 of 64 codes in the nominal FreePDK45 SAR6 ramp probe (all
-  on conversions that were already non-monotonic before the fix), and 181
-  device grids across all three PDKs in the engine-parity corpus, re-frozen
-  after verifying magnitudes: at most 5.4e-16 A absolute on currents
-  (6e-5 relative, subthreshold points), with the five circuit-level golden
-  cases bit-identical throughout.
-
-  **中文：** vendored BSIM4 的 load 会把调用者要求的端电压对上一次 load 落定的
-  电压做限幅，大的偏置跳变要分好几次 load 才走完。host 的内部节点循环只要内部
-  节点稳定就退出，没有任何东西检查这段"走步"是否完成：`DEVfetlim` 静默限幅，
-  rbodyMod 的结限幅分支又用体网络两个结的标志覆盖了核心 vbs/vbd 的 `DEVpnjlim`
-  标志，连 `CKTnoncon` 也保持沉默。在内部节点对该电压不敏感的器件上，循环因此
-  可能在半路退出，返回一个没人要求过的工作点。FreePDK45 PMOS 在 Vg=0.66/
-  Vd=0.88（漏-体结正偏）的冷求值就在结电压差 72.7 mV 时提前退出，源电流偏离
-  收敛点 9.9%；而逐步逼近同一偏置得到的是收敛值——该器件 36 个网格偏置中有 8 个
-  的答案取决于 handle 历史。
-
-  循环新增两个退出条件：每次 load 前清零 `CKTnoncon` 且必须保持为零；load 写进
-  `CKTstate0` 的限幅电压块（`vbd..vdes`）移动不得超过 1 uV——还在走步的限幅器
-  每次至少移动一个限幅步长，数十 mV。现在每次求值都落到重复求值与逐步逼近共同
-  到达的不动点上；回归测试在上述偏置钉死"冷启动 == 走过去"，子进程测试保持块
-  清零与整帧清零逐位一致。运行时间不变（45 点 campaign 13.1 s，单 residue
-  55.9 ms）。数值只在原先提前退出的地方移动：signoff 状态零变化、非退化
-  campaign 字段最大相对差 8.8e-6；名义 FreePDK45 SAR6 斜坡探针 64 码中 6 码
-  变化（全部落在修复前就已非单调的转换上）；engine-parity 语料中三个 PDK 共
-  181 个器件网格变化，核对幅度后已重新冻结：电流最大绝对差 5.4e-16 A
-  （相对 6e-5，亚阈值点），五个电路级 golden 用例全程逐位不变。
 
 ### Changed / 变更
 
@@ -451,6 +348,111 @@ release checklist.
   行为。
 
 ### Fixed / 修复
+
+- **The 6-bit SAR example now converts correctly at nominal / 6-bit SAR 示例在名义点正确转换**
+
+  **English:** `freepdk45_sar6.json`'s nominal 64-code ramp was deformed and
+  nothing pinned it: the stream was non-monotonic with wild codes (inputs 1
+  and 2 read 41 and 53) and a deterministic LSB inversion (`code = i XOR 1`
+  over half the range). The engine was exonerated -- the compiled continuation,
+  the production path, and the frozen full replay agree bit-for-bit, and the
+  CDAC top-plate differentials measure exactly `trial - vin` -- the deformity
+  was the comparator design. Its StrongARM input pair sat at the CDAC common
+  mode of about 0.47 V, at the VTG threshold: with millivolt overdrives the
+  latch resolved through charge-share races between the stacked internal nodes
+  and the outputs rather than through the input signal. No single flavor
+  rescues that topology on this kit -- VTG inverts small differentials, VTL
+  fixes them but its subthreshold slide inverts large ones, and a double-tail
+  second stage either parks metastably on the 100 ps grid or locks capacitive
+  feedthrough of the wrong sign; each regime was measured, not assumed.
+
+  The comparator is now fully static: two diode-loaded differential preamp
+  stages (VTL input pairs, zero systematic offset by symmetry, soft-clipped
+  range compression) into the same five-transistor mirror stage the 3-bit
+  example has always used. The nominal ramp is the ideal staircase -- all 64
+  code centers resolve to their ideal codes, strictly monotone -- and is now
+  pinned absolutely by a new regression test, closing the gap that let the
+  deformity ship: the previous SAR tests were self-consistency checks only.
+  Pinned conversions updated to the ideal codes (0.7109375 now reads 45, not
+  44; 0.2890625 reads 18, not 19), the strobe-machinery tests inject their
+  clock block through the config override, and the explore config retargets
+  the new preamp pair. The mismatch hook still reaches the comparator: +50 mV
+  on one preamp input shifts a three-point sweep by a coherent four codes.
+
+  **中文：** `freepdk45_sar6.json` 的名义 64 码斜坡是畸形的，且没有任何测试钉住它：
+  码流非单调、带狂码（输入 1、2 读出 41、53），一半量程上还有确定性的 LSB 反相
+  （`code = i XOR 1`）。引擎已洗清——编译续算、生产路径与冻结全重放逐位一致，
+  CDAC 顶板差分实测恰为 `trial - vin`——畸形出自比较器设计本身。其 StrongARM
+  输入对栅极共模约 0.47 V，正贴 VTG 阈值：毫伏级过驱动下，锁存靠栈接内部节点与
+  输出间的电荷分享竞争而非输入信号定胜负。该拓扑在这套模型上无论换哪种阈值都
+  救不回——VTG 反转小差分，VTL 治好小差分却让亚阈值滑移反转大差分，double-tail
+  二级要么在 100 ps 网格上亚稳停车、要么锁住符号相反的容性馈通；每个 regime
+  都经实测而非推断。
+
+  比较器现改为全静态：两级二极管负载全差分前放（VTL 输入对，对称结构系统失调
+  为零，软限幅自带量程压缩）接 3-bit 示例一直使用的同款五管镜像级。名义斜坡
+  成为理想阶梯——64 个码中心全部落到理想码、严格单调——并由新增回归测试绝对
+  钉死，补上让畸形溜过的缺口：此前的 SAR 测试全部只是自洽性检验。已钉转换更新
+  为理想码（0.7109375 现读 45 而非 44；0.2890625 读 18 而非 19），选通机制测试
+  改为经 config 注入时钟块，explore 配置改指新前放对。失配钩子仍能到达比较器：
+  单侧前放输入 +50 mV 使三点扫码相干偏移 4 码。
+
+- **Device evaluation waits for the model's own convergence signal / 器件求值等待模型自己的收敛信号**
+
+  **English:** The vendored BSIM4 load limits the terminal voltages it was
+  asked for against the ones the previous load settled on, walking each large
+  bias step over several loads. The host's internal-node loop stopped as soon
+  as the internal nodes settled, and nothing checked whether that walk had
+  finished: `DEVfetlim` limits silently, and the rbodyMod junction branch
+  overwrites the core vbs/vbd `DEVpnjlim` flag with the body-network flags
+  alone, so even `CKTnoncon` stays quiet. On devices whose internal nodes are
+  insensitive to the walking voltage the loop could therefore exit mid-walk
+  and report an operating point nobody requested. A cold FreePDK45 PMOS
+  evaluation at Vg=0.66/Vd=0.88 -- forward-biased drain-body junction --
+  exited 72.7 mV short on the junction voltage and returned a source current
+  9.9% away from the converged point; approaching the same bias gradually gave
+  the converged one, so the answer depended on handle history at 8 of that
+  device's 36 grid biases.
+
+  Two exit conditions were added to the loop: `CKTnoncon` is cleared before
+  every load and must stay clear, and the limited-voltage block the load
+  stores in `CKTstate0` (`vbd..vdes`) must not have moved by more than 1 uV --
+  a walking limiter always moves it by at least one limiting step, tens of mV.
+  Every evaluation now lands on the fixed point that repeated and gradual
+  approaches reach; a regression test pins cold-equals-walked at the bias
+  above, and a subprocess test keeps it bit-identical between block and
+  full-frame matrix clears. Runtime is unchanged (45-point campaign 13.1 s,
+  single residue 55.9 ms). Numbers move where evaluations used to stop early:
+  no signoff status changes and at most 8.8e-6 relative on non-degenerate
+  campaign fields, 6 of 64 codes in the nominal FreePDK45 SAR6 ramp probe as it
+  stood at the time -- all on conversions that were already non-monotonic before
+  the fix, on the StrongARM comparator this release also replaces -- and 181
+  device grids across all three PDKs in the engine-parity corpus, re-frozen
+  after verifying magnitudes: at most 5.4e-16 A absolute on currents
+  (6e-5 relative, subthreshold points), with the five circuit-level golden
+  cases bit-identical throughout.
+
+  **中文：** vendored BSIM4 的 load 会把调用者要求的端电压对上一次 load 落定的
+  电压做限幅，大的偏置跳变要分好几次 load 才走完。host 的内部节点循环只要内部
+  节点稳定就退出，没有任何东西检查这段"走步"是否完成：`DEVfetlim` 静默限幅，
+  rbodyMod 的结限幅分支又用体网络两个结的标志覆盖了核心 vbs/vbd 的 `DEVpnjlim`
+  标志，连 `CKTnoncon` 也保持沉默。在内部节点对该电压不敏感的器件上，循环因此
+  可能在半路退出，返回一个没人要求过的工作点。FreePDK45 PMOS 在 Vg=0.66/
+  Vd=0.88（漏-体结正偏）的冷求值就在结电压差 72.7 mV 时提前退出，源电流偏离
+  收敛点 9.9%；而逐步逼近同一偏置得到的是收敛值——该器件 36 个网格偏置中有 8 个
+  的答案取决于 handle 历史。
+
+  循环新增两个退出条件：每次 load 前清零 `CKTnoncon` 且必须保持为零；load 写进
+  `CKTstate0` 的限幅电压块（`vbd..vdes`）移动不得超过 1 uV——还在走步的限幅器
+  每次至少移动一个限幅步长，数十 mV。现在每次求值都落到重复求值与逐步逼近共同
+  到达的不动点上；回归测试在上述偏置钉死"冷启动 == 走过去"，子进程测试保持块
+  清零与整帧清零逐位一致。运行时间不变（45 点 campaign 13.1 s，单 residue
+  55.9 ms）。数值只在原先提前退出的地方移动：signoff 状态零变化、非退化
+  campaign 字段最大相对差 8.8e-6；当时的名义 FreePDK45 SAR6 斜坡探针 64 码中
+  6 码变化（全部落在修复前就已非单调的转换上，即本次同时被替换掉的 StrongARM
+  比较器）；engine-parity 语料中三个 PDK 共
+  181 个器件网格变化，核对幅度后已重新冻结：电流最大绝对差 5.4e-16 A
+  （相对 6e-5，亚阈值点），五个电路级 golden 用例全程逐位不变。
 
 - **Lifecycle, payload, and SAR input guards / 生命周期、输出与 SAR 输入校验**
 
@@ -2099,7 +2101,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.4.0...HEAD
+[2.4.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.1.5...v2.2.0
 [2.1.5]: https://github.com/751K/circuit-optimization-lab/compare/v2.1.0...v2.1.5
