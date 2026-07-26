@@ -7,7 +7,9 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from .adc import (average_supply_power, average_waveform_source_power,
-                  dynamic_metrics, static_ramp_metrics)
+                  bisect_code_transitions, carry_transition_codes,
+                  dynamic_metrics, sampled_transfer_metrics,
+                  static_ramp_metrics, transition_dnl_inl)
 from ._parallel import worker_device_eval
 from .circuit_loader import CircuitSpec
 from .transient_solver import transient
@@ -556,6 +558,16 @@ def run_sar_sweep(spec: CircuitSpec, vin_values, *, config=None,
     ``include_transients=False`` keeps only code/bits metadata per input and
     avoids recording terminal history. This is the fast path for DNL/INL-only
     sweeps; the default preserves the complete public waveform payload.
+
+    A sweep with fewer samples than ``2**n_bits`` is **subsampled**: transition
+    DNL/INL cannot be measured on it (adjacent samples alias several code
+    boundaries onto one midpoint and the numbers come out wrong, not merely
+    incomplete), so ``metrics`` then comes from
+    :func:`circuitopt.adc.sampled_transfer_metrics` — signed code errors,
+    ``max_abs_code_err``, ``monotonic`` and ``sampled_missing_codes`` — with
+    ``metrics["subsampled"] = True``. A full-density sweep keeps the exact
+    :func:`static_ramp_metrics` payload it always had, plus the code-error
+    fields and ``subsampled = False``.
     """
     cfg = _sar_config(spec, config)
     vin = np.asarray(vin_values, float)
@@ -565,8 +577,17 @@ def run_sar_sweep(spec: CircuitSpec, vin_values, *, config=None,
         spec, vin, cfg, corner, mismatch, workers,
         include_transients=include_transients)
     codes = np.array([item["code"] for item in conversions], np.int64)
-    metrics = static_ramp_metrics(
+    sampled = sampled_transfer_metrics(
         vin, codes, cfg["n_bits"], vmin=0.0, vmax=cfg["vref"])
+    if len(vin) >= (1 << cfg["n_bits"]):
+        metrics = static_ramp_metrics(
+            vin, codes, cfg["n_bits"], vmin=0.0, vmax=cfg["vref"])
+        metrics["code_errors"] = sampled["code_errors"]
+        metrics["max_abs_code_err"] = sampled["max_abs_code_err"]
+        metrics["subsampled"] = False
+    else:
+        metrics = sampled
+        metrics["subsampled"] = True
     return {
         "vin": vin,
         "codes": codes,
@@ -600,6 +621,68 @@ def run_sar_signal(spec: CircuitSpec, vin_values, sample_rate: float, *, config=
             codes, sample_rate, fundamental_bin=fundamental_bin),
         "average_power_w": float(np.mean([item["total_power_w"] for item in conversions])),
         "conversions": conversions,
+        "n_bits": cfg["n_bits"],
+        "vref": cfg["vref"],
+    }
+
+
+def run_sar_transitions(spec: CircuitSpec, codes=None, *, config=None,
+                        corner: str | None = None,
+                        mismatch: Mapping[str, float] | None = None,
+                        tol_lsb: float = 0.05, bracket_lsb: float = 2.0,
+                        workers: int = 1) -> dict:
+    """Locate physical code-transition voltages by lockstep bisection.
+
+    The final-verification counterpart of the subsampled screening sweep:
+    a sparse ramp bounds |INL| through code errors but cannot measure DNL at
+    all, and even a full code-center ramp only brackets each transition to
+    ±0.5 LSB. This drives the converter itself as the search oracle —
+    ``T(k)`` is the smallest input whose conversion reaches code ``k`` — and
+    resolves every requested transition to ``tol_lsb`` LSB in
+    ``O(log(1/tol))`` conversions instead of ``2**n_bits``.
+
+    ``codes=None`` measures :func:`circuitopt.adc.carry_transition_codes` —
+    the offset transition plus both DNL bins around every binary major
+    carry, where a binary-weighted CDAC concentrates its worst DNL. Each
+    bisection round batches all pending probes through one compiled SAR
+    batch call, so ``workers`` parallelises across transitions and the
+    serial depth is the round count (~7 with the default 2-LSB bracket).
+    """
+    cfg = _sar_config(spec, config)
+    levels = 1 << cfg["n_bits"]
+    if codes is None:
+        targets = carry_transition_codes(cfg["n_bits"])
+    else:
+        targets = sorted(set(int(c) for c in codes))
+        if not targets or targets[0] < 1 or targets[-1] > levels - 1:
+            raise ValueError(
+                f"transition codes must lie in [1, {levels - 1}]")
+
+    def probe(vins):
+        convs = _run_sar_conversions(
+            spec, np.asarray(vins, dtype=float), cfg, corner, mismatch,
+            workers, include_transients=False)
+        return np.array([item["code"] for item in convs], dtype=np.int64)
+
+    found = bisect_code_transitions(
+        probe, targets, cfg["n_bits"], vmin=0.0, vmax=cfg["vref"],
+        tol_lsb=tol_lsb, bracket_lsb=bracket_lsb)
+    linearity = transition_dnl_inl(
+        found["targets"], found["transitions"], cfg["n_bits"],
+        vmin=0.0, vmax=cfg["vref"])
+    return {
+        "targets": found["targets"],
+        "transitions": found["transitions"],
+        "inl": linearity["inl"],
+        "dnl_codes": linearity["dnl_codes"],
+        "dnl": linearity["dnl"],
+        "max_abs_dnl": linearity["max_abs_dnl"],
+        "max_abs_inl": linearity["max_abs_inl"],
+        "unmeasured": found["unmeasured"],
+        "conversions": found["conversions"],
+        "rounds": found["rounds"],
+        "lsb": found["lsb"],
+        "tol_lsb": float(tol_lsb),
         "n_bits": cfg["n_bits"],
         "vref": cfg["vref"],
     }

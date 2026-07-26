@@ -518,8 +518,9 @@ TD adjoint 后为 +0.02% / −0.00% / +0.57%。这把此前由边带截断造成
   状态。transient lease 或 campaign worker 会在整个 solve 期间独占这些 handle，
   因而热路径可调用内部无锁求值入口；公共标量/C ABI 仍保留逐 handle mutex，batch
   内重复 handle 也继续串行。盖章顺序仍保持确定。该池是进程级共享的，因此并行归最外层所有：驱动本身
-  已在并发求解时（signoff PVT 点、SAR 转换与蒙特卡洛 trial、corner/PVT 切片、
-  探索候选），其 worker 会内联求值批次，把核让给外层。此规则仅在外层任务数不少于
+  已在并发求解时（signoff PVT 点、SAR 转换与蒙特卡洛 trial、corner/PVT 切片），
+  其 worker 会内联求值批次，把核让给外层。（SAR 探索不再并发候选——其
+  `workers` 直达每个候选自己的转换 sweep，落在上面"SAR 转换"这一档。）此规则仅在外层任务数不少于
   worker 数时生效（与编译式 campaign 的轴策略一致），单次求解仍使用池；
   `CIRCUITOPT_BSIM_NESTED_POOL=1` 可恢复原调度，两种调度的数值结果相同。每次
   求值都只清零固定 BSIM 矩阵中到 `CKTmaxEqNum` 的有效行列——那正是 vendor 会

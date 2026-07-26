@@ -85,10 +85,18 @@ def plot_sar_static(sweep_result: Mapping, out_dir: Path | str = RESULTS,
     ``sweep_result`` is a :func:`circuitopt.sar.run_sar_sweep` payload (``vin``,
     ``codes``, ``metrics``, ``n_bits``, ``vref``). ``note`` is stamped on the figure
     (e.g. to flag a sub-sampled sweep).
+
+    A subsampled payload (``metrics["subsampled"]``) has no transition DNL/INL
+    — those panels used to render the aliasing artifact (a perfect converter
+    showed multi-LSB "DNL") — so it draws the staircase plus the signed
+    code-error panel instead.
     """
+    m = sweep_result["metrics"]
+    if m.get("subsampled"):
+        return _plot_sar_static_subsampled(sweep_result, out_dir, filename,
+                                           note=note, dpi=dpi)
     vin = np.asarray(sweep_result["vin"], float)
     codes = np.asarray(sweep_result["codes"], np.int64)
-    m = sweep_result["metrics"]
     n_bits = int(sweep_result["n_bits"])
     vref = float(sweep_result["vref"])
     levels = 1 << n_bits
@@ -147,6 +155,47 @@ def plot_sar_static(sweep_result: Mapping, out_dir: Path | str = RESULTS,
     ax2.annotate(f"max|INL| = {maxinl:.3f} LSB", xy=(0.01, 0.94),
                  xycoords="axes fraction", ha="left", va="top", color=INK,
                  fontsize=9, bbox=dict(boxstyle="round", fc="white", ec=GRID))
+
+    fig.tight_layout()
+    return _save(fig, out_dir, filename, dpi)
+
+
+def _plot_sar_static_subsampled(sweep_result: Mapping, out_dir, filename,
+                                *, note, dpi) -> Path:
+    """Staircase + signed code errors for a sparse ramp (no transition metrics)."""
+    vin = np.asarray(sweep_result["vin"], float)
+    codes = np.asarray(sweep_result["codes"], np.int64)
+    m = sweep_result["metrics"]
+    n_bits = int(sweep_result["n_bits"])
+    vref = float(sweep_result["vref"])
+    levels = 1 << n_bits
+    ideal = np.asarray(m["ideal_codes"], np.int64)
+    errors = np.asarray(m["code_errors"], float)
+
+    fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9, 6.5))
+    title = (f"SAR transfer — {n_bits}-bit, subsampled "
+             f"{len(vin)} of {levels} (no transition DNL/INL at this density)")
+    if note:
+        title += f"\n{note}"
+    ax0.set_title(title)
+
+    ax0.step(vin, codes, where="post", color=BLUE, lw=2, label="measured")
+    ax0.plot(vin, ideal, color=MUTED, lw=1.2, ls="--", label="ideal")
+    ax0.set_xlabel("Vin [V]"); ax0.set_ylabel("output code")
+    ax0.set_xlim(0, vref); ax0.set_ylim(-0.5, levels - 0.5)
+    ax0.legend(loc="upper left", framealpha=0.9)
+
+    markers, stems, base = ax1.stem(vin, errors)
+    plt.setp(markers, color=AQUA); plt.setp(stems, color=AQUA)
+    plt.setp(base, color=MUTED, lw=0.8)
+    ax1.axhline(0, color=MUTED, lw=0.8)
+    ax1.set_xlabel("Vin [V]"); ax1.set_ylabel("code error [LSB]")
+    ax1.set_xlim(0, vref)
+    ax1.annotate(f"max|code err| = {m['max_abs_code_err']:.0f} LSB  "
+                 f"monotonic = {'yes' if m['monotonic'] else 'NO'}",
+                 xy=(0.01, 0.94), xycoords="axes fraction", ha="left", va="top",
+                 color=INK, fontsize=9,
+                 bbox=dict(boxstyle="round", fc="white", ec=GRID))
 
     fig.tight_layout()
     return _save(fig, out_dir, filename, dpi)
@@ -419,7 +468,11 @@ def _render_showcase(circuit: str, out_dir: Path | str, *, static_points: int,
     note = (f"sub-sampled: {static_points} ramp points over {levels} codes"
             if static_points < levels else None)
     out.append(plot_sar_static(sweep, out_dir=out_dir, note=note))
-    print(f"  static: max|DNL|={sweep['metrics']['max_abs_dnl']:.3f}  ->  {out[-1]}")
+    if sweep["metrics"]["subsampled"]:
+        print(f"  static: max|code err|={sweep['metrics']['max_abs_code_err']:.0f}"
+              f"  ->  {out[-1]}")
+    else:
+        print(f"  static: max|DNL|={sweep['metrics']['max_abs_dnl']:.3f}  ->  {out[-1]}")
 
     phase = 2.0 * np.pi * tone_bin * np.arange(sine_points) / sine_points
     sig_in = 0.5 * vref + 0.45 * vref * np.sin(phase)

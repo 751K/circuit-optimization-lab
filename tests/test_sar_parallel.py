@@ -26,15 +26,22 @@ def _spec():
 
 
 def test_sweep_workers_match_serial():
-    """A 4-point sweep with workers=2 equals the serial codes and static metrics."""
+    """A 4-point sweep with workers=2 equals the serial codes and metrics.
+
+    Four points on a 3-bit converter are a subsampled sweep, so the metric
+    parity probe is the code-error family (transition DNL/INL are not defined
+    on a sparse ramp since the subsampling rework)."""
     from circuitopt.sar import run_sar_sweep
     spec = _spec()
     vin = (np.arange(4) + 0.5) / 4.0
     serial = run_sar_sweep(spec, vin, workers=1)
     parallel = run_sar_sweep(spec, vin, workers=2)
     np.testing.assert_array_equal(serial["codes"], parallel["codes"])
-    assert serial["metrics"]["max_abs_dnl"] == parallel["metrics"]["max_abs_dnl"]
-    assert serial["metrics"]["max_abs_inl"] == parallel["metrics"]["max_abs_inl"]
+    assert serial["metrics"]["subsampled"] and parallel["metrics"]["subsampled"]
+    np.testing.assert_array_equal(serial["metrics"]["code_errors"],
+                                  parallel["metrics"]["code_errors"])
+    assert serial["metrics"]["max_abs_code_err"] == \
+        parallel["metrics"]["max_abs_code_err"]
     for expected, actual in zip(
         serial["conversions"], parallel["conversions"], strict=True
     ):

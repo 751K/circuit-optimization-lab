@@ -19,6 +19,214 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+## [2.5.0] - 2026-07-27
+
+### Added / 新增
+
+- **`tools/workers.py`: per-machine `--workers` advice / `tools/workers.py`：按机器给 `--workers` 建议**
+
+  **English:** The worker counts quoted in the docs were measured on one
+  4P+6E Apple M4 and do not transfer. The new tool detects the machine's
+  topology (macOS `hw.perflevel*`, Intel-hybrid Linux sysfs, uniform
+  fallback elsewhere; stdlib-only) and prints per-workload recommendations
+  from the measured scheduling rules: conversion-parallel modes
+  (ramp/sine/explore/transitions) use every logical core — E cores carry
+  real load — while a mismatch MC with up to `4x` cores' worth of trials
+  runs one trial per task (`workers = trials`; 16 trials on 10 cores are
+  faster at 16 workers than at 10, whose 2-vs-1 trial split leaves a tail)
+  and larger MCs use the core count. `--mc-trials N` answers for a concrete
+  run, `--json` is machine-readable, and `--calibrate` measures the real
+  saturation knee with the compiled SAR ramp (~8 s), preferring the
+  smallest worker count within 5% of the fastest and recording everything
+  to `results/workers_calibration.json`; on the reference machine it
+  resolved the knee to 16 workers at 6.1x over serial. Unit tests pin the
+  topology contract, the recommendation rules and the knee picker
+  (mutation-verified); a CLI smoke pins the JSON shape.
+
+  **中文：** 文档里引用的 worker 数是在一台 4P+6E Apple M4 上测的，换机器不成立。
+  新工具用纯标准库侦测本机拓扑（macOS `hw.perflevel*`、Intel 混合架构 Linux 走
+  sysfs，其余按均匀核回退），并按实测调度规则打印逐工作负载建议：转换级并行模式
+  （ramp/sine/explore/transitions）用全部逻辑核——E 核承载真实负载；失配 MC 在
+  trial 数不超过 4 倍核数时一 trial 一任务（`workers = trials`；10 核上 16 个
+  trial 用 16 worker 反而比 10 快——后者 2/1 分摊必留尾巴），更大的 MC 用核数。
+  `--mc-trials N` 回答具体某次运行，`--json` 机器可读，`--calibrate` 用编译 SAR
+  ramp 实测饱和拐点（约 8 s），在最快值 5% 容差内取最小 worker 数并把全部数据写进
+  `results/workers_calibration.json`；参考机上它把拐点定在 16 worker、对串行
+  6.1 倍。单元测试钉死拓扑契约、建议规则与拐点选取（经变异验证）；CLI smoke 钉死
+  JSON 形状。
+
+- **Transition bisection: final-verification DNL at search cost / 码界二分：以搜索代价做终验 DNL**
+
+  **English:** `adc --transitions` (API `run_sar_transitions`) locates
+  physical code-transition voltages by lockstep bisection — the converter
+  itself is the search oracle, `T(k)` being the smallest input whose
+  conversion reaches code `k`. Every round batches all pending probes
+  through one compiled SAR call, so `--workers` parallelises across
+  transitions and the serial depth is the round count (7 with the default
+  2-LSB bracket; a bracket that screening mispredicted widens to the full
+  range automatically, and a transition outside the input range reports NaN,
+  never a guess). The default target set covers both DNL bins around every
+  binary major carry plus the offset transition — where a binary-weighted
+  CDAC concentrates its worst DNL — and `transition_dnl_inl` reduces the
+  measured boundaries to DNL/INL, reporting only bins whose both edges were
+  measured. This closes the loop the subsampled screening mode opens: sparse
+  ramps bound |INL| but cannot measure DNL, and even a full code-center ramp
+  quantizes every transition to ±0.5 LSB, while bisection reaches `--tol-lsb`
+  (default 0.05) directly. On the nominal 6-bit example: 14 transitions in
+  125 conversions and 1.75 s at 8 workers, resolving a real, uniform
+  −0.17 LSB INL (a global offset the ideal-staircase ramp could not see) and
+  DNL within 0.031 LSB of zero; results are bit-identical across worker
+  counts. At 12 bits the carry set is ~34 transitions ≈ 310 conversions
+  against a 4096-conversion ramp. Pure-numpy unit tests pin the bisection
+  invariant, the bracket-recovery path, the unmeasured contract and the
+  reducer (mutation-verified); simulator tests pin the nominal carries,
+  mismatch sensitivity, worker-count identity, and the CLI guards.
+
+  **中文：** `adc --transitions`（API `run_sar_transitions`）用锁步二分定位物理
+  码界电压——转换器自己就是搜索的 oracle，`T(k)` 即转换结果首次达到码 `k` 的最小
+  输入。每轮把所有未收敛探针合成一次编译 SAR batch 调用，`--workers` 跨跃变并
+  行，串行深度只是轮数（默认 2 LSB 括号下 7 轮；筛查失真导致括号不套住跃变时自动
+  放宽到全量程，跃变落在输入范围之外则报 NaN，绝不编造）。默认目标集覆盖每个二进
+  制 major carry 两侧的 DNL bin 加失调跃变——二进制加权 CDAC 的最差 DNL 就集中在
+  那里——`transition_dnl_inl` 把实测边界归约为 DNL/INL，只报两侧边界都测到的
+  bin。这补上了子采样筛查模式的闭环：稀疏 ramp 能约束 |INL| 但测不了 DNL，而全码
+  中心 ramp 也只能把每个跃变量化到 ±0.5 LSB，二分则直接收敛到 `--tol-lsb`（默认
+  0.05）。名义 6-bit 示例：14 个跃变、125 次转换、8 worker 下 1.75 s，分辨出真实
+  存在的均匀 −0.17 LSB INL（全局失调，理想阶梯 ramp 根本看不见）与 0.031 LSB 内
+  的 DNL；各 worker 数结果逐位一致。12-bit 的 carry 集约 34 个跃变 ≈ 310 次转换，
+  对照 4096 次的全码 ramp。纯 numpy 单元测试钉死二分不变量、括号恢复路径、不可测
+  契约与归约器（经变异验证）；仿真测试钉死名义 carry、失配敏感性、worker 数一致
+  性与 CLI 守卫。
+
+- **Subsampled SAR sweeps with honest code-error metrics / SAR 子采样扫描与诚实的码误差指标**
+
+  **English:** A 12-bit static ramp is 4096 conversions and the full-density
+  cost scales as `2**n * (n+1)`, so sparse ramps are the only affordable
+  screening mode at that resolution — but the toolchain's only subsampling
+  hook (`sar_explore`'s `sweep_points`) scored garbage: a **perfect** 6-bit
+  converter subsampled at 16 of 64 centers reported `missing_codes = 48` (the
+  unsampled codes counted as missing — 4032 at 12 bits) and `max_abs_dnl =
+  3.5` (adjacent samples alias several code boundaries onto one transition
+  midpoint, so the transition metrics read wrong, not merely incomplete), so
+  any constraint or objective on them failed or misled every candidate.
+
+  The new `adc.sampled_transfer_metrics` measures what a sparse ramp actually
+  determines: the signed **code error** at each sample (`|INL|` at a sample is
+  within half an LSB of `|code error|`), plus monotonicity. Everything below
+  full density now reports transition DNL/INL — and missing codes, which a
+  sparse ramp cannot prove present or absent, and whose "expected vs produced"
+  bookkeeping misfires on a plain +1-code offset — as unmeasured NaN, never as
+  aliased numbers. Wired end to end: `run_sar_sweep` returns the code-error
+  metric family (with `subsampled: True`) below `2**n_bits` samples and gains
+  `max_abs_code_err` at full density too; the CLI `--sweep` floor drops from
+  `2**n_bits` to 2; `--plot` renders a staircase + signed-code-error figure
+  for sparse sweeps instead of the aliased DNL/INL panels the showcase used
+  to stamp "sub-sampled" onto; explore's `sweep_points` scores clean and
+  `max_abs_code_err` joins the constraint/objective vocabulary; and mismatch
+  MC accepts `adc.mismatch.sweep_points` (CLI `--sweep-points`), converts the
+  subsampled inputs through the same compiled Rust batch, and gates yield on a
+  new `code_err_threshold` (default 0.5 LSB — every sampled center must read
+  its own code). Measured on the 6-bit example at 16 of 64 points: sweep
+  compute 0.69 s -> 0.19 s and an 8-trial MC 5.24 s -> 1.37 s (both about
+  3.7x of the 4x conversion-count bound), identical across worker counts;
+  MC's full-density rows, gates and summaries are unchanged. One deliberate
+  behavior change: a `run_sar_sweep` call with fewer samples than `2**n_bits`
+  used to return the full transition-metric schema computed on aliased data
+  and now returns the code-error schema — the parity tests that probed those
+  fields now probe the code-error family.
+
+  **中文：** 12-bit 静态 ramp 是 4096 次转换，全密度代价按 `2**n * (n+1)` 增长，
+  稀疏 ramp 是该分辨率下唯一负担得起的筛查模式——但工具链里唯一的子采样钩子
+  （`sar_explore` 的 `sweep_points`）打出来的是垃圾分数：**完美的** 6-bit 转换器
+  在 64 取 16 的子采样下报 `missing_codes = 48`（未采样的码全算 missing——12-bit
+  下是 4032）、`max_abs_dnl = 3.5`（相邻样本把多个码界混叠到同一个跃变中点上，
+  跃变指标读出来是**错的**，不只是不全），因此任何相关约束或目标要么全军覆没、
+  要么误导。
+
+  新增 `adc.sampled_transfer_metrics`，只测稀疏 ramp 真能确定的东西：每个样本处
+  带符号的**码误差**（样本处 `|INL|` 与 `|码误差|` 相差不超过半 LSB），外加单调
+  性。低于全密度时，跃变 DNL/INL——以及 missing codes（稀疏 ramp 无法证明某码存
+  在或缺失，"期望 vs 产出"的记账在整体 +1 码失调下必然误报）——一律报为未测量的
+  NaN，绝不给混叠数字。全链打通：`run_sar_sweep` 在样本数低于 `2**n_bits` 时返回
+  码误差指标族（带 `subsampled: True`），全密度下也新增 `max_abs_code_err`；CLI
+  `--sweep` 下限由 `2**n_bits` 放宽到 2；`--plot` 对稀疏扫描渲染"阶梯 + 带符号
+  码误差"图，取代 showcase 过去盖着"sub-sampled"字样输出的混叠 DNL/INL 面板；
+  explore 的 `sweep_points` 打分归正、`max_abs_code_err` 进入约束/目标词汇表；
+  失配 MC 接受 `adc.mismatch.sweep_points`（CLI `--sweep-points`），子采样输入走
+  同一条编译 Rust batch，良率改由新的 `code_err_threshold` 判定（默认 0.5 LSB，
+  即每个被采样码中心必须读出自己的码）。6-bit 示例 64 取 16 实测：sweep 计算
+  0.69 s -> 0.19 s，8-trial MC 5.24 s -> 1.37 s（都约为 4 倍转换数上限的 3.7
+  倍），各 worker 数结果一致；MC 全密度的行、门与汇总不变。一处有意的行为变化：
+  样本数少于 `2**n_bits` 的 `run_sar_sweep` 调用过去返回在混叠数据上算出的完整
+  跃变指标 schema，现在返回码误差 schema——原先探测那些字段的 parity 测试改为
+  探测码误差族。
+
+### Changed / 变更
+
+- **ADC explore parallelises inside each candidate's sweep / ADC explore 的并行下沉到每个候选自己的 sweep**
+
+  **English:** `sar_explore` used to fan candidates out on a Python thread pool
+  with each candidate's 64-conversion sweep pinned to `workers=1`. Measured on
+  the machine that motivated the change, that outer parallelism topped out at
+  1.8x on 8 workers — concurrent serial sweeps contend inside one process —
+  while the compiled kernel's own Rayon parallelism runs the same sweep at
+  4.4-5.3x. Candidates now run serially and `workers` reaches each candidate's
+  own conversions (`evaluate_sar` grew a `workers` keyword; the coherent-sine
+  dynamic probe also stops recording trajectories it never read). The SAR6
+  explore CLI moved from 9.08 s to 3.59 s for 4 candidates on 8 workers
+  (scaling 1.84x -> 4.74x) and 17.39 s to 7.02 s for 8; serial runtime is
+  unchanged, and per-candidate wall at 8 workers is now 0.83 s against the
+  0.68 s of a bare 64-code ramp. Results are bit-identical across worker
+  counts on the real 6-bit config, including `power_uw`; earlier profiling
+  attributed the gap to per-candidate template recompilation, which measurement
+  refuted — `build_sar_batch` costs 11 ms cold and 1 ms warm, and trajectory
+  finalization costs 10 ms per sweep, so scheduling was the whole story. A
+  regression test pins the worker count each candidate's conversion batch
+  receives.
+
+  **中文：** `sar_explore` 原先把候选摊到 Python 线程池上、每个候选的 64 次转换
+  sweep 固定 `workers=1`。在触发本次改动的机器上实测，这种外层并行 8 worker 只有
+  1.8x——同进程内并发的串行 sweep 相互争抢——而编译内核自己的 Rayon 并行跑同一
+  sweep 有 4.4-5.3x。现在候选串行执行，`workers` 直达每个候选自己的转换
+  （`evaluate_sar` 新增 `workers` 关键字；相干正弦动态探针也不再录制它从未读过的
+  轨迹）。SAR6 explore CLI 在 8 worker 下 4 候选由 9.08 s 降至 3.59 s（扩展比
+  1.84x -> 4.74x），8 候选由 17.39 s 降至 7.02 s；串行耗时不变，8 worker 下每
+  候选墙钟 0.83 s，对照裸 64 码 ramp 的 0.68 s。真 6-bit 配置下各 worker 数结果
+  逐位一致（含 `power_uw`）。此前的画像把差距归因于每候选重编译模板，实测证伪
+  ——`build_sar_batch` 冷 11 ms、热 1 ms，轨迹 finalize 每 sweep 10 ms，问题
+  全部在调度。回归测试钉死每个候选转换批次实际收到的 worker 数。
+
+- **`adc -o` writes codes and metrics by default; `--waveforms` restores the full payload / `adc -o` 默认只落码流与指标；`--waveforms` 恢复完整载荷**
+
+  **English:** `circuit-opt adc ... -o` used to force full trajectory recording
+  and serialize every conversion's waveforms: a 64-code SAR6 sweep wrote an
+  82 MB JSON, and of its 6.10 s wall time 2.75 s (45%) was recording (1.04 s)
+  plus serializing (1.71 s) — more than the codes cost to solve. The output now
+  defaults to the slim tier — codes, bits, decision traces, and power/metric
+  scalars — for all three conversion modes (`--vin`/`--sweep`/`--sine`), and a
+  `--sweep` run no longer records trajectories at all unless asked (the sweep
+  figure never read them). The same sweep with `-o` now runs in 0.95 s and
+  writes 20 KB. The new `--waveforms` flag restores the previous behavior
+  bit-for-bit (verified against a pre-change capture); it requires `-o` and is
+  rejected for `--mc`/`--explore`, whose rows never carried waveforms. Anyone
+  parsing waveforms out of `adc -o` files must pass `--waveforms` from now on.
+  The library API is unchanged (`run_sar_sweep(include_transients=...)` keeps
+  its default); regression tests pin the slim payload shape, the full-payload
+  round-trip, both rejection guards, and — via a spy on `run_sar_sweep` — the
+  fact that a bare `-o` stays on the codes-only path.
+
+  **中文：** `circuit-opt adc ... -o` 原先会强制录制全部轨迹并序列化每次转换的
+  波形：64 码 SAR6 sweep 要写 82 MB JSON，6.10 s 墙钟里有 2.75 s（45%）花在
+  录制（1.04 s）与序列化（1.71 s）上——比解码流本身还贵。现在三种转换模式
+  （`--vin`/`--sweep`/`--sine`）的 `-o` 默认只落精简档——码流、bits、判决轨迹
+  与功耗/指标标量——且 `--sweep` 不再录制轨迹（sweep 图本就不读它们）。同一
+  sweep 加 `-o` 现在 0.95 s、写 20 KB。新增 `--waveforms` 恢复旧行为（与改动
+  前抓取的文件逐位一致已验证）；它必须与 `-o` 同用，`--mc`/`--explore` 会拒绝
+  （其行本就不含波形）。此前从 `adc -o` 文件解析波形的用法，今后必须加
+  `--waveforms`。库 API 不变（`run_sar_sweep(include_transients=...)` 默认值
+  保持）；回归测试钉死精简载荷形状、完整载荷往返、两个拒绝守卫，以及（通过
+  对 `run_sar_sweep` 的探针）裸 `-o` 停留在 codes-only 路径这一事实。
+
 ## [2.4.0] - 2026-07-26
 
 ### Added / 新增
@@ -2101,7 +2309,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.4.0...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.1.5...v2.2.0

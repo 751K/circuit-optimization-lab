@@ -4,7 +4,7 @@ import pytest
 from circuitopt.adc import (average_supply_power, average_waveform_source_power,
                             code_density_metrics,
                             decode_bit_waveforms, dynamic_metrics,
-                            static_ramp_metrics)
+                            sampled_transfer_metrics, static_ramp_metrics)
 
 
 def test_decode_bit_waveforms_msb_first():
@@ -62,3 +62,133 @@ def test_average_waveform_source_power():
     current = np.full_like(t, -10e-6)
     result = average_waveform_source_power(t, {"VDRV": current}, {"VDRV": voltage})
     assert result["total_w"] == pytest.approx(5e-6)
+
+
+# ── sampled_transfer_metrics ──────────────────────────────────────────────────
+def test_sampled_transfer_metrics_full_density_perfect_staircase():
+    n_bits = 4
+    levels = 1 << n_bits
+    vin = (np.arange(levels) + 0.5) / levels
+    codes = np.arange(levels)
+    m = sampled_transfer_metrics(vin, codes, n_bits, vmin=0.0, vmax=1.0)
+    np.testing.assert_array_equal(m["ideal_codes"], codes)
+    np.testing.assert_array_equal(m["code_errors"], 0)
+    assert m["max_abs_code_err"] == 0.0
+    assert m["monotonic"]
+
+
+def test_sampled_transfer_metrics_subsample_scores_a_perfect_converter_clean():
+    """The motivating aliasing bug: a perfect 6-bit converter sampled at every
+    fourth code center reads ``max_abs_dnl = 3.5`` through the transition
+    metrics (four boundaries alias onto one midpoint), while the code-error
+    metrics correctly score it clean."""
+    n_bits = 6
+    levels = 1 << n_bits
+    idx = np.arange(0, levels, 4)
+    vin = (idx + 0.5) / levels
+    codes = idx.copy()
+    aliased = static_ramp_metrics(vin, codes, n_bits, vmin=0.0, vmax=1.0)
+    assert aliased["max_abs_dnl"] > 1.0                   # wrong, by construction
+    m = sampled_transfer_metrics(vin, codes, n_bits, vmin=0.0, vmax=1.0)
+    assert m["max_abs_code_err"] == 0.0 and m["monotonic"]
+
+
+def test_sampled_transfer_metrics_offset_and_missing():
+    n_bits = 4
+    levels = 1 << n_bits
+    idx = np.arange(0, levels, 2)
+    vin = (idx + 0.5) / levels
+    codes = np.minimum(idx + 1, levels - 1)      # global +1 code offset
+    m = sampled_transfer_metrics(vin, codes, n_bits, vmin=0.0, vmax=1.0)
+    assert m["max_abs_code_err"] == 1.0
+    np.testing.assert_array_equal(m["code_errors"][:-1], 1)
+    # No missing-code field: a sparse ramp cannot measure missing codes, and an
+    # expected-vs-produced count would misfire on exactly this offset case.
+    assert "sampled_missing_codes" not in m
+
+
+def test_sampled_transfer_metrics_accepts_non_monotonic_codes():
+    vin = np.array([0.1, 0.3, 0.5, 0.7])
+    codes = np.array([0, 5, 3, 11])
+    m = sampled_transfer_metrics(vin, codes, 4, vmin=0.0, vmax=1.0)
+    assert not m["monotonic"]
+    assert np.isfinite(m["max_abs_code_err"])
+    with pytest.raises(ValueError):
+        static_ramp_metrics(vin, codes, 4, vmin=0.0, vmax=1.0)
+
+
+# ── transition bisection ──────────────────────────────────────────────────────
+def _ideal_probe(n_bits, offset_lsb=0.0):
+    levels = 1 << n_bits
+    lsb = 1.0 / levels
+
+    def probe(vins):
+        vins = np.asarray(vins, float)
+        return np.clip(np.floor(vins / lsb + offset_lsb), 0, levels - 1
+                       ).astype(np.int64)
+    return probe
+
+
+def test_bisect_transitions_locates_the_ideal_quantizer():
+    from circuitopt.adc import bisect_code_transitions
+    n_bits = 4
+    lsb = 1.0 / 16
+    targets = list(range(1, 16))
+    r = bisect_code_transitions(_ideal_probe(n_bits), targets, n_bits,
+                                vmin=0.0, vmax=1.0, tol_lsb=0.05)
+    assert not r["unmeasured"]
+    np.testing.assert_allclose(r["transitions"],
+                               np.array(targets) * lsb, atol=0.05 * lsb)
+    # cost: 2T bracket probes + <= ceil(log2(4/0.05)) rounds of <= T probes
+    assert r["conversions"] <= 2 * 15 + 8 * 15
+    assert r["rounds"] <= 8
+
+
+def test_bisect_transitions_recovers_from_a_missed_bracket():
+    """A +5-LSB offset pushes every transition outside the default 2-LSB
+    bracket: the search must widen to the full range and still land, and the
+    transitions driven below the input range must come back NaN, never a
+    made-up number."""
+    from circuitopt.adc import bisect_code_transitions
+    n_bits = 4
+    lsb = 1.0 / 16
+    targets = [2, 8, 12]
+    r = bisect_code_transitions(_ideal_probe(n_bits, offset_lsb=5.0), targets,
+                                n_bits, vmin=0.0, vmax=1.0, tol_lsb=0.05)
+    # T(k) = (k-5)*lsb; k=2 lies below 0 -> unmeasurable
+    assert r["unmeasured"] == [2]
+    assert np.isnan(r["transitions"][0])
+    np.testing.assert_allclose(r["transitions"][1:],
+                               np.array([3.0, 7.0]) * lsb, atol=0.05 * lsb)
+
+
+def test_bisect_transitions_rejects_bad_probe_shape():
+    from circuitopt.adc import bisect_code_transitions
+    with pytest.raises(ValueError):
+        bisect_code_transitions(lambda v: np.array([0]), [1, 2], 4,
+                                vmin=0.0, vmax=1.0)
+
+
+def test_carry_transition_codes_cover_both_bins_of_every_carry():
+    from circuitopt.adc import carry_transition_codes
+    assert carry_transition_codes(3) == [1, 2, 3, 4, 5]
+    six = carry_transition_codes(6)
+    assert six == [1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33]
+    for j in range(1, 6):                # both DNL bins around each carry
+        m = 1 << j
+        assert {m - 1, m, m + 1} <= set(six)
+    assert carry_transition_codes(1) == [1]
+
+
+def test_transition_dnl_inl_reduces_measured_boundaries_only():
+    from circuitopt.adc import transition_dnl_inl
+    lsb = 1.0 / 16
+    targets = [3, 4, 5, 8]
+    # code 3 compressed by 0.2 LSB, code 4 widened by 0.2; T(8) unmeasured
+    transitions = [3 * lsb, 3.8 * lsb, 5 * lsb, np.nan]
+    r = transition_dnl_inl(targets, transitions, 4, vmin=0.0, vmax=1.0)
+    np.testing.assert_array_equal(r["dnl_codes"], [3, 4])
+    np.testing.assert_allclose(r["dnl"], [-0.2, 0.2], atol=1e-12)
+    np.testing.assert_allclose(r["inl"][:3], [0.0, -0.2, 0.0], atol=1e-12)
+    assert np.isnan(r["inl"][3])
+    assert r["max_abs_dnl"] == pytest.approx(0.2)

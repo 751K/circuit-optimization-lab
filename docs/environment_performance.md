@@ -1,5 +1,17 @@
 # 运行环境与性能基准
 
+> **worker 数怎么选（`tools/workers.py`，2026-07-27）**：不同机器的最优
+> `--workers` 不同，别沿用文档里在 4P+6E Apple M4 上测出的具体数字。
+> `python tools/workers.py` 侦测本机拓扑（macOS `hw.perflevel*` / Intel 混合
+> Linux sysfs；其余按均匀核处理）并按实测规则给出逐工作负载建议：转换级并行
+> （ramp/sine/explore/transitions）用全部逻辑核——E 核承载真实负载，实测 w8 已
+> 好于理想 4P；MC 在 trial 数 ≤ 4×核数时用 `workers = trials`（一 trial 一任务，
+> work-stealing 抹平 P/E 不对称——16 trial 在 10 核上 w16 比 w10 *快*），更多
+> trial 时用核数；单次转换无可并行。`--mc-trials N` 给具体 MC 建议；
+> `--calibrate` 用编译 SAR ramp 真测饱和拐点（本机 8 s，取最快值 5% 容差内的
+> 最小 worker 数，写入 `results/workers_calibration.json`）——与静态规则不一致
+> 时以实测为准。
+>
 > **v2.0.0 基线变更（新）：numba 引擎已移除，编译 Rust 核（`circuitopt_core`，
 > `CIRCUIT_ENGINE=rust`）成为唯一计算引擎。** 因此下文所有以 Numba 为前提的性能
 > 指引与“确认 Numba 在跑”的步骤均为**历史记录（v1.x）**，已被 Rust 核取代：现在

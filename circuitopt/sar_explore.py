@@ -38,9 +38,19 @@ as one knob. Capacitor edits are applied to a per-candidate *copy* of the topolo
 (the shallow-copy pattern of :func:`circuitopt.sar_mc.perturb_capacitors`) so the
 loaded spec is never mutated.
 
-Metrics per candidate: ``max_abs_dnl``, ``max_abs_inl``, ``missing_codes`` (count),
-``monotonic`` (0/1), ``power_uw``, ``conv_time_ns``, ``energy_per_conv_pj`` and —
-only when a ``"dynamic"`` block is present — ``enob``, ``sndr_db``, ``sfdr_db``.
+Metrics per candidate: ``max_abs_dnl``, ``max_abs_inl``, ``max_abs_code_err``,
+``missing_codes`` (count), ``monotonic`` (0/1), ``power_uw``, ``conv_time_ns``,
+``energy_per_conv_pj`` and — only when a ``"dynamic"`` block is present —
+``enob``, ``sndr_db``, ``sfdr_db``.
+
+With ``sweep_points`` below ``2**n_bits`` the sweep is subsampled: transition
+DNL/INL are not measurable there (``max_abs_dnl``/``max_abs_inl`` read NaN, so
+constrain/objective on ``max_abs_code_err`` instead — ``|INL|`` at each sample
+lies within half an LSB of it), and ``missing_codes`` reads NaN too (a sparse
+ramp cannot prove a code present or absent), so drop any ``missing_codes``
+constraint from a subsampled config. This is the intended screening mode for
+resolutions where the full ramp is unaffordable (a 12-bit full ramp is 4096
+conversions; ``sweep_points: 256`` is 16x fewer).
 """
 from __future__ import annotations
 
@@ -48,14 +58,13 @@ import dataclasses
 import json
 import os
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 
 from . import diagnostics
-from ._parallel import worker_device_eval
 from .circuit_loader import CircuitSpec, load_circuit_json
-from .adc import dynamic_metrics, static_ramp_metrics
+from .adc import (dynamic_metrics, sampled_transfer_metrics,
+                  static_ramp_metrics)
 from .explore import (Variable, apply_variables, is_feasible, pareto_front,
                       sample, write_csv, write_jsonl)
 from .sar import _run_sar_conversions, _sar_config
@@ -66,7 +75,8 @@ from .sar_mc import _copy_with_capacitors
 # CSV/JSONL columns are stable and a config typo is rejected instead of silently
 # constraining nothing. The dynamic trio is always present in a metrics dict (NaN
 # when no ``dynamic`` block ran), which keeps the column set constant.
-METRICS = ("max_abs_dnl", "max_abs_inl", "missing_codes", "monotonic",
+METRICS = ("max_abs_dnl", "max_abs_inl", "max_abs_code_err",
+           "missing_codes", "monotonic",
            "power_uw", "conv_time_ns", "energy_per_conv_pj",
            "enob", "sndr_db", "sfdr_db")
 
@@ -243,7 +253,7 @@ def apply_sar_variables(variables, var_values, spec: CircuitSpec) -> CircuitSpec
 
 
 # ── evaluation ────────────────────────────────────────────────────────────────
-def _dynamic_sar_metrics(spec, scfg, dyn, corner):
+def _dynamic_sar_metrics(spec, scfg, dyn, corner, workers=1):
     """Coherent-sine SNDR/SFDR/ENOB for one candidate (only when configured)."""
     vref = scfg["vref"]
     n_samples = dyn["n_samples"]
@@ -252,16 +262,22 @@ def _dynamic_sar_metrics(spec, scfg, dyn, corner):
     amplitude = 0.45 * vref if dyn.get("amplitude") is None else float(dyn["amplitude"])
     phase = 2.0 * np.pi * cycles * np.arange(n_samples) / n_samples
     vin = np.clip(offset + amplitude * np.sin(phase), 0.0, vref)
+    # Only the codes feed the FFT metrics, so skip trajectory recording.
     conversions = _run_sar_conversions(
-        spec, vin, scfg, corner, None, workers=1)
+        spec, vin, scfg, corner, None, workers, include_transients=False)
     codes = np.array([item["code"] for item in conversions], dtype=np.int64)
     m = dynamic_metrics(codes, 1.0, fundamental_bin=cycles)
     return {"enob": float(m["enob"]), "sndr_db": float(m["sndr_db"]),
             "sfdr_db": float(m["sfdr_db"])}
 
 
-def evaluate_sar(spec: CircuitSpec, cfg: SarExploreConfig, *, corner=None) -> dict | None:
+def evaluate_sar(spec: CircuitSpec, cfg: SarExploreConfig, *, corner=None,
+                 workers: int = 1) -> dict | None:
     """Run one candidate's code-center static sweep -> ADC metrics dict (or ``None``).
+
+    ``workers`` parallelises the candidate's own conversions (the compiled
+    kernel's Rayon chunks, or the replay fallback's final-transient threads);
+    any worker count returns the same metrics.
 
     The sweep is the SAR code-center ramp ``(arange(2**n)+0.5)/2**n * vref`` —
     the input that lands one sample squarely in each code bin — optionally
@@ -288,22 +304,31 @@ def evaluate_sar(spec: CircuitSpec, cfg: SarExploreConfig, *, corner=None) -> di
 
     try:
         convs = _run_sar_conversions(
-            spec, vin, scfg, corner, None, workers=1)
+            spec, vin, scfg, corner, None, workers)
     except Exception as exc:                       # pragma: no cover - candidate skip
         diagnostics.note("sar_explore.conversion_fail", exc)
         return None
 
     codes = np.array([c["code"] for c in convs], dtype=np.int64)
     power_w = float(np.mean([c["total_power_w"] for c in convs]))
-    present = np.unique(codes)
-    missing = int(levels - present.size)
-    monotonic = bool(np.all(np.diff(codes) >= 0))
+    subsampled = len(vin) < levels
+    sampled = sampled_transfer_metrics(vin, codes, n_bits, vmin=0.0, vmax=vref)
+    monotonic = sampled["monotonic"]
+    # Missing codes are not measurable on a sparse ramp (any code can hide
+    # between two samples, and expected-vs-produced bookkeeping misfires on a
+    # plain offset), so below full density they are NaN — unmeasured — rather
+    # than the old levels-minus-present count that scored a perfect converter
+    # as "missing 4032 codes" at 12 bits. Constrain subsampled runs on
+    # monotonic and max_abs_code_err instead.
+    missing = (float("nan") if subsampled
+               else float(levels - np.unique(codes).size))
     # Conversion time = the SAR time-grid span (sample phase + n_bits+1 bit periods).
     conv_time_s = scfg["sample_end"] + (n_bits + 1) * scfg["bit_period"]
 
     metrics = {
-        "missing_codes": float(missing),
+        "missing_codes": missing,
         "monotonic": 1.0 if monotonic else 0.0,
+        "max_abs_code_err": float(sampled["max_abs_code_err"]),
         "power_uw": power_w * 1e6,
         "conv_time_ns": conv_time_s * 1e9,
         "energy_per_conv_pj": power_w * conv_time_s * 1e12,
@@ -311,21 +336,31 @@ def evaluate_sar(spec: CircuitSpec, cfg: SarExploreConfig, *, corner=None) -> di
         "sndr_db": float("nan"),
         "sfdr_db": float("nan"),
     }
-    if monotonic:
+    if not monotonic:
+        # Measured and broken (at any density): worst-case linearity.
+        metrics["max_abs_dnl"] = float("inf")
+        metrics["max_abs_inl"] = float("inf")
+    elif subsampled:
+        # Not measurable on a sparse ramp — adjacent samples alias several code
+        # boundaries onto one midpoint and transition DNL/INL read wrong, not
+        # merely incomplete. NaN says "not measured"; screen sparse candidates
+        # on max_abs_code_err (|INL| at each sample is within 0.5 LSB of it).
+        metrics["max_abs_dnl"] = float("nan")
+        metrics["max_abs_inl"] = float("nan")
+    else:
         m = static_ramp_metrics(vin, codes, n_bits, vmin=0.0, vmax=vref)
         dnl = float(m["max_abs_dnl"])
         inl = float(m["max_abs_inl"])
-        # A subsampled sweep can leave every transition undefined -> NaN; treat that
-        # as a failed (worst-case) linearity so the objective/constraint stays finite.
+        # A full sweep can still leave a transition undefined (missing codes at
+        # the ends); treat that as failed (worst-case) linearity so the
+        # objective/constraint stays finite.
         metrics["max_abs_dnl"] = dnl if np.isfinite(dnl) else float("inf")
         metrics["max_abs_inl"] = inl if np.isfinite(inl) else float("inf")
-    else:
-        metrics["max_abs_dnl"] = float("inf")
-        metrics["max_abs_inl"] = float("inf")
 
     if cfg.dynamic is not None:
         try:
-            metrics.update(_dynamic_sar_metrics(spec, scfg, cfg.dynamic, corner))
+            metrics.update(
+                _dynamic_sar_metrics(spec, scfg, cfg.dynamic, corner, workers))
         except Exception as exc:                   # pragma: no cover - dynamic skip
             diagnostics.note("sar_explore.dynamic_fail", exc)
     return metrics
@@ -346,20 +381,26 @@ def sar_explore(spec: CircuitSpec, cfg: SarExploreConfig, *, n=50, seed=0,
     ``pareto`` plus a ``summary``), so the reused ``write_csv``/``write_jsonl`` writers
     accept it directly (pass :data:`METRICS`).
 
-    ``workers`` parallelises *across candidates* on a thread pool (each candidate's
-    code-center sweep still runs serially inside :func:`evaluate_sar` — the pools are
-    never nested). ``progress(done, total)`` fires from the main thread as each
-    candidate finishes, with a monotonic completed count.
+    ``workers`` parallelises each candidate's *own conversions* — the compiled
+    kernel's Rayon chunks (or the replay fallback's final-transient threads) —
+    while the candidates themselves run serially. The outer-thread-pool design
+    this replaces topped out at 1.8x on 8 workers because concurrent serial
+    sweeps contend inside one process, whereas the kernel's inner parallelism
+    reaches the sweep's own scaling (measured 4.4x on the same machine); serial
+    candidates also keep peak memory at one sweep. ``progress(done, total)``
+    fires from the main thread as each candidate finishes, with a monotonic
+    completed count.
     """
     if workers is None or workers < 1:
         raise ValueError("workers must be a positive integer")
     samples = sample(cfg.variables, n, seed=seed, method=method)
 
-    def _eval(i):
+    candidates: list[dict] = []
+    for i in range(n):
         cand_spec = apply_sar_variables(cfg.variables, samples[i], spec)
-        metrics = evaluate_sar(cand_spec, cfg, corner=corner)
+        metrics = evaluate_sar(cand_spec, cfg, corner=corner, workers=workers)
         complete = _has_finite_objectives(metrics, cfg.objectives)
-        return i, {
+        candidates.append({
             "idx": i,
             "vars": samples[i],
             "metrics": metrics,
@@ -367,29 +408,9 @@ def sar_explore(spec: CircuitSpec, cfg: SarExploreConfig, *, n=50, seed=0,
             "feasible": bool(metrics is not None and complete and
                              is_feasible(metrics, cfg.constraints)),
             "pareto": False,
-        }
-
-    candidates: list[dict | None] = [None] * n
-    if workers == 1:
-        for i in range(n):
-            _, cand = _eval(i)
-            candidates[i] = cand
-            if progress is not None:
-                progress(i + 1, n)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            def eval_worker(index):
-                # Candidates are the parallel level here.
-                with worker_device_eval(workers, n):
-                    return _eval(index)
-
-            futures = [ex.submit(eval_worker, i) for i in range(n)]
-            for done, fut in enumerate(as_completed(futures), start=1):
-                i, cand = fut.result()
-                candidates[i] = cand           # final order stays by candidate index
-                if progress is not None:
-                    progress(done, n)
-    candidates = [c for c in candidates if c is not None]
+        })
+        if progress is not None:
+            progress(i + 1, n)
 
     feasible = [c for c in candidates if c["feasible"]]
     front_local = pareto_front([c["metrics"] for c in feasible], cfg.objectives)

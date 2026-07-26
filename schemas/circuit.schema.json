@@ -417,7 +417,9 @@
             "sigma_cu": {"type": "number", "minimum": 0},
             "c_unit": {"$ref": "#/$defs/positiveNumber"},
             "dnl_threshold": {"$ref": "#/$defs/positiveNumber"},
-            "inl_threshold": {"$ref": "#/$defs/positiveNumber"}
+            "inl_threshold": {"$ref": "#/$defs/positiveNumber"},
+            "sweep_points": {"type": "integer", "minimum": 2},
+            "code_err_threshold": {"$ref": "#/$defs/positiveNumber"}
           }
         }
       }

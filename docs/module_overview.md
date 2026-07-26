@@ -594,9 +594,11 @@ Solves the time-domain response of the topology-defined system using backward Eu
   Stamping remains deterministic.
   The pool is process-wide, so parallelism belongs to the outermost level: a
   driver already running solves concurrently (signoff PVT points, SAR
-  conversions and Monte-Carlo trials, corner/PVT slices, exploration
-  candidates) has its workers evaluate batches inline and leaves the cores to
-  that level. This applies only when the outer work is at least as wide as the
+  conversions and Monte-Carlo trials, corner/PVT slices) has its workers
+  evaluate batches inline and leaves the cores to that level. (SAR exploration
+  no longer runs candidates concurrently — its `workers` go to each
+  candidate's own conversion sweep, which lands on the "SAR conversions"
+  case above.) This applies only when the outer work is at least as wide as the
   worker count, matching the compiled campaign's own axis rule, so a single
   solve keeps the pool. `CIRCUITOPT_BSIM_NESTED_POOL=1` restores the previous
   scheduling; results are unaffected either way. Every evaluation clears only

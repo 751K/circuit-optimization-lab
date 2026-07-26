@@ -298,6 +298,13 @@ omitting the block (or leaving sigmas zero) reproduces the nominal conversion.
   gets relative sigma `sigma_cu / sqrt(C / c_unit)` (binary-weighted caps are
   paralleled units and match better).
 - `dnl_threshold` / `inl_threshold` — |DNL|/|INL| yield limits in LSB (default 0.5).
+- `sweep_points` — optional per-trial sweep subsample (default: the full `2**n_bits`
+  code centers). Below full density, transition DNL/INL and missing codes are not
+  measurable (rows report NaN) and the yield gates on `code_err_threshold` instead —
+  the screening mode for 12-bit-class resolutions, where a full ramp is 4096
+  conversions per trial. The CLI flag `--sweep-points` overrides it.
+- `code_err_threshold` — |code error| yield limit in LSB for subsampled sweeps
+  (default 0.5, i.e. every sampled center must read its own code).
 
 ### `outputs`
 

@@ -852,6 +852,27 @@ def _add_adc_parser(subparsers):
     p.add_argument("--mc", type=int, default=None, metavar="N",
                    help="run an N-trial per-instance mismatch Monte-Carlo (uses the "
                         "circuit's adc.mismatch config; --seed/--workers/--corner apply)")
+    p.add_argument("--transitions", nargs="?", const="carries", default=None,
+                   metavar="CODES",
+                   help="locate physical code-transition voltages by lockstep "
+                        "bisection and report DNL/INL at them. Default target "
+                        "set 'carries' = both DNL bins around every binary "
+                        "major carry plus the offset transition; or a comma-"
+                        "separated list of transition codes. Resolves each "
+                        "transition to --tol-lsb (finer than a full ramp's "
+                        "+/-0.5 LSB) in O(log 1/tol) conversions instead of "
+                        "2**n_bits — the 12-bit final-verification mode")
+    p.add_argument("--tol-lsb", type=float, default=0.05,
+                   help="transitions: bisection tolerance in LSB (default 0.05)")
+    p.add_argument("--bracket-lsb", type=float, default=2.0,
+                   help="transitions: initial search bracket around each ideal "
+                        "transition in LSB (default 2.0; a bracket that misses "
+                        "widens to the full range automatically)")
+    p.add_argument("--sweep-points", type=int, default=None, metavar="M",
+                   help="mc only: subsample each trial's code-center sweep to M "
+                        "points (overrides adc.mismatch.sweep_points; yield then "
+                        "gates on code errors instead of transition DNL/INL — "
+                        "the screening mode for 12-bit-class resolutions)")
     p.add_argument("--tone-bin", type=int, default=3,
                    help="coherent sine FFT bin (default: 3)")
     p.add_argument("--sample-rate", type=float, default=10e6,
@@ -869,13 +890,19 @@ def _add_adc_parser(subparsers):
                    help="explore: number of candidates (default: 50)")
     p.add_argument("--seed", type=int, default=0, help="explore: RNG seed")
     p.add_argument("--workers", type=int, default=1,
-                   help="parallel conversions (sweep/sine) or candidates (explore); "
-                        "default 1 (serial). Bit decisions within a conversion stay serial.")
+                   help="parallel conversions (sweep/sine, and inside each explore "
+                        "candidate's sweep) or MC trials; default 1 (serial). "
+                        "Bit decisions within a conversion stay serial.")
     p.add_argument("--csv", default=None, help="explore: write candidate rows to this CSV")
     p.add_argument("--jsonl", default=None, help="explore: write candidate rows to this JSONL")
     p.add_argument("--plot", nargs="?", const="results", default=None, metavar="DIR",
                    help="render the figure(s) matching the run mode into DIR "
                         "(default: results/); needs matplotlib")
+    p.add_argument("--waveforms", action="store_true",
+                   help="record full per-conversion waveforms and keep them in "
+                        "--output; without it -o stores codes, decision traces "
+                        "and power/metrics only (kilobytes instead of tens of "
+                        "megabytes for a 64-code sweep)")
     _add_output_arg(p)
     p.add_argument("--quiet", action="store_true", help="Suppress summary output")
     return p
@@ -973,6 +1000,29 @@ def _cmd_adc_explore(args):
 _ADC_PLOT_FUNCS = {"vin": "plot_sar_conversion", "sweep": "plot_sar_static",
                    "sine": "plot_sar_spectrum", "mc": "plot_sar_mc"}
 
+# The three waveform-bearing fields of a finalized conversion. Everything else
+# (codes, bits, decision traces, power scalars) is kilobyte-sized.
+_ADC_WAVEFORM_KEYS = ("t", "input_waveforms", "transient")
+
+
+def _slim_adc_result(result):
+    """``result`` without per-conversion waveform payloads.
+
+    A 64-code sweep's waveforms serialize to an 82 MB JSON and take longer to
+    write than the codes take to solve, so ``-o`` keeps the codes, bits,
+    decision traces and power/metric scalars unless ``--waveforms`` asks for
+    the full payload. Works on a sweep/sine result (slims each entry of
+    ``conversions``) and on a bare single-conversion result alike.
+    """
+    def slim(conversion):
+        return {key: value for key, value in conversion.items()
+                if key not in _ADC_WAVEFORM_KEYS}
+
+    if "conversions" in result:
+        return {**result,
+                "conversions": [slim(item) for item in result["conversions"]]}
+    return slim(result)
+
 
 def _adc_plot(args, mode, result, spec):
     """Render the ADC figure matching ``mode`` into ``args.plot`` (a no-op when unset).
@@ -1002,34 +1052,103 @@ def _cmd_adc(args):
     # `adc circuit.json` still falls back to a 0.5 V conversion below).
     given = [flag for flag, value in (("--vin", args.vin), ("--sweep", args.sweep),
                                       ("--sine", args.sine), ("--mc", args.mc),
+                                      ("--transitions", args.transitions),
                                       ("--explore", args.explore))
              if value is not None]
     if len(given) > 1:
         raise SystemExit(f"choose only one run mode: {' and '.join(given)} "
                          "are mutually exclusive")
+    # ── --waveforms contract ──
+    # Its only observable effect is the --output payload (plus, for --sweep,
+    # actually recording trajectories), so reject the silent no-op forms
+    # instead of accepting them: without -o nothing would change, and the
+    # mc/explore rows never carried waveforms in the first place.
+    if args.waveforms:
+        if (args.mc is not None or args.explore is not None
+                or args.transitions is not None):
+            raise SystemExit(
+                "--waveforms applies to --vin/--sweep/--sine conversions only")
+        if args.output is None:
+            raise SystemExit("--waveforms only changes --output; pass -o too")
     # ── ADC design-space exploration ──
     if args.explore is not None:
         return _cmd_adc_explore(args)
     spec = _load_spec(args.circuit)
     if spec.adc is None:
         raise SystemExit("circuit JSON has no 'adc' workflow block")
+    if args.sweep_points is not None and args.mc is None:
+        raise SystemExit("--sweep-points applies to --mc only")
     # ── mismatch Monte-Carlo ──
     if args.mc is not None:
         from .sar_mc import sar_mismatch_mc
         if args.mc < 1:
             raise SystemExit("--mc requires at least one trial")
+        override = ({"sweep_points": args.sweep_points}
+                    if args.sweep_points is not None else None)
         result = sar_mismatch_mc(spec, n=args.mc, seed=args.seed, corner=args.corner,
-                                 workers=args.workers)
+                                 workers=args.workers, config=override)
         summary = result["summary"]
         if not args.quiet:
-            print(
-                f"SAR mismatch MC: n={summary['n']}  yield={summary['yield'] * 100:.1f}%  "
-                f"monotonic={summary['monotonic_rate'] * 100:.0f}%  "
-                f"max|DNL| worst={summary['max_abs_dnl']['worst']:.3f} LSB  "
-                f"max|INL| worst={summary['max_abs_inl']['worst']:.3f} LSB")
+            if summary["subsampled"]:
+                print(
+                    f"SAR mismatch MC (subsampled {summary['sweep_points']} pts): "
+                    f"n={summary['n']}  yield={summary['yield'] * 100:.1f}%  "
+                    f"monotonic={summary['monotonic_rate'] * 100:.0f}%  "
+                    f"max|code err| worst="
+                    f"{summary['max_abs_code_err']['worst']:.0f} LSB")
+            else:
+                print(
+                    f"SAR mismatch MC: n={summary['n']}  "
+                    f"yield={summary['yield'] * 100:.1f}%  "
+                    f"monotonic={summary['monotonic_rate'] * 100:.0f}%  "
+                    f"max|DNL| worst={summary['max_abs_dnl']['worst']:.3f} LSB  "
+                    f"max|INL| worst={summary['max_abs_inl']['worst']:.3f} LSB")
         _adc_plot(args, "mc", result, spec)
         if args.output:
             os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
+            with open(args.output, "w") as fh:
+                json.dump(_jsonable(result), fh, indent=2, default=str)
+            if not args.quiet:
+                print(f"wrote {args.output}")
+        return result
+    # ── transition bisection (final-verification DNL/INL) ──
+    if args.transitions is not None:
+        from .sar import run_sar_transitions
+        if args.plot is not None:
+            raise SystemExit("--transitions has no figure; drop --plot")
+        if args.transitions == "carries":
+            codes = None
+        else:
+            try:
+                codes = [int(x) for x in args.transitions.split(",") if x.strip()]
+            except ValueError:
+                raise SystemExit(
+                    "--transitions takes 'carries' or a comma-separated "
+                    "code list") from None
+            if not codes:
+                raise SystemExit("--transitions code list is empty")
+        try:
+            result = run_sar_transitions(
+                spec, codes, corner=args.corner, tol_lsb=args.tol_lsb,
+                bracket_lsb=args.bracket_lsb, workers=args.workers)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        if not args.quiet:
+            worst = ""
+            if len(result["dnl"]):
+                at = result["dnl_codes"][int(np.argmax(np.abs(result["dnl"])))]
+                worst = f" @ code {at}"
+            print(
+                f"SAR transitions: {len(result['targets'])} located to "
+                f"{result['tol_lsb']:g} LSB in {result['conversions']} "
+                f"conversions ({result['rounds']} rounds)  "
+                f"max|DNL|={result['max_abs_dnl']:.3f} LSB{worst}  "
+                f"max|INL|={result['max_abs_inl']:.3f} LSB"
+                + (f"  unmeasured={result['unmeasured']}"
+                   if result["unmeasured"] else ""))
+        if args.output:
+            os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".",
+                        exist_ok=True)
             with open(args.output, "w") as fh:
                 json.dump(_jsonable(result), fh, indent=2, default=str)
             if not args.quiet:
@@ -1061,8 +1180,9 @@ def _cmd_adc(args):
             bits = "".join(str(int(v)) for v in result["bits"])
             print(f"SAR: Vin={result['vin']:.6g} V  code={result['code']}  bits={bits}")
     else:
-        if args.sweep < (1 << int(spec.adc["n_bits"])):
-            raise SystemExit("--sweep must contain at least 2**n_bits samples")
+        if args.sweep < 2:
+            raise SystemExit("--sweep needs at least 2 samples")
+        levels = 1 << int(spec.adc["n_bits"])
         vref = float(spec.adc["vref"])
         vin = (np.arange(args.sweep) + 0.5) * vref / args.sweep
         result = run_sar_sweep(
@@ -1070,10 +1190,20 @@ def _cmd_adc(args):
             vin,
             corner=args.corner,
             workers=args.workers,
-            include_transients=args.plot is not None or args.output is not None,
+            # Only --waveforms needs trajectories recorded: the sweep figure
+            # (plot_sar_static) and the -o default both read codes/metrics
+            # alone, and recording+serializing 64 conversions costs more than
+            # solving them (~1.0 s record + ~1.7 s for the 82 MB write).
+            include_transients=args.waveforms,
         )
         metrics = result["metrics"]
-        if not args.quiet:
+        if metrics["subsampled"]:
+            if not args.quiet:
+                print(
+                    f"SAR sweep (subsampled {args.sweep} of {levels}): "
+                    f"max|code err|={metrics['max_abs_code_err']:.0f} LSB  "
+                    f"monotonic={'yes' if metrics['monotonic'] else 'NO'}")
+        elif not args.quiet:
             print(
                 f"SAR sweep: {args.sweep} conversions  "
                 f"max|DNL|={metrics['max_abs_dnl']:.3f} LSB  "
@@ -1082,9 +1212,10 @@ def _cmd_adc(args):
     mode = "sine" if args.sine is not None else ("vin" if args.sweep is None else "sweep")
     _adc_plot(args, mode, result, spec)
     if args.output:
+        payload = result if args.waveforms else _slim_adc_result(result)
         os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
         with open(args.output, "w") as fh:
-            json.dump(_jsonable(result), fh, indent=2, default=str)
+            json.dump(_jsonable(payload), fh, indent=2, default=str)
         if not args.quiet:
             print(f"wrote {args.output}")
     return result

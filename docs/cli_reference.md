@@ -262,6 +262,10 @@ circuit-opt adc examples/freepdk45_sar6.json \
 # Design-space exploration
 circuit-opt adc examples/freepdk45_sar6.json \
   --explore examples/freepdk45_sar6_explore.json -n 20 --workers 4
+
+# Final-verification DNL: bisect the physical transition voltages at the
+# binary major carries (0.05-LSB resolution, ~O(log 1/tol) conversions)
+circuit-opt adc examples/freepdk45_sar6.json --transitions --workers 8
 ```
 
 Main flags:
@@ -269,9 +273,11 @@ Main flags:
 | Flag | Description |
 |---|---|
 | `--vin VIN` | Single conversion; defaults to running one conversion at 0.5 V when no mode flag is given |
-| `--sweep N` | N uniformly spaced ramp inputs |
+| `--sweep N` | N uniformly spaced ramp inputs. Below `2**n_bits` the sweep is **subsampled**: transition DNL/INL don't exist at that density, so metrics and the `--plot` figure switch to signed code errors (`max_abs_code_err`; \|INL\| at each sample is within 0.5 LSB of it) — the screening mode for 12-bit-class resolutions |
 | `--sine N` | N coherent sine-wave samples |
 | `--mc N` | N per-device mismatch MC trials |
+| `--sweep-points M` | mc only: subsample each trial's code-center sweep to M points (overrides `adc.mismatch.sweep_points`); yield then gates on `code_err_threshold` instead of the DNL/INL limits |
+| `--transitions [CODES]` | Locate physical code-transition voltages by lockstep bisection and report DNL/INL at them. Default `carries` targets both DNL bins around every binary major carry plus the offset transition; or pass a comma-separated code list. Each round batches every pending probe through one compiled call, so `--workers` parallelises across transitions. Resolves to `--tol-lsb` (default 0.05 — ten times finer than a full ramp's ±0.5 LSB quantization) from a `--bracket-lsb` window (default 2, auto-widened to full range if screening lied). The 12-bit final-verification mode: ~34 carries × ~9 probes ≈ 310 conversions instead of 4096 |
 | `--explore CONFIG` | Standalone SAR-explore config JSON; runs ADC design-space exploration; mutually exclusive with `--vin`/`--sweep`/`--sine`/`--mc` |
 | `--tone-bin` | Coherent-input FFT bin, default 3 |
 | `--sample-rate` | Sample rate reported in the results, default 10 MHz |
@@ -280,10 +286,12 @@ Main flags:
 | `--corner` | The current ADC CLI accepts `nom/ss/ff` |
 | `-n`, `--n` | Number of candidates in `--explore` mode, default `50` |
 | `--seed` | RNG seed in `--explore` mode, default `0` |
-| `--workers` | Concurrency for independent final transients, MC trials, or exploration candidates. Native-BSIM single conversions, sweeps, sine tests, MC, and exploration all use the compiled Rust SAR continuation kernel for bit decisions; each input then runs one final transient for waveform and power reporting. MC batches trials in one Rayon pool. Unsupported topologies or incomplete seeds explicitly fall back to Python replay. |
+| `--workers` | Concurrency for independent final transients, MC trials, or — in explore mode — each candidate's own conversion sweep (candidates run serially; the outer-thread-pool design it replaces topped out at 1.8x where the kernel's inner parallelism reaches 4.7x). Native-BSIM single conversions, sweeps, sine tests, MC, and exploration all use the compiled Rust SAR continuation kernel for bit decisions; each input then runs one final transient for waveform and power reporting. MC batches trials in one Rayon pool. Unsupported topologies or incomplete seeds explicitly fall back to Python replay. |
 | `--plot [DIR]` | Write the corresponding PNG; needs the `plot` extra |
+| | Not sure what `--workers` to pass on this machine? `python tools/workers.py` detects the topology and recommends per-workload counts; `--calibrate` measures the real saturation knee |
+| `--waveforms` | Record full per-conversion waveforms (`t`, `input_waveforms`, `transient`) and keep them in `--output`. Without it `-o` stores codes, bits, decision traces, and power/metric scalars only — kilobytes instead of tens of megabytes for a 64-code sweep — and a `--sweep` run skips trajectory recording entirely. Requires `-o`; rejected for `--mc`/`--explore`, whose rows never carried waveforms. |
 | `--csv` / `--jsonl` | ADC explore output |
-| `-o`, `--output` | JSON result |
+| `-o`, `--output` | JSON result (codes/metrics tier by default; see `--waveforms`) |
 
 The closed-loop bit-decision state machine runs in the Rust continuation
 kernel; Python handles workflow orchestration and final result/power assembly.

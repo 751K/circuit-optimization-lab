@@ -58,10 +58,12 @@ from .pss_solver import pss_solve
 from .topology import Topology
 from .transient_solver import transient
 from .adc import (average_supply_power, average_waveform_source_power,
+                  bisect_code_transitions, carry_transition_codes,
                   code_density_metrics, decode_bit_waveforms, dynamic_metrics,
-                  static_ramp_metrics)
+                  sampled_transfer_metrics, static_ramp_metrics,
+                  transition_dnl_inl)
 from .sar import (run_sar_conversion, run_sar_signal, run_sar_sweep,
-                  sar_input_waveforms, sar_time_grid)
+                  run_sar_transitions, sar_input_waveforms, sar_time_grid)
 from .sar_mc import sar_mismatch_mc
 from .sar_explore import (apply_sar_variables, evaluate_sar,
                           load_sar_explore_json, sar_explore_from_dict)
@@ -114,6 +116,7 @@ __all__ = [
     "run_sar_conversion",
     "run_sar_sweep",
     "run_sar_signal",
+    "run_sar_transitions",
     "sar_input_waveforms",
     "sar_time_grid",
     "sar_mismatch_mc",

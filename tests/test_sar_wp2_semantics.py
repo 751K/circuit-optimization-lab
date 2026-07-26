@@ -30,14 +30,21 @@ def _spec():
 
 # ── parallel == serial ────────────────────────────────────────────────────────
 def test_sweep_parallel_matches_serial_even_with_excess_workers():
-    """Order preservation must hold when workers exceed the point count."""
+    """Order preservation must hold when workers exceed the point count.
+
+    Three points on a 3-bit converter are a subsampled sweep, so the parity
+    probe is the code-error metric family (transition DNL/INL do not exist on
+    a sparse ramp since the subsampling rework)."""
     from circuitopt.sar import run_sar_sweep
     vin = np.array([0.1875, 0.4375, 0.6875])
     serial = run_sar_sweep(_spec(), vin)
     threaded = run_sar_sweep(_spec(), vin, workers=8)
     np.testing.assert_array_equal(serial["codes"], threaded["codes"])
-    np.testing.assert_array_equal(serial["metrics"]["dnl"], threaded["metrics"]["dnl"])
-    np.testing.assert_array_equal(serial["metrics"]["inl"], threaded["metrics"]["inl"])
+    assert serial["metrics"]["subsampled"] and threaded["metrics"]["subsampled"]
+    np.testing.assert_array_equal(serial["metrics"]["code_errors"],
+                                  threaded["metrics"]["code_errors"])
+    assert serial["metrics"]["max_abs_code_err"] == \
+        threaded["metrics"]["max_abs_code_err"]
 
 
 def test_mc_parallel_matches_serial_per_trial():
@@ -216,3 +223,280 @@ def test_cli_explore_conflicts_with_sweep():
         cwd=ROOT, capture_output=True, text=True, timeout=120)
     assert proc.returncode != 0
     assert "mutually exclusive" in (proc.stderr + proc.stdout)
+
+
+# ── -o payload tiers (--waveforms) ────────────────────────────────────────────
+_WAVEFORM_KEYS = {"t", "input_waveforms", "transient"}
+
+
+def test_cli_output_defaults_to_codes_and_metrics_only(tmp_path):
+    """A bare ``-o`` writes the slim payload: no per-conversion waveforms."""
+    out = tmp_path / "sweep.json"
+    proc = subprocess.run(
+        [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+         "--sweep", "8", "-o", str(out)],
+        cwd=ROOT, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(out.read_text())
+    assert data["codes"] == list(range(8))
+    assert "max_abs_dnl" in data["metrics"]
+    assert len(data["conversions"]) == 8
+    assert all(not (_WAVEFORM_KEYS & set(c)) for c in data["conversions"])
+    # The whole point: kilobytes, not the tens of megabytes waveforms cost.
+    assert out.stat().st_size < 100_000
+
+
+def test_cli_waveforms_flag_restores_the_full_payload(tmp_path):
+    out = tmp_path / "sweep_full.json"
+    proc = subprocess.run(
+        [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+         "--sweep", "8", "-o", str(out), "--waveforms"],
+        cwd=ROOT, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(out.read_text())
+    assert data["codes"] == list(range(8))
+    assert all(_WAVEFORM_KEYS <= set(c) for c in data["conversions"])
+    node_wave = data["conversions"][0]["transient"]["nodes"]
+    assert node_wave, "waveform payload must carry transient node histories"
+
+
+def test_cli_single_conversion_output_keeps_decisions_and_power(tmp_path):
+    out = tmp_path / "one.json"
+    proc = subprocess.run(
+        [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+         "--vin", "0.4375", "-o", str(out)],
+        cwd=ROOT, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(out.read_text())
+    assert not (_WAVEFORM_KEYS & set(data))
+    assert {"code", "bits", "decisions", "total_power_w"} <= set(data)
+    assert len(data["decisions"]) == data["n_bits"]
+
+
+def test_cli_waveforms_without_output_is_rejected():
+    proc = subprocess.run(
+        [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+         "--sweep", "8", "--waveforms"],
+        cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert proc.returncode != 0
+    assert "--waveforms only changes --output" in (proc.stderr + proc.stdout)
+
+
+def test_cli_waveforms_rejects_modes_without_waveforms(tmp_path):
+    for mode_args in (["--mc", "1"], ["--explore", str(EXPLORE_CFG)]):
+        proc = subprocess.run(
+            [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+             *mode_args, "--waveforms", "-o", str(tmp_path / "x.json")],
+            cwd=ROOT, capture_output=True, text=True, timeout=120)
+        assert proc.returncode != 0
+        assert "--waveforms applies to" in (proc.stderr + proc.stdout)
+
+
+def test_cli_sweep_output_alone_skips_trajectory_recording(tmp_path, monkeypatch):
+    """Pin the compute rule, not just the file shape: a bare ``-o`` (and a bare
+    ``--plot``) must run the codes-only path; only ``--waveforms`` records."""
+    import circuitopt.__main__ as cli
+    import circuitopt.sar as sar_mod
+
+    seen = []
+    real = sar_mod.run_sar_sweep
+
+    def spy(spec, vin, **kwargs):
+        seen.append(kwargs.get("include_transients"))
+        return real(spec, vin, **kwargs)
+
+    monkeypatch.setattr(sar_mod, "run_sar_sweep", spy)
+    cli.main(["adc", str(EXAMPLE), "--sweep", "8", "--quiet",
+              "-o", str(tmp_path / "a.json")])
+    cli.main(["adc", str(EXAMPLE), "--sweep", "8", "--quiet",
+              "-o", str(tmp_path / "b.json"), "--waveforms"])
+    assert seen == [False, True]
+
+
+def test_explore_workers_reach_the_candidate_sweep_kernel(monkeypatch):
+    """``workers`` must parallelise each candidate's own conversions.
+
+    The outer-thread-pool design capped at 1.8x on 8 workers; the kernel's
+    inner parallelism reaches the sweep's own scaling. Pin the wiring: every
+    candidate's conversion batch receives the caller's worker count.
+    """
+    import circuitopt.sar_explore as se
+    from circuitopt.sar_explore import load_sar_explore_json, sar_explore
+
+    seen = []
+    real = se._run_sar_conversions
+
+    def spy(spec, vin, cfg, corner, mismatch, workers, **kwargs):
+        seen.append(workers)
+        return real(spec, vin, cfg, corner, mismatch, workers, **kwargs)
+
+    monkeypatch.setattr(se, "_run_sar_conversions", spy)
+    spec, cfg = load_sar_explore_json(EXPLORE_CFG)
+    result = sar_explore(spec, cfg, n=2, seed=3, workers=3)
+    assert seen == [3, 3]                     # one batch per candidate, inner w=3
+    assert len(result["candidates"]) == 2
+
+
+# ── subsampled sweeps (12-bit screening mode) ────────────────────────────────
+def test_explore_subsampled_scores_the_nominal_circuit_clean():
+    """A perfect converter on a sparse ramp must score clean: code errors 0,
+    monotonic, and DNL/INL/missing reported as unmeasured NaN — not the old
+    levels-minus-present "missing 4032 codes at 12 bits" / aliased-DNL scoring
+    that failed every subsampled candidate."""
+    from circuitopt.sar_explore import evaluate_sar, parse_sar_explore
+    cfg = parse_sar_explore({
+        "variables": {"w": {"min": 1.0, "max": 2.0, "targets": ["W:M1"]}},
+        "constraints": {"monotonic": {"min": 1},
+                        "max_abs_code_err": {"max": 0.5}},
+        "objectives": {"max_abs_code_err": "min", "power_uw": "min"},
+        "sweep_points": 4,
+    })
+    m = evaluate_sar(_spec(), cfg, workers=2)
+    assert m["max_abs_code_err"] == 0.0
+    assert m["monotonic"] == 1.0
+    assert np.isnan(m["max_abs_dnl"]) and np.isnan(m["max_abs_inl"])
+    assert np.isnan(m["missing_codes"])
+    from circuitopt.explore import is_feasible
+    assert is_feasible(m, cfg.constraints)
+
+
+def test_mc_subsampled_rows_gate_on_code_errors():
+    from circuitopt.sar_mc import sar_mismatch_mc
+    cfg = {"sigma_vth0": 0.01, "sweep_points": 4}
+    a = sar_mismatch_mc(_spec(), n=2, seed=5, config=cfg, workers=1)
+    b = sar_mismatch_mc(_spec(), n=2, seed=5, config=cfg, workers=8)
+    for row in a["rows"]:
+        assert row["subsampled"] and len(row["codes"]) == 4
+        assert np.isnan(row["max_abs_dnl"]) and np.isnan(row["missing_codes"])
+        assert np.isfinite(row["max_abs_code_err"])
+    assert a["summary"]["subsampled"] and a["summary"]["sweep_points"] == 4
+    assert 0.0 <= a["summary"]["yield"] <= 1.0
+    # worker count changes nothing, including the code-error yield gate
+    # (NaN-aware compare: subsampled summaries carry NaN for the unmeasured
+    # transition metrics, and nan != nan under plain equality)
+    assert [r["codes"].tolist() for r in a["rows"]] == \
+           [r["codes"].tolist() for r in b["rows"]]
+    sa, sb = a["summary"], b["summary"]
+    assert set(sa) == set(sb)
+    for key in sa:
+        va, vb = sa[key], sb[key]
+        if isinstance(va, dict):
+            assert set(va) == set(vb)
+            for k in va:
+                assert va[k] == vb[k] or (
+                    np.isnan(va[k]) and np.isnan(vb[k]))
+        else:
+            assert va == vb
+
+
+def test_mc_compiled_batch_converts_the_subsampled_inputs():
+    """The compiled batch must be built on the subsampled vin — without the
+    explicit ``vins=`` it silently converts the full 2**n centers and the
+    codes/vin lengths disagree."""
+    from circuitopt.sar import _sar_config
+    from circuitopt.sar_mc import _rust_batch_rows
+    spec = _spec()
+    cfg = _sar_config(spec, None)
+    levels = 1 << cfg["n_bits"]
+    idx = np.unique(np.linspace(0, levels - 1, 4).round().astype(int))
+    vin = (idx + 0.5) / levels * cfg["vref"]
+    rows = _rust_batch_rows(spec, cfg, None, [({}, spec)], vin, workers=1)
+    assert rows is not None, "compiled path must handle a subsampled vin"
+    assert len(rows) == 1 and len(rows[0]["codes"]) == len(vin)
+    assert rows[0]["subsampled"]
+
+
+def test_cli_subsampled_sweep_prints_code_errors(tmp_path):
+    out = tmp_path / "sub.json"
+    proc = subprocess.run(
+        [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+         "--sweep", "4", "-o", str(out)],
+        cwd=ROOT, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, proc.stderr
+    assert "subsampled 4 of 8" in proc.stdout and "code err" in proc.stdout
+    data = json.loads(out.read_text())
+    assert len(data["codes"]) == 4
+    assert data["metrics"]["subsampled"] is True
+    assert "max_abs_code_err" in data["metrics"]
+
+
+def test_cli_subsampled_sweep_renders_the_code_error_figure(tmp_path):
+    proc = subprocess.run(
+        [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+         "--sweep", "4", "--plot", str(tmp_path)],
+        cwd=ROOT, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, proc.stderr
+    assert (tmp_path / "adc_sar_static.png").is_file()
+
+
+def test_cli_sweep_points_requires_mc():
+    proc = subprocess.run(
+        [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+         "--sweep", "8", "--sweep-points", "4"],
+        cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert proc.returncode != 0
+    assert "--sweep-points applies to --mc only" in (proc.stderr + proc.stdout)
+
+
+# ── transition bisection (final-verification DNL) ─────────────────────────────
+def test_transitions_locate_the_nominal_carries_cleanly():
+    """Nominal sar3: every carry transition measurable, DNL near zero at the
+    0.05-LSB tolerance, and byte-identical across worker counts."""
+    from circuitopt.sar import run_sar_transitions
+    a = run_sar_transitions(_spec(), workers=1)
+    b = run_sar_transitions(_spec(), workers=8)
+    assert a["targets"].tolist() == [1, 2, 3, 4, 5]
+    assert not a["unmeasured"]
+    assert np.all(np.isfinite(a["transitions"]))
+    assert a["max_abs_dnl"] <= 0.15
+    assert np.all(np.abs(a["inl"]) < 0.5)      # code-center ramp was ideal
+    np.testing.assert_array_equal(a["transitions"], b["transitions"])
+    assert a["conversions"] == b["conversions"] > 0
+
+
+def test_transitions_shift_under_gross_comparator_mismatch():
+    from circuitopt.sar import run_sar_transitions
+    nominal = run_sar_transitions(_spec(), codes=[2, 4], workers=8)
+    shifted = run_sar_transitions(_spec(), codes=[2, 4], workers=8,
+                                  mismatch={"M1": 0.3})
+    lsb = nominal["lsb"]
+    moved = np.abs(shifted["transitions"] - nominal["transitions"])
+    finite = np.isfinite(moved)
+    assert finite.any()
+    assert np.nanmax(moved) > 0.5 * lsb
+
+
+def test_cli_transitions_smoke_and_guards(tmp_path):
+    out = tmp_path / "tr.json"
+    proc = subprocess.run(
+        [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+         "--transitions", "--workers", "2", "-o", str(out)],
+        cwd=ROOT, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, proc.stderr
+    assert "SAR transitions: 5 located" in proc.stdout
+    data = json.loads(out.read_text())
+    assert data["targets"] == [1, 2, 3, 4, 5]
+    assert len(data["transitions"]) == 5 and "dnl" in data
+
+    for extra, msg in (
+        (["--sweep", "8"], "mutually exclusive"),
+        (["--waveforms", "-o", str(tmp_path / "x.json")], "--waveforms applies"),
+        (["--plot", str(tmp_path)], "no figure"),
+        (["--tol-lsb", "0.05"], None),               # placeholder, replaced below
+    ):
+        if msg is None:
+            continue
+        proc = subprocess.run(
+            [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+             "--transitions", *extra],
+            cwd=ROOT, capture_output=True, text=True, timeout=120)
+        assert proc.returncode != 0
+        assert msg in (proc.stderr + proc.stdout)
+    # out-of-range code list dies cleanly, not with a traceback
+    proc = subprocess.run(
+        [sys.executable, "-m", "circuitopt", "adc", str(EXAMPLE),
+         "--transitions", "0,9"],
+        cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert proc.returncode != 0
+    assert "must lie in [1, 7]" in (proc.stderr + proc.stdout)
+    assert "Traceback" not in proc.stderr

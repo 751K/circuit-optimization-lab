@@ -246,6 +246,10 @@ circuit-opt adc examples/freepdk45_sar6.json \
 # 设计空间探索
 circuit-opt adc examples/freepdk45_sar6.json \
   --explore examples/freepdk45_sar6_explore.json -n 20 --workers 4
+
+# 终验 DNL：在二进制 major carry 处二分定位物理跃变电压
+# （0.05 LSB 分辨率，~O(log 1/tol) 次转换）
+circuit-opt adc examples/freepdk45_sar6.json --transitions --workers 8
 ```
 
 主要参数：
@@ -253,9 +257,11 @@ circuit-opt adc examples/freepdk45_sar6.json \
 | 参数 | 说明 |
 |---|---|
 | `--vin VIN` | 单次转换；不指定模式时默认以 0.5 V 运行一次 |
-| `--sweep N` | N 个均匀 ramp 输入 |
+| `--sweep N` | N 个均匀 ramp 输入。小于 `2**n_bits` 即**子采样**：该密度下不存在跃变 DNL/INL，指标与 `--plot` 图切换为带符号码误差（`max_abs_code_err`；每个样本处\|INL\| 与其相差不超过 0.5 LSB）——12-bit 量级分辨率的筛查模式 |
 | `--sine N` | N 个相干正弦样本 |
 | `--mc N` | N 次逐器件失配 MC |
+| `--sweep-points M` | 仅 mc：把每个 trial 的码中心扫描子采样到 M 点（覆盖 `adc.mismatch.sweep_points`）；良率改由 `code_err_threshold` 判定而非 DNL/INL 上限 |
+| `--transitions [CODES]` | 锁步二分定位物理码界电压并报告其 DNL/INL。默认 `carries` = 每个二进制 major carry 两侧的 DNL bin 加失调跃变；也可给逗号分隔码表。每轮把全部未收敛探针合成一次编译 batch，`--workers` 跨跃变并行。收敛到 `--tol-lsb`（默认 0.05——比全码 ramp 的 ±0.5 LSB 量化细 10 倍），初始括号 `--bracket-lsb`（默认 2，筛查失真时自动放宽全量程）。12-bit 终验模式：~34 跃变 × ~9 探针 ≈ 310 次转换，而非 4096 |
 | `--explore CONFIG` | 独立 SAR-explore 配置 JSON，跑 ADC 设计空间探索；与 `--vin`/`--sweep`/`--sine`/`--mc` 互斥 |
 | `--tone-bin` | 相干输入 FFT bin，默认 3 |
 | `--sample-rate` | 结果中报告的采样率，默认 10 MHz |
@@ -264,10 +270,12 @@ circuit-opt adc examples/freepdk45_sar6.json \
 | `--corner` | 当前 ADC CLI 接受 `nom/ss/ff` |
 | `-n`, `--n` | `--explore` 模式下的候选数量，默认 `50` |
 | `--seed` | `--explore` 模式下的随机种子，默认 `0` |
-| `--workers` | 独立最终瞬态、MC trial 或探索 candidate 的并发数。原生 BSIM 的单次转换、sweep、正弦测试、MC 和探索都使用编译式 Rust SAR 续算内核完成 bit 判决；随后每个输入只运行一次最终瞬态来报告波形和功耗。MC 在单个 Rayon 池中批处理 trial。不支持的拓扑或不完整 DC seed 会显式回退 Python replay。 |
+| `--workers` | 独立最终瞬态、MC trial，或探索模式下每个 candidate 自己转换 sweep 的并发数（candidate 串行执行；被替换的外层线程池设计只能到 1.8x，内核自身并行可达 4.7x）。原生 BSIM 的单次转换、sweep、正弦测试、MC 和探索都使用编译式 Rust SAR 续算内核完成 bit 判决；随后每个输入只运行一次最终瞬态来报告波形和功耗。MC 在单个 Rayon 池中批处理 trial。不支持的拓扑或不完整 DC seed 会显式回退 Python replay。 |
 | `--plot [DIR]` | 输出对应 PNG，需要 `plot` extra |
+| | 不确定本机该给多少 `--workers`？`python tools/workers.py` 侦测拓扑并按工作负载给建议；`--calibrate` 实测饱和拐点 |
+| `--waveforms` | 录制完整逐转换波形（`t`、`input_waveforms`、`transient`）并写入 `--output`。不带它时 `-o` 只落码流、bits、判决轨迹与功耗/指标标量——64 码 sweep 从数十 MB 降到 KB 量级——且 `--sweep` 完全跳过轨迹录制。必须与 `-o` 同用；`--mc`/`--explore` 拒绝该选项（其行本就不含波形）。 |
 | `--csv` / `--jsonl` | ADC explore 输出 |
-| `-o`, `--output` | JSON 结果 |
+| `-o`, `--output` | JSON 结果（默认码流/指标档；见 `--waveforms`） |
 
 闭环 bit 判决状态机在 Rust 续算内核中运行；Python 负责工作流编排以及最终结果和功耗组装。
 比较器、CDAC 和开关仍由晶体管级瞬态计算。当前流程不等价于完整晶体管级数字 SAR 控制器。

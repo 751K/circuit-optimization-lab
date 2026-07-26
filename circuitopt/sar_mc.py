@@ -39,7 +39,7 @@ from typing import Any, Callable, Mapping
 import numpy as np
 
 from . import diagnostics
-from .adc import static_ramp_metrics
+from .adc import sampled_transfer_metrics, static_ramp_metrics
 from ._parallel import worker_device_eval
 from .circuit_loader import CircuitSpec
 from .sar import _sar_config, run_sar_conversion
@@ -63,6 +63,13 @@ def _mismatch_config(spec: CircuitSpec, override: Mapping[str, Any] | None = Non
     sigma_cu : unit-cap relative sigma (dimensionless) at capacitance ``c_unit``.
     c_unit : reference unit capacitance [F] for the cap area scaling.
     dnl_threshold / inl_threshold : |DNL|/|INL| yield limits in LSB (default 0.5).
+    sweep_points : optional per-trial sweep subsample (None = full ``2**n``
+        code centers). Below full density, transition DNL/INL are not
+        measurable (rows read NaN) and the yield gates on ``code_err_threshold``
+        instead — the screening mode for 12-bit-class resolutions.
+    code_err_threshold : |code error| yield limit in LSB for subsampled sweeps
+        (default 0.5, i.e. every sampled center must read its own code —
+        matching the strictness of the 0.5-LSB DNL/INL gates).
     """
     cfg = dict((spec.adc or {}).get("mismatch") or {})
     cfg.update(override or {})
@@ -74,7 +81,14 @@ def _mismatch_config(spec: CircuitSpec, override: Mapping[str, Any] | None = Non
         "c_unit": float(cfg.get("c_unit", 1e-14)),
         "dnl_threshold": float(cfg.get("dnl_threshold", 0.5)),
         "inl_threshold": float(cfg.get("inl_threshold", 0.5)),
+        "sweep_points": (None if cfg.get("sweep_points") is None
+                         else int(cfg["sweep_points"])),
+        "code_err_threshold": float(cfg.get("code_err_threshold", 0.5)),
     }
+    if out["sweep_points"] is not None and out["sweep_points"] < 2:
+        raise ValueError("sweep_points must be at least 2")
+    if out["code_err_threshold"] <= 0.0:
+        raise ValueError("code_err_threshold must be positive")
     out["sigma_vth0_nmos"] = float(cfg.get("sigma_vth0_nmos", out["sigma_vth0"]))
     out["sigma_vth0_pmos"] = float(cfg.get("sigma_vth0_pmos", out["sigma_vth0"]))
     if min(out["w0"], out["l0"], out["c_unit"]) <= 0.0:
@@ -167,26 +181,40 @@ def _row_from_codes(codes, vin: np.ndarray, cfg: dict) -> dict:
     :func:`static_ramp_metrics` requires monotonic codes: under heavy mismatch a
     SAR can go non-monotonic, and that trial is scored as a failure rather than
     crashing the sweep.
+
+    A subsampled sweep (``len(vin) < 2**n_bits``) cannot resolve transitions
+    or prove codes missing: DNL/INL/offset and ``missing_codes`` all read NaN
+    there (not measured, unlike the deliberate ``inf`` of a broken
+    non-monotonic trial), and screening moves to ``max_abs_code_err`` —
+    recorded for every density.
     """
     n_bits = cfg["n_bits"]
     levels = 1 << n_bits
     codes = np.asarray(codes, dtype=np.int64)
-    present = np.unique(codes)
-    missing = int(levels - present.size)
-    monotonic = bool(np.all(np.diff(codes) >= 0))
-    row = {"codes": codes, "missing_codes": missing, "monotonic": monotonic}
-    if monotonic:
+    sampled = sampled_transfer_metrics(vin, codes, n_bits, vmin=0.0, vmax=cfg["vref"])
+    subsampled = len(vin) < levels
+    monotonic = sampled["monotonic"]
+    missing = (np.nan if subsampled
+               else float(levels - np.unique(codes).size))
+    row = {"codes": codes, "missing_codes": missing, "monotonic": monotonic,
+           "max_abs_code_err": float(sampled["max_abs_code_err"]),
+           "subsampled": subsampled}
+    if not monotonic:
+        # Non-monotonic: linearity is undefined; mark worst so the trial fails yield.
+        row["max_abs_dnl"] = np.inf
+        row["max_abs_inl"] = np.inf
+        row["offset_lsb"] = np.nan
+    elif subsampled:
+        row["max_abs_dnl"] = np.nan
+        row["max_abs_inl"] = np.nan
+        row["offset_lsb"] = np.nan
+    else:
         m = static_ramp_metrics(vin, codes, n_bits, vmin=0.0, vmax=cfg["vref"])
         row["max_abs_dnl"] = float(m["max_abs_dnl"])
         row["max_abs_inl"] = float(m["max_abs_inl"])
         # First-transition INL == offset in LSB (NaN if that transition never fired).
         inl = m["inl"]
         row["offset_lsb"] = float(inl[0]) if inl.size else np.nan
-    else:
-        # Non-monotonic: linearity is undefined; mark worst so the trial fails yield.
-        row["max_abs_dnl"] = np.inf
-        row["max_abs_inl"] = np.inf
-        row["offset_lsb"] = np.nan
     return row
 
 
@@ -223,7 +251,7 @@ def _rust_batch_rows(spec: CircuitSpec, cfg: dict, corner: str | None,
     except ImportError:  # pragma: no cover - extension always present in-tree
         return None
     try:
-        batch = build_sar_batch(spec, cfg, corner=corner)
+        batch = build_sar_batch(spec, cfg, corner=corner, vins=vin)
         trials = [(delvto, [cap[3] for cap in trial_spec.topology.capacitors])
                   for delvto, trial_spec in draws]
         codes_list = batch.run(trials, workers)
@@ -290,6 +318,14 @@ def sar_mismatch_mc(spec: CircuitSpec, *, n: int = 50, seed: int = 0,
     n_bits = cfg["n_bits"]
     levels = 1 << n_bits
     vin = (np.arange(levels) + 0.5) / levels * cfg["vref"]
+    # Optional per-trial subsample (mcfg["sweep_points"]): the same code-center
+    # picks the explorer uses, so a 12-bit trial can run 256 conversions
+    # instead of 4096. Scoring switches to code-error metrics in
+    # _row_from_codes / _summarize.
+    sp = mcfg["sweep_points"]
+    if sp is not None and sp < levels:
+        idx = np.unique(np.linspace(0, levels - 1, sp).round().astype(int))
+        vin = vin[idx]
     rng = np.random.default_rng(seed)
 
     # Draw both families for every trial up front, in trial order, so the RNG stream
@@ -356,24 +392,41 @@ def sar_mismatch_mc(spec: CircuitSpec, *, n: int = 50, seed: int = 0,
 
 def _arrays(rows: list[dict]) -> dict:
     return {k: np.array([r[k] for r in rows], dtype=float)
-            for k in ("max_abs_dnl", "max_abs_inl", "offset_lsb", "missing_codes")}
+            for k in ("max_abs_dnl", "max_abs_inl", "max_abs_code_err",
+                      "offset_lsb", "missing_codes")}
 
 
 def _summarize(rows: list[dict], mcfg: Mapping[str, Any]) -> dict:
-    """Aggregate accumulated ``rows`` into the summary payload (reused for progress)."""
+    """Aggregate accumulated ``rows`` into the summary payload (reused for progress).
+
+    Full-density rows keep the historical DNL/INL yield gate. Subsampled rows
+    (uniform per run by construction) have no transition metrics, so the yield
+    gates on ``code_err_threshold`` plus monotonicity and sampled-missing
+    instead — non-monotonic trials fail either way.
+    """
     arr = _arrays(rows)
-    passed = ((arr["max_abs_dnl"] <= mcfg["dnl_threshold"]) &
-              (arr["max_abs_inl"] <= mcfg["inl_threshold"]) &
-              (arr["missing_codes"] == 0))
+    subsampled = bool(rows and rows[0].get("subsampled"))
+    monotonic = np.array([bool(r["monotonic"]) for r in rows])
+    if subsampled:
+        passed = (monotonic &
+                  (arr["max_abs_code_err"] <= mcfg["code_err_threshold"]))
+    else:
+        passed = ((arr["max_abs_dnl"] <= mcfg["dnl_threshold"]) &
+                  (arr["max_abs_inl"] <= mcfg["inl_threshold"]) &
+                  (arr["missing_codes"] == 0))
     return {
         "n": len(rows),
         "max_abs_dnl": _summ(arr["max_abs_dnl"]),
         "max_abs_inl": _summ(arr["max_abs_inl"]),
+        "max_abs_code_err": _summ(arr["max_abs_code_err"]),
         "offset_lsb": _summ(arr["offset_lsb"]),
         "missing_codes": {"mean": float(arr["missing_codes"].mean()),
                           "worst": float(arr["missing_codes"].max())},
-        "monotonic_rate": float(np.mean([r["monotonic"] for r in rows])),
+        "monotonic_rate": float(monotonic.mean()),
         "yield": float(passed.mean()),
         "dnl_threshold": mcfg["dnl_threshold"],
         "inl_threshold": mcfg["inl_threshold"],
+        "code_err_threshold": mcfg["code_err_threshold"],
+        "subsampled": subsampled,
+        "sweep_points": mcfg["sweep_points"],
     }

@@ -294,6 +294,12 @@ bit 的 `decision_time` 附近脉冲到 `high`（评估）——锁存器在 CDA
 - `sigma_cu`——CDAC 单位电容相对 sigma（定义在 `c_unit`）；容值 `C` 的电容相对 sigma 为
   `sigma_cu / sqrt(C / c_unit)`（二进制加权电容由多个单位电容并联，匹配更好）。
 - `dnl_threshold` / `inl_threshold`——良率判定的 |DNL|/|INL| 上限，单位 LSB（默认 0.5）。
+- `sweep_points`——可选的逐 trial 扫描子采样点数（默认全量 `2**n_bits` 码中心）。低于
+  全密度时，跃变 DNL/INL 与 missing codes 无法测量（行内记为 NaN），良率改由
+  `code_err_threshold` 判定——这是 12-bit 量级分辨率的筛查模式（全码 ramp 每 trial
+  要 4096 次转换）。CLI 的 `--sweep-points` 可覆盖此值。
+- `code_err_threshold`——子采样扫描的良率 |码误差| 上限，单位 LSB（默认 0.5，即每个
+  被采样码中心必须读出自己的码）。
 
 ### `outputs`
 
