@@ -97,10 +97,6 @@ def _install_fake_base(monkeypatch, *, settle_flags, wideband_uv, base_overrides
         tsmc._tls.noise_wideband = float("nan") if wideband_uv is None else wideband_uv / 1e6
         return _fake_base_row(**(base_overrides or {}))
     monkeypatch.setattr(tsmc, "_base_run_point", fake_base)
-    # Boost loops are Tian-probed by real ngspice in production; stub them here with
-    # finite, passing PM/UGF so run_point stays a pure-Python logic test.  Individual
-    # tests override this to exercise the pass_boostpm gate.
-    monkeypatch.setattr(tsmc, "_boost_loops", lambda corner, tk, vdd: dict(_boost_ok()))
 
 
 def _fake_code(**overrides):
@@ -111,14 +107,6 @@ def _fake_code(**overrides):
     }
     code.update(overrides)
     return code
-
-
-def _boost_ok(**overrides):
-    """Both gain-boost loops stable and active (the passing default)."""
-    out = {"boostn_pm_deg": 75.0, "boostn_ugf_hz": 5e8,
-           "boostp_pm_deg": 72.0, "boostp_ugf_hz": 5e8}
-    out.update(overrides)
-    return out
 
 
 # ── settle-time aggregation: any nan level => worst is nan ───────────────────────
@@ -205,49 +193,6 @@ def test_campaign_decks_bind_ngspice_oracle_classes():
     for model_type in spec.binding().model_types.values():
         cls = get_model_class(str(model_type))
         assert getattr(cls, "NGSPICE_ADAPTER", None) is not None, model_type
-
-
-# ── boost-loop columns + pass_boostpm gate ───────────────────────────────────────
-def test_boost_columns_populated_and_pass_when_both_stable(monkeypatch):
-    _install_fake_base(monkeypatch, settle_flags=[True] * 5, wideband_uv=100.0)
-    monkeypatch.setattr(tsmc, "_code_transition", lambda *a, **k: _fake_code())
-    row = tsmc.run_point("tt", 27.0, 0.9)
-    for col in ("boostn_pm_deg", "boostn_ugf_hz", "boostp_pm_deg", "boostp_ugf_hz"):
-        assert col in row and np.isfinite(float(row[col]))
-        assert col in campaign.CSV_FIELDS
-    assert row["pass_boostpm"] is True
-    assert row["pass_all"] is True
-
-
-@pytest.mark.parametrize("bad", [
-    {"boostn_pm_deg": 55.0},          # N-side underdamped
-    {"boostp_pm_deg": 59.9},          # P-side just under 60
-    {"boostn_ugf_hz": float("nan")},  # N loop not active
-    {"boostp_ugf_hz": float("nan")},  # P loop not active
-])
-def test_pass_boostpm_false_drops_pass_all(monkeypatch, bad):
-    _install_fake_base(monkeypatch, settle_flags=[True] * 5, wideband_uv=100.0)
-    monkeypatch.setattr(tsmc, "_code_transition", lambda *a, **k: _fake_code())
-    monkeypatch.setattr(tsmc, "_boost_loops",
-                        lambda corner, tk, vdd: _boost_ok(**bad))
-    row = tsmc.run_point("tt", 27.0, 0.9)
-    assert row["pass_boostpm"] is False
-    assert row["pass_all"] is False
-
-
-def test_boost_loops_gate_in_smoke_mode(monkeypatch):
-    # Smoke skips noise + code transition, but the boost loops still run and gate.
-    campaign.SKIP_NOISE = True
-    campaign.SKIP_CODE_TRANSITION = True
-    _install_fake_base(monkeypatch, settle_flags=[True] * 5, wideband_uv=None,
-                       base_overrides={"pass_noise": False})
-    monkeypatch.setattr(tsmc, "_boost_loops",
-                        lambda corner, tk, vdd: _boost_ok(boostp_pm_deg=40.0))
-    row = tsmc.run_point("tt", 27.0, 0.9)
-    assert row["smoke"] == 1
-    assert np.isfinite(row["boostn_pm_deg"]) and np.isfinite(row["boostp_pm_deg"])
-    assert row["pass_boostpm"] is False
-    assert row["pass_all"] is False
 
 
 # ── errors.csv on a failing point; main CSV untouched by the failure ────────────

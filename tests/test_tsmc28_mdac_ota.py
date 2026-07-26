@@ -19,8 +19,6 @@ TB_FILES = [
     "tsmc28hpcp_mdac_ota.json",
     "tsmc28hpcp_mdac_ota_ac.json",
     "tsmc28hpcp_mdac_ota_dmloop.json",
-    "tsmc28hpcp_mdac_ota_boostn.json",
-    "tsmc28hpcp_mdac_ota_boostp.json",
     "tsmc28hpcp_mdac_ota_cmfb1.json",
     "tsmc28hpcp_mdac_ota_cmfb2.json",
     "tsmc28hpcp_mdac_ota_noise.json",
@@ -54,9 +52,9 @@ def test_dut_uses_one_reference_current_and_no_ideal_active_devices():
     assert not deck.get("ccvs")
     # 46 explicit instances collapsed to 38 (the 8 parallel clones M0B/M0C, M9B,
     # M10B, M11B/M11C, M12B/M12C now render as m= multiplicity); C2b adds the two
-    # folded-cascode bottom-mirror sinks MFN1/MFN2 and 8 single-transistor
-    # regulated-cascode boosters (4 CS devices + 4 current-source loads): 38+2+8=48.
-    assert len(deck["devices"]) == 48
+    # folded-cascode bottom-mirror sinks MFN1/MFN2 (iter5 dropped the aux
+    # gain-boost devices -- replica legs bias the cascode gates): 38+2=40.
+    assert len(deck["devices"]) == 40
     assert {
         (model["pdk"], model["model"])
         for model in deck["models"].values()
@@ -84,55 +82,39 @@ def test_parallel_multiplicity_replaces_clone_instances():
         assert mult[name] == m
         assert per_unit[name] == pytest.approx(gen.SZ[name][0])
     # C2b: CORE_SAT_DEVICES also carries the folded-cascode bottom-mirror sinks
-    # MFN1/MFN2, the Iref diode MBN, and every gain-boost aux transistor, so the
-    # campaign region-checks them at every PVT corner.
+    # MFN1/MFN2 and the Iref diode MBN, so the campaign region-checks them at
+    # every PVT corner.
     assert list(gen.CORE_SAT_DEVICES) == [
         "M0", *[f"M{i}" for i in range(1, 13)],
-        *(name for name, *_ in gen.FOLD_DEVICES),
-        "MBN", *(name for name, *_ in gen.BOOST_DEVICES)]
+        *(name for name, *_ in gen.FOLD_DEVICES), "MBN"]
 
 
-def test_gain_boost_aux_amps_and_loop_probes():
+def test_folded_cascode_stage1_wiring_and_replica_gates():
+    """iter5 contract: folded stage-1, replica-biased cascode gates, no aux loops.
+
+    The regulated-cascode boosters were removed on measurement: the PMOS-from-VDD
+    aux pins NN1 to VDD-|Vgs_p| (supply-referenced) while O1 is GND-referenced, so
+    the static window collapses at ff/125/0.95 (M3 vds 2.7 mV measured).  A stray
+    MB* device or a cascode gate off the replica legs means the fix regressed."""
     generator = _generator()
     deck = generator.build_transient()
     devices = {dev["name"]: dev for dev in deck["devices"]}
-    # Every booster transistor is present and named MB*, and appears in the
-    # saturation-checked device set.  C2b: single-transistor regulated-cascode
-    # boosters (a CS device + a current-source load per side), replacing the C2
-    # quad DDA that could not DC-couple at 0.85 V.
-    boost = [name for name, *_ in generator.BOOST_DEVICES]
-    assert set(boost) == {
-        "MBN1", "MBN2", "MBN1L", "MBN2L",
-        "MBP1", "MBP2", "MBP1L", "MBP2L"}
-    for name in boost:
-        assert name in devices
-        assert name.startswith("MB")
-        assert name in generator.CORE_SAT_DEVICES
-    # Each booster's CS device is source-at-a-rail so its output device stays
-    # saturated: PMOS-from-VDD for the NMOS cascodes, NMOS-from-GND for the PMOS.
-    assert devices["MBN1"]["source"] == "VDD" and devices["MBN1"]["gate"] == "NN1"
-    assert devices["MBP1"]["source"] == "GND" and devices["MBP1"]["gate"] == "A1"
-    # The stage-1 cascode gates are regulated by the booster drains, not the fixed
-    # VBNC/VBPC bias any more.
-    assert devices["M3"]["gate"] == "GBN1" and devices["M4"]["gate"] == "GBN2"
-    assert devices["M5"]["gate"] == "GBP1" and devices["M6"]["gate"] == "GBP2"
-    # No new ideal sources sneak in with the boost (still one 20 uA reference).
+    # Folded re-wiring: fold sources M7/M8 land on A1/A2, P-cascodes ride the fold
+    # nodes, N-cascodes sit on their own bottom branch through the MFN sinks.
+    assert devices["M7"]["drain"] == "A1" and devices["M8"]["drain"] == "A2"
+    assert devices["M5"]["source"] == "A1" and devices["M6"]["source"] == "A2"
+    assert devices["M3"]["source"] == "NN1" and devices["M4"]["source"] == "NN2"
+    assert devices["MFN1"]["drain"] == "NN1" and devices["MFN1"]["gate"] == "IB"
+    assert devices["MFN2"]["drain"] == "NN2" and devices["MFN2"]["gate"] == "IB"
+    # Replica-biased cascode gates (wide-swing legs), no boost devices/nodes.
+    assert devices["M3"]["gate"] == "VBNC" and devices["M4"]["gate"] == "VBNC"
+    assert devices["M5"]["gate"] == "VBPC" and devices["M6"]["gate"] == "VBPC"
+    assert not any(name.startswith("MB") and name != "MBN" for name in devices)
+    solved = set(deck["solved"])
+    assert {"NN1", "NN2"} <= solved
+    assert not ({"GBN1", "GBN2", "GBP1", "GBP2", "B1", "B2"} & solved)
+    # Still exactly one ideal reference current.
     assert deck["current_sources"] == [["Iref", "VDD", "IB", 20e-6]]
-
-    # Each boost-loop testbench breaks the +side cascode gate with Vinj and mirrors
-    # the -side with a unity VCVS whose control pair equals the break pair, so
-    # loop_gain_tian_ngspice auto-detects the differential mirror.
-    for which, (dp, dn, gp, gn) in generator.BOOST_BREAK.items():
-        deck = getattr(generator, f"build_{which}")()
-        srcnames = {s[0] for s in deck["vsources"]}
-        assert "Vinj" in srcnames and not (srcnames - {"Vinj", "VACP", "VACN"})
-        vinj = next(s for s in deck["vsources"] if s[0] == "Vinj")
-        assert vinj[1] == gp + "G" and vinj[2] == gp
-        (emir,) = deck["vcvs"]
-        assert emir["mu"] == 1.0 and {emir["cp"], emir["cn"]} == {gp, gp + "G"}
-        assert emir["p"] == gn + "G" and emir["q"] == gn
-        gates = {dev["name"]: dev["gate"] for dev in deck["devices"]}
-        assert gates[dp] == gp + "G" and gates[dn] == gn + "G"
 
 
 def test_cmfb1_probe_keeps_compensation_on_physical_node():

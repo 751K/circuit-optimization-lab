@@ -91,10 +91,6 @@ campaign.GRID_PRIORITY = [
 EXTRA_FIELDS = [
     "settle_time_worst_ns",
     "cm_static_signed_mv", "cm5_min_signed_mv", "cm5_max_signed_mv",
-    # Stage-1 gain-boost loops (C2b): each single-transistor aux regulates a cascode
-    # gate. Both loops are Tian-probed every point (smoke included, like DM/CMFB).
-    "boostn_pm_deg", "boostn_ugf_hz", "boostp_pm_deg", "boostp_ugf_hz",
-    "pass_boostpm",
     "noise_wideband_onoise_uv", "noise_wideband_adc_uv",
     "code_transition_pct", "code_settle_ns", "code_peak_glitch_pct", "code_cm5_mv",
     "code_cm5_signed_mv",
@@ -277,44 +273,11 @@ def _code_transition(corner, tk, vdd):
     }
 
 
-def _boost_loops(corner, tk, vdd):
-    """Tian loop gain of both stage-1 gain-boost loops (PM/UGF per side).
-
-    Each single-transistor aux regulates a cascode gate; ``build_boostn``/
-    ``build_boostp`` break the +side cascode gate with ``Vinj`` and mirror the
-    -side with a unity VCVS, so the Tian probe (``campaign.loop_gain_ngspice``)
-    returns the differential boost loop gain.  The boost is DC-coupled, so |T| is
-    flat down to DC; fstart 1e5 simply starts on that plateau and keeps the sweep
-    cheap.  Runs every point, smoke included (like the DM/CMFB loops), because a
-    slow or underdamped boost loop shows up as a settling doublet."""
-    out = {}
-    for tag, builder in (("boostn", G.build_boostn), ("boostp", G.build_boostp)):
-        spec = circuit_from_dict(builder(vdd))
-        b, dk = campaign._dk(spec, tk)
-        lg = campaign.loop_gain_ngspice(
-            spec.sizes, spec.bias, topo=spec.topology, inject="Vinj",
-            fstart=1e5, fstop=2e10, points=20, nf=spec.nf,
-            model_types=b.model_types, device_kwargs=dk, corner=corner,
-            x0_guess=spec.topology.dc_guesses[0])
-        out[f"{tag}_pm_deg"] = lg["pm"]
-        out[f"{tag}_ugf_hz"] = lg["ugf"]
-    return out
-
-
 def run_point(corner, temp_c, vdd):
     _tls.transients = []
     _tls.op_calls = 0
     _tls.noise_wideband = float("nan")
     row = _base_run_point(corner, temp_c, vdd)
-
-    # ── stage-1 gain-boost loops (C2b): both must be stable and active ───────────
-    row.update(_boost_loops(corner, temp_c + 273.15, vdd))
-    row["pass_boostpm"] = bool(
-        np.isfinite(row["boostn_ugf_hz"]) and np.isfinite(row["boostp_ugf_hz"])
-        and np.isfinite(row["boostn_pm_deg"])
-        and row["boostn_pm_deg"] > campaign.SPEC_PM_DEG
-        and np.isfinite(row["boostp_pm_deg"])
-        and row["boostp_pm_deg"] > campaign.SPEC_PM_DEG)
     row["noise_wideband_onoise_uv"] = _tls.noise_wideband * 1e6
     row["noise_wideband_adc_uv"] = _tls.noise_wideband / 8.0 * 1e6
 
@@ -399,7 +362,7 @@ def run_point(corner, temp_c, vdd):
     # ``smoke`` column records which regime produced the row.
     row["smoke"] = 1 if (campaign.SKIP_NOISE or campaign.SKIP_CODE_TRANSITION) else 0
     measured = ["pass_gain", "pass_dmpm", "pass_cmfb1pm", "pass_cmfb2pm",
-                "pass_boostpm", "pass_settle", "pass_cm", "pass_sat"]
+                "pass_settle", "pass_cm", "pass_sat"]
     if not campaign.SKIP_NOISE:
         measured.append("pass_noise")
     if not campaign.SKIP_CODE_TRANSITION:

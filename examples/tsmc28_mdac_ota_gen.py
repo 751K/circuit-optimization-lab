@@ -27,8 +27,11 @@ RDIV_TOP = 67.2e3
 RDIV_BOTTOM = 60e3
 RSENSE = 100e3
 RSENSE1 = 100e3
-RNC = 14.6e3
-RCP = 11e3
+# iter5 wide-swing legs: NN1 ~ 20uA*RNC (density-matched MCND), A1 ~ VDD-20uA*RCP
+# (density-matched MCPD).  Targets: NN1 ~0.17 (MFN vdsat floor ~0.09, M3 window to
+# O1=VREF1 which bottoms at ~0.40 hot/fast), A1 ~ VDD-0.17 (M7 vdsat headroom).
+RNC = 8.5e3
+RCP = 8.5e3
 RCM = 4e3
 RZ = 420.0
 RDEG2 = 100.0
@@ -46,12 +49,17 @@ SZ = {
     "MPR": (1.5, 0.20),
     "MPRN": (6.0, 0.20),
     "MPC": (1.5, 0.20),
-    # C2: MCND/MCPD are the M3/M4 and M5/M6 density replicas that set the fixed
-    # cascode-gate bias (VBNC/VBPC) -- the operating-point CM the gain-boost aux
-    # amps regulate around.  Re-matched to the short-L cascodes below.
-    "MCND": (4.8, 0.40),
+    # C2b iter5: MCND/MCPD are the M3/M4 and M5/M6 density replicas whose wide-swing
+    # legs (VBNC = Vgs(MCND)+I*RNC, VBPC = VDD-I*RCP-|Vgs(MCPD)|) bias the folded
+    # cascode gates DIRECTLY (no aux loops).  Near-density matching (~2.2x the main
+    # cascodes' current density) keeps the Vgs replica error to tens of mV, so
+    # NN1 ~ I*RNC (GND-referenced, tracking M3's own Vth family) and
+    # A1 ~ VDD - I*RCP (VDD-referenced, matching M7's VDD-referenced source).
+    # The C2 values (4.8/4.9 um at 22x density) put NN1 ~0.35-0.49 V and collapsed
+    # M3 at ff/125/0.95 -- measured; the mismatch term was half the level shift.
+    "MCND": (48.0, 0.40),
     "MNC": (6.0, 0.20),
-    "MCPD": (4.9, 0.30),
+    "MCPD": (48.0, 0.30),
     # MREPP mirrors 4 x 20 uA = 80 uA into the M9-replica diode.  C2 narrows MREP
     # (higher density than M9) so VREF1 -> CMFB1 -> O1/O2 CM sits a few tens of mV
     # HIGHER, giving the NMOS cascodes M3/M4 more Vds at fast/hot (ff/125/0.95).
@@ -67,24 +75,28 @@ SZ = {
     "M1": (260.0, 0.18),
     "M2": (260.0, 0.18),
     # C2b folded cascode: M3/M4 NMOS cascode (source NN1/NN2 -> own bottom branch),
-    # M5/M6 PMOS cascode (source A1/A2 = fold node).  Long L carries the cold-corner
-    # intrinsic gain; the regulated-cascode boost keeps ro high hot.  Widths trimmed
-    # from the C2 telescopic values so the cascode-gate Cgg stays low enough for the
-    # single-transistor booster to reach a ~200 MHz loop UGF (fast settling doublet).
+    # M5/M6 PMOS cascode (source A1/A2 = fold node).  Long L carries the intrinsic
+    # gain; iter5 drops the regulated-cascode aux loops entirely -- measured, the
+    # single-transistor boosters pin NN1 to VDD-|Vgs_p| (supply-referenced) while
+    # O1 is GND-referenced (VREF1 = Vgs replica), and across +-5% supply and the
+    # mixed corners the N-to-P static window pinches to 0.10 V (ff/125/0.95).
     "M3": (400.0, 0.40),
     "M4": (400.0, 0.40),
     "M5": (400.0, 0.30),
     "M6": (400.0, 0.30),
-    # C2b: M7/M8 are now the PMOS FOLD current sources (VDD -> A1/A2), still gated by
-    # CTRL1 so CMFB1 steers the fold current to regulate the stage-1 CM.  Moderate L
-    # keeps their gm (input-referred noise contributor) in check.
-    "M7": (225.0, 0.30),
-    "M8": (225.0, 0.30),
+    # C2b: M7/M8 are the PMOS FOLD current sources (VDD -> A1/A2), gated by CTRL1 so
+    # CMFB1 steers the fold current to regulate the stage-1 CM.  iter5 lengthens
+    # 0.30 -> 0.45: the up-branch output impedance gm5*ro5*(ro7 || ro1) was the
+    # slow/cold-corner gain floor (sf/-40 measured 83.2 dB no-boost), and a longer
+    # fold source raises ro7 AND cuts its gm (a direct output-noise contributor).
+    "M7": (225.0, 0.45),
+    "M8": (225.0, 0.45),
     # C2b: bottom NMOS cascode-mirror sinks (NN1/NN2 -> GND, gate = IB).  Long L /
     # low gm -- a fold-branch current-source device is a direct input-referred noise
-    # contributor; sized for ~0.25 mA branch current at a low-Vov (weak-inv) point.
-    "MFN1": (60.0, 0.50),
-    "MFN2": (60.0, 0.50),
+    # contributor; ~80 uA branch at a low-Vov point.  iter5: 0.50 -> 0.60 for the
+    # down-branch ro (same slow-corner gain floor).
+    "MFN1": (60.0, 0.60),
+    "MFN2": (60.0, 0.60),
     "M9": (200.0, 0.20),
     "M10": (200.0, 0.20),
     "M11": (371.428571, 0.40),
@@ -102,15 +114,6 @@ SZ = {
     "MTB": (2.325, 0.20),
     "MDL2": (0.4875, 0.30),
     "MDS2": (0.4875, 0.30),
-    # ── C2b stage-1 gain-boost: single-transistor regulated-cascode boosters ──
-    # (see BOOST_DEVICES for the why-not-DDA rationale).  Each booster is one common-
-    # source transistor (source at a rail) + one current-source load mirrored off the
-    # existing IB/PB bias.  The CS device W pins the cascode source (VDD-Vsg / Vgs);
-    # the load current sets the booster gm -> the boost-loop UGF.
-    "MBN1": (15.0, 0.30), "MBN2": (15.0, 0.30),      # PMOS CS booster, gate NN1/NN2
-    "MBN1L": (40.0, 0.20), "MBN2L": (40.0, 0.20),    # NMOS load (gate IB, ~135 uA)
-    "MBP1": (8.0, 0.30), "MBP2": (8.0, 0.30),        # NMOS CS booster, gate A1/A2
-    "MBP1L": (14.0, 0.30), "MBP2L": (14.0, 0.30),    # PMOS load (gate PB, ~120 uA)
 }
 
 # Parallel-instance multiplicity (SPICE ``m=``): one drawn macro instance, M
@@ -153,62 +156,25 @@ FOLD_DEVICES = [
 FOLD_NEW_NODES = ["NN1", "NN2"]
 FOLD_ORPHAN_NODES = ["B1", "B2"]   # telescopic PMOS-casc-source nodes, now unused
 
-# main-DUT cascode device -> per-side gate node = the booster output (DC-coupled to
-# the mid-rail fold cascode gates, the whole point of folding).  Each booster closes
-# a local regulated-cascode loop that raises the cascode branch output impedance.
-BOOST_CASCODE_GATE = {"M3": "GBN1", "M4": "GBN2", "M5": "GBP1", "M6": "GBP2"}
-# (name, drain, gate, source, kind) for the per-side regulated-cascode boosters,
-# injected into every DUT deck by ``_port`` (part of the amplifier, not a TB probe).
-#
-# C2b design note -- why single-transistor common-source, NOT the C2 quad DDA:
-# DC-coupling the DDA output to the cascode gate is INFEASIBLE at 0.85 V.  The DDA
-# output device shares the differential-pair tail, which sits at (cascode source +-
-# Vgs_sense); the cascode gate it must drive sits at (cascode source +- Vgs_cascode)
-# -- so the output device's |Vds| collapses to |Vgs_sense - Vgs_cascode| ~ |Vth_p -
-# Vth_n|, a threshold-mismatch knife-edge that goes triode at sf (boostn) and fs
-# (boostp) by 30-60 mV (measured).  Widening the cascodes to sink Vgs below the
-# opposite threshold needs > 4 pF of gate cap, which kills the boost UGF.
-# The fold's intrinsic cascode gain is already ~98 dB (the DDA delivered only ~5 dB
-# of loop gain), so the booster does NOT need diff-pair gain -- it only has to be a
-# stable regulated-cascode loop that keeps every device saturated.  A single common-
-# source transistor whose SOURCE is at a rail does exactly that: its output-device
-# saturation only needs the cascode gate inside [Vdsat, VDD-Vdsat] (always true mid-
-# rail), with no Vth-mismatch term.  It pins the cascode source to VDD-Vsg (boostn)
-# / Vgs (boostp), which TRACKS the NMOS-referenced O1 across corners, so the cascode
-# Vds stays put.  NMOS-cascode gates -> PMOS booster from VDD; PMOS-cascode -> NMOS
-# booster from GND; loads are IB/PB-mirrored current sources (no new ideal source).
-BOOST_DEVICES = [
-    # boostn: PMOS common-source boosters for the NMOS cascodes M3/M4.  Gate = the
-    # sensed cascode source NN1/NN2, source VDD (rail -> output always saturated),
-    # drain = cascode gate GBN1/GBN2; NMOS current-source load gated by the 20 uA IB.
-    ("MBN1", "GBN1", "NN1", "VDD", "p"),
-    ("MBN2", "GBN2", "NN2", "VDD", "p"),
-    ("MBN1L", "GBN1", "IB", "GND", "n"),
-    ("MBN2L", "GBN2", "IB", "GND", "n"),
-    # boostp: NMOS common-source boosters for the PMOS cascodes M5/M6.  Gate = the
-    # sensed fold node A1/A2, source GND, drain = cascode gate GBP1/GBP2; PMOS
-    # current-source load gated by the PB mirror node.
-    ("MBP1", "GBP1", "A1", "GND", "n"),
-    ("MBP2", "GBP2", "A2", "GND", "n"),
-    ("MBP1L", "GBP1", "PB", "VDD", "p"),
-    ("MBP2L", "GBP2", "PB", "VDD", "p"),
-]
-BOOST_NODES = ["GBN1", "GBN2", "GBP1", "GBP2"]
-# No booster reference dividers: each single-transistor booster self-biases its
-# cascode source to its own Vgs (Vth-tracking), so there is nothing to divide.
-BOOST_RESISTORS = []
-# per-side break nodes for the two boost-loop testbenches (build_boostn/p)
-BOOST_BREAK = {
-    "boostn": ("M3", "M4", "GBN1", "GBN2"),
-    "boostp": ("M5", "M6", "GBP1", "GBP2"),
-}
+# C2b design record -- why NO gain-boost aux loops (iter5 decision, all measured):
+# * quad DDA (C2): DC-coupling its output to a telescopic cascode gate collapses the
+#   output device to |Vth_p - Vth_n| (triode at sf/fs by 30-60 mV).
+# * single-transistor regulated cascode (iter2-iter3): the PMOS-from-VDD booster
+#   pins NN1 = VDD - |Vgs_p| (supply-referenced) while O1 = VREF1 = Vgs(MREP) is
+#   GND-referenced; across +-5% supply and mixed corners the whole N-to-P static
+#   window (A1 - NN1) pinches to 0.10 V at ff/125/0.95 (M3 vds 2.7 mV) and any
+#   re-centering pushes NN1 under the MFN vdsat floor at ss/-40/0.85.  Boost gain
+#   (+7-19 dB where alive) is not worth an unfixable bias reference.
+# * iter5: wide-swing replica legs bias the cascode gates directly (VBNC/VBPC with
+#   near-density-matched MCND/MCPD), and the slow-corner intrinsic gain is recovered
+#   with longer fold sources (M7/M8 L=0.45) + longer fold sinks (MFN L=0.60).
 
 # Post-collapse saturation-checked core devices (consumed by the PVT campaign).
-# Every MB* aux transistor and the fold sinks MFN1/MFN2 are region-checked at every
-# PVT corner too.
+# The fold sinks MFN1/MFN2 and the Iref diode MBN are region-checked at every PVT
+# corner too.
 CORE_SAT_DEVICES = ["M0", *[f"M{i}" for i in range(1, 13)],
                     *(name for name, *_ in FOLD_DEVICES),
-                    "MBN", *(name for name, *_ in BOOST_DEVICES)]
+                    "MBN"]
 
 
 def _seed(vdd: float) -> dict[str, float]:
@@ -226,23 +192,16 @@ def _seed(vdd: float) -> dict[str, float]:
         "VCMIN": 0.60,
         "CMR": 0.16,
         "TAIL": 0.15,
-        # C2b folded cascode: A1/A2 are the FOLD nodes (input-pair drain = fold PMOS
-        # source drain = PMOS-cascode source), pinned by the boostp NMOS booster to
-        # its Vgs (~0.6); NN1/NN2 the bottom NMOS-cascode sources, pinned by the
-        # boostn PMOS booster to VDD-Vsg (~0.2); O1/O2 the stage-1 outputs mid-rail.
-        "A1": 0.60,
-        "A2": 0.60,
-        "NN1": 0.20,
-        "NN2": 0.20,
+        # C2b folded cascode (iter5, replica-biased): A1/A2 are the FOLD nodes
+        # (input-pair drain = fold PMOS drain = PMOS-cascode source) at
+        # ~VDD - 20uA*RCP; NN1/NN2 the bottom NMOS-cascode sources at ~20uA*RNC;
+        # O1/O2 the stage-1 outputs at VREF1.
+        "A1": vdd - 0.17,
+        "A2": vdd - 0.17,
+        "NN1": 0.17,
+        "NN2": 0.17,
         "O1": 0.50,
         "O2": 0.50,
-        # C2b single-transistor boosters, DC-coupled: the cascode gates ARE the
-        # booster drains (GBN* mid-high ~0.6 for the NMOS cascodes; GBP* mid-low ~0.3
-        # for the PMOS cascodes).  No DDA tail/reference/coupling nodes.
-        "GBN1": 0.60,
-        "GBN2": 0.60,
-        "GBP1": 0.30,
-        "GBP2": 0.30,
         "OUTP": h,
         "OUTN": h,
         "MZ1": 0.55,
@@ -282,27 +241,23 @@ def _port(deck: dict, vdd: float) -> dict:
         deck["models"].pop(name, None)
     deck["solved"] = [node for node in deck["solved"] if node != "CMT2"]
 
-    # ── C2b folded cascode + DC-coupled gain-boost: re-map the frozen telescopic
-    # stage-1 slots into a folded cascode (M3/M4/M5/M6 sources + M7/M8 drains), point
-    # the four boosted cascode gates at the aux outputs (GBN*/GBP*, DC-coupled), and
-    # add the fold-mirror sinks + aux devices (all part of the amplifier, every deck).
+    # ── C2b folded cascode (iter5): re-map the frozen telescopic stage-1 slots into
+    # a folded cascode (M3/M4/M5/M6 sources + M7/M8 drains) and add the fold-mirror
+    # sinks.  The cascode gates stay on the wide-swing replica legs VBNC/VBPC (the
+    # base telescopic wiring), so no gate re-pointing is needed.
     for dev in deck["devices"]:
-        if dev["name"] in BOOST_CASCODE_GATE:
-            dev["gate"] = BOOST_CASCODE_GATE[dev["name"]]
         if dev["name"] in FOLD_REWIRE:
             dev.update(FOLD_REWIRE[dev["name"]])
-    for name, drain, gate, source, kind in (*FOLD_DEVICES, *BOOST_DEVICES):
+    for name, drain, gate, source, kind in FOLD_DEVICES:
         deck["devices"].append(
             {"name": name, "drain": drain, "gate": gate, "source": source})
         deck["models"][name] = {
             "pdk": "tsmc28hpcp", "model": "nmos" if kind == "n" else "pmos",
             "section": "inherit", "bin": "auto",
         }
-    deck.setdefault("resistors", []).extend(
-        {**res} for res in BOOST_RESISTORS)
     # The telescopic PMOS-cascode-source nodes B1/B2 are orphaned by the fold.
     deck["solved"] = [n for n in deck["solved"] if n not in FOLD_ORPHAN_NODES]
-    for node in (*BOOST_NODES, *FOLD_NEW_NODES):
+    for node in FOLD_NEW_NODES:
         if node not in deck["solved"]:
             deck["solved"].append(node)
 
@@ -383,7 +338,7 @@ def _port(deck: dict, vdd: float) -> dict:
         guess.setdefault("CMPC2", seed["CMPC2"])
         guess.setdefault("CMRA", seed["CMRA"])
         guess.setdefault("CMRB", seed["CMRB"])
-        for node in (*BOOST_NODES, *FOLD_NEW_NODES):
+        for node in FOLD_NEW_NODES:
             guess.setdefault(node, seed[node])
         for node in FOLD_ORPHAN_NODES:
             guess.pop(node, None)
@@ -429,53 +384,6 @@ def build_noise(vdd: float = VDD_NOM) -> dict:
 
 def build_dmloop(vdd: float = VDD_NOM) -> dict:
     return _port(base.build_dmloop(vdd), vdd)
-
-
-def _boost_loop(vdd: float, which: str) -> dict:
-    """Stage-1 gain-boost loop-gain testbench (Tian double injection).
-
-    The DUT is the open-loop ``build_ac`` bias configuration (inputs held at the
-    on-chip VCMIN through 2 Mohm, CL on each output).  ``Vinj`` breaks the +side
-    cascode gate between the aux-amp output (GBN1/GBP1, high-Z) and the cascode
-    MOS gate (GBN1G/GBP1G, capacitive) -- exactly the high-Z/high-Z boundary where
-    Middlebrook lies, so the campaign probes it with the Tian method.  A unity VCVS
-    ``Emir`` mirrors the break anti-phase onto the -side gate so the excitation
-    stays in the differential subspace (auto-detected by loop_gain_tian_ngspice)."""
-    devp, devn, gp, gn = BOOST_BREAK[which]
-    gpg, gng = gp + "G", gn + "G"
-    deck = _port(base.build_ac(vdd), vdd)
-    for dev in deck["devices"]:
-        if dev["name"] == devp:
-            dev["gate"] = gpg
-        elif dev["name"] == devn:
-            dev["gate"] = gng
-    for node in (gpg, gng):
-        if node not in deck["solved"]:
-            deck["solved"].append(node)
-    deck["vsources"] = [s for s in deck.get("vsources", []) if s[0] != "Vinj"]
-    deck["vsources"].append(["Vinj", gpg, gp, 0.0])
-    deck["vcvs"] = [{"name": "Emir", "p": gng, "q": gn,
-                     "cp": gp, "cn": gpg, "mu": 1.0}]
-    seed = _seed(vdd)
-    for guess in deck.get("dc_guesses", []):
-        guess[gpg] = guess.get(gp, seed[gp])
-        guess[gng] = guess.get(gn, seed[gn])
-    deck["name"] = f"tsmc28hpcp_mdac_ota_{which}"
-    side = "NMOS" if which == "boostn" else "PMOS"
-    deck["description"] = (
-        f"Stage-1 {side}-cascode gain-boost loop gain. Vinj breaks the +side "
-        f"cascode gate ({gpg}/{gp}); Emir mirrors the -side gate anti-phase. Tian "
-        "double injection is mandatory (both break terminals are high-Z). PM must "
-        "be > 60 deg and the UGF sits between the main-loop UGF and ~2x it.")
-    return deck
-
-
-def build_boostn(vdd: float = VDD_NOM) -> dict:
-    return _boost_loop(vdd, "boostn")
-
-
-def build_boostp(vdd: float = VDD_NOM) -> dict:
-    return _boost_loop(vdd, "boostp")
 
 
 def build_cmfb1(vdd: float = VDD_NOM) -> dict:
@@ -623,8 +531,6 @@ def all_testbenches(vdd: float = VDD_NOM) -> dict[str, dict]:
         "tsmc28hpcp_mdac_ota.json": build_transient(vdd),
         "tsmc28hpcp_mdac_ota_ac.json": build_ac(vdd),
         "tsmc28hpcp_mdac_ota_dmloop.json": build_dmloop(vdd),
-        "tsmc28hpcp_mdac_ota_boostn.json": build_boostn(vdd),
-        "tsmc28hpcp_mdac_ota_boostp.json": build_boostp(vdd),
         "tsmc28hpcp_mdac_ota_cmfb1.json": build_cmfb1(vdd),
         "tsmc28hpcp_mdac_ota_cmfb2.json": build_cmfb2(vdd),
         "tsmc28hpcp_mdac_ota_noise.json": build_noise(vdd),

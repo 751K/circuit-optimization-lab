@@ -30,10 +30,6 @@
     "NSNS2",
     "INP",
     "INN",
-    "GBN1",
-    "GBN2",
-    "GBP1",
-    "GBP2",
     "NN1",
     "NN2",
     "CMS1",
@@ -105,18 +101,18 @@
       "drain": "VBNC",
       "gate": "VBNC",
       "source": "NBC",
-      "W": 4.8,
+      "W": 48.0,
       "L": 0.4,
-      "NF": 5
+      "NF": 48
     },
     {
       "name": "MCPD",
       "drain": "VBPC",
       "gate": "VBPC",
       "source": "PX",
-      "W": 4.9,
+      "W": 48.0,
       "L": 0.3,
-      "NF": 5
+      "NF": 48
     },
     {
       "name": "MNC",
@@ -194,7 +190,7 @@
     {
       "name": "M3",
       "drain": "O1",
-      "gate": "GBN1",
+      "gate": "VBNC",
       "source": "NN1",
       "W": 400.0,
       "L": 0.4,
@@ -203,7 +199,7 @@
     {
       "name": "M4",
       "drain": "O2",
-      "gate": "GBN2",
+      "gate": "VBNC",
       "source": "NN2",
       "W": 400.0,
       "L": 0.4,
@@ -212,7 +208,7 @@
     {
       "name": "M5",
       "drain": "O1",
-      "gate": "GBP1",
+      "gate": "VBPC",
       "source": "A1",
       "W": 400.0,
       "L": 0.3,
@@ -221,7 +217,7 @@
     {
       "name": "M6",
       "drain": "O2",
-      "gate": "GBP2",
+      "gate": "VBPC",
       "source": "A2",
       "W": 400.0,
       "L": 0.3,
@@ -233,7 +229,7 @@
       "gate": "CTRL1",
       "source": "VDD",
       "W": 225.0,
-      "L": 0.3,
+      "L": 0.45,
       "NF": 200
     },
     {
@@ -242,7 +238,7 @@
       "gate": "CTRL1",
       "source": "VDD",
       "W": 225.0,
-      "L": 0.3,
+      "L": 0.45,
       "NF": 200
     },
     {
@@ -381,7 +377,7 @@
       "gate": "IB",
       "source": "GND",
       "W": 60.0,
-      "L": 0.5,
+      "L": 0.6,
       "NF": 60
     },
     {
@@ -390,80 +386,8 @@
       "gate": "IB",
       "source": "GND",
       "W": 60.0,
-      "L": 0.5,
+      "L": 0.6,
       "NF": 60
-    },
-    {
-      "name": "MBN1",
-      "drain": "GBN1",
-      "gate": "NN1",
-      "source": "VDD",
-      "W": 15.0,
-      "L": 0.3,
-      "NF": 15
-    },
-    {
-      "name": "MBN2",
-      "drain": "GBN2",
-      "gate": "NN2",
-      "source": "VDD",
-      "W": 15.0,
-      "L": 0.3,
-      "NF": 15
-    },
-    {
-      "name": "MBN1L",
-      "drain": "GBN1",
-      "gate": "IB",
-      "source": "GND",
-      "W": 40.0,
-      "L": 0.2,
-      "NF": 40
-    },
-    {
-      "name": "MBN2L",
-      "drain": "GBN2",
-      "gate": "IB",
-      "source": "GND",
-      "W": 40.0,
-      "L": 0.2,
-      "NF": 40
-    },
-    {
-      "name": "MBP1",
-      "drain": "GBP1",
-      "gate": "A1",
-      "source": "GND",
-      "W": 8.0,
-      "L": 0.3,
-      "NF": 8
-    },
-    {
-      "name": "MBP2",
-      "drain": "GBP2",
-      "gate": "A2",
-      "source": "GND",
-      "W": 8.0,
-      "L": 0.3,
-      "NF": 8
-    },
-    {
-      "name": "MBP1L",
-      "drain": "GBP1",
-      "gate": "PB",
-      "source": "VDD",
-      "W": 14.0,
-      "L": 0.3,
-      "NF": 14
-    },
-    {
-      "name": "MBP2L",
-      "drain": "GBP2",
-      "gate": "PB",
-      "source": "VDD",
-      "W": 14.0,
-      "L": 0.3,
-      "NF": 14
     },
     {
       "name": "MSWPN",
@@ -734,58 +658,6 @@
       "section": "inherit",
       "bin": "auto"
     },
-    "MBN1": {
-      "pdk": "tsmc28hpcp",
-      "model": "pmos",
-      "section": "inherit",
-      "bin": "auto",
-      "vb": 0.9
-    },
-    "MBN2": {
-      "pdk": "tsmc28hpcp",
-      "model": "pmos",
-      "section": "inherit",
-      "bin": "auto",
-      "vb": 0.9
-    },
-    "MBN1L": {
-      "pdk": "tsmc28hpcp",
-      "model": "nmos",
-      "section": "inherit",
-      "bin": "auto"
-    },
-    "MBN2L": {
-      "pdk": "tsmc28hpcp",
-      "model": "nmos",
-      "section": "inherit",
-      "bin": "auto"
-    },
-    "MBP1": {
-      "pdk": "tsmc28hpcp",
-      "model": "nmos",
-      "section": "inherit",
-      "bin": "auto"
-    },
-    "MBP2": {
-      "pdk": "tsmc28hpcp",
-      "model": "nmos",
-      "section": "inherit",
-      "bin": "auto"
-    },
-    "MBP1L": {
-      "pdk": "tsmc28hpcp",
-      "model": "pmos",
-      "section": "inherit",
-      "bin": "auto",
-      "vb": 0.9
-    },
-    "MBP2L": {
-      "pdk": "tsmc28hpcp",
-      "model": "pmos",
-      "section": "inherit",
-      "bin": "auto",
-      "vb": 0.9
-    },
     "MSWPN": {
       "pdk": "tsmc28hpcp",
       "model": "nmos",
@@ -990,13 +862,13 @@
       "name": "RNC",
       "a": "NBC",
       "b": "GND",
-      "R": 14600.0
+      "R": 8500.0
     },
     {
       "name": "RCP",
       "a": "VDD",
       "b": "PX",
-      "R": 11000.0
+      "R": 8500.0
     },
     {
       "name": "RCM",
@@ -1172,8 +1044,8 @@
       "VCMIN": 0.6,
       "CMR": 0.16,
       "TAIL": 0.15,
-      "A1": 0.6,
-      "A2": 0.6,
+      "A1": 0.73,
+      "A2": 0.73,
       "O1": 0.5,
       "O2": 0.5,
       "OUTP": 0.45,
@@ -1197,12 +1069,8 @@
       "CMPC2": 0.9,
       "CMRA": 0.07,
       "CMRB": 0.07,
-      "GBN1": 0.6,
-      "GBN2": 0.6,
-      "GBP1": 0.3,
-      "GBP2": 0.3,
-      "NN1": 0.2,
-      "NN2": 0.2,
+      "NN1": 0.17,
+      "NN2": 0.17,
       "RDCP": 0.6,
       "RDCN": 0.6,
       "DCH": 0.9,
