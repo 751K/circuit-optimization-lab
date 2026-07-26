@@ -189,3 +189,48 @@ def test_native_backend_supports_all_controlled_sources():
     np.testing.assert_allclose(result["nodes"]["V3"][1:], vin[1:], atol=1e-8)
     np.testing.assert_allclose(result["nodes"]["V4"][1:], -vin[1:], atol=1e-8)
     np.testing.assert_allclose(result["nodes"]["V5"][1:], vin[1:], atol=1e-8)
+
+
+def test_dc_start_pins_waveform_vsources_at_u0():
+    """The t=0 operating point is solved with waveform vsources at u(t0).
+
+    Regression: the DC-start compile had no input matrix, so a vsource whose
+    value is a waveform key collapsed to 0 V EMF; the first transient step then
+    slammed the full source swing through any coupling capacitor into
+    high-impedance nets (the TSMC28 MDAC hold-phase bench measured +0.42 V of
+    common-mode drift on the floating virtual ground when both CDAC bottom
+    plates stepped 0 -> VCM at t0+).  The driven node must sit at u(t0) at
+    sample zero and a cap-coupled floating net must see no start-up kick."""
+    from circuitopt.circuit_loader import circuit_from_dict
+    from circuitopt.transient_solver import transient
+
+    spec = circuit_from_dict({
+        "name": "dc_start_u0",
+        "solved": ["U", "X", "D"],
+        "rails": {"VDD": "VDD", "GND": 0.0},
+        "bias": {"VDD": 1.0},
+        "devices": [{
+            "name": "M1", "drain": "D", "gate": "X", "source": "GND",
+            "W": 1.0, "L": 0.1,
+        }],
+        "models": {"M1": {"pdk": "freepdk45", "model": "nmos",
+                          "section": "inherit", "bin": "auto"}},
+        "outputs": ["X"],
+        "vsources": [["VU", "U", "GND", "u"], ["VD", "D", "GND", 0.6]],
+        "capacitors": [
+            {"name": "CU", "a": "U", "b": "X", "C": 1e-12},
+            {"name": "CX", "a": "X", "b": "GND", "C": 1e-12},
+        ],
+        "resistors": [["RX", "X", "D", 1e12]],
+        "dc_guesses": [{"U": 0.5, "X": 0.6, "D": 0.6}],
+    })
+    tgrid = np.linspace(0.0, 10e-9, 51)
+    u = np.full_like(tgrid, 0.5)
+    result = transient(
+        spec.sizes, spec.bias, tgrid, binding=spec.binding(), inputs={"u": u})
+    # Sample zero IS the start operating point: the driven node already sits at
+    # u(t0), not at a phantom 0 V.
+    assert result["nodes"]["U"][0] == pytest.approx(0.5, abs=1e-9)
+    # And the cap-coupled high-impedance net sees no start-up charge kick.
+    x = result["nodes"]["X"]
+    assert np.max(np.abs(x - x[0])) < 1e-4

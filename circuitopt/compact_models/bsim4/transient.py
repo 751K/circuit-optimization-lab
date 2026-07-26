@@ -508,8 +508,16 @@ def transient_native_bsim4(
             (abs(float(value)) for value in bias.values()),
             default=1.0,
         )
+        # The start point must be solved in the SAME source configuration the
+        # transient begins in: every waveform-driven vsource clamped at its
+        # u(t0) sample.  Compiling without this pinned each such source to 0 V
+        # at DC and the first transient step slammed the full source swing
+        # through any coupling capacitor into high-impedance nets (measured on
+        # the MDAC hold-phase testbench: both CDAC bottom plates stepped
+        # 0 -> VCM at t0+, +0.42 V of common-mode on the floating inputs).
         V0 = solve_bsim4_dc_rust(
-            CompiledTopology(topo, bias),
+            CompiledTopology(topo, bias, dc_input_values={
+                key: float(inputs[key][0]) for key in input_keys}),
             devices,
             topo.dc_guess_vectors(bias),
             dc_tolerance=dc_tolerance,

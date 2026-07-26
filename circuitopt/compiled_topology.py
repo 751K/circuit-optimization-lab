@@ -207,7 +207,7 @@ class CompiledTopology:
     """
 
     def __init__(self, topo, bias, input_keys=(), node_inputs=None,
-                 transient_inputs=False):
+                 transient_inputs=False, dc_input_values=None):
         self.topo = topo
         self.solved = tuple(topo.solved)
         self.idx = topo.idx
@@ -215,6 +215,15 @@ class CompiledTopology:
         self.rails = topo.rail_values(bias)
         self.input_keys = tuple(input_keys)
         self.input_index = {key: i for i, key in enumerate(self.input_keys)}
+        # DC-start clamp values for waveform-driven vsources: a compile used for
+        # the t=0 operating point has no input matrix, so a source whose value is
+        # a waveform key would otherwise collapse to 0 V EMF.  Solving the start
+        # point with every such source at 0 and then stepping to u(t0) on the
+        # first transient step injects the full source swing through any coupling
+        # capacitor (measured: 2.6 pF CDAC x 0.45 V = 1.17 pC slammed into the
+        # MDAC's floating virtual ground).  Mapping key -> u(t0) here pins the
+        # start point to the same configuration the transient actually begins in.
+        self.dc_input_values = dict(dc_input_values or {})
         self.node_inputs = dict(node_inputs or {})
         self.use_transient_inputs = bool(transient_inputs)
         self.output_weights = topo.output_weights()
@@ -356,6 +365,9 @@ class CompiledTopology:
                 e_const, e_input_idx = float(value), -1
             elif value in self.input_index:
                 e_const, e_input_idx = 0.0, self.input_index[value]
+            elif value in self.dc_input_values:
+                # DC-start compile of a waveform-driven source: pin at u(t0).
+                e_const, e_input_idx = float(self.dc_input_values[value]), -1
             else:                                   # unknown string -> 0 EMF (no DC bias)
                 e_const, e_input_idx = 0.0, -1
             out.append(VsourcePlan(
