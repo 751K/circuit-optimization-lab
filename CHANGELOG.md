@@ -19,6 +19,8 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+## [2.6.0] - 2026-07-28
+
 ### Added / 新增
 
 - **Analog design-loop tooling / 模拟设计环路工具**
@@ -2466,7 +2468,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.6.0...HEAD
+[2.6.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.5.0...v2.6.0
 [2.5.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.2.0...v2.3.0
