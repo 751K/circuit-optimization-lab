@@ -78,7 +78,14 @@ markdown_extensions:
       permalink: true
   - pymdownx.highlight:
       anchor_linenums: true
-  - pymdownx.superfences
+  # Mermaid diagrams. Material ships the renderer, so a ```mermaid fence needs
+  # no extra dependency — only this fence registration, which keeps the block
+  # out of the syntax highlighter and hands it to mermaid.js instead.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.inlinehilite
 
 plugins:

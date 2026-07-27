@@ -9,7 +9,7 @@
 
 100 MS/s、14-bit pipeline ADC 第一级（4-bit 子 ADC、残差增益 8、保持相 5 ns）
 的全差分两级 OTA。测试台 JSON 由单一事实源
-[examples/tsmc28_mdac_ota_gen.py](../examples/tsmc28_mdac_ota_gen.py) 生成，
+[examples/tsmc28_mdac_ota_gen.py](https://github.com/751K/circuit-optimization-lab/blob/main/examples/tsmc28_mdac_ota_gen.py) 生成，
 DUT 块在全部 7 个测试台中逐字节一致。许可模型只从本机
 `TSMC28_MODEL_DIR` / `TSMC28_PDK_ROOT` / `PDK_ROOT` 解析，不进入仓库；可提交
 网表只引用逻辑模型名 `tsmc28hpcp.nmos` / `tsmc28hpcp.pmos`。
@@ -76,16 +76,23 @@ DUT 块在全部 7 个测试台中逐字节一致。许可模型只从本机
 
 ```mermaid
 flowchart LR
-  IREF["20 uA IREF（测试台唯一理想量）"] --> BIAS["镜像 + 复制偏置网络"]
-  IN["MDAC 虚地输入"] --> S1["折叠 cascode 第一级"]
-  S1 --> S2["NMOS 共源第二级"]
-  S2 --> OUT["OUTP/OUTN, 500 fF/侧"]
-  OUT --> CF["Cf = 325 fF/侧"] --> IN
-  OUT --> CFFB["CFF 电容 CM 前馈"] --> CM2
-  OUT --> CM2["CMFB2（电阻平均）"] --> S2
-  S1 --> CM1["CMFB1"] --> S1
-  BIAS --> S1 & S2 & CM1 & CM2
+  IREF(["20 µA Iref<br/>测试台提供的唯一理想量"]) --> BIAS
+  BIAS["偏置网络<br/>镜像 + 宽摆复制腿<br/>产生 VBPC / VBNC / CTRL1"]
+
+  IN(["MDAC 虚地<br/>INP / INN"]) --> ST1
+  ST1["第一级 · 折叠 cascode<br/>M1/M2 输入对，漏即折叠节点 A1/A2<br/>M7/M8 VDD 侧电流源 · M5/M6 PMOS cascode<br/>M3/M4 NMOS cascode · MFN1/MFN2 电流沉<br/>高阻输出 O1/O2"]
+  ST2["第二级 · NMOS 共源<br/>M9/M10 共源管 · M11/M12 PMOS 负载<br/>Miller 补偿 Cc = 840 fF 串 Rz = 400 Ω"]
+  ST1 --> ST2 --> OUT(["OUTP / OUTN<br/>CL = 500 fF 每侧"])
+  OUT -- "Cf = 325 fF 每侧" --> IN
+
+  ST1 -.-> CMFB1["CMFB1<br/>电阻平均 O1/O2 到 CMS1，与复制参考 VREF1 比较<br/>调 M7/M8 折叠电流"]
+  CMFB1 -.-> ST1
+  OUT -.-> CMFB2["CMFB2<br/>电阻平均 OUTP/OUTN 到 CMS，与分压 VCM 比较<br/>经二极管 MDL2 镜像；另加 CFF 电容共模前馈"]
+  CMFB2 -.-> ST2
+  BIAS -.-> ST1 & ST2
 ```
+
+实线为差模信号通路，虚线为共模反馈与偏置。器件尺寸见 §3，补偿与 CMFB 元件值见 §4。
 
 **第一级：折叠 cascode（不是望远镜）。** 输入对 M1/M2 的漏为折叠节点 A1/A2，
 M7/M8 是 VDD→A1/A2 的折叠电流源（栅 = CTRL1，CMFB1 仍靠调折叠电流控一级

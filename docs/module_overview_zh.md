@@ -86,56 +86,169 @@ circuitopt/
 
 ## 导入关系
 
-```text
-topology.py          <- 无内部依赖
-compiled_topology.py <- 无内部依赖；运行时消费 Topology 风格对象
-circuit_loader.py    <- topology
-device_model.py      <- 无内部依赖（仅 abc、dataclasses）
-device_factory.py    <- 仅 device_model（leaf 器件层；不 import 任何 solver/workflow 模块）
-pmos_tft_model.py    <- device_model（方程在 circuitopt_core.OtftModel）
-ac_mna.py            <- 无内部依赖
-ac_solver.py         <- device_factory, dc_solver, topology, compiled_topology, diagnostics
-dc_solver.py         <- device_factory, topology, diagnostics
-noise_solver.py      <- device_model, ac_mna, ac_solver, device_factory, topology, compiled_topology, diagnostics
-transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, diagnostics
-transient_profile.py <- 无内部依赖（计数器槽位常量）
-pss_solver.py        <- ac_mna, ac_solver, device_factory, adaptive_config, topology, transient_solver, diagnostics
-pac_solver.py        <- ac_mna, ac_solver, device_factory, topology, transient_solver, diagnostics
-pnoise_solver.py     <- ac_mna, device_factory, noise_solver, pac_solver, diagnostics
-adaptive_config.py   <- 无内部依赖（仅 dataclass）
-analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader, analysis_options
-analysis_options.py  <- 无内部依赖（注册表）
-diagnostics.py       <- 无内部依赖（线程安全计数器）
-psf.py               <- 无内部依赖
-calibration.py       <- psf, ac_solver, adaptive_config, noise_solver
-cadence_netlist.py   <- circuit_loader, topology
-chopper.py           <- ac_solver, dc_solver, device_factory, adaptive_config, device_model, noise_solver, pac_solver, pnoise_solver, pss_solver, topology, transient_solver
-explore.py           <- ac_solver, device_factory, device_model, noise_solver, circuit_loader, diagnostics
-corners.py           <- ac_solver, device_factory, noise_solver, topology, diagnostics
-dataset.py           <- diagnostics, circuit_loader, corners, device_model, device_factory, explore, transient_solver
-surrogate.py         <- 无内部依赖；运行时可选 scikit-learn/joblib
-surrogate_torch.py   <- dataset（仅 CLI）；运行时可选 torch
-optimize.py          <- surrogate, circuit_loader, dataset, explore
-sky130_model.py      <- pdk/sky130, toolchain
-ngspice_char.py      <- 无内部依赖；ngspice 子进程 + numpy
-ngspice_device.py    <- device_model, ngspice_char；运行期可选 scipy
-ngspice_process.py   <- device_model
-freepdk45_model.py   <- pdk/freepdk45, device_model, ngspice_device
-pdk/freepdk45/*      <- spice 解析器、compact_models/bsim4、device_model、toolchain
-tsmc28_model.py      <- device_model, ngspice_device, ngspice_process, toolchain
-service/operations.py <- analysis_dispatch, analysis_options, circuit_loader, device_factory,
-                         device_model, run_contract, service/serialize
-service/app.py       <- service/operations, service/jobs；import 时可选 fastapi/pydantic
-service/jobs.py      <- explore, corners, service/serialize；不依赖 fastapi（纯 threading/queue）
-service/serialize.py <- 无内部依赖；仅 numpy
-service/cli.py       <- service/app（延迟导入）；运行期可选 uvicorn
-mcp/server.py        <- service/operations, service/jobs, signoff_campaign, mcp/workspace；
-                        import 时可选 mcp SDK
-mcp/cli.py           <- mcp/server（延迟导入）
+模块级导入构成一个十层的有向无环图。下图给出分层结构，其后是完整的边列表。
+
+```mermaid
+flowchart TB
+  subgraph BASE["L0 — 无内部依赖"]
+    direction LR
+    B1["topology<br/>compiled_topology"]
+    B2["device_model"]
+    B3["run_contract · analysis_options<br/>adaptive_config · diagnostics"]
+    B4["_rust_lti · _rust_transient<br/>_rust_periodic"]
+  end
+
+  subgraph DESC["L1–L2 — 描述与器件"]
+    direction LR
+    D1["circuit_loader"]
+    D2["device_factory"]
+    D3["pdk/* · compact_models/bsim4<br/>spice/*"]
+  end
+
+  subgraph SOLV["L2–L4 — 求解器"]
+    direction LR
+    S1["dc_solver"] --> S2["ac_solver"]
+    S2 --> S3["noise_solver"]
+    S2 --> S4["transient_solver"]
+  end
+
+  subgraph PER["L5–L6 — 周期稳态族"]
+    direction LR
+    P1["pss_solver"] --> P2["pac_solver"] --> P3["pnoise_solver"]
+  end
+
+  DISP["L7 — analysis_dispatch"]
+
+  subgraph WF["L5–L7 — 工作流"]
+    direction LR
+    W1["explore · corners"]
+    W2["dataset · optimize"]
+    W3["sar · sar_mc · sar_explore"]
+    W4["chopper · calibration"]
+  end
+
+  CAMP["L8 — signoff_campaign<br/>L9 — engine_crosscheck"]
+
+  subgraph NG["ngspice 对照引擎"]
+    direction LR
+    N1["ngspice_render"] --> N2["ngspice_ac<br/>ngspice_transient"]
+  end
+
+  subgraph SVC["L9 — 服务层（纯消费叶）"]
+    direction LR
+    V1["service/*"]
+    V2["mcp/*"]
+  end
+
+  BASE --> DESC
+  DESC --> SOLV
+  DESC --> NG
+  SOLV --> PER
+  SOLV --> DISP
+  PER --> DISP
+  SOLV --> WF
+  PER --> WF
+  DISP --> CAMP
+  DISP --> SVC
+  WF --> SVC
+  CAMP --> SVC
 ```
 
-`service/` 子包是一个纯*消费方* leaf——没有任何模块反过来 import 它，`circuitopt/__init__.py`
-也从不 import 它，所以即使装了 `serve` extra，裸 `import circuitopt` 仍然不依赖 fastapi。
+这张图上有两条性质值得单独说明，因为二者都是承重的：
+
+- **`explore`、`corners`、`dataset`、`chopper` 直接调用求解器**，不经过
+  `analysis_dispatch`。dispatch 负责让一个电路跑完一套配置好的分析；这四个模块
+  驱动的是候选矩阵，需要直接拿到求解器。
+- **`service/` 与 `mcp/` 是纯消费叶子。** 二者之外没有任何模块反向导入它们，且
+  `circuitopt/__init__.py` 从不导入其中任何一个，因此即使装了 `serve` extra，
+  普通的 `import circuitopt` 也不会引入 fastapi。
+
+下面的完整列表只记录**模块级**导入。有两对模块——`run_contract`/`dc_measurements`
+与 `sar`/`sar_rust`——还会在函数内部互相导入；这是 Python 中打破导入环的惯用做法，
+也是模块级图能保持无环的原因。
+
+```text
+topology.py            <- 无内部依赖
+compiled_topology.py   <- 无内部依赖; 运行时消费 Topology 形状的对象
+device_model.py        <- 无内部依赖 （仅 abc / dataclasses）
+ac_mna.py              <- 无内部依赖
+run_contract.py        <- 无内部依赖 （dc_measurements 为延迟导入）
+analysis_options.py    <- 无内部依赖 （注册表）
+adaptive_config.py     <- 无内部依赖 （仅 dataclass）
+transient_profile.py   <- 无内部依赖 （计数器槽位常量）
+diagnostics.py         <- 无内部依赖 （线程安全计数器）
+psf.py                 <- 无内部依赖
+adc.py                 <- 无内部依赖
+frequency_metrics.py   <- 无内部依赖
+passive_bom.py         <- 无内部依赖
+toolchain.py           <- 无内部依赖
+surrogate.py           <- 无内部依赖; 运行时可选 scikit-learn/joblib
+_engine.py             <- 无内部依赖
+_parallel.py           <- 无内部依赖
+_rust_lti.py           <- 无内部依赖 （序列化桥）
+_rust_transient.py     <- 无内部依赖 （序列化桥）
+_rust_periodic.py      <- 无内部依赖 （序列化桥）
+spice/parser.py        <- 无内部依赖
+spice/expressions.py   <- 无内部依赖
+spice/elaborator.py    <- spice/parser, spice/expressions
+circuit_loader.py      <- topology, device_model
+device_factory.py      <- device_model, run_contract （叶子器件层；不导入求解器/工作流）
+dc_measurements.py     <- run_contract
+pmos_tft_model.py      <- device_model （方程在 circuitopt_core.OtftModel 中）
+cadence_netlist.py     <- topology
+_campaign_sweep.py     <- _engine
+compact_models/bsim4/abi.py         <- 无内部依赖
+compact_models/bsim4/card_cache.py  <- 无内部依赖
+compact_models/bsim4/native.py      <- compact_models/bsim4/abi
+compact_models/bsim4/rust_transient.py <- _rust_transient, compiled_topology, bsim4/native
+compact_models/bsim4/transient.py   <- adaptive_config, compiled_topology, device_factory
+pdk/<name>/library.py  <- compact_models/bsim4, spice, toolchain
+pdk/<name>/device.py   <- compact_models/bsim4, device_model, pdk/<name>/library
+sky130_model.py        <- pdk/sky130, toolchain
+freepdk45_model.py     <- pdk/freepdk45, device_model, ngspice_device
+tsmc28_model.py        <- device_model, ngspice_device, ngspice_process, toolchain
+ngspice_char.py        <- toolchain; 仅 ngspice 子进程 + numpy
+ngspice_process.py     <- device_model
+ngspice_device.py      <- device_model, ngspice_char; 运行时可选 scipy
+ngspice_render.py      <- device_factory, freepdk45_model, ngspice_process, toolchain
+ngspice_ac.py          <- device_factory, ngspice_char, ngspice_render
+ngspice_transient.py   <- device_factory, ngspice_char, ngspice_render
+dc_solver.py           <- device_factory, topology
+ac_solver.py           <- compiled_topology, dc_solver, device_factory, run_contract, topology
+noise_solver.py        <- ac_solver, compiled_topology, device_factory, device_model, run_contract, topology
+transient_solver.py    <- ac_solver, adaptive_config, compiled_topology, device_factory, topology, transient_profile
+pss_solver.py          <- ac_mna, ac_solver, adaptive_config, device_factory, topology, transient_solver
+pac_solver.py          <- ac_mna, ac_solver, device_factory, topology, transient_solver
+pnoise_solver.py       <- ac_mna, device_factory, noise_solver, pac_solver, run_contract
+analysis_dispatch.py   <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver,
+                          pnoise_solver, circuit_loader, analysis_options, adaptive_config, run_contract
+calibration.py         <- ac_solver, adaptive_config, noise_solver
+chopper.py             <- ac_solver, dc_solver, device_factory, device_model, adaptive_config,
+                          noise_solver, pss_solver, pac_solver, pnoise_solver, topology, transient_solver
+explore.py             <- ac_solver, circuit_loader, device_factory, frequency_metrics, noise_solver, run_contract
+corners.py             <- _campaign_sweep, _parallel, ac_solver, circuit_loader, device_factory,
+                          noise_solver, run_contract, topology
+dataset.py             <- circuit_loader, device_factory, device_model, explore, run_contract, transient_solver
+optimize.py            <- circuit_loader, dataset, device_factory, explore
+surrogate_torch.py     <- surrogate （dataset 延迟导入，仅 CLI）；运行时可选 torch
+_rust_campaign.py      <- compiled_topology, device_factory, topology
+sar.py                 <- _parallel, adc, circuit_loader, transient_solver
+sar_mc.py              <- _parallel, adc, circuit_loader, sar
+sar_rust.py            <- _rust_transient, compiled_topology, device_factory, sar, transient_solver
+sar_explore.py         <- adc, circuit_loader, explore, sar, sar_mc
+signoff_campaign.py    <- _parallel, analysis_dispatch, circuit_loader, compact_models/bsim4, run_contract
+engine_crosscheck.py   <- analysis_dispatch, circuit_loader, compact_models/bsim4, device_model, signoff_campaign
+service/serialize.py   <- 无内部依赖; 仅 numpy
+service/jobs.py        <- corners, explore, service/serialize; 无 fastapi（纯 threading/queue）
+service/operations.py  <- analysis_dispatch, analysis_options, circuit_loader, device_factory,
+                          device_model, freepdk45_model, run_contract, service/jobs, service/serialize
+service/app.py         <- service/operations, service/jobs; 导入时可选 fastapi/pydantic
+service/cli.py         <- service/app （延迟）；运行时可选 uvicorn
+mcp/workspace.py       <- 无内部依赖
+mcp/server.py          <- mcp/workspace, service/operations, service/jobs, service/serialize,
+                          signoff_campaign; 导入时可选 mcp SDK
+mcp/cli.py             <- mcp/server （延迟）
+```
 
 ## 主要组件
 
@@ -169,7 +282,27 @@ AC 和噪声分析时，求解器通过有限差分 `get_Idc` 提取端 `gm` 和
   quasi-static 4×4 terminal `(G, C)` stamp；原生 BSIM 器件设为 `True`。
   `TRANSIENT_BACKEND`（默认 `None`，即走所选引擎的通用 OTFT 瞬态路径）指定专用积分器，
   例如 `"bsim4_native"` 或显式外部 oracle 后端。
-- **`register_model()` / `create_device()` + PDK/极性分层** — 工厂 + 注册表。每个 `(pdk, polarity)` 以结构化键 `"<pdk>.<polarity>"`（如 `"at4000tg.pmos"`）注册；`register_pdk()` 把一个工艺的各极性归组并标记默认。求解器文件调用 `create_device(get_default_model_type(), …)`（单一切换点）而非硬编码模型名，新增工艺或 `nmos` 极性只需一次 `register_pdk`、不改任何求解器。`"pmos_tft"` 保留为向后兼容别名。`get_model_class(model_type)` 是公开只读的注册表访问器，让求解器无需 import 具体后端类即可读取模型的能力标志。`registered_models()` 返回整个注册表的只读快照 `{model_type: "module.QualName"}`（按插入顺序），供需要*枚举*而非查单条的调用者使用——服务层 `GET /api/v1/capabilities` 用它列出全部可选模型键。通用元件（电阻/电容/理想 V/I/受控源）是与工艺无关的拓扑原语，**不在**此注册表中，故每个 PDK 零改动复用。`register_model()` 重复注册时仍会*覆盖*旧条目（有意替换——例如测试打桩——继续静默生效）；但真正的冲突——不同类（按 `__module__.__qualname__` 判断）抢占已被占用的名字，比如两个 PDK 模块争同一别名——现在会在覆盖前发出 `RuntimeWarning`；对*同一个*类的重复 import 或 `importlib.reload` 仍保持静默。
+- **`register_model()` / `create_device()` + PDK/极性分层** — 工厂与注册表，见下文。
+
+**注册键。** 每个 `(pdk, polarity)` 以结构化键 `"<pdk>.<polarity>"` 注册，例如
+`"at4000tg.pmos"`。`register_pdk()` 把一个工艺的各极性归组并标记默认。`"pmos_tft"`
+保留为向后兼容别名。
+
+**单一切换点。** 求解器调用 `create_device(get_default_model_type(), …)` 而非硬编码
+模型名，因此新增工艺或 `nmos` 极性只需一次 `register_pdk`，不改任何求解器。
+
+**读取接口。** `get_model_class(model_type)` 是公开只读访问器，让求解器无需 import
+具体后端类即可读取模型的能力标志。`registered_models()` 返回整个注册表的只读快照
+`{model_type: "module.QualName"}`（按插入顺序），供需要*枚举*而非查单条的调用者使用；
+服务层 `GET /api/v1/capabilities` 用它列出全部可选模型键。
+
+**不在注册表内。** 通用元件——电阻、电容、理想电压/电流源、受控源——是与工艺无关的
+拓扑原语，**不**进入此注册表，因此每个 PDK 零改动复用。
+
+**名字冲突。** `register_model()` 重复注册时会覆盖旧条目，使有意的替换（例如测试打桩）
+继续静默生效。真正的冲突——不同的类（按 `__module__.__qualname__` 判断）抢占已被占用
+的名字，例如两个 PDK 模块争同一别名——会在覆盖前发出 `RuntimeWarning`。对*同一个*类的
+重复 import 或 `importlib.reload` 仍保持静默。
 
 ### `device_factory.py`
 
@@ -203,7 +336,32 @@ leaf 器件构建层：只依赖 `device_model`（不 import 任何 solver 或 w
 
 将电路拓扑定义为单一事实来源。拓扑包含晶体管列表、被求解节点列表、rail/bias 节点、输出、AC 输入驱动、负载电容、瞬态输入映射、DC 初值猜测和 DC 别名。求解器运行态元数据均从这个拓扑派生，而不是在各个求解器中分别手写。
 
-除了晶体管之外，还承载无源/源元件——`resistors`（a-b，阻值 R 欧姆）、`capacitors`（a-b，容值 C 法拉）、`isources`（理想直流电流源，I 从 nplus 流向 nminus）、`vccs`（压控电流源：p、q、ctrl_p、ctrl_n、gm）、`vcvs`（压控电压源：p、q、cp、cn、mu → Vp−Vq=μ(Vcp−Vcn)）、`cccs`（流控电流源：p、q、ctrl_name、beta → Iout=β·Ictrl）、`ccvs`（流控电压源：p、q、ctrl_name、gamma → Vp−Vq=γ·Ictrl）和 `vsources`（理想电压源，真·MNA：p、q、value）。每个 vsource/VCVS/CCVS 新增一个支路电流未知量和一行约束，系统从 `n` 增长到 `n_aug = n + m`。这些通用于全部分析：电阻支路电流和电流源注入进入 DC KCL；电阻在 AC/噪声中按 `1/R` stamp，电容按 `jωC` stamp，VCCS 按 ``gm*(Vcp-Vcn)`` stamp，VCVS/CCVS/vsource 按 bordered ``[[Y,B],[B^T,0]]`` 块 stamp 含各自约束行，CCCS 按 KCL 行耦合 stamp；电阻贡献热噪声 `4kT/R`（所有受控源和理想电压源无噪声）；瞬态加入电导、电容伴随模型、恒定/VCCS/CCCS 源电流以及带约束方程的 VCVS/CCVS/vsource 支路电流。电流源在小信号 AC 系统中视为开路。CCCS 和 CCVS 支持级联：可控制任何 vsource/VCVS/CCVS 的支路电流。这些都不影响晶体管模型相关逻辑。
+除了晶体管之外，还承载无源与源元件。这些元件都不影响晶体管模型相关逻辑。
+
+| 元件 | 字段 | 语义 |
+| --- | --- | --- |
+| `resistors` | a、b、R | 阻值，单位欧姆。 |
+| `capacitors` | a、b、C | 容值，单位法拉。 |
+| `isources` | nplus、nminus、I | 理想直流电流源，I 从 nplus 流向 nminus。 |
+| `vsources` | p、q、value | 理想电压源，真 MNA。 |
+| `vccs` | p、q、ctrl_p、ctrl_n、gm | 压控电流源。 |
+| `vcvs` | p、q、cp、cn、mu | 压控电压源，`Vp−Vq = μ(Vcp−Vcn)`。 |
+| `cccs` | p、q、ctrl_name、beta | 流控电流源，`Iout = β·Ictrl`。 |
+| `ccvs` | p、q、ctrl_name、gamma | 流控电压源，`Vp−Vq = γ·Ictrl`。 |
+
+每个 vsource、VCVS 与 CCVS 新增一个支路电流未知量和一行约束，系统从 `n` 增长到
+`n_aug = n + m`。CCCS 与 CCVS 支持级联：二者都可以控制在任意 vsource、VCVS 或 CCVS
+的支路电流上。
+
+这些元件贯穿全部分析：
+
+- **DC** —— 电阻支路电流与电流源注入进入 KCL。
+- **AC** —— 电阻按 `1/R` stamp，电容按 `jωC`，VCCS 按 `gm*(Vcp-Vcn)`，
+  VCVS/CCVS/vsource 按 bordered `[[Y,B],[B^T,0]]` 块连同各自约束行 stamp，
+  CCCS 按 KCL 行耦合。电流源在小信号系统中视为开路。
+- **噪声** —— 电阻贡献 `4kT/R` 热噪声。所有受控源与理想电压源无噪声。
+- **瞬态** —— 电导、电容伴随模型、恒定/VCCS/CCCS 源电流，以及带约束方程的
+  VCVS/CCVS/vsource 支路电流未知量。
 
 默认拓扑是 `AFE_TOPO`，一个 10 管全差分 AFE 核心，包含尾电流器件、输入对、输出级和交叉耦合正反馈电平移位器件。
 
@@ -744,10 +902,13 @@ FreePDK45 现与 TSMC28HPC+ 共用原生 Berkeley BSIM4.5 内核。
 同一次 Schur 分解会服务四个外部端子右端项，不再为每个行列组合重复分解内部矩阵。
 四端电荷聚合包含分布式体结电荷，并统一 PMOS 电荷符号。因此 N/P 两种极性的 AC
 电容与电荷有限差分一致，DC、AC、noise、transient、PSS、PAC、PNoise 可以共用
-同一进程内紧凑模型路径。完整求值会把最终 floating-point model load 已生成的电荷
+同一进程内紧凑模型路径。
+
+完整求值会把最终 floating-point model load 已生成的电荷
 与小信号字段直接交给 `acLoad`，省去一次重复 `MODEINITSMSIG` load；设置
-`CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD=0` 可恢复旧顺序。实验性开关
-`CIRCUITOPT_BSIM_REUSE_FINAL_LOAD=1` 可让 Newton 更新低于 1 pV 的私有内部节点
+`CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD=0` 可恢复旧顺序。
+
+实验性开关 `CIRCUITOPT_BSIM_REUSE_FINAL_LOAD=1` 可让 Newton 更新低于 1 pV 的私有内部节点
 线性化直接完成端口消元；由于个别标量 PDK 点会超出公共 API 的位级 golden 契约，
 该开关默认关闭。与该实验模式无关，当私有节点解和当前 load 使用值的位模式完全
 一致（或不存在私有节点）时，host 总会安全省略 reload。外部/内部节点布局也会在

@@ -97,57 +97,171 @@ circuitopt/
 
 ## Import Relationship
 
-```text
-topology.py          <- no internal dependency
-compiled_topology.py <- no internal dependency; consumes Topology-like objects at runtime
-circuit_loader.py    <- topology
-device_model.py      <- no internal dependency (abc, dataclasses only)
-device_factory.py    <- device_model only (leaf device layer; no solver/workflow imports)
-pmos_tft_model.py    <- device_model (equations in circuitopt_core.OtftModel)
-ac_mna.py            <- no internal dependency
-ac_solver.py         <- device_factory, dc_solver, topology, compiled_topology, diagnostics
-dc_solver.py         <- device_factory, topology, diagnostics
-noise_solver.py      <- device_model, ac_mna, ac_solver, device_factory, topology, compiled_topology, diagnostics
-transient_solver.py  <- adaptive_config, topology, ac_solver, device_factory, transient_profile, compiled_topology, diagnostics
-transient_profile.py <- no internal dependency (counter slot constants)
-pss_solver.py        <- ac_mna, ac_solver, device_factory, adaptive_config, topology, transient_solver, diagnostics
-pac_solver.py        <- ac_mna, ac_solver, device_factory, topology, transient_solver, diagnostics
-pnoise_solver.py     <- ac_mna, device_factory, noise_solver, pac_solver, diagnostics
-adaptive_config.py   <- no internal dependency (dataclass only)
-analysis_dispatch.py <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver, pnoise_solver, circuit_loader, analysis_options
-analysis_options.py  <- no internal dependency (registry)
-diagnostics.py       <- no internal dependency (thread-safe counters)
-psf.py               <- no internal dependency
-calibration.py       <- psf, ac_solver, adaptive_config, noise_solver
-cadence_netlist.py   <- circuit_loader, topology
-chopper.py           <- ac_solver, dc_solver, device_factory, adaptive_config, device_model, noise_solver, pac_solver, pnoise_solver, pss_solver, topology, transient_solver
-explore.py           <- ac_solver, device_factory, device_model, noise_solver, circuit_loader, diagnostics
-corners.py           <- ac_solver, device_factory, noise_solver, topology, diagnostics
-dataset.py           <- diagnostics, circuit_loader, corners, device_model, device_factory, explore, transient_solver
-surrogate.py         <- no internal dependency; optional scikit-learn/joblib at runtime
-surrogate_torch.py   <- dataset (CLI only); optional torch at runtime
-optimize.py          <- surrogate, circuit_loader, dataset, explore
-sky130_model.py      <- pdk/sky130, toolchain
-ngspice_char.py      <- no internal dependency; ngspice subprocess + numpy only
-ngspice_device.py    <- device_model, ngspice_char; optional scipy at runtime
-ngspice_process.py   <- device_model
-freepdk45_model.py   <- pdk/freepdk45, device_model, ngspice_device
-pdk/freepdk45/*      <- spice parser, compact_models/bsim4, device_model, toolchain
-tsmc28_model.py      <- device_model, ngspice_device, ngspice_process, toolchain
-service/operations.py <- analysis_dispatch, analysis_options, circuit_loader, device_factory,
-                         device_model, run_contract, service/serialize
-service/app.py       <- service/operations, service/jobs; optional fastapi/pydantic at import time
-service/jobs.py      <- explore, corners, service/serialize; no fastapi (pure threading/queue)
-service/serialize.py <- no internal dependency; numpy only
-service/cli.py       <- service/app (lazy); optional uvicorn at runtime
-mcp/server.py        <- service/operations, service/jobs, signoff_campaign, mcp/workspace;
-                        optional mcp SDK at import time
-mcp/cli.py           <- mcp/server (lazy)
+Module-level imports form a directed acyclic graph ten layers deep. The diagram
+groups those layers; the exhaustive edge list follows it.
+
+```mermaid
+flowchart TB
+  subgraph BASE["L0 — no internal dependency"]
+    direction LR
+    B1["topology<br/>compiled_topology"]
+    B2["device_model"]
+    B3["run_contract · analysis_options<br/>adaptive_config · diagnostics"]
+    B4["_rust_lti · _rust_transient<br/>_rust_periodic"]
+  end
+
+  subgraph DESC["L1–L2 — description and devices"]
+    direction LR
+    D1["circuit_loader"]
+    D2["device_factory"]
+    D3["pdk/* · compact_models/bsim4<br/>spice/*"]
+  end
+
+  subgraph SOLV["L2–L4 — solvers"]
+    direction LR
+    S1["dc_solver"] --> S2["ac_solver"]
+    S2 --> S3["noise_solver"]
+    S2 --> S4["transient_solver"]
+  end
+
+  subgraph PER["L5–L6 — periodic family"]
+    direction LR
+    P1["pss_solver"] --> P2["pac_solver"] --> P3["pnoise_solver"]
+  end
+
+  DISP["L7 — analysis_dispatch"]
+
+  subgraph WF["L5–L7 — workflows"]
+    direction LR
+    W1["explore · corners"]
+    W2["dataset · optimize"]
+    W3["sar · sar_mc · sar_explore"]
+    W4["chopper · calibration"]
+  end
+
+  CAMP["L8 — signoff_campaign<br/>L9 — engine_crosscheck"]
+
+  subgraph NG["ngspice oracle"]
+    direction LR
+    N1["ngspice_render"] --> N2["ngspice_ac<br/>ngspice_transient"]
+  end
+
+  subgraph SVC["L9 — services, consumer leaves"]
+    direction LR
+    V1["service/*"]
+    V2["mcp/*"]
+  end
+
+  BASE --> DESC
+  DESC --> SOLV
+  DESC --> NG
+  SOLV --> PER
+  SOLV --> DISP
+  PER --> DISP
+  SOLV --> WF
+  PER --> WF
+  DISP --> CAMP
+  DISP --> SVC
+  WF --> SVC
+  CAMP --> SVC
 ```
 
-The `service/` subpackage is a pure *consumer* leaf — nothing outside it imports
-back into it, and `circuitopt/__init__.py` never imports it, so plain
-`import circuitopt` stays fastapi-free even when the `serve` extra is installed.
+Two properties of this graph are worth stating, because both are load-bearing:
+
+- **`explore`, `corners`, `dataset` and `chopper` reach the solvers directly**, not
+  through `analysis_dispatch`. Dispatch drives one circuit through a configured
+  analysis suite; those four drive a candidate matrix and need the solvers raw.
+- **`service/` and `mcp/` are pure consumer leaves.** Nothing outside them imports
+  back in, and `circuitopt/__init__.py` never imports either, so plain
+  `import circuitopt` stays fastapi-free even with the `serve` extra installed.
+
+The exhaustive list below records module-level imports only. Two pairs —
+`run_contract`/`dc_measurements` and `sar`/`sar_rust` — also import each other from
+inside functions; that is the deliberate way to break an import cycle in Python and
+is why the module-level graph stays acyclic.
+
+```text
+topology.py            <- no internal dependency
+compiled_topology.py   <- no internal dependency; consumes Topology-like objects at runtime
+device_model.py        <- no internal dependency (abc, dataclasses only)
+ac_mna.py              <- no internal dependency
+run_contract.py        <- no internal dependency (dc_measurements imported lazily)
+analysis_options.py    <- no internal dependency (registry)
+adaptive_config.py     <- no internal dependency (dataclass only)
+transient_profile.py   <- no internal dependency (counter slot constants)
+diagnostics.py         <- no internal dependency (thread-safe counters)
+psf.py                 <- no internal dependency
+adc.py                 <- no internal dependency
+frequency_metrics.py   <- no internal dependency
+passive_bom.py         <- no internal dependency
+toolchain.py           <- no internal dependency
+surrogate.py           <- no internal dependency; optional scikit-learn/joblib at runtime
+_engine.py             <- no internal dependency
+_parallel.py           <- no internal dependency
+_rust_lti.py           <- no internal dependency (serialization bridge)
+_rust_transient.py     <- no internal dependency (serialization bridge)
+_rust_periodic.py      <- no internal dependency (serialization bridge)
+spice/parser.py        <- no internal dependency
+spice/expressions.py   <- no internal dependency
+spice/elaborator.py    <- spice/parser, spice/expressions
+circuit_loader.py      <- topology, device_model
+device_factory.py      <- device_model, run_contract (leaf device layer; no solver/workflow imports)
+dc_measurements.py     <- run_contract
+pmos_tft_model.py      <- device_model (equations in circuitopt_core.OtftModel)
+cadence_netlist.py     <- topology
+_campaign_sweep.py     <- _engine
+compact_models/bsim4/abi.py         <- no internal dependency
+compact_models/bsim4/card_cache.py  <- no internal dependency
+compact_models/bsim4/native.py      <- compact_models/bsim4/abi
+compact_models/bsim4/rust_transient.py <- _rust_transient, compiled_topology, bsim4/native
+compact_models/bsim4/transient.py   <- adaptive_config, compiled_topology, device_factory
+pdk/<name>/library.py  <- compact_models/bsim4, spice, toolchain
+pdk/<name>/device.py   <- compact_models/bsim4, device_model, pdk/<name>/library
+sky130_model.py        <- pdk/sky130, toolchain
+freepdk45_model.py     <- pdk/freepdk45, device_model, ngspice_device
+tsmc28_model.py        <- device_model, ngspice_device, ngspice_process, toolchain
+ngspice_char.py        <- toolchain; ngspice subprocess + numpy only
+ngspice_process.py     <- device_model
+ngspice_device.py      <- device_model, ngspice_char; optional scipy at runtime
+ngspice_render.py      <- device_factory, freepdk45_model, ngspice_process, toolchain
+ngspice_ac.py          <- device_factory, ngspice_char, ngspice_render
+ngspice_transient.py   <- device_factory, ngspice_char, ngspice_render
+dc_solver.py           <- device_factory, topology
+ac_solver.py           <- compiled_topology, dc_solver, device_factory, run_contract, topology
+noise_solver.py        <- ac_solver, compiled_topology, device_factory, device_model, run_contract, topology
+transient_solver.py    <- ac_solver, adaptive_config, compiled_topology, device_factory, topology, transient_profile
+pss_solver.py          <- ac_mna, ac_solver, adaptive_config, device_factory, topology, transient_solver
+pac_solver.py          <- ac_mna, ac_solver, device_factory, topology, transient_solver
+pnoise_solver.py       <- ac_mna, device_factory, noise_solver, pac_solver, run_contract
+analysis_dispatch.py   <- ac_solver, noise_solver, transient_solver, pss_solver, pac_solver,
+                          pnoise_solver, circuit_loader, analysis_options, adaptive_config, run_contract
+calibration.py         <- ac_solver, adaptive_config, noise_solver
+chopper.py             <- ac_solver, dc_solver, device_factory, device_model, adaptive_config,
+                          noise_solver, pss_solver, pac_solver, pnoise_solver, topology, transient_solver
+explore.py             <- ac_solver, circuit_loader, device_factory, frequency_metrics, noise_solver, run_contract
+corners.py             <- _campaign_sweep, _parallel, ac_solver, circuit_loader, device_factory,
+                          noise_solver, run_contract, topology
+dataset.py             <- circuit_loader, device_factory, device_model, explore, run_contract, transient_solver
+optimize.py            <- circuit_loader, dataset, device_factory, explore
+surrogate_torch.py     <- surrogate (dataset lazily, CLI only); optional torch at runtime
+_rust_campaign.py      <- compiled_topology, device_factory, topology
+sar.py                 <- _parallel, adc, circuit_loader, transient_solver
+sar_mc.py              <- _parallel, adc, circuit_loader, sar
+sar_rust.py            <- _rust_transient, compiled_topology, device_factory, sar, transient_solver
+sar_explore.py         <- adc, circuit_loader, explore, sar, sar_mc
+signoff_campaign.py    <- _parallel, analysis_dispatch, circuit_loader, compact_models/bsim4, run_contract
+engine_crosscheck.py   <- analysis_dispatch, circuit_loader, compact_models/bsim4, device_model, signoff_campaign
+service/serialize.py   <- no internal dependency; numpy only
+service/jobs.py        <- corners, explore, service/serialize; no fastapi (pure threading/queue)
+service/operations.py  <- analysis_dispatch, analysis_options, circuit_loader, device_factory,
+                          device_model, freepdk45_model, run_contract, service/jobs, service/serialize
+service/app.py         <- service/operations, service/jobs; optional fastapi/pydantic at import time
+service/cli.py         <- service/app (lazy); optional uvicorn at runtime
+mcp/workspace.py       <- no internal dependency
+mcp/server.py          <- mcp/workspace, service/operations, service/jobs, service/serialize,
+                          signoff_campaign; optional mcp SDK at import time
+mcp/cli.py             <- mcp/server (lazy)
+```
 
 ## Main Components
 
@@ -178,7 +292,34 @@ Defines the abstract device‑model interface that decouples solvers from concre
 - **`TransistorModel` (ABC)** — seven abstract methods (`get_Idc`, `get_op`, `get_capacitances`, `get_capacitance_charges_from_op`, `get_capacitance_branch_terms_from_op`, `get_noise_psd`, `get_otft_params`); `get_ss_params` provides a finite‑difference default that subclasses can override.
 - **`OtftParams` (frozen dataclass)** — the 16 scalar parameters extracted once per device and passed to the compiled transient kernels.
 - **Backend-capability class attributes** — generic solvers dispatch on *capabilities*, never on a concrete backend type. `HAS_TERMINAL_LINEARIZATION` (default `False`) advertises the full quasi-static 4×4 terminal `(G, C)` stamp used by AC/PAC/PNoise; native BSIM devices set it to `True`. `TRANSIENT_BACKEND` (default `None`, meaning the selected engine's generic OTFT transient path) names a specialised integrator such as `"bsim4_native"` or an explicit external oracle backend.
-- **`register_model()` / `create_device()` + PDK/polarity layer** — factory + registry. Each `(pdk, polarity)` pair registers under a structured key `"<pdk>.<polarity>"` (e.g. `"at4000tg.pmos"`); `register_pdk()` groups one process's polarities and marks the default. Solver files call `create_device(get_default_model_type(), …)` — a single switch point — instead of hardcoding a model name, so a new process or an `nmos` polarity slots in with one `register_pdk` call and no solver edits. `"pmos_tft"` stays a back-compat alias. `get_model_class(model_type)` is a public read-only registry accessor so solvers can inspect a model's capability flags without importing a concrete backend class. `registered_models()` returns a read-only `{model_type: "module.QualName"}` snapshot of the whole registry (insertion order) for a caller that needs to *enumerate* rather than look up one entry — the service layer's `GET /api/v1/capabilities` uses it to list every selectable model key. Generic elements (R/C/ideal V/I/controlled sources) are process-independent topology primitives and are **not** in this registry, so every PDK reuses them unchanged. `register_model()` still *replaces* an existing entry on re-registration (intentional swap-in, e.g. a test stub, keeps working silently), but a genuine collision — a different class (by `__module__.__qualname__`) taking over an already-occupied name, e.g. two PDK modules racing for the same alias — now emits a `RuntimeWarning` before overwriting; a repeat import or `importlib.reload` of the *same* class stays silent.
+- **`register_model()` / `create_device()` + PDK/polarity layer** — the factory and
+  registry described below.
+
+**Registry keys.** Each `(pdk, polarity)` pair registers under a structured key
+`"<pdk>.<polarity>"`, for example `"at4000tg.pmos"`. `register_pdk()` groups one
+process's polarities and marks the default. `"pmos_tft"` stays a back-compat alias.
+
+**Single switch point.** Solver files call `create_device(get_default_model_type(), …)`
+instead of hardcoding a model name, so a new process or an `nmos` polarity slots in
+with one `register_pdk` call and no solver edits.
+
+**Read access.** `get_model_class(model_type)` is a public read-only accessor, so a
+solver can inspect a model's capability flags without importing a concrete backend
+class. `registered_models()` returns a read-only `{model_type: "module.QualName"}`
+snapshot of the whole registry in insertion order, for callers that need to
+*enumerate* rather than look up one entry; the service layer's
+`GET /api/v1/capabilities` uses it to list every selectable model key.
+
+**Out of scope.** Generic elements — resistors, capacitors, ideal voltage and current
+sources, controlled sources — are process-independent topology primitives and are
+**not** in this registry, so every PDK reuses them unchanged.
+
+**Collisions.** `register_model()` replaces an existing entry on re-registration, which
+keeps an intentional swap-in such as a test stub working silently. A genuine collision
+— a different class, compared by `__module__.__qualname__`, taking over an occupied
+name, for instance two PDK modules racing for the same alias — emits a `RuntimeWarning`
+before overwriting. A repeat import or `importlib.reload` of the *same* class stays
+silent.
 
 ### `device_factory.py`
 
@@ -216,7 +357,36 @@ module), so every solver can import it without risking a cycle.
 
 Defines the circuit topology as the single source of truth. The topology contains the transistor list, solved node list, rail/bias nodes, outputs, AC input drives, load capacitors, transient input mapping, DC guesses, and DC aliases. Solver runtime metadata is derived from this topology instead of being hand-written separately in each solver.
 
-Alongside the transistors it also carries passive/source elements — `resistors` (a-b, R in ohms), `capacitors` (a-b, C in farads), `isources` (ideal DC current sources, I from nplus to nminus), `vccs` (voltage-controlled current sources: p, q, ctrl_p, ctrl_n, gm), `vcvs` (voltage-controlled voltage sources: p, q, cp, cn, mu → Vp−Vq=μ(Vcp−Vcn)), `cccs` (current-controlled current sources: p, q, ctrl_name, beta → Iout=β·Ictrl), `ccvs` (current-controlled voltage sources: p, q, ctrl_name, gamma → Vp−Vq=γ·Ictrl), and `vsources` (ideal voltage sources, true MNA: p, q, value). Each vsource/VCVS/CCVS adds one branch-current unknown and a constraint row, growing the system from `n` to `n_aug = n + m`. These flow through all analyses: resistor branch currents and current-source injections enter the DC KCL; resistors stamp as `1/R`, capacitors as `jωC`, VCCS as ``gm*(Vcp-Vcn)``, VCVS/CCVS/vsource as a bordered ``[[Y,B],[B^T,0]]`` block with the respective constraint rows, and CCCS as a coupling into the KCL rows; resistors add `4kT/R` thermal noise (all controlled sources and ideal voltage sources are noiseless); transient adds resistor conductances, capacitor companions, constant/VCCS/CCCS source currents, and VCVS/CCVS/vsource branch-current unknowns with their constraint equations. Current sources are open-circuit in the small-signal AC system. CCCS and CCVS can cascade: they control on the branch current of any vsource/VCVS/CCVS. None of these touch the transistor model machinery.
+Alongside the transistors it also carries passive and source elements. None of them
+touch the transistor model machinery.
+
+| Element | Fields | Semantics |
+| --- | --- | --- |
+| `resistors` | a, b, R | Resistance in ohms. |
+| `capacitors` | a, b, C | Capacitance in farads. |
+| `isources` | nplus, nminus, I | Ideal DC current source, I flows nplus → nminus. |
+| `vsources` | p, q, value | Ideal voltage source, true MNA. |
+| `vccs` | p, q, ctrl_p, ctrl_n, gm | Voltage-controlled current source. |
+| `vcvs` | p, q, cp, cn, mu | Voltage-controlled voltage source, `Vp−Vq = μ(Vcp−Vcn)`. |
+| `cccs` | p, q, ctrl_name, beta | Current-controlled current source, `Iout = β·Ictrl`. |
+| `ccvs` | p, q, ctrl_name, gamma | Current-controlled voltage source, `Vp−Vq = γ·Ictrl`. |
+
+Each vsource, VCVS and CCVS adds one branch-current unknown and one constraint row,
+growing the system from `n` to `n_aug = n + m`. CCCS and CCVS can cascade: either may
+control on the branch current of any vsource, VCVS or CCVS.
+
+The elements flow through every analysis:
+
+- **DC** — resistor branch currents and current-source injections enter the KCL.
+- **AC** — resistors stamp as `1/R`, capacitors as `jωC`, VCCS as `gm*(Vcp-Vcn)`,
+  VCVS/CCVS/vsource as a bordered `[[Y,B],[B^T,0]]` block with their constraint rows,
+  and CCCS as a coupling into the KCL rows. Current sources are open circuits in the
+  small-signal system.
+- **Noise** — resistors add `4kT/R` thermal noise. All controlled sources and ideal
+  voltage sources are noiseless.
+- **Transient** — resistor conductances, capacitor companions, constant/VCCS/CCCS
+  source currents, and VCVS/CCVS/vsource branch-current unknowns with their constraint
+  equations.
 
 The default topology is `AFE_TOPO`, a 10-transistor fully differential AFE core with tail current device, input pair, output stage, and cross-coupled positive-feedback level shifting devices.
 
@@ -906,11 +1076,14 @@ refactoring the same internal matrix for every row and column. Four-terminal
 charge aggregation includes distributed body-junction charge and normalizes
 PMOS charge signs, so AC capacitance and finite-difference charge derivatives
 agree for both polarities. DC, AC, noise, transient, PSS, PAC, and PNoise
-therefore share one in-process compact-model path. Full evaluations feed
+therefore share one in-process compact-model path.
+
+Full evaluations feed
 `acLoad` from the charge and small-signal fields produced by their final
 floating-point model load, avoiding a duplicate `MODEINITSMSIG` load; set
-`CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD=0` to restore the legacy sequence. The
-experimental `CIRCUITOPT_BSIM_REUSE_FINAL_LOAD=1` mode also lets a private-node
+`CIRCUITOPT_BSIM_REUSE_SMSIG_LOAD=0` to restore the legacy sequence.
+
+The experimental `CIRCUITOPT_BSIM_REUSE_FINAL_LOAD=1` mode also lets a private-node
 linearization whose Newton update is below 1 pV supply terminal reduction
 directly. It remains opt-in because isolated scalar PDK points can move beyond
 the public bit-level golden contract. Independently of that experimental mode,

@@ -92,6 +92,12 @@ python -m pip install -r requirements-docs.txt
 mkdocs build --strict
 ```
 
+Diagrams are ```mermaid fences, registered as a superfence in `mkdocs.yml`.
+Material renders them by fetching `mermaid` from unpkg at page-view time, so a
+diagram is blank in a browser with no network — `mkdocs build --strict` cannot
+catch a syntax error in one. Check a new or edited diagram in a browser, or parse
+it offline with `npx -p mermaid -p jsdom node -e ...` against `mermaid.parse`.
+
 Use `git diff --check` before committing.
 
 ## Rust Core
