@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>求解器调用流程 · Circuit Optimization Lab</title>
+<style>
+  :root{
+    --bg:#fff; --fg:#1a1c1f; --muted:#5f6874; --line:#e3e6ea;
+    --card:#f7f8fa; --accent:#3a4db0; --py:#3572a5; --rs:#b5652f; --ext:#6f7b87;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#16181b; --fg:#e4e7ea; --muted:#98a1ab; --line:#2b2f35;
+           --card:#1c1f23; --accent:#93a4f0; --py:#6ba6dd; --rs:#d99a63; --ext:#94a3af; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:16px/1.8 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;}
+  .wrap{display:grid;grid-template-columns:236px minmax(0,1fr);gap:44px;
+        max-width:1180px;margin:0 auto;padding:36px 24px 120px;}
+  nav{position:sticky;top:24px;align-self:start;max-height:calc(100vh - 48px);overflow:auto;
+      font-size:13.5px;line-height:1.65;border-left:1px solid var(--line);padding-left:16px}
+  nav a{display:block;color:var(--muted);text-decoration:none;padding:2.5px 0}
+  nav a:hover{color:var(--accent)}
+  nav .grp{color:var(--fg);font-size:11.5px;letter-spacing:.09em;margin:16px 0 5px;font-weight:600}
+  h1{font-size:28px;line-height:1.35;margin:0 0 10px;font-weight:650}
+  h2{font-size:21px;margin:52px 0 14px;padding-bottom:7px;border-bottom:1px solid var(--line);font-weight:600}
+  h3{font-size:16.5px;margin:28px 0 8px;font-weight:600}
+  p{margin:11px 0}
+  ul,ol{margin:11px 0;padding-left:22px} li{margin:5px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--card);
+       border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+  pre{background:var(--card);border:1px solid var(--line);border-radius:7px;
+      padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:12.8px;line-height:1.7}
+  pre code{background:none;border:none;padding:0;font-size:inherit}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+  th{background:var(--card);font-weight:600;white-space:nowrap}
+  .lead{color:var(--muted);margin:0 0 4px}
+  .meta{color:var(--muted);font-size:13.5px;border-left:2px solid var(--line);
+        padding-left:14px;margin:20px 0}
+  .note{background:var(--card);border:1px solid var(--line);border-radius:7px;
+        padding:12px 16px;margin:16px 0;font-size:14.5px}
+  .note .h{font-weight:600;display:block;margin-bottom:3px}
+  .flow{margin:22px 0;font-size:14px}
+  .flow .row{display:grid;grid-template-columns:186px minmax(0,1fr);gap:20px;
+             padding:11px 0;border-top:1px solid var(--line)}
+  .flow .row:last-child{border-bottom:1px solid var(--line)}
+  .flow .row>*{min-width:0}
+  .flow .k{font-family:var(--mono);font-size:12.5px;line-height:1.5;color:var(--muted);
+           padding-top:3px;overflow-wrap:anywhere}
+  .flow .n{font-weight:600}
+  .flow .d{color:var(--muted);font-size:13.5px}
+  .flow .py .n{color:var(--py)} .flow .rs .n{color:var(--rs)} .flow .ext .n{color:var(--ext)}
+  .foot{color:var(--muted);font-size:13px;margin-top:64px;border-top:1px solid var(--line);padding-top:14px}
+  @media (max-width:900px){
+    .wrap{grid-template-columns:1fr;gap:0;padding:20px 16px 80px}
+    nav{position:static;max-height:none;border-left:none;border-top:1px solid var(--line);
+        padding:14px 0 0;margin-bottom:16px;columns:2}
+    .flow .row{grid-template-columns:1fr;gap:2px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav>
+  <div class="grp">总览</div>
+  <a href="#s1">1 概述</a>
+  <a href="#s2">2 组件与调用顺序</a>
+  <a href="#s3">3 术语</a>
+  <div class="grp">逐层说明</div>
+  <a href="#s4">4 入口</a>
+  <a href="#s5">5 电路描述</a>
+  <a href="#s6">6 分析调度</a>
+  <a href="#s7">7 器件模型</a>
+  <a href="#s8">8 分析与后端对应</a>
+  <a href="#s9">9 Python 与 Rust 的边界</a>
+  <a href="#s10">10 Rust 核心</a>
+  <div class="grp">横向机制</div>
+  <a href="#s11">11 批量执行</a>
+  <a href="#s12">12 ngspice 对照引擎</a>
+  <a href="#s13">13 并行策略</a>
+  <div class="grp">参考</div>
+  <a href="#s14">14 完整调用示例</a>
+  <a href="#s15">15 约束与注意事项</a>
+  <a href="#s16">16 错误来源对照</a>
+  <a href="#s17">17 源文件索引</a>
+</nav>
+
+<main>
+
+<h1>求解器调用流程</h1>
+<p class="lead">本文说明一次仿真请求从命令行进入、到 Rust 数值核心返回结果之间经过的各层组件。</p>
+
+<div class="meta">
+  <b>文档类型</b>：架构说明，面向需要修改或排查求解器的开发者。<br>
+  <b>覆盖范围</b>：<code>circuitopt/</code>（Python）与 <code>rust/crates/co-*</code>（Rust）的调用关系。<br>
+  <b>不覆盖</b>：各分析的数值算法推导、JSON 字段清单、CLI 参数全集，分别见 <code>docs/module_overview_zh.md</code>、<code>docs/json_circuit_format_zh.md</code>、<code>docs/cli_reference_zh.md</code>。
+</div>
+
+<h2 id="s1">1 概述</h2>
+
+<p>求解器栈分为两侧。Python 侧负责描述与编排：读取 JSON 电路、确定要运行哪些分析、把电路结构翻译成矩阵索引、构造器件模型、最后把结果整理成指标和判据。Rust 侧负责数值计算：矩阵装配、Newton 迭代、时域积分、频域求解。</p>
+
+<p>两侧只有一个接口，即 PyO3 扩展模块 <code>circuitopt_core</code>。Python 在这个接口上一次性提交一个完整的问题（例如「这条网表、这个时间网格、这些波形，求瞬态响应」），Rust 算完后一次性返回结果数组。<strong>Rust 在计算过程中不回调 Python</strong>，因此整段计算可以在释放 GIL 的状态下运行。</p>
+
+<p>这一约束决定了 Python 侧的形态：所有需要逐步迭代的工作都必须提前折叠成静态数据。波形被采样成数组而不是保留为函数，器件参数被展开成数值卡片而不是保留为对象，节点名被替换成矩阵行号。因此调用链看起来层数较多，但每一层做的都是一次性的转换，而不是嵌套的循环。</p>
+
+<h2 id="s2">2 组件与调用顺序</h2>
+
+<p>下表按调用顺序列出各层。左列为该层的主要源文件。</p>
+
+<div class="flow">
+  <div class="row"><div class="k">__main__.py</div>
+    <div><span class="n">入口</span><br><span class="d">解析命令行，确定运行哪个电路、哪些分析、多少个工艺角点。不涉及数值。</span></div></div>
+  <div class="row py"><div class="k">circuit_loader.py<br>topology.py</div>
+    <div><span class="n">电路描述</span><br><span class="d">JSON 转换为 <code>CircuitSpec</code>，再编译为 <code>CompiledTopology</code>：节点名映射到矩阵行号，元件映射到矩阵位置。</span></div></div>
+  <div class="row py"><div class="k">analysis_dispatch.py</div>
+    <div><span class="n">分析调度</span><br><span class="d">按固定顺序运行已配置的分析，处理分析间的依赖与结果复用，并把 JSON 中的波形定义采样成数组。</span></div></div>
+  <div class="row py"><div class="k">device_factory.py<br>pdk/</div>
+    <div><span class="n">器件模型</span><br><span class="d">按尺寸、指数、工艺角、温度为每个晶体管构造模型实例；硅工艺下展开为数值 BSIM4 卡片。</span></div></div>
+  <div class="row py"><div class="k">ac_solver.py<br>transient_solver.py 等</div>
+    <div><span class="n">分析求解器</span><br><span class="d">每种分析组装自己的问题描述。所有分析都以直流工作点为前置。</span></div></div>
+  <div class="row py"><div class="k">_rust_*.py</div>
+    <div><span class="n">序列化桥</span><br><span class="d">把 Python 对象压成只含元组与浮点数的字典。此层不含物理，只做格式转换。</span></div></div>
+  <div class="row rs"><div class="k">co-py</div>
+    <div><span class="n">PyO3 边界</span><br><span class="d">构造问题对象并求解。GIL 在此释放。</span></div></div>
+  <div class="row rs"><div class="k">co-core</div>
+    <div><span class="n">数值核心</span><br><span class="d">MNA 装配与稠密求解、Newton 迭代、BDF 积分、频域求解、批量执行器。</span></div></div>
+  <div class="row rs"><div class="k">co-bsim4<br>co-pdk / co-spice</div>
+    <div><span class="n">器件与工艺</span><br><span class="d">给定端电压与几何，返回端电流、电荷、电导、电容与噪声；以及厂商模型库的解析与卡片编译。</span></div></div>
+</div>
+
+<h2 id="s3">3 术语</h2>
+
+<table>
+<tr><th>术语</th><th>含义</th></tr>
+<tr><td>MNA</td><td>改进节点分析法。电路方程的标准形式：未知量是节点电压加若干支路电流。</td></tr>
+<tr><td>stamp（印记）</td><td>把一个元件的贡献加到 MNA 矩阵的特定位置上。</td></tr>
+<tr><td>端子（term）</td><td>元件的一个连接点。在编译后的电路描述中，端子有三种形式：待解节点（用行号引用）、波形输入（用输入槽位引用）、常数电压（直接带值）。</td></tr>
+<tr><td>handle</td><td>一个 BSIM4 器件在 Rust 侧的句柄，持有全部模型参数与器件内部状态。</td></tr>
+<tr><td>corner（工艺角）</td><td>本项目有两套互不相同的机制：硅工艺使用离散角名（<code>tt/ss/ff/sf/fs</code>），OTFT 使用连续参数偏移（<code>typical/slow/fast</code>）。</td></tr>
+<tr><td>case / point</td><td>批量运行的两个维度。case 指一个测试台，point 指一组 PVT 条件（角、温度、电源电压）。</td></tr>
+</table>
+
+<h2 id="s4">4 入口</h2>
+
+<p>共有四个入口，最终都汇入同一个函数 <code>analysis_dispatch.run_analysis_suite()</code>，区别只在于调用它的次数与参数来源。</p>
+
+<table>
+<tr><th>入口</th><th>实现</th><th>说明</th></tr>
+<tr><td>命令行</td><td><code>circuitopt/__main__.py</code></td><td>主要入口，<code>circuit-opt &lt;子命令&gt;</code>，共 13 个子命令</td></tr>
+<tr><td>Python API</td><td><code>circuitopt</code> 包</td><td>测试与脚本直接调用 <code>ac_solve</code>、<code>transient</code> 等函数</td></tr>
+<tr><td>HTTP 服务</td><td><code>circuitopt/service/</code></td><td><code>circuit-opt serve</code>，提供任务队列与结果序列化</td></tr>
+<tr><td>MCP 服务</td><td><code>circuitopt/mcp/</code></td><td><code>circuit-opt mcp</code>，供 agent 调用的工具接口</td></tr>
+</table>
+
+<h3>子命令分类</h3>
+
+<p>按对求解器的调用次数，13 个子命令分为三类。</p>
+
+<p><b>单次运行。</b><code>run</code> 按 JSON 的 <code>analyses</code> 块运行一套分析；<code>chopper</code> 运行斩波专用分析链；<code>adc</code> 解码 ADC 波形并计算静态与动态指标；<code>plot</code> 只读取已有结果作图。</p>
+
+<p><b>批量运行。</b><code>signoff</code> 在 PVT 网格上运行多个测试台；<code>explore</code> 做设计空间搜索与 Pareto 筛选；<code>corners</code> 做工艺角扫描；<code>mc</code> 做失配蒙特卡洛；<code>dataset</code> 生成代理模型训练集。</p>
+
+<p><b>辅助工具。</b><code>verify-engine</code> 在两个引擎上运行同一个用例并比对；<code>passive-bom</code> 统计无源元件与估算面积；<code>serve</code> 与 <code>mcp</code> 启动服务。</p>
+
+<h3>引擎开关</h3>
+
+<p><code>--engine</code> 选项与 <code>CIRCUIT_ENGINE</code> 环境变量仍然存在，但取值只有 <code>rust</code> 一个。传入 <code>python</code> 或 <code>numba</code> 会报错退出——这两个引擎已在 v2.0.0 移除，保留错误提示是为了避免旧脚本静默改变行为。开关在 <code>circuitopt/__init__.py</code> 顶部、任何求解器被导入之前解析一次，实现在 <code>_engine.apply_engine_env()</code>。</p>
+
+<h2 id="s5">5 电路描述</h2>
+
+<p>这一层把 JSON 文本转换成矩阵索引。涉及四个对象，职责如下。</p>
+
+<table>
+<tr><th>对象</th><th>实现</th><th>职责</th></tr>
+<tr><td><code>CircuitSpec</code></td><td><code>circuit_loader.py</code></td>
+    <td>JSON 文件内容的不可变表示：尺寸、偏置、拓扑、待运行的分析、signoff 判据。</td></tr>
+<tr><td><code>Topology</code></td><td><code>topology.py</code></td>
+    <td>电路结构：哪些节点待求解、哪些是固定电压轨、每个晶体管的漏栅源接在何处、有哪些直流初值猜测。</td></tr>
+<tr><td><code>CompiledTopology</code></td><td><code>compiled_topology.py</code></td>
+    <td>矩阵层面的描述：节点名到行列号的映射、每个无源元件与受控源的印记位置、波形名到输入槽位的映射。</td></tr>
+<tr><td><code>CircuitBinding</code></td><td><code>device_factory.py</code></td>
+    <td>模型绑定：<code>topo</code>、<code>model_types</code>、<code>device_kwargs</code>、<code>nf</code> 与默认直流种子的集合。</td></tr>
+</table>
+
+<h3>CircuitBinding 的作用</h3>
+
+<p><code>run_analysis_suite</code> 会连续调用六个求解器，每个都需要相同的五项模型信息。早期实现逐个传递这些参数，遗漏其中一项时求解器会退回默认的 OTFT 模型——不报错，但结果对应的是另一个器件。<code>CircuitBinding</code> 把这五项打包成一个对象，由 <code>spec.binding().at_corner(corner)</code> 一次构造，六个分析共用同一份。</p>
+
+<h3>转换示例</h3>
+
+<p>一个负载电容从 JSON 到 Rust 的形态变化：</p>
+
+<pre><code>JSON        {"name":"CL1", "a":"OUTP", "b":"GND", "C":500e-15}
+
+Topology    OUTP 是待解节点，GND 是电压轨
+
+CompiledTopology
+            capacitors += ( (kind=0, ref=7), (kind=2, value=0.0), 5.0e-13 )
+                            待解节点第 7 行     常数端子 0 V
+
+co-core     Term{kind:0, reference:7} / Term{kind:2, value:0.0}</code></pre>
+
+<p>端子的三种 <code>kind</code> 见 <a href="#s3">§3 术语</a>。经过这一层之后，调用链上不再出现节点名字符串。</p>
+
+<h2 id="s6">6 分析调度</h2>
+
+<p><code>analysis_dispatch.run_analysis_suite()</code> 是全项目唯一编排「一个电路运行一整套分析」的函数。它承担四项职责。</p>
+
+<p><b>配置校验。</b>在任何求解器运行之前校验配置，未知的配置键按硬错误处理。JSON 是唯一入口，一个拼错的选项若被忽略，分析会用默认值运行完成，结果看起来正常但对应的不是所请求的配置。实现在 <code>analysis_options.validate_analysis_cfg()</code>。</p>
+
+<p><b>顺序执行。</b>按 <code>ANALYSIS_ORDER = (ac, noise, transient, pss, pac, pnoise)</code> 运行。顺序有依赖含义：噪声分析需要复用交流分析已解出的直流工作点。</p>
+
+<p><b>依赖补齐。</b>只请求 <code>pac</code> 或 <code>pnoise</code> 时，调度层会先运行 <code>pss</code>。同时校验工艺角一致性：若已有的 PSS 结果与依赖分析请求的角不同，报错而非沿用。</p>
+
+<p><b>结果复用。</b>噪声分析若与交流分析处于同一工艺角、同一频率网格，直接复用后者的结果，省去一次直流求解与一次线性化。</p>
+
+<h3>波形的处理</h3>
+
+<p>JSON 的 <code>periodic</code> 块支持 <code>constant</code>、<code>sine</code>、<code>square</code>、<code>pulse</code>、<code>pwl</code> 五种波形。<code>build_periodic_context()</code> 在这一层把它们按时间网格采样成 numpy 数组再向下传递；Rust 侧只接收「时间点数组加每个输入一行采样值」，不理解波形类型。</p>
+
+<p>采样数组是分段线性的，因此方波的跳变若不落在采样点上，自适应步进器无法察觉。<code>_with_adaptive_waveform_breakpoints()</code> 负责把每个方波与脉冲的边沿时刻插入时间网格。两点实现细节：</p>
+
+<ul>
+<li>瞬态分析不补齐整周期（<code>close_period=False</code>）。MDAC 测试台只运行 10 ns 周期中的 5 ns，补齐会使求解窗口翻倍，并返回超出 <code>tstop</code> 的网格。</li>
+<li>落在容差内的重复时刻需要合并。否则会留下长度接近浮点精度极限的退化区间，使步长策略中的斜率归一化失效。</li>
+</ul>
+
+<h2 id="s7">7 器件模型</h2>
+
+<h3>模型注册表</h3>
+
+<p><code>device_model.py</code> 维护一张扁平注册表，键为 <code>"&lt;pdk&gt;.&lt;polarity&gt;"</code>，例如 <code>"tsmc28hpcp.nmos"</code>。新增一个 PDK 需要写一个 <code>TransistorModel</code> 子类并调用一次 <code>register_pdk()</code>，不需要修改求解器代码。求解器通过类属性（如 <code>HAS_TERMINAL_LINEARIZATION</code>、<code>TRANSIENT_BACKEND</code>）按能力分派，而不是按具体后端类型判断。</p>
+
+<p>同一个工艺可能注册两组类：<code>tsmc28hpcp</code> 对应原生引擎，<code>tsmc28hpcp_ngspice</code> 对应厂商 deck 适配器，且后者只在 <code>circuitopt.tsmc28_model</code> 被导入后才注册。网表绑错名字时的表现是 ngspice 路径报「mixed FreePDK45/other-model ngspice analysis is not supported」。</p>
+
+<h3>器件构造</h3>
+
+<p><code>device_factory.build_devices()</code> 是唯一的器件构造入口。输入尺寸、指数、并联数、工艺角、模型类型与构造参数，输出 <code>{名字: 模型实例}</code>。三个几何参数的区别如下。</p>
+
+<table>
+<tr><th>参数</th><th>含义</th><th>影响</th></tr>
+<tr><td><code>W</code> / <code>L</code></td><td>单指宽度与沟道长度</td><td>电流、跨导、输出电导</td></tr>
+<tr><td><code>NF</code></td><td>把一个器件的宽度切分成几指</td><td>不改变总电流，改变栅电容，因而影响带宽和电容相关的噪声</td></tr>
+<tr><td><code>M</code></td><td>并联的相同器件个数</td><td>电流、电容、噪声功率均按 <code>M</code> 缩放，等价于 ngspice 的 <code>m=</code></td></tr>
+</table>
+
+<h3>硅工艺的卡片来源</h3>
+
+<p>厂商模型库（本地文件，不进入仓库，也不落盘缓存）经词法分析、Pratt 解析与表达式求值后，按工艺角选择 section、按几何选择 bin，展开成一张扁平的数值 BSIM4.5 卡片。卡片由 <code>Bsim4CardCache</code> 缓存，缓存键包含模型文件的路径、修改时间与大小，以及工艺角、温度和几何 bin；缓存仅存在于进程内。</p>
+
+<p>Python 侧的解析实现在 <code>circuitopt/spice/</code>，Rust 侧的等价实现在 <code>co-spice</code> 与 <code>co-pdk</code>，后者是前者的一对一移植。</p>
+
+<h2 id="s8">8 分析与后端对应</h2>
+
+<p>下表列出每种分析对应的 Python 求解器、序列化桥、Rust 对象与算法。</p>
+
+<table>
+<tr><th>分析</th><th>Python 求解器</th><th>桥</th><th>Rust 对象</th><th>算法</th></tr>
+<tr><td>直流<br><span style="color:var(--muted);font-size:12.5px">无独立入口，是所有分析的前置</span></td>
+    <td><code>dc_solver.py</code> 及各求解器内联</td><td><code>_rust_transient</code></td>
+    <td><code>Bsim4TransientProblem.solve_dc()</code></td>
+    <td>阻尼 Newton 加步长限制</td></tr>
+<tr><td>交流</td><td><code>ac_solver.py</code></td><td><code>_rust_lti</code></td>
+    <td><code>LtiProblem.solve()</code></td>
+    <td>直流求解后线性化，逐频点复数稠密 LU</td></tr>
+<tr><td>噪声</td><td><code>noise_solver.py</code></td><td><code>_rust_lti</code></td>
+    <td><code>LtiProblem.solve_transpose()</code></td>
+    <td>伴随法求各噪声源到输出的传递函数，按功率谱密度累加</td></tr>
+<tr><td>瞬态（硅工艺）</td><td><code>compact_models/bsim4/transient.py</code></td>
+    <td><code>bsim4/rust_transient.py</code></td>
+    <td><code>Bsim4TransientProblem</code></td>
+    <td>固定网格后向欧拉或变步长 BDF2，每步 Newton，端电荷守恒</td></tr>
+<tr><td>瞬态（OTFT）</td><td><code>transient_solver.py</code></td><td><code>_rust_transient</code></td>
+    <td><code>OtftTransientProblem</code></td>
+    <td>同上，器件方程走 <code>co_core::otft</code></td></tr>
+<tr><td>周期稳态</td><td><code>pss_solver.py</code></td><td>复用瞬态路径</td>
+    <td>反复调用瞬态求解</td>
+    <td>打靶法，求解 <code>Φ_T(x₀) − x₀ = 0</code>，有限差分打靶 Jacobian</td></tr>
+<tr><td>周期交流</td><td><code>pac_solver.py</code></td><td><code>_rust_periodic</code></td>
+    <td><code>PeriodicLinearizationProblem</code></td>
+    <td>沿 PSS 轨道线性化，谐波平衡装配后复数求解</td></tr>
+<tr><td>周期噪声</td><td><code>pnoise_solver.py</code></td><td><code>_rust_periodic</code></td>
+    <td><code>periodic_fold_psd</code></td>
+    <td>循环平稳噪声，边带折叠回基带</td></tr>
+</table>
+
+<h3>直流求解的退避顺序</h3>
+
+<p>直流是最容易不收敛的一步，因此有一条三级退避链，实现在 <code>ac_solver.ac_solve()</code>。</p>
+
+<ol>
+<li>调用方显式提供的初值优先使用，且不保留后备猜测。蒙特卡洛与角点扫描会把上一个已求解的工作点带入，这类初值是权威的；若探测特定工作分支的初值失败，应当报失败而不是退回标称解。</li>
+<li>全 BSIM 电路使用编译 Newton（<code>solve_dc()</code>），逐个尝试已声明的初值猜测。收敛后仍用 Python 侧的残差函数复核一遍才接受。</li>
+<li>依次退回 scipy <code>fsolve</code> 与 <code>bounded_least_squares_dc</code>。</li>
+</ol>
+
+<p>AFE 拓扑另有一套对称种子与源斜坡延拓的启发式，位于 <code>dc_solver.py</code>。它针对该拓扑的多稳态特性设计，刻意不合并进通用求解路径。</p>
+
+<h2 id="s9">9 Python 与 Rust 的边界</h2>
+
+<p>全项目只有一处语言边界，由 <code>rust/crates/co-py</code> 提供（PyO3，abi3-py310），编译产物是扩展模块 <code>circuitopt_core</code>。导出内容分三类。</p>
+
+<p><b>问题对象</b>：<code>LtiProblem</code>、<code>Bsim4TransientProblem</code>、<code>OtftTransientProblem</code>、<code>PeriodicLinearizationProblem</code>、<code>CompiledCampaign</code>、<code>PreparedCampaign</code>、<code>CompiledSarConversion</code>。均为构造一次、多次求解。</p>
+
+<p><b>器件与工艺</b>：<code>Bsim4Device</code>（另附一套 C ABI 供 <code>native.py</code> 的 ctypes 路径使用）、<code>OtftModel</code>、<code>CompiledPdk</code>，以及 <code>spice_*</code> 系列解析函数。</p>
+
+<p><b>零散函数</b>：<code>engine_info()</code>、<code>integration_rows()</code>、<code>dense_neg_solve()</code>、<code>mna_term_values()</code>、<code>serial_device_eval()</code>。</p>
+
+<h3>问题描述的格式</h3>
+
+<p>序列化桥（<code>_rust_*.py</code>）的产物不含任何 Python 对象，只有嵌套的元组与浮点数：</p>
+
+<pre><code># _rust_lti.build_lti_problem() 产出的一部分
+spec = {
+  "size": 12,                                    # 矩阵阶数：节点数加支路数
+  "mos_devices": [ (drain, gate, source, gm, gds, Cgs, Cgd), ... ],
+  "capacitors":  [ (a, b, 5.0e-13), ... ],
+  "resistors":   [ (a, b, 1.25e-5), ... ],       # 存电导，非电阻
+  "voltage_sources": [ (p, q, branch, emf_re, emf_im), ... ],
+}
+# 其中 a / b / drain 等每个端子都是 (kind, reference, value) 三元组
+circuitopt_core.LtiProblem(spec)</code></pre>
+
+<p>频域结果以实部虚部对的形式返回，Python 侧由 <code>complex_array()</code> 重组为 numpy 复数数组。原因是 PyO3 的复数 ABI 不稳定。</p>
+
+<h2 id="s10">10 Rust 核心</h2>
+
+<table>
+<tr><th>crate</th><th>职责</th></tr>
+<tr><td><code>co-py</code></td><td>PyO3 边界层，<code>circuitopt_core</code> 的全部导出。GIL 在此释放。</td></tr>
+<tr><td><code>co-core</code></td><td>数值核心，模块见下表。</td></tr>
+<tr><td><code>co-bsim4</code></td><td>Berkeley BSIM4.5 的 Rust 宿主。<code>build.rs</code> 编译未经修改的原版 C 代码，Rust 重写宿主适配层（参数绑定、内部节点消去、端量提取、噪声合成），与原 C 实现逐位一致。</td></tr>
+<tr><td><code>co-spice</code></td><td>HSPICE 表达式引擎：词法分析、Pratt 解析（带编译缓存）、求值，以及大小写不敏感的惰性参数作用域。</td></tr>
+<tr><td><code>co-pdk</code></td><td>FreePDK45、SKY130、TSMC28 三家 PDK 的卡片编译器，共用 <code>co-spice</code>。</td></tr>
+</table>
+
+<h3>co-core 的模块</h3>
+
+<table>
+<tr><th>模块</th><th>职责</th></tr>
+<tr><td><code>mna.rs</code></td><td>稠密 MNA 原语：端子解析、矩阵结构、部分主元高斯消去。</td></tr>
+<tr><td><code>integrator.rs</code></td><td>积分公式与步长策略的唯一实现处。BDF 族：首步用后向欧拉，其后用变步长 BDF2；步长增长超过阈值时该步退回后向欧拉。BDF3 与 BDF2 之差构成自适应局部误差估计。</td></tr>
+<tr><td><code>transient.rs</code></td><td>OTFT 瞬态印记与电路级 Newton。</td></tr>
+<tr><td><code>bsim_transient.rs</code></td><td>四端紧凑模型的瞬态编排，含固定网格与自适应两条路径。</td></tr>
+<tr><td><code>lti.rs</code></td><td>线性时不变 MNA 装配与复频域求解。仅当频点数与矩阵阶数的乘积超过阈值时启用 Rayon。</td></tr>
+<tr><td><code>periodic.rs</code></td><td>周期小信号装配与循环平稳噪声核。</td></tr>
+<tr><td><code>stimulus.rs</code></td><td>两个自适应引擎共用的激励采样：任意时刻插值与斜率断点识别。</td></tr>
+<tr><td><code>sar.rs</code></td><td>SAR 逐位转换闭环，整条转换在一次 GIL 释放内完成。</td></tr>
+<tr><td><code>campaign.rs</code></td><td>批量执行器：单一 Rayon 线程池、候选级与频点级并行二选一、按索引顺序回写以保证可复现。</td></tr>
+<tr><td><code>otft.rs</code></td><td>AT4000TG OTFT 器件方程。</td></tr>
+</table>
+
+<p><code>integrator.rs</code> 中保留了两套缩放约定：<code>scaled</code> 行携带 <code>1/h</code> 因子，<code>dimensionless</code> 行不携带。两者都被逐位冻结在 golden 语料中，统一它们会改变数值结果，因此是有意保留而非遗留。</p>
+
+<h2 id="s11">11 批量执行</h2>
+
+<p>批量运行有两条路径，选择依据是每个点是否需要运行一整套分析并施加判据。</p>
+
+<h3>路径一：signoff campaign</h3>
+
+<p>用于 <code>circuit-opt signoff</code>。并行发生在 PVT 点这一级，每个点内部串行运行全部测试台。</p>
+
+<pre><code>signoff_campaign.run_signoff_campaign(path, workers=N)
+├─ load_campaign_json()          读 manifest 并校验
+├─ _load_case_bases()            读入各测试台 deck
+├─ 预检：每个工艺角先 prepare 一次并校验 signoff 配置
+│                                结构性错误属于配置失败，应一次报出，
+│                                而不是变成 45 行重复的 invalid
+└─ _run_prepared_campaign()
+   └─ ThreadPoolExecutor(N) 分发 PVT 点
+      └─ _run_point_worker()
+         ├─ with worker_device_eval(N)          见 §13
+         └─ with isolated_native_device_cache() 见下
+            └─ for case in cases:
+               prepare_case_dict()  →  circuit_from_dict()
+               run_analysis_suite(spec)          §6
+               evaluate_signoff(spec, results)   run_contract.py</code></pre>
+
+<p><code>isolated_native_device_cache()</code> 是正确性所需，而非性能优化。BSIM handle 在调用之间保留热启动与限幅状态；共享同一张卡片的两个点（同角同温、不同电源电压）会租用同一个 handle，从而看到对方的状态。其表现是 campaign 只在 <code>workers=1</code> 时可复现。把租用隔离到每个点各自的命名空间后，任意 worker 数下每个点的结果都只取决于该点自身。</p>
+
+<h3>路径二：compiled campaign</h3>
+
+<p>用于 <code>explore</code>、<code>corners</code>、<code>mc</code>、<code>dataset</code>，即「同一个电路、更换一批尺寸、只需少量标量指标」的批量。调用链为 <code>_campaign_sweep.py</code> → <code>_rust_campaign.py</code> → <code>CompiledCampaign</code>。特点：</p>
+
+<ul>
+<li>器件构造、直流、交流、噪声整条流水线都在 Rust 内完成，无逐候选的 Python 回调，整批共用一次 GIL 释放。</li>
+<li>随机失配抽样与各候选的直流初值全部提前计算好，Rust 批次运行期间不回调 Python。</li>
+<li>并行轴二选一：候选数不小于 worker 数时按候选并行，否则按频点并行，保证单一线程池不被超额订阅。</li>
+</ul>
+
+<p>并非所有电路都能走这条路径。硅 BSIM 的 5T OTA 是单稳的，编译 Newton 冷启动可以到达与冻结的 scipy 路径相同的物理分支（最差节点差约 2e-5 V）；AFE 的 OTFT 是多稳的，冷启动可能选到另一个分支。因此 <code>_campaign_sweep.py</code> 中带有一条按器件族区分的准入策略。</p>
+
+<h3>SAR 与 ADC</h3>
+
+<pre><code>sar.py  run_sar_conversion()      冻结的 Python 参考实现，同时作为回退路径
+  └─ sar_rust.build_sar_batch()   不支持的拓扑抛 SarRustUnavailable
+     └─ circuitopt_core.CompiledSarConversion
+        └─ co_core::sar           逐位续算，整条转换一次 GIL 释放
+adc.py                            由码流计算 INL / DNL / SNDR / ENOB</code></pre>
+
+<p>「逐位续算」指每一位在前一位的状态上继续求解，而不是每位重放整条波形；后者会使一次 N 位转换的成本变成 N 的平方量级。</p>
+
+<h2 id="s12">12 ngspice 对照引擎</h2>
+
+<p>项目包含两个仿真引擎。原生引擎用于设计迭代，ngspice 作为第三方参考用于终验与核对。</p>
+
+<table>
+<tr><th></th><th>原生引擎</th><th>ngspice</th></tr>
+<tr><td>执行方式</td><td>进程内调用 <code>circuitopt_core</code></td><td>渲染 SPICE 网表，启动子进程，解析输出</td></tr>
+<tr><td>实现</td><td><code>ac_solver.py</code> 等</td><td><code>ngspice_render / process / ac / transient / char / device</code></td></tr>
+<tr><td>模型绑定名</td><td><code>&lt;pdk&gt;</code></td><td><code>&lt;pdk&gt;_ngspice</code></td></tr>
+<tr><td>耗时（MDAC 案例，45 点 × 11 用例 = 495 次求解）</td><td>约 11 秒</td><td>约 3 至 4 小时</td></tr>
+</table>
+
+<h3>verify-engine</h3>
+
+<pre><code>circuit-opt verify-engine campaign.json --case residue_max --point ss/125/0.85</code></pre>
+
+<p><code>engine_crosscheck.py</code> 做三件事。</p>
+
+<p><b>在内存中改写模型绑定</b>（<code>oracle_deck()</code>）。提交的网表保持引擎中立，运行前才把 <code>pdk</code> 改写为 <code>*_ngspice</code>。若改由维护两份网表实现，两份迟早会不一致。</p>
+
+<p><b>排除受激励驱动的节点</b>（<code>driven_nodes()</code>）。这些节点在两个引擎中按定义相同，比较它们等于比较测试台本身；且一个 20 ps 的时钟边沿落在两套不同的步长网格上时，其偏差会超过所有真实节点，占据比较结果的首位。</p>
+
+<p><b>判定依据取稳态偏差而非峰值偏差</b>。快速跳变处的大偏差来自步长落点差异，稳定后仍不收敛的偏差才表示两个引擎不一致。峰值偏差仍然报告，但使用独立的、更宽的阈值单独标记。</p>
+
+<h2 id="s13">13 并行策略</h2>
+
+<p>原则：<strong>拥有外层循环的一方拥有并行，内层改为串行执行。</strong></p>
+
+<p>编译核心通过一个进程级线程池评估瞬态的器件批次。对单次孤立求解这是合理的；但 signoff 的 PVT 点、SAR 的转换序列、蒙特卡洛试验都向同一个池提交任务，外层 worker 会互相排队。<code>_parallel.worker_device_eval(workers)</code> 返回一个上下文管理器，使调用线程的器件批次改为内联求值。只有调度方式改变，结果逐位相同。</p>
+
+<p>参考机上 16 个 TSMC28 MDAC 残差瞬态的实测：</p>
+
+<table>
+<tr><th>调度方式</th><th>1 线程</th><th>8 线程</th><th>8 线程时核占用</th></tr>
+<tr><td>内层使用共享池</td><td>4.90 s</td><td>4.03 s</td><td>7.8 核，但外层 worker 均在排队</td></tr>
+<tr><td>内层内联</td><td>10.54 s</td><td>3.19 s</td><td>6.0 核</td></tr>
+</table>
+
+<p>两种情况下不做让路：<code>workers ≤ 1</code> 时没有外层并行需要保护，线程池能让单次求解更快；外层任务数小于 worker 数时外层无法占满机器，空闲核心交给线程池更合适。</p>
+
+<p>这条原则的适用范围是 Python 侧的 BSIM 池路径。编译 SAR 内核相反：外层串行，内核使用 Rayon。参考机只有 4 个性能核，worker 数超过该值后收益迅速趋平。</p>
+
+<h3>GIL 的位置</h3>
+
+<p><code>py.detach()</code> 位于 co-py 的每个求解入口。计算密集部分本就不持有 GIL，因此改用 Python 3.14 的自由线程构建不会加速这些路径。Python 侧剩余的单线程工作是问题描述装配与结果整理，两者都不是热点。</p>
+
+<h2 id="s14">14 完整调用示例</h2>
+
+<p>命令为 <code>circuit-opt signoff examples/tsmc28hpcp_mdac_ota_signoff.json --workers 4</code>。下面跟踪其中一个 PVT 点的一个测试台。</p>
+
+<pre><code>__main__.main() → _cmd_signoff()
+└─ run_signoff_campaign(path, workers=4)
+   └─ ThreadPoolExecutor(4)，45 个 PVT 点
+      └─ _run_point_worker(idx, ("ss", 125.0, 0.85), cases, pvt, workers=4)
+         └─ _run_point_isolated()，遍历 11 个测试台
+            ├─ prepare_case_dict()      代入角/温/压，求值 $pvt 表达式，
+            │                           同步缩放数值电压源
+            ├─ circuit_from_dict()      → CircuitSpec
+            ├─ run_analysis_suite(spec)
+            │  └─ transient(...)
+            │     └─ transient_native_bsim4()
+            │        ├─ CompiledTopology(...)         §5
+            │        ├─ build_devices(...)            §7
+            │        ├─ solve_bsim4_dc_rust()         求瞬态起点，见下
+            │        └─ solve_bsim4_rust()
+            │           └─ Bsim4TransientProblem.solve_adaptive_gear2()
+            │              └─ py.detach()  ── 释放 GIL ──
+            │                 co_core::bsim_transient
+            │                 ├─ stimulus  断点识别与插值
+            │                 ├─ integrator 首步后向欧拉，其后变步长 BDF2
+            │                 ├─ 每步 Newton：
+            │                 │  co_bsim4 求 I/Q/G/C → mna 印记 → 高斯消去
+            │                 │  → 步长限制 → 收敛判定
+            │                 └─ 双半步 Richardson 外推估计局部误差
+            │                    → 接受或减步重试
+            └─ evaluate_signoff(spec, results)        run_contract.py
+               settling_time / checkpoint_error / saturation /
+               phase_margin / noise → 判据 → normalized_margin</code></pre>
+
+<p>其中 <code>solve_bsim4_dc_rust()</code> 一步值得注意。瞬态的起点必须在与瞬态起始时刻完全相同的源配置下求解，即每个由波形驱动的电压源都要钳位在其 <code>u(t₀)</code> 采样值上。早期实现在直流编译时把这类源一律取 0 V，于是 <code>t₀⁺</code> 的第一步把整个源摆幅经耦合电容注入高阻网络。在 MDAC 保持相测试台上，两个 CDAC 底极板从 0 跳变到 VCM，向浮空虚地注入约 1.17 pC/边，输出共模在 5 ns 内上升 0.42 V 并撞轨，表现为两套不同拓扑在全部 45 个 PVT 点的瞬态全部失败，而 golden 语料始终逐位通过。修正方式是 <code>CompiledTopology(..., dc_input_values=...)</code>，实现在 <code>compiled_topology.py</code>。</p>
+
+<h2 id="s15">15 约束与注意事项</h2>
+
+<p>以下六项是修改求解器时容易违反的约束，均有对应的测试或实测数据支撑。</p>
+
+<p><b>器件状态跨调用保留。</b>BSIM 的求值是路径相关的，热启动与限幅状态会在调用之间保留。两个推论：回滚重解时必须调用 <code>resync_evaluator</code>；并行 campaign 必须隔离 handle 租用（见 §11）。</p>
+
+<p><b>BSIM 后端的锁必须保持粗粒度。</b>收窄锁范围看似是明显的优化，实测慢 35% 至 45%。该锁真正串行化的是 vendored C 中线程不安全的 setup 路径，而非计算本身。</p>
+
+<p><b>自适应重启不使用盲步。</b>在断点处重启积分历史时，早期实现走一个盲步。改为 Richardson 双半步后误差下降约 40 倍，步数增加约 35%。<code>reltol</code> 与 <code>max_step</code> 对这一环节无效，它使用独立的误差预算。</p>
+
+<p><b>采样系统的共模判据定义在时刻上而非窗口上。</b>要求整个窗口内共模都满足限值对采样系统过严，压摆阶段本就会偏离。正确的判据是 <code>checkpoint_error</code>，只在命名的时刻（静态工作点、保持相末尾）检查。实现在 <code>run_contract._checkpoint_error_measurement()</code>。</p>
+
+<p><b>对生成器源码做文本替换时必须断言目标存在。</b><code>str.replace()</code> 在目标字符串不存在时不报错，只是不做任何修改。此处曾因此连续三轮测量的都是未修改的设计。同理，<code>git checkout &lt;file&gt;</code> 会静默丢弃未提交的修改。</p>
+
+<p><b>未知配置键按错误处理。</b>理由见 §6 的配置校验。</p>
+
+<h2 id="s16">16 错误来源对照</h2>
+
+<table>
+<tr><th>错误信息</th><th>抛出位置</th><th>含义</th></tr>
+<tr><td><code>No analyses configured</code></td><td>分析调度</td><td>JSON 缺少 <code>analyses</code> 块，或 <code>--analysis</code> 指定了不存在的分析名</td></tr>
+<tr><td>未知配置键相关</td><td><code>analysis_options.py</code></td><td>配置键拼写错误。该检查阻止了一次静默的配置降级</td></tr>
+<tr><td><code>ModelBindingError</code></td><td><code>device_factory.py</code></td><td><code>model_types</code> 或 <code>device_kwargs</code> 未覆盖某个器件，或 PDK 名称有误</td></tr>
+<tr><td><code>mixed ... ngspice analysis is not supported</code></td><td>ngspice 路径</td><td>网表绑定了 <code>&lt;pdk&gt;</code> 而非 <code>&lt;pdk&gt;_ngspice</code>，见 §7</td></tr>
+<tr><td>直流不收敛</td><td><code>ac_solver.py</code> / <code>dc_solver.py</code></td><td>三级退避全部失败。先检查偏置是否自洽，再检查 <code>dc_guesses</code> 是否合理</td></tr>
+<tr><td><code>SimulationInvalid</code></td><td><code>run_contract.py</code></td><td>结果含 NaN 或 inf，或某项测量无有效值。campaign 中记为该点 <code>invalid</code></td></tr>
+<tr><td><code>tgrid must be strictly increasing</code></td><td>瞬态入口</td><td>时间网格存在重复点，常见于断点合并容差未生效</td></tr>
+<tr><td><code>circuitopt_core ... not importable</code></td><td><code>_engine.py</code>（警告）</td><td>扩展模块未安装，见下方命令</td></tr>
+<tr><td>更改 worker 数导致 campaign 结果变化</td><td>—</td><td>handle 隔离失效，见 §11。属于正确性问题，非数值噪声</td></tr>
+</table>
+
+<h3>常用排查命令</h3>
+
+<pre><code># 查看当前引擎与核心状态
+python -c "from circuitopt._engine import engine_info; print(engine_info())"
+
+# 安装编译核心
+maturin develop --release -m rust/crates/co-py/Cargo.toml
+
+# 单点单分析运行，不展开 PVT 网格
+circuit-opt run examples/tsmc28hpcp_mdac_ota.json -a transient
+
+# 输出全部规格的余量表，而非仅最紧的一项
+circuit-opt signoff campaign.json --margins
+
+# 元件容差敏感度
+circuit-opt signoff campaign.json --tolerance R=20,C=10
+
+# 与 ngspice 比对同一个点
+circuit-opt verify-engine campaign.json --case residue_max --point ss/125/0.85</code></pre>
+
+<h2 id="s17">17 源文件索引</h2>
+
+<h3>Python</h3>
+<table>
+<tr><th>文件</th><th>职责</th></tr>
+<tr><td><code>__main__.py</code></td><td>命令行入口，13 个子命令的参数定义与分发</td></tr>
+<tr><td><code>_engine.py</code></td><td>引擎开关解析</td></tr>
+<tr><td><code>circuit_loader.py</code></td><td>JSON 到 <code>CircuitSpec</code></td></tr>
+<tr><td><code>topology.py</code>、<code>compiled_topology.py</code></td><td>拓扑到矩阵索引与印记</td></tr>
+<tr><td><code>device_model.py</code>、<code>device_factory.py</code></td><td>模型注册表与器件构造</td></tr>
+<tr><td><code>pdk/{freepdk45,sky130,tsmc28}/</code></td><td>各 PDK 的卡片适配器</td></tr>
+<tr><td><code>spice/</code></td><td>HSPICE 解析与表达式求值，Python 参考实现</td></tr>
+<tr><td><code>compact_models/bsim4/</code></td><td>BSIM4 后端：ABI、卡片缓存、原生瞬态、Rust 桥</td></tr>
+<tr><td><code>analysis_dispatch.py</code>、<code>analysis_options.py</code></td><td>分析编排与选项校验</td></tr>
+<tr><td><code>ac_solver.py</code>、<code>noise_solver.py</code>、<code>transient_solver.py</code>、<code>dc_solver.py</code></td><td>四个基本分析</td></tr>
+<tr><td><code>pss_solver.py</code>、<code>pac_solver.py</code>、<code>pnoise_solver.py</code></td><td>周期稳态一族</td></tr>
+<tr><td><code>_rust_lti.py</code>、<code>_rust_transient.py</code>、<code>_rust_periodic.py</code>、<code>_rust_campaign.py</code></td><td>序列化桥</td></tr>
+<tr><td><code>run_contract.py</code></td><td>测量与判据</td></tr>
+<tr><td><code>signoff_campaign.py</code></td><td>PVT campaign、余量表、容差扫描</td></tr>
+<tr><td><code>_campaign_sweep.py</code>、<code>_parallel.py</code></td><td>批量派发策略与嵌套并行策略</td></tr>
+<tr><td><code>explore.py</code>、<code>corners.py</code>、<code>sar*.py</code>、<code>adc.py</code></td><td>四类批量工作流</td></tr>
+<tr><td><code>ngspice_*.py</code></td><td>ngspice 对照引擎</td></tr>
+<tr><td><code>engine_crosscheck.py</code>、<code>passive_bom.py</code></td><td>双引擎比对与无源元件清单</td></tr>
+<tr><td><code>service/</code>、<code>mcp/</code></td><td>HTTP 服务与 MCP 服务</td></tr>
+</table>
+
+<h3>Rust</h3>
+<table>
+<tr><th>路径</th><th>职责</th></tr>
+<tr><td><code>rust/crates/co-py/src/lib.rs</code></td><td>PyO3 边界</td></tr>
+<tr><td><code>rust/crates/co-core/src/</code></td><td>数值核心，模块见 §10</td></tr>
+<tr><td><code>rust/crates/co-bsim4/src/lib.rs</code></td><td>Berkeley BSIM4.5 的 Rust 宿主</td></tr>
+<tr><td><code>rust/crates/co-spice/src/</code></td><td>HSPICE 表达式引擎</td></tr>
+<tr><td><code>rust/crates/co-pdk/src/</code></td><td>三家 PDK 的卡片编译器</td></tr>
+</table>
+
+<h3>相关文档</h3>
+<ul>
+<li><code>docs/module_overview_zh.md</code>：逐模块的详细参考。本文按调用顺序组织，该文按模块组织。</li>
+<li><code>docs/json_circuit_format_zh.md</code>：电路 JSON 的字段定义。</li>
+<li><code>docs/signoff_campaign_zh.md</code>：signoff campaign 的完整配置说明。</li>
+<li><code>docs/cli_reference_zh.md</code>：全部子命令与参数。</li>
+<li><code>docs/rust_core_rewrite_plan.md</code>：当前分层的设计依据。</li>
+</ul>
+
+<p class="foot">本文描述 <code>main</code> 分支的当前实现。修改调用链时请同步更新本文。</p>
+
+</main>
+</div>
+</body>
+</html>
