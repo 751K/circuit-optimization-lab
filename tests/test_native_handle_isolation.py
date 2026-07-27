@@ -59,12 +59,26 @@ def test_a_scope_releases_its_handles_when_it_exits():
 
 def test_concurrent_scopes_never_share_a_handle():
     # The campaign case: several units running at once, all wanting the same
-    # card. Without isolation they all get one handle and interleave on it.
+    # card. Entering a scope must not cost them the active-lease invariant.
+    #
+    # The leases have to be held open across the comparison. `_lease_identity`
+    # closes before returning, and CPython then reuses the freed address for
+    # the next thread's handle -- the same hazard the scope-release test below
+    # calls out. Measured at 42 spurious collisions in 200 runs, which is what
+    # made this test fail roughly one full suite run in five.
     device = Fp45Nfet(W=1.0, L=0.05)
+    barrier = Barrier(4)
 
     def unit(_):
         with isolated_native_device_cache():
-            return _lease_identity(device)
+            lease = device.lease_native_solver_handle()
+            try:
+                barrier.wait()          # every handle now alive at once
+                identity = id(lease.device)
+                barrier.wait()          # nobody frees before all ids are read
+                return identity
+            finally:
+                lease.close()
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         identities = list(pool.map(unit, range(4)))
