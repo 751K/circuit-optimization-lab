@@ -431,3 +431,32 @@ def test_settling_uses_declared_target_not_last_sample():
     assert signoff["constraints"]["settling_time"]["passed"] is False
     assert signoff["constraints"]["settling_time"][
         "normalized_margin"] == pytest.approx(-9.0)
+
+
+def test_cm_settling_time_is_a_second_settling_measurement_with_own_gate():
+    """``cm_settling_time`` reuses the settling machinery under its own name.
+
+    The MDAC brief gates the OUTPUT COMMON MODE (|CM - VDD/2| < 20 mV after
+    every residue settles) -- a second settled-band question on the same
+    transient.  The fixture's outputs are anti-symmetric, so the CM signal
+    {OUTP: 0.5, OUTN: 0.5} sits exactly on a 0.0 target from t=0."""
+    spec, results = _signoff_fixture()
+    results["ac"]["ac_stimulus"]["drives"]["Vinj"] = 1.0 + 0.0j
+    spec.signoff["measurements"]["cm_settling_time"] = {
+        "analysis": "transient",
+        "signal": {"OUTP": 0.5, "OUTN": 0.5},
+        "target": 0.0,
+        "start_time": 0.0,
+        "tolerance": {"absolute": 0.02},
+    }
+    spec.signoff["constraints"]["cm_settling_time"] = {"max": 3e-9}
+    signoff = evaluate_signoff(spec, results)
+    metric = signoff["measurements"]["cm_settling_time"]
+    assert metric["unit"] == "s"
+    assert metric["value"] == pytest.approx(0.0, abs=1e-12)
+    assert metric["tolerance"]["mode"] == "absolute"
+    gate = signoff["constraints"]["cm_settling_time"]
+    assert gate["passed"] is True
+    # The ordinary settling_time measurement is untouched by the second one.
+    assert signoff["measurements"]["settling_time"]["unit"] == "s"
+    assert signoff["status"] == "pass"

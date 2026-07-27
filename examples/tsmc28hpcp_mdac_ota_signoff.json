@@ -106,7 +106,6 @@
             }
           },
           "constraints": {
-            "integrated_input_noise": {"max": 0.0000565},
             "integrated_output_noise": {"max": 0.000452}
           }
         }
@@ -181,6 +180,14 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
+            "cm_settling_time": {
+              "analysis": "transient",
+              "signal": {"OUTP": 0.5, "OUTN": 0.5},
+              "target": {"$pvt": {"vdd": 0.5}},
+              "start_time": 2e-11,
+              "end_time": 5e-9,
+              "tolerance": {"absolute": 0.02}
+            },
             "saturation": {
               "analysis": "transient",
               "devices": [
@@ -196,6 +203,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
+            "cm_settling_time": {"max": 5e-9},
             "saturation": {"equals": true}
           }
         }
@@ -246,9 +254,17 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
+            "cm_settling_time": {
+              "analysis": "transient",
+              "signal": {"OUTP": 0.5, "OUTN": 0.5},
+              "target": {"$pvt": {"vdd": 0.5}},
+              "start_time": 2e-11,
+              "end_time": 5e-9,
+              "tolerance": {"absolute": 0.02}
+            },
             "saturation": {
               "analysis": "transient",
-              "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12"],
+              "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "MFN1", "MFN2"],
               "minimum_headroom": 0.0,
               "checkpoints": [
                 {"name": "static", "time": 0.0},
@@ -258,6 +274,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
+            "cm_settling_time": {"max": 5e-9},
             "saturation": {"equals": true}
           }
         }
@@ -308,9 +325,17 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
+            "cm_settling_time": {
+              "analysis": "transient",
+              "signal": {"OUTP": 0.5, "OUTN": 0.5},
+              "target": {"$pvt": {"vdd": 0.5}},
+              "start_time": 2e-11,
+              "end_time": 5e-9,
+              "tolerance": {"absolute": 0.02}
+            },
             "saturation": {
               "analysis": "transient",
-              "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12"],
+              "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "MFN1", "MFN2"],
               "minimum_headroom": 0.0,
               "checkpoints": [
                 {"name": "static", "time": 0.0},
@@ -320,6 +345,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
+            "cm_settling_time": {"max": 5e-9},
             "saturation": {"equals": true}
           }
         }
@@ -370,9 +396,17 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
+            "cm_settling_time": {
+              "analysis": "transient",
+              "signal": {"OUTP": 0.5, "OUTN": 0.5},
+              "target": {"$pvt": {"vdd": 0.5}},
+              "start_time": 2e-11,
+              "end_time": 5e-9,
+              "tolerance": {"absolute": 0.02}
+            },
             "saturation": {
               "analysis": "transient",
-              "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12"],
+              "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "MFN1", "MFN2"],
               "minimum_headroom": 0.0,
               "checkpoints": [
                 {"name": "static", "time": 0.0},
@@ -382,6 +416,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
+            "cm_settling_time": {"max": 5e-9},
             "saturation": {"equals": true}
           }
         }
@@ -432,9 +467,17 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
+            "cm_settling_time": {
+              "analysis": "transient",
+              "signal": {"OUTP": 0.5, "OUTN": 0.5},
+              "target": {"$pvt": {"vdd": 0.5}},
+              "start_time": 2e-11,
+              "end_time": 5e-9,
+              "tolerance": {"absolute": 0.02}
+            },
             "saturation": {
               "analysis": "transient",
-              "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12"],
+              "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "MFN1", "MFN2"],
               "minimum_headroom": 0.0,
               "checkpoints": [
                 {"name": "static", "time": 0.0},
@@ -444,6 +487,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
+            "cm_settling_time": {"max": 5e-9},
             "saturation": {"equals": true}
           }
         }
@@ -499,9 +543,17 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
+            "cm_settling_time": {
+              "analysis": "transient",
+              "signal": {"OUTP": 0.5, "OUTN": 0.5},
+              "target": {"$pvt": {"vdd": 0.5}},
+              "start_time": 2e-11,
+              "end_time": 5e-9,
+              "tolerance": {"absolute": 0.02}
+            },
             "saturation": {
               "analysis": "transient",
-              "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12"],
+              "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "MFN1", "MFN2"],
               "minimum_headroom": 0.0,
               "checkpoints": [
                 {"name": "static", "time": 0.0},
@@ -511,6 +563,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
+            "cm_settling_time": {"max": 5e-9},
             "saturation": {"equals": true}
           }
         }

@@ -260,7 +260,8 @@ def validate_signoff_config(
             "signoff.constraints must contain at least one constraint")
     _reject_unknown(
         measurements,
-        {"phase_margin", "settling_time", "noise", "saturation"},
+        {"phase_margin", "settling_time", "cm_settling_time", "noise",
+         "saturation"},
         "signoff.measurements",
     )
 
@@ -329,9 +330,15 @@ def validate_signoff_config(
             "phase_margin", "loop_unity_gain_frequency", "loop_gain_dc",
         })
 
-    if "settling_time" in measurements:
-        path = "signoff.measurements.settling_time"
-        cfg = _require_mapping(measurements["settling_time"], path)
+    # ``cm_settling_time`` reuses the settling machinery byte-for-byte with its
+    # own signal/target/tolerance -- the MDAC brief gates the OUTPUT COMMON MODE
+    # (|CM - VDD/2| < 20 mV after every residue settles), which is a second
+    # settled-band question on the same transient.
+    for settle_name in ("settling_time", "cm_settling_time"):
+        if settle_name not in measurements:
+            continue
+        path = f"signoff.measurements.{settle_name}"
+        cfg = _require_mapping(measurements[settle_name], path)
         _reject_unknown(
             cfg,
             {"analysis", "signal", "target", "start_time", "end_time", "tolerance"},
@@ -356,7 +363,7 @@ def validate_signoff_config(
         if float(cfg["start_time"]) < 0.0:
             raise SignoffConfigurationError(f"{path}.start_time must be non-negative")
         _settling_tolerance(cfg)
-        produced.add("settling_time")
+        produced.add(settle_name)
 
     if "noise" in measurements:
         path = "signoff.measurements.noise"
@@ -839,13 +846,15 @@ def summarize_design_metrics(
             raise SignoffConfigurationError(
                 "phase_margin requires the ac analysis result")
         out.update(_phase_margin_measurement(spec, ac, configured["phase_margin"]))
-    if "settling_time" in configured:
+    for settle_name in ("settling_time", "cm_settling_time"):
+        if settle_name not in configured:
+            continue
         transient = results.get("transient")
         if transient is None:
             raise SignoffConfigurationError(
-                "settling_time requires the transient analysis result")
-        out["settling_time"] = _settling_measurement(
-            transient, configured["settling_time"])
+                f"{settle_name} requires the transient analysis result")
+        out[settle_name] = _settling_measurement(
+            transient, configured[settle_name])
     if "noise" in configured:
         noise = results.get("noise")
         if noise is None:
