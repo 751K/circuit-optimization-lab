@@ -81,26 +81,61 @@ release checklist.
   电容占了无源面积的 64%，无源总面积是全部晶体管的 21 倍——自补偿整定以来一直如此，
   只是没有任何视图把它加起来。
 
-### Changed / 变更
+- **MCP: margin table, passive inventory, and an agent guide / MCP：余量表、无源清单与 agent 指南**
 
-- **Documentation readability pass / 文档可读性整理**
+  **English:** The MCP surface could report whether a campaign passed and which
+  points failed, but not which specification was closest to failing -- the
+  reading an agent needs to choose its next change. `signoff_margins` exposes
+  the existing per-constraint margin table over a saved result, tightest first.
+  `passive_inventory` exposes the passive BOM, which reads deck JSON and runs
+  no solver. Both are read-only and workspace-confined. Twelve tools now.
 
-  **English:** Reference material that had been written as continuous prose is
-  now structured for lookup: the `analyses` option block in the circuit JSON
-  format became eight grouped option tables, and `module_overview`'s longest
-  entries — one 1568-character bullet and two run-on paragraphs — became
-  headed sections and an element table. `signoff_campaign` gained the
-  `--margins` and `--tolerance` sections it never had. New page
-  `docs/solver_call_flow_zh.html` traces one request from the CLI to the Rust
-  core.
+  New page `docs/agent_guide.md` documents the surface for autonomous callers:
+  what each entry point costs, how to read a campaign result, and the failure
+  modes that return a plausible number instead of an error.
 
-  **中文：** 把本应供查阅、却写成连续散文的参考内容改为结构化：电路 JSON 的
-  `analyses` 选项块拆成八组选项表；`module_overview` 最长的三处——一个 1568
-  字符的 bullet 和两个跑长段落——改为带小标题的段落与元件表。`signoff_campaign`
-  补上了一直缺失的 `--margins` 与 `--tolerance` 两节。新增
-  `docs/solver_call_flow_zh.html`，追踪一次请求从命令行到 Rust 核心的完整路径。
+  **中文：** MCP 此前能报出 campaign 是否通过、哪些点失败，却报不出**哪条规格
+  最接近失败**——而这正是 agent 决定下一步该改什么所需的读数。`signoff_margins`
+  把已有的逐约束余量表暴露出来，按最紧优先排序；`passive_inventory` 暴露无源
+  物料清单，只读 deck JSON、不跑求解器。两者均为只读且受 workspace 路径闭锁。
+  工具总数增至 12 个。
+
+  新增 `docs/agent_guide.md`，面向自主调用方说明：各入口的开销、如何读 campaign
+  结果，以及哪些失败模式会返回一个貌似合理的数字而不是报错。
 
 ### Fixed / 修复
+
+- **CLI transient step count, and a 21%-flaky handle-isolation test / CLI 瞬态步数与一个 21% 概率失败的句柄隔离测试**
+
+  **English:** `circuit-opt run` reported the solved-node count as the transient
+  step count. `_format_analysis_summary` measured `len(result["nodes"])`, and
+  `nodes` is a `{node: waveform}` map, so a seven-node circuit printed
+  "7 steps" for every grid it was ever given. The number looked plausible,
+  which is why it survived; the sibling code path a few hundred lines away had
+  always used `len(t)`.
+
+  `test_native_handle_isolation.py::test_concurrent_scopes_never_share_a_handle`
+  failed roughly one full suite run in five. It compared `id(lease.device)`
+  across threads but closed each lease before returning, and CPython then
+  reused the freed address for the next thread's handle -- 42 spurious
+  collisions in 200 measured runs. The same file's scope-release test already
+  warned that identity cannot be compared across a free. The leases are now
+  held open across the comparison with a barrier, as the sibling
+  active-lease test does. No product defect: handles were never shared.
+
+  **中文：** `circuit-opt run` 把待解节点数当成了瞬态步数。
+  `_format_analysis_summary` 取的是 `len(result["nodes"])`，而 `nodes` 是
+  `{节点: 波形}` 映射，因此一个 7 节点电路无论用多长的时间网格都打印
+  "7 steps"。这个数字看起来合理，所以一直没被发现；同文件几百行外的另一处
+  一直用的是正确的 `len(t)`。
+
+  `test_native_handle_isolation.py::test_concurrent_scopes_never_share_a_handle`
+  大约每五次全量测试失败一次。它跨线程比较 `id(lease.device)`，却在返回前就
+  关闭了租约，CPython 随后把释放的地址复用给下一个线程的句柄——实测 200 轮
+  出现 42 次伪碰撞。同文件的作用域释放测试早已写明"跨释放不能比较身份"。
+  现改为用 barrier 让各租约在比较期间保持存活，与同文件活跃租约测试的写法
+  一致。非产品缺陷：句柄从未真正共享。
+
 
 - **Mermaid rendering, a stale import graph, and broken links / Mermaid 渲染、过时的导入图与坏链接**
 
@@ -121,6 +156,25 @@ release checklist.
   依赖图。三处链接缺陷：changelog 的 `[1.4.1]` 标题缺链接定义、被渲染成字面文字；
   `Changed / 性能` 把英文小节名与含义为 Performance 的中文配成一对；TSMC28 设计
   文档链接了一个非文档文件的仓库路径，导致 `mkdocs build --strict` 中止。
+
+### Changed / 变更
+
+- **Documentation readability pass / 文档可读性整理**
+
+  **English:** Reference material that had been written as continuous prose is
+  now structured for lookup: the `analyses` option block in the circuit JSON
+  format became eight grouped option tables, and `module_overview`'s longest
+  entries — one 1568-character bullet and two run-on paragraphs — became
+  headed sections and an element table. `signoff_campaign` gained the
+  `--margins` and `--tolerance` sections it never had. New page
+  `docs/solver_call_flow_zh.html` traces one request from the CLI to the Rust
+  core.
+
+  **中文：** 把本应供查阅、却写成连续散文的参考内容改为结构化：电路 JSON 的
+  `analyses` 选项块拆成八组选项表；`module_overview` 最长的三处——一个 1568
+  字符的 bullet 和两个跑长段落——改为带小标题的段落与元件表。`signoff_campaign`
+  补上了一直缺失的 `--margins` 与 `--tolerance` 两节。新增
+  `docs/solver_call_flow_zh.html`，追踪一次请求从命令行到 Rust 核心的完整路径。
 
 ## [2.5.0] - 2026-07-27
 
