@@ -17,14 +17,14 @@ import numpy as np
 CS = 2.6e-12
 CF = CS / 8.0
 CL = 500e-15
-CC = 900e-15
+CC = 840e-15
 CSENSE = 100e-15
 VDD_NOM = 0.90
 
 # A small ratio trim offsets CMFB2's positive systematic error without moving the
 # large-signal common-mode trajectory outside its 5 ns window.
 RDIV_TOP = 67.2e3
-RDIV_BOTTOM = 73e3
+RDIV_BOTTOM = 71.2e3
 RSENSE = 100e3
 RSENSE1 = 100e3
 # iter5 wide-swing legs: NN1 ~ 20uA*RNC (density-matched MCND), A1 ~ VDD-20uA*RCP
@@ -33,7 +33,7 @@ RSENSE1 = 100e3
 RNC = 8.5e3
 RCP = 8.5e3
 RCM = 4e3
-RZ = 205.0
+RZ = 400.0
 RDEG2 = 100.0
 CSENSE1 = 50e-15
 CCMFB1 = 40e-12
@@ -110,8 +110,8 @@ SZ = {
     "MFN2": (60.0, 0.50),
     "M9": (150.0, 0.20),
     "M10": (150.0, 0.20),
-    "M11": (185.714286, 0.40),
-    "M12": (185.714286, 0.40),
+    "M11": (139.285714, 0.30),
+    "M12": (139.285714, 0.30),
     "MS1": (10.0, 0.20),
     "MS2": (10.0, 0.20),
     "MS3": (10.0, 0.20),
