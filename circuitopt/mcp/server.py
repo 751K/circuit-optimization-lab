@@ -25,8 +25,10 @@ from ..service.operations import (
     solve_circuit,
     validate_circuit,
 )
+from ..passive_bom import DEFAULTS as DEFAULT_PROCESS
+from ..passive_bom import build_report, load_decks
 from ..service.serialize import to_jsonable
-from ..signoff_campaign import run_signoff_campaign
+from ..signoff_campaign import run_signoff_campaign, summarize_margins
 from .workspace import Workspace, WorkspaceError, write_json_atomic
 
 
@@ -40,6 +42,12 @@ Circuit Optimization MCP workflow:
 5. Poll get_job until done/failed/cancelled; cancel_job is cooperative.
 6. Signoff details are written under results/mcp and can be queried with
    inspect_signoff_result. Invalid models or non-convergence are never replaced.
+7. To decide what to change next, read signoff_margins: it ranks every spec by
+   remaining margin, which worst_case alone does not tell you.
+   inspect_signoff_result answers the separate question of where a spec failed.
+8. passive_inventory sizes the passive area from deck JSON alone, no solver.
+
+All paths are workspace-relative; absolute paths and '..' are rejected.
 """
 
 
@@ -429,5 +437,76 @@ def create_mcp_server(
             "match_count_returned": len(matches),
             "truncated": matched_total > len(matches),
         }
+
+    @server.tool()
+    def signoff_margins(
+        result_path: str,
+        ctx: McpContext,
+        max_rows: int = 20,
+    ) -> dict[str, Any]:
+        """Per-constraint margin table from a saved signoff result.
+
+        ``worst_case`` names the single tightest measurement, which ranks runs
+        but does not describe a design: a spec sitting just inside its limit is
+        still a constraint when some other spec is the formal worst. Rows come
+        back tightest-margin first, each with the PVT point holding that
+        margin, the observed range, and every failing point.
+        """
+        if max_rows < 1 or max_rows > 100:
+            raise ToolError("max_rows must be between 1 and 100")
+        try:
+            path = ctx.request_context.lifespan_context.workspace.resolve_input(
+                result_path, suffixes=(".json",)
+            )
+            with path.open("r", encoding="utf-8") as handle:
+                result = json.load(handle)
+            rows = summarize_margins(result)
+        except (WorkspaceError, OSError, ValueError, KeyError,
+                json.JSONDecodeError) as exc:
+            raise _tool_error(exc) from exc
+        return {
+            **_signoff_summary(result),
+            "constraints": [_compact(row) for row in rows[:max_rows]],
+            "constraint_count": len(rows),
+            "truncated": len(rows) > max_rows,
+        }
+
+    @server.tool()
+    def passive_inventory(
+        paths: list[str],
+        ctx: McpContext,
+        sheet_ohm_sq: float = DEFAULT_PROCESS["sheet_ohm_sq"],
+        resistor_width_um: float = DEFAULT_PROCESS["resistor_width_um"],
+        cap_ff_um2: float = DEFAULT_PROCESS["cap_ff_um2"],
+    ) -> dict[str, Any]:
+        """Inventory every resistor and capacitor with a silicon-area estimate.
+
+        Pass one signoff manifest, which already names every testbench wrapped
+        around one DUT, or two or more circuit files. DUT-vs-testbench
+        membership is derived from which decks an element appears in, so a
+        single deck cannot be classified. Reads JSON only; it runs no solver.
+        """
+        if not paths:
+            raise ToolError("paths must name at least one deck or manifest")
+        workspace = ctx.request_context.lifespan_context.workspace
+        try:
+            resolved = [
+                str(workspace.resolve_input(item, suffixes=(".json",)))
+                for item in paths
+            ]
+            decks = load_decks(resolved)
+            report = build_report(
+                decks,
+                sheet_ohm_sq=sheet_ohm_sq,
+                resistor_width_um=resistor_width_um,
+                cap_ff_um2=cap_ff_um2,
+            )
+        except SystemExit as exc:
+            # load_decks reports its usage errors the CLI way.
+            raise ToolError(str(exc)) from exc
+        except (WorkspaceError, OSError, ValueError, KeyError,
+                json.JSONDecodeError) as exc:
+            raise _tool_error(exc) from exc
+        return _compact(report, max_items=40)
 
     return server
