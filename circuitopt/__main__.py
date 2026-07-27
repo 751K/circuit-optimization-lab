@@ -59,7 +59,7 @@ from .mcp import run_cli as mcp_run_cli
 
 _ANALYSIS_NAMES = ["ac", "noise", "transient", "pss", "pac", "pnoise"]
 _SUBCOMMANDS = [
-    "run", "signoff", "verify-engine", "corners", "mc", "chopper", "adc",
+    "run", "signoff", "verify-engine", "passive-bom", "corners", "mc", "chopper", "adc",
     "explore", "plot", "dataset", "serve", "mcp",
 ]
 _CHOPPER_LEVELS = ["ideal", "pmos", "lptv", "pss", "pac", "pnoise", "transient"]
@@ -285,6 +285,59 @@ def _parse_tolerance_spec(text):
     if not out:
         raise SystemExit("--tolerance needs at least one NAME=PERCENT entry")
     return out
+
+
+def _add_passive_bom_parser(subparsers):
+    from .passive_bom import DEFAULTS
+
+    p = subparsers.add_parser(
+        "passive-bom",
+        help="Inventory every resistor and capacitor with a silicon-area "
+             "estimate and the passive/active area ratio",
+    )
+    p.add_argument("decks", nargs="+",
+                   help="A signoff campaign JSON (which names every testbench) "
+                        "or two or more circuit JSON files around one design")
+    p.add_argument("--exclude", default="",
+                   help="Comma-separated DUT elements to leave out of the totals "
+                        "(e.g. a load specified as external)")
+    p.add_argument("--top", type=int, help="Only list the N largest")
+    p.add_argument("--sheet-ohm-sq", type=float, default=DEFAULTS["sheet_ohm_sq"],
+                   help=f"Resistor sheet resistance (default: "
+                        f"{DEFAULTS['sheet_ohm_sq']:g} ohm/sq)")
+    p.add_argument("--resistor-width-um", type=float,
+                   default=DEFAULTS["resistor_width_um"],
+                   help=f"Drawn resistor width (default: "
+                        f"{DEFAULTS['resistor_width_um']:g} um)")
+    p.add_argument("--cap-ff-um2", type=float, default=DEFAULTS["cap_ff_um2"],
+                   help=f"Capacitor density (default: {DEFAULTS['cap_ff_um2']:g} "
+                        f"fF/um2)")
+    _add_output_arg(p)
+    p.add_argument("--quiet", action="store_true", help="Suppress the table")
+    return p
+
+
+def _cmd_passive_bom(args):
+    from .passive_bom import build_report, load_decks, print_report
+
+    for path in args.decks:
+        if not os.path.exists(path):
+            raise SystemExit(f"file not found: {path}")
+    report = build_report(
+        load_decks(args.decks),
+        exclude=[n.strip() for n in args.exclude.split(",") if n.strip()],
+        sheet_ohm_sq=args.sheet_ohm_sq,
+        resistor_width_um=args.resistor_width_um,
+        cap_ff_um2=args.cap_ff_um2)
+    if not args.quiet:
+        print_report(report, top=args.top)
+    if args.output:
+        os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
+        with open(args.output, "w", encoding="utf-8") as handle:
+            json.dump(_jsonable(report), handle, indent=2, default=str)
+        if not args.quiet:
+            print(f"wrote {args.output}")
+    return report
 
 
 def _add_verify_engine_parser(subparsers):
@@ -1375,6 +1428,7 @@ def main(argv=None):
     _add_run_parser(sub)
     _add_signoff_parser(sub)
     _add_verify_engine_parser(sub)
+    _add_passive_bom_parser(sub)
     _add_explore_parser(sub)
     _add_corners_parser(sub)
     _add_mc_parser(sub)
@@ -1417,6 +1471,7 @@ def main(argv=None):
         "run": _cmd_run,
         "signoff": _cmd_signoff,
         "verify-engine": _cmd_verify_engine,
+        "passive-bom": _cmd_passive_bom,
         "explore": _cmd_explore,
         "corners": _cmd_corners,
         "mc": _cmd_mc,

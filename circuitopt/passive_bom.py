@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Passive bill of materials with silicon-area estimates for a generated design.
+"""Passive bill of materials with silicon-area estimates for a circuit design.
 
 Netlist review catches wrong values; nothing catches a value that is *correct
 and unbuildable*.  A 40 pF compensation capacitor simulates perfectly and costs
@@ -22,22 +21,15 @@ Two things make the report trustworthy:
   The point of the number is its order of magnitude and its ranking, not
   three significant figures.
 
-Example::
-
-    tools/passive_bom.py --generator tsmc28_mdac_ota_gen \\
-        --exclude CL1,CL2 --top 8
+The deck set comes from a signoff manifest (which already names every
+testbench) or from explicit paths, so this reads the same committed JSON as
+every other command -- no generator module and no Python import required.
 """
 from __future__ import annotations
 
-import argparse
-import importlib
-import sys
+import json
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-for _p in (ROOT, ROOT / "examples", ROOT / "experiments"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+from typing import Any, Mapping
 
 
 # Defaults for a 28 nm bulk CMOS flow.  Stated in the report so a reader never
@@ -79,22 +71,65 @@ def capacitor_area_um2(farads, *, cap_ff_um2):
     return float(farads) * 1e15 / float(cap_ff_um2)
 
 
-def transistor_gate_area_um2(generator):
-    """Total drawn gate area over the generator's sizing table.
+def dut_devices(decks):
+    """Transistors present in every deck, i.e. the amplifier's own devices.
+
+    Same membership rule as the passives: a testbench switch or probe device
+    appears in some decks, an amplifier device in all of them."""
+    seen: dict[str, set[str]] = {}
+    geometry: dict[str, tuple[float, float, int]] = {}
+    for deck_name, deck in decks.items():
+        for device in deck.get("devices", ()) or ():
+            name = device["name"]
+            seen.setdefault(name, set()).add(deck_name)
+            geometry[name] = (float(device.get("W", 0.0)),
+                              float(device.get("L", 0.0)),
+                              int(device.get("M", 1)))
+    total = set(decks)
+    return {name: geometry[name] for name in geometry if seen[name] == total}
+
+
+def transistor_gate_area_um2(decks):
+    """Total drawn gate area of the DUT transistors.
 
     Gate area alone understates the real active footprint (diffusion, contacts
     and routing typically make it 2-3x), so the passive/active ratio printed
-    against it is a lower bound on how passive-dominated the layout is."""
-    sizes = getattr(generator, "SZ", None)
-    if not isinstance(sizes, dict):
+    against it is a lower bound on how passive-dominated the layout is.  Each
+    device is counted once from its own deck entry -- both halves of a
+    differential pair are separate instances and must not be doubled again."""
+    devices = dut_devices(decks)
+    if not devices:
         return None
-    mult = getattr(generator, "MULT", {}) or {}
-    return sum(width * length * int(mult.get(name, 1))
-               for name, (width, length) in sizes.items())
+    return sum(width * length * mult for width, length, mult in devices.values())
 
 
-def build_report(generator, *, exclude=(), **process):
-    decks = generator.all_testbenches()
+def load_decks(paths) -> dict[str, Any]:
+    """``{filename: deck}`` from deck paths, or from a signoff manifest.
+
+    A manifest already names every testbench wrapped around one DUT, which is
+    exactly the deck set the membership rule needs."""
+    resolved: dict[str, Any] = {}
+    for path in paths:
+        path = Path(path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, Mapping) and "cases" in data and "pvt" in data:
+            root = path.parent
+            for case in data["cases"]:
+                circuit = root / case["circuit"]
+                resolved[circuit.name] = json.loads(
+                    circuit.read_text(encoding="utf-8"))
+            continue
+        resolved[path.name] = data
+    if not resolved:
+        raise SystemExit("no decks to inventory")
+    if len(resolved) < 2:
+        raise SystemExit(
+            "DUT-vs-testbench classification needs at least two decks around "
+            "the same design; pass a signoff manifest or several deck files")
+    return resolved
+
+
+def build_report(decks, *, exclude=(), **process):
     elements = classify(decks)
     excluded = set(exclude)
     rows = []
@@ -111,7 +146,7 @@ def build_report(generator, *, exclude=(), **process):
         })
     rows.sort(key=lambda r: (-r["area_um2"], r["name"]))
     counted = [r for r in rows if r["counted"]]
-    gate_area = transistor_gate_area_um2(generator)
+    gate_area = transistor_gate_area_um2(decks)
     return {
         "decks": sorted(decks),
         "process": dict(process),
@@ -161,43 +196,3 @@ def print_report(report, *, top=None):
     if gate:
         print(f"gate area  ~{gate:>9.0f} um2  (drawn W*L; real active is 2-3x)")
         print(f"passive/active ratio ~{report['passive_area_um2'] / gate:.1f}x")
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(
-        description=__doc__.splitlines()[0],
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--generator", required=True,
-                        help="importable generator module exposing all_testbenches()")
-    parser.add_argument("--exclude", default="",
-                        help="comma-separated DUT elements to leave out of the "
-                             "totals (e.g. a specified external load)")
-    parser.add_argument("--top", type=int, help="only list the N largest")
-    parser.add_argument("--sheet-ohm-sq", type=float,
-                        default=DEFAULTS["sheet_ohm_sq"])
-    parser.add_argument("--resistor-width-um", type=float,
-                        default=DEFAULTS["resistor_width_um"])
-    parser.add_argument("--cap-ff-um2", type=float, default=DEFAULTS["cap_ff_um2"])
-    parser.add_argument("--json", action="store_true", help="emit JSON instead")
-    args = parser.parse_args(argv)
-
-    generator = importlib.import_module(args.generator)
-    if not hasattr(generator, "all_testbenches"):
-        raise SystemExit(
-            f"{args.generator} exposes no all_testbenches(); nothing to inventory")
-    report = build_report(
-        generator,
-        exclude=[n.strip() for n in args.exclude.split(",") if n.strip()],
-        sheet_ohm_sq=args.sheet_ohm_sq,
-        resistor_width_um=args.resistor_width_um,
-        cap_ff_um2=args.cap_ff_um2)
-    if args.json:
-        import json
-        print(json.dumps(report, indent=2))
-    else:
-        print_report(report, top=args.top)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

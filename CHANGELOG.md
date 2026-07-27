@@ -49,9 +49,9 @@ release checklist.
   point, and left the golden corpus bit-exact because no golden case
   exercised that path.
 
-  `tools/passive_bom.py` inventories every resistor and capacitor with a
-  silicon-area estimate, deriving DUT-vs-testbench membership from which
-  generated decks an element appears in, and prints the passive/active area
+  `circuit-opt passive-bom` inventories every resistor and capacitor with a
+  silicon-area estimate, deriving DUT-vs-testbench membership from which of a
+  manifest's decks an element appears in, and prints the passive/active area
   ratio. On the MDAC design it shows one 40 pF compensation capacitor holding
   64% of the passive area and the passives outweighing every transistor by
   21x — true since the compensation was tuned, and invisible until something
@@ -76,8 +76,8 @@ release checklist.
   +0.42 V、让全部 45 点的 residue case 全灭，而 golden 语料始终逐位通过——因为没有
   任何 golden case 走那条路径。
 
-  `tools/passive_bom.py` 枚举全部电阻电容并估算硅面积，由"元件出现在哪些生成 deck
-  中"推导 DUT 与测试台件，给出无源/有源面积比。在 MDAC 设计上它显示单个 40 pF 补偿
+  `circuit-opt passive-bom` 枚举全部电阻电容并估算硅面积，由"元件出现在 manifest 的
+  哪些 deck 中"推导 DUT 与测试台件，给出无源/有源面积比。在 MDAC 设计上它显示单个 40 pF 补偿
   电容占了无源面积的 64%，无源总面积是全部晶体管的 21 倍——自补偿整定以来一直如此，
   只是没有任何视图把它加起来。
 

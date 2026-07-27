@@ -21,6 +21,7 @@ The two entry points are equivalent. The rest of this document uses
 | `run` | Run AC, noise, transient, PSS, PAC, PNoise per the JSON config |
 | `signoff` | Run multiple signoff testbenches over an explicit PVT grid |
 | `verify-engine` | Cross-check one signoff case between the native engine and ngspice |
+| `passive-bom` | Inventory passives with silicon-area estimates and the passive/active ratio |
 | `explore` | Sample, solve, filter by constraints, and generate the Pareto front from an `explore` block |
 | `corners` | Fixed `typical/slow/fast` process-corner sweep for AT4000TG |
 | `mc` | Per-device mismatch Monte Carlo for AT4000TG |
@@ -95,6 +96,27 @@ result contracts.
 |---|---|
 | `--margins` | Print a per-constraint margin table (observed range, tightest corner, fail count) ordered tightest-first. The stock `worst_case` names one measurement; the table is what shows which *other* specs are also near their limits. |
 | `--tolerance SPEC` | Re-run the campaign with passives perturbed and report which constraints break. `SPEC` is comma-separated `NAME=PERCENT`, where `NAME` is a class (`R`, `C`) or a single element (`CC1`): `--tolerance R=20,C=10`. A signoff that holds only at nominal component values is not a signoff. |
+
+## `passive-bom`
+
+```bash
+circuit-opt passive-bom CAMPAIGN.json [--exclude A,B] [--top N]
+                        [--sheet-ohm-sq R] [--resistor-width-um W] [--cap-ff-um2 D]
+```
+
+Inventories every resistor and capacitor with a silicon-area estimate and
+reports the passive/active area ratio. Netlist review catches wrong values;
+nothing otherwise catches a value that is correct and *unbuildable*.
+
+DUT-versus-testbench membership is **derived**: an element belonging to the
+amplifier appears in every deck the manifest names, while bias helpers, AC
+coupling and loop probes appear in some. The rule needs no annotation, so it
+stays correct as testbenches are added. Process constants are printed with the
+report and overridable — the useful output is the ranking and the order of
+magnitude, not three significant figures.
+
+Accepts a signoff manifest (which already names every testbench) or two or more
+deck files.
 
 ## `verify-engine`
 
@@ -478,9 +500,6 @@ python tools/design_iterate.py trace --generator tsmc28_mdac_ota_gen \
     --manifest examples/tsmc28hpcp_mdac_ota_signoff.json \
     --case residue_plus_fs16 --point ff/27/0.85 --nodes OUTP,OUTN,CTRL2
 
-# Passive bill of materials with silicon area, DUT vs testbench derived from
-# deck membership, and the passive/active area ratio.
-python tools/passive_bom.py --generator tsmc28_mdac_ota_gen --exclude CL1,CL2 --top 8
 ```
 
 The `map` grouping is the root-cause discriminator worth knowing: a spread that

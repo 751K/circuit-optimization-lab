@@ -1,18 +1,11 @@
-"""Contracts for the passive bill of materials (tools/passive_bom.py)."""
+"""Contracts for the passive bill of materials (circuitopt/passive_bom.py)."""
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-import types
+import json
 
 import pytest
 
-
-ROOT = Path(__file__).resolve().parents[1]
-_SPEC = importlib.util.spec_from_file_location(
-    "passive_bom", ROOT / "tools" / "passive_bom.py")
-passive_bom = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(passive_bom)
+from circuitopt import passive_bom
 
 
 def _decks():
@@ -68,29 +61,33 @@ def test_capacitor_area_follows_the_declared_density():
     assert passive_bom.capacitor_area_um2(40e-12, cap_ff_um2=4.0) == pytest.approx(10000)
 
 
-def test_gate_area_counts_multiplicity_and_each_sizing_entry_once():
-    generator = types.SimpleNamespace(
-        SZ={"M1": (100.0, 0.2), "M2": (100.0, 0.2), "M0": (300.0, 0.2)},
-        MULT={"M0": 3})
+def test_gate_area_counts_multiplicity_and_each_instance_once():
+    devices = [{"name": "M1", "W": 100.0, "L": 0.2},
+               {"name": "M2", "W": 100.0, "L": 0.2},
+               {"name": "M0", "W": 300.0, "L": 0.2, "M": 3}]
+    decks = {"a.json": {"devices": devices}, "b.json": {"devices": devices}}
     # 20 + 20 + 3*60 = 220 um2; both halves of a differential pair are their
-    # own SZ entries and must not be doubled again.
-    assert passive_bom.transistor_gate_area_um2(generator) == pytest.approx(220.0)
+    # own instances and must not be doubled again.
+    assert passive_bom.transistor_gate_area_um2(decks) == pytest.approx(220.0)
 
 
-def test_gate_area_is_none_without_a_sizing_table():
-    assert passive_bom.transistor_gate_area_um2(types.SimpleNamespace()) is None
+def test_gate_area_counts_only_devices_present_in_every_deck():
+    """A testbench switch is not the amplifier's silicon."""
+    decks = {
+        "ac.json": {"devices": [{"name": "M1", "W": 100.0, "L": 0.2}]},
+        "tran.json": {"devices": [{"name": "M1", "W": 100.0, "L": 0.2},
+                                  {"name": "MSW", "W": 10.0, "L": 0.05}]},
+    }
+    assert passive_bom.transistor_gate_area_um2(decks) == pytest.approx(20.0)
+
+
+def test_gate_area_is_none_without_devices():
+    assert passive_bom.transistor_gate_area_um2({"a.json": {}, "b.json": {}}) is None
 
 
 # ── report assembly ─────────────────────────────────────────────────────────────
-def _generator():
-    return types.SimpleNamespace(
-        all_testbenches=_decks,
-        SZ={"M1": (100.0, 0.2)}, MULT={})
-
-
 def test_report_totals_count_dut_elements_only():
-    report = passive_bom.build_report(
-        _generator(), **passive_bom.DEFAULTS)
+    report = passive_bom.build_report(_decks(), **passive_bom.DEFAULTS)
     assert report["resistor_area_um2"] == pytest.approx(
         passive_bom.resistor_area_um2(1000.0, sheet_ohm_sq=300.0,
                                       resistor_width_um=0.8))
@@ -102,7 +99,7 @@ def test_report_totals_count_dut_elements_only():
 def test_excluded_elements_stay_listed_but_leave_the_totals():
     """A specified external load is real silicon elsewhere, not this block's."""
     report = passive_bom.build_report(
-        _generator(), exclude=["CCORE"], **passive_bom.DEFAULTS)
+        _decks(), exclude=["CCORE"], **passive_bom.DEFAULTS)
     assert report["capacitor_area_um2"] == pytest.approx(0.0)
     row = next(r for r in report["rows"] if r["name"] == "CCORE")
     assert row["dut"] is True and row["counted"] is False
@@ -110,22 +107,41 @@ def test_excluded_elements_stay_listed_but_leave_the_totals():
 
 
 def test_rows_are_ordered_largest_area_first():
-    report = passive_bom.build_report(_generator(), **passive_bom.DEFAULTS)
+    report = passive_bom.build_report(_decks(), **passive_bom.DEFAULTS)
     areas = [row["area_um2"] for row in report["rows"]]
     assert areas == sorted(areas, reverse=True)
 
 
 def test_report_records_the_process_constants_it_used():
     report = passive_bom.build_report(
-        _generator(), sheet_ohm_sq=1000.0, resistor_width_um=0.5, cap_ff_um2=4.0)
+        _decks(), sheet_ohm_sq=1000.0, resistor_width_um=0.5, cap_ff_um2=4.0)
     assert report["process"] == {"sheet_ohm_sq": 1000.0,
                                  "resistor_width_um": 0.5, "cap_ff_um2": 4.0}
     assert report["capacitor_area_um2"] == pytest.approx(250.0)
 
 
-def test_cli_rejects_a_generator_without_testbenches(monkeypatch):
-    import sys
-    monkeypatch.setitem(sys.modules, "fake_bom_gen", types.ModuleType("fake_bom_gen"))
+# ── deck loading ────────────────────────────────────────────────────────────────
+def test_a_signoff_manifest_expands_to_its_case_circuits(tmp_path):
+    """The manifest already names every testbench around one DUT.
+
+    That is exactly the deck set the membership rule needs, so pointing the
+    inventory at a campaign requires no second list to keep in sync."""
+    for name in ("a.json", "b.json"):
+        (tmp_path / name).write_text(json.dumps(
+            {"resistors": [{"name": "R1", "R": 1000.0}]}), encoding="utf-8")
+    manifest = tmp_path / "campaign.json"
+    manifest.write_text(json.dumps({
+        "name": "c", "pvt": {}, "cases": [{"name": "x", "circuit": "a.json"},
+                                          {"name": "y", "circuit": "b.json"}]}),
+        encoding="utf-8")
+    decks = passive_bom.load_decks([manifest])
+    assert set(decks) == {"a.json", "b.json"}
+
+
+def test_a_single_deck_cannot_be_classified(tmp_path):
+    """One deck gives no membership signal: everything would look like DUT."""
+    deck = tmp_path / "only.json"
+    deck.write_text(json.dumps({"resistors": []}), encoding="utf-8")
     with pytest.raises(SystemExit) as excinfo:
-        passive_bom.main(["--generator", "fake_bom_gen"])
-    assert "all_testbenches" in str(excinfo.value)
+        passive_bom.load_decks([deck])
+    assert "at least two decks" in str(excinfo.value)

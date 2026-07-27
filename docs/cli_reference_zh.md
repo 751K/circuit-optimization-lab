@@ -19,6 +19,7 @@ python -m circuitopt --help
 | `run` | 按 JSON 配置运行 AC、noise、transient、PSS、PAC、PNoise |
 | `signoff` | 在显式 PVT 网格上运行多个 signoff 测试台 |
 | `verify-engine` | 在内部引擎与 ngspice 之间交叉校验单个 signoff case |
+| `passive-bom` | 枚举无源器件、估算硅面积并给出无源/有源比 |
 | `explore` | 从 `explore` 块采样、求解、筛约束并生成 Pareto 前沿 |
 | `corners` | AT4000TG 的 `typical/slow/fast` 固定工艺角扫描 |
 | `mc` | AT4000TG 逐器件 mismatch Monte Carlo |
@@ -86,6 +87,23 @@ circuit-opt signoff CAMPAIGN.json [--workers N] [--margins] [--tolerance SPEC] [
 |---|---|
 | `--margins` | 打印逐约束余量表（实测范围、最紧角点、失败点数），按最紧优先排序。内置的 `worst_case` 只给出单个测量量；余量表才能显示**其他哪些**规格也逼近极限。 |
 | `--tolerance SPEC` | 按元件容差扰动无源器件后重跑，报告哪条约束先破。`SPEC` 为逗号分隔的 `NAME=PERCENT`，`NAME` 可以是器件类（`R`、`C`）或单个器件名（`CC1`）：`--tolerance R=20,C=10`。只在标称值下成立的签核不算签核。 |
+
+## `passive-bom`
+
+```bash
+circuit-opt passive-bom CAMPAIGN.json [--exclude A,B] [--top N]
+                        [--sheet-ohm-sq R] [--resistor-width-um W] [--cap-ff-um2 D]
+```
+
+枚举全部电阻电容并估算硅面积，给出无源/有源面积比。网表评审能抓住"值写错了"，
+但抓不住"值是对的、却造不出来"。
+
+DUT 与测试台件的归属是**推导**出来的：属于放大器的元件会出现在 manifest 列出的
+每一个 deck 中，而偏置辅助、AC 耦合和环路探针只出现在部分 deck 里。该规则不需要
+任何标注，因此新增测试台后依然正确。工艺常数随报告一并打印且可覆盖——有用的输出
+是排序和数量级，不是三位有效数字。
+
+接受 signoff manifest（其中已列出全部测试台）或两个以上的 deck 文件。
 
 ## `verify-engine`
 
@@ -451,9 +469,6 @@ python tools/design_iterate.py trace --generator tsmc28_mdac_ota_gen \
     --manifest examples/tsmc28hpcp_mdac_ota_signoff.json \
     --case residue_plus_fs16 --point ff/27/0.85 --nodes OUTP,OUTN,CTRL2
 
-# 无源物料清单与硅面积：DUT 与测试台件由 deck 成员关系推导，
-# 并给出无源/有源面积比。
-python tools/passive_bom.py --generator tsmc28_mdac_ota_gen --exclude CL1,CL2 --top 8
 ```
 
 `map` 的分组是值得记住的根因判别器：跨度落在温度轴上说明是器件级失调，落在电源
