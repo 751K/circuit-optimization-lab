@@ -292,3 +292,28 @@ def test_jsonable_drops_opaque_objects_from_nested_sequences_and_arrays():
         "set": ["kept"],
     }
     assert "0x" not in json.dumps(ready)
+
+
+def test_transient_summary_reports_step_count_not_node_count():
+    """``Tran: N steps`` must count time points, not solved nodes.
+
+    ``nodes`` is a {node: waveform} map, so ``len(nodes)`` is the node count.
+    A seven-node circuit therefore reported "7 steps" for every grid, whatever
+    its length -- the number looked plausible and was never the step count.
+    Distinct values here are what makes the two readings separable.
+    """
+    import numpy as np
+
+    from circuitopt.__main__ import _format_analysis_summary
+
+    summary = _format_analysis_summary({
+        "transient": {
+            "t": np.linspace(0.0, 1e-6, 2001),
+            "nodes": {name: np.zeros(2001) for name in
+                      ("G1", "G2", "D1", "D2", "OUTP", "OUTN", "TAIL")},
+            "nfail": 0,
+        },
+    })
+
+    assert "2001 steps" in summary
+    assert "7 steps" not in summary

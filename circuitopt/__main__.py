@@ -104,7 +104,10 @@ def _format_analysis_summary(results):
             else:
                 lines.append("  Noise: computed")
         elif name == "transient":
-            n = len(r.get("nodes", []))
+            # Step count is the length of the time grid. ``nodes`` is a
+            # {node: waveform} map, so its length is the solved-node count --
+            # a 7-node circuit reported "7 steps" for any grid.
+            n = len(r.get("t", ()))
             nfail = r.get("nfail", 0)
             lines.append(f"  Tran:  {n} steps  nfail={nfail}")
         elif name == "pss":
