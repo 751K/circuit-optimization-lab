@@ -1,0 +1,374 @@
+{
+  "name": "tsmc28hpcp_chopper",
+  "description": "TSMC28HPC+ 0.9 V 斩波 5T OTA：PMOS 输入对 + NMOS 二极管负载，输入/输出 NMOS 斩波开关。fchop = 4 MHz，选在 1/f 拐点(≈2 MHz)之上、测量带上边沿(1 MHz)之外。硅工艺 PSS/PAC/PNoise 的参考用例。",
+  "solved": [
+    "G1",
+    "G2",
+    "D1",
+    "D2",
+    "OUTP",
+    "OUTN",
+    "TAIL"
+  ],
+  "rails": {
+    "GND": 0.0,
+    "VDD": "VDD",
+    "VBIAS": "VB",
+    "VINP": "VINP",
+    "VINN": "VINN",
+    "CLK": "VCK",
+    "CLKB": "VCKB"
+  },
+  "bias": {
+    "VDD": 0.9,
+    "VB": 0.45,
+    "VINP": 0.305,
+    "VINN": 0.295,
+    "VCK": 0.9,
+    "VCKB": 0.0
+  },
+  "devices": [
+    {
+      "name": "SI1",
+      "drain": "G1",
+      "gate": "CLK",
+      "source": "VINP",
+      "W": 1.0,
+      "L": 0.03,
+      "NF": 1
+    },
+    {
+      "name": "SI2",
+      "drain": "G1",
+      "gate": "CLKB",
+      "source": "VINN",
+      "W": 1.0,
+      "L": 0.03,
+      "NF": 1
+    },
+    {
+      "name": "SI3",
+      "drain": "G2",
+      "gate": "CLK",
+      "source": "VINN",
+      "W": 1.0,
+      "L": 0.03,
+      "NF": 1
+    },
+    {
+      "name": "SI4",
+      "drain": "G2",
+      "gate": "CLKB",
+      "source": "VINP",
+      "W": 1.0,
+      "L": 0.03,
+      "NF": 1
+    },
+    {
+      "name": "M1",
+      "drain": "D1",
+      "gate": "G1",
+      "source": "TAIL",
+      "W": 16.0,
+      "L": 0.2,
+      "NF": 16
+    },
+    {
+      "name": "M2",
+      "drain": "D2",
+      "gate": "G2",
+      "source": "TAIL",
+      "W": 16.0,
+      "L": 0.2,
+      "NF": 16
+    },
+    {
+      "name": "M5",
+      "drain": "TAIL",
+      "gate": "VBIAS",
+      "source": "VDD",
+      "W": 8.0,
+      "L": 0.2,
+      "NF": 8
+    },
+    {
+      "name": "M3",
+      "drain": "D1",
+      "gate": "D1",
+      "source": "GND",
+      "W": 0.5,
+      "L": 0.3,
+      "NF": 1
+    },
+    {
+      "name": "M4",
+      "drain": "D2",
+      "gate": "D2",
+      "source": "GND",
+      "W": 0.5,
+      "L": 0.3,
+      "NF": 1
+    },
+    {
+      "name": "SO1",
+      "drain": "OUTP",
+      "gate": "CLK",
+      "source": "D1",
+      "W": 1.0,
+      "L": 0.03,
+      "NF": 1
+    },
+    {
+      "name": "SO2",
+      "drain": "OUTP",
+      "gate": "CLKB",
+      "source": "D2",
+      "W": 1.0,
+      "L": 0.03,
+      "NF": 1
+    },
+    {
+      "name": "SO3",
+      "drain": "OUTN",
+      "gate": "CLK",
+      "source": "D2",
+      "W": 1.0,
+      "L": 0.03,
+      "NF": 1
+    },
+    {
+      "name": "SO4",
+      "drain": "OUTN",
+      "gate": "CLKB",
+      "source": "D1",
+      "W": 1.0,
+      "L": 0.03,
+      "NF": 1
+    }
+  ],
+  "models": {
+    "SI1": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "SI2": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "SI3": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "SI4": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "M1": {
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
+      "vb": 0.9
+    },
+    "M2": {
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
+      "vb": 0.9
+    },
+    "M5": {
+      "pdk": "tsmc28hpcp",
+      "model": "pmos",
+      "section": "inherit",
+      "bin": "auto",
+      "vb": 0.9
+    },
+    "M3": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "M4": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "SO1": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "SO2": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "SO3": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    },
+    "SO4": {
+      "pdk": "tsmc28hpcp",
+      "model": "nmos",
+      "section": "inherit",
+      "bin": "auto"
+    }
+  },
+  "capacitors": [
+    {
+      "name": "CO1",
+      "a": "OUTP",
+      "b": "GND",
+      "C": 1e-12
+    },
+    {
+      "name": "CO2",
+      "a": "OUTN",
+      "b": "GND",
+      "C": 1e-12
+    }
+  ],
+  "outputs": [
+    "OUTP",
+    "OUTN"
+  ],
+  "ac_drives": {
+    "VINP": 0.5,
+    "VINN": -0.5
+  },
+  "dc_guesses": [
+    {
+      "G1": 0.3,
+      "G2": 0.3,
+      "D1": 0.56,
+      "D2": 0.56,
+      "OUTP": 0.56,
+      "OUTN": 0.56,
+      "TAIL": 0.72
+    },
+    {
+      "G1": 0.3,
+      "G2": 0.3,
+      "D1": 0.45,
+      "D2": 0.45,
+      "OUTP": 0.45,
+      "OUTN": 0.45,
+      "TAIL": 0.76
+    }
+  ],
+  "analyses": {
+    "ac": {
+      "freqs": {
+        "start": 1000.0,
+        "stop": 10000000000.0,
+        "num": 101,
+        "scale": "log"
+      }
+    },
+    "noise": {
+      "freqs": {
+        "start": 1000.0,
+        "stop": 1000000000.0,
+        "num": 61,
+        "scale": "log"
+      },
+      "band": [
+        1000.0,
+        1000000000.0
+      ]
+    },
+    "transient": {
+      "tstop": 1e-06,
+      "n_points": 2001
+    },
+    "pss": {
+      "residual_tol": 2e-05,
+      "max_shooting_iters": 15,
+      "tstab_periods": 8,
+      "integration_method": "gear2"
+    },
+    "pac": {
+      "freqs": {
+        "start": 1000.0,
+        "stop": 5000000.0,
+        "num": 21,
+        "scale": "log"
+      },
+      "input_drive": {
+        "vinp": 0.5,
+        "vinn": -0.5
+      },
+      "time_domain": true
+    },
+    "pnoise": {
+      "freqs": {
+        "start": 100.0,
+        "stop": 5000000.0,
+        "num": 21,
+        "scale": "log"
+      },
+      "input_drive": {
+        "vinp": 0.5,
+        "vinn": -0.5
+      },
+      "time_domain": true,
+      "band": [
+        1000.0,
+        1000000.0
+      ]
+    }
+  },
+  "periodic": {
+    "frequency": 4000000.0,
+    "n_points": 201,
+    "node_inputs": {
+      "VINP": "vinp",
+      "VINN": "vinn",
+      "CLK": "clk",
+      "CLKB": "clkb"
+    },
+    "inputs": {
+      "clk": {
+        "type": "pulse",
+        "low": 0.0,
+        "high": 0.9,
+        "duty": 0.5,
+        "delay": 0.0,
+        "rise": 2e-09,
+        "fall": 2e-09
+      },
+      "clkb": {
+        "type": "pulse",
+        "low": 0.0,
+        "high": 0.9,
+        "duty": 0.5,
+        "delay": 1.25e-07,
+        "rise": 2e-09,
+        "fall": 2e-09
+      },
+      "vinp": {
+        "type": "constant",
+        "value": 0.305
+      },
+      "vinn": {
+        "type": "constant",
+        "value": 0.295
+      }
+    }
+  }
+}
