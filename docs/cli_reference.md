@@ -20,6 +20,7 @@ The two entry points are equivalent. The rest of this document uses
 |---|---|
 | `run` | Run AC, noise, transient, PSS, PAC, PNoise per the JSON config |
 | `signoff` | Run multiple signoff testbenches over an explicit PVT grid |
+| `verify-engine` | Cross-check one signoff case between the native engine and ngspice |
 | `explore` | Sample, solve, filter by constraints, and generate the Pareto front from an `explore` block |
 | `corners` | Fixed `typical/slow/fast` process-corner sweep for AT4000TG |
 | `mc` | Per-device mismatch Monte Carlo for AT4000TG |
@@ -82,13 +83,36 @@ top-level `signoff.measurements` definition; acceptance limits live in
 ## `signoff`
 
 ```bash
-circuit-opt signoff CAMPAIGN.json [--workers N] [--output RESULT.json]
+circuit-opt signoff CAMPAIGN.json [--workers N] [--margins] [--tolerance SPEC] [--output RESULT.json]
 ```
 
 The command evaluates every configured testbench at every Cartesian PVT point,
 retains invalid cases, and emits deterministic per-point plus global worst-case
 metadata. See [Signoff Campaigns](signoff_campaign.md) for the manifest and
 result contracts.
+
+| Flag | Purpose |
+|---|---|
+| `--margins` | Print a per-constraint margin table (observed range, tightest corner, fail count) ordered tightest-first. The stock `worst_case` names one measurement; the table is what shows which *other* specs are also near their limits. |
+| `--tolerance SPEC` | Re-run the campaign with passives perturbed and report which constraints break. `SPEC` is comma-separated `NAME=PERCENT`, where `NAME` is a class (`R`, `C`) or a single element (`CC1`): `--tolerance R=20,C=10`. A signoff that holds only at nominal component values is not a signoff. |
+
+## `verify-engine`
+
+```bash
+circuit-opt verify-engine CAMPAIGN.json --case NAME --point CORNER/TEMP/SUPPLY
+                          [--nodes A,B] [--tolerance-mv MV] [--top N]
+```
+
+Runs one signoff case through both the native BSIM4 engine and the ngspice
+model-card path and diffs the node trajectories. The verdict keys on the
+**settled** deviation: during a fast transition, step-placement differences
+between two solvers alone produce tens of millivolts, whereas a genuine
+disagreement about the circuit is still there at the end of the window. Nodes
+held by the stimulus and samples straddling an input discontinuity are excluded
+by default, because both compare a waveform with itself.
+
+Use it whenever a design result looks structurally wrong rather than slightly
+off — that is the failure mode a single-engine toolchain cannot diagnose.
 
 ## `explore`
 
@@ -431,6 +455,37 @@ circuit-opt mcp --transport stdio --workspace .
 
 The equivalent dedicated entry point is `circuit-opt-mcp`. See
 [MCP Server](mcp_server.md) for tools, resources, and client configuration.
+
+## Analog Design Tools
+
+Standalone tools in `tools/`, for the loop that sits *around* a signoff campaign
+rather than inside one.
+
+```bash
+# Sizing loop: override generator constants in memory, run the full PVT grid,
+# print per-spec pass counts plus the corners behind every failing constraint.
+python tools/design_iterate.py run --generator tsmc28_mdac_ota_gen \
+    --manifest examples/tsmc28hpcp_mdac_ota_signoff.json CC=850e-15 SZ:M11=139.286/0.30
+
+# Root cause: distribution of one measurement over the grid, its mean grouped
+# along each PVT axis, and the optimal common trim for a signed error.
+python tools/design_iterate.py map --generator tsmc28_mdac_ota_gen \
+    --manifest examples/tsmc28hpcp_mdac_ota_signoff.json \
+    --case residue_plus_fs16 --measurement checkpoint_error --scale 1e3 --unit mV --limit 20
+
+# Trajectory anatomy at one point.
+python tools/design_iterate.py trace --generator tsmc28_mdac_ota_gen \
+    --manifest examples/tsmc28hpcp_mdac_ota_signoff.json \
+    --case residue_plus_fs16 --point ff/27/0.85 --nodes OUTP,OUTN,CTRL2
+
+# Passive bill of materials with silicon area, DUT vs testbench derived from
+# deck membership, and the passive/active area ratio.
+python tools/passive_bom.py --generator tsmc28_mdac_ota_gen --exclude CL1,CL2 --top 8
+```
+
+The `map` grouping is the root-cause discriminator worth knowing: a spread that
+lives on the temperature axis is a device-level offset, one that lives on the
+supply axis is a reference or level-shift mismatch.
 
 ## Calibration and Benchmarks
 

@@ -19,6 +19,68 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Added / 新增
+
+- **Analog design-loop tooling / 模拟设计环路工具**
+
+  **English:** Four gaps found while taking a 14-bit pipeline MDAC OTA to a
+  45/45 PVT signoff, each previously covered by a throwaway script.
+
+  `tools/design_iterate.py` drives a full PVT campaign from a generator
+  module, overriding constants in memory and staging decks in a temp
+  directory. `run` prints per-spec pass counts **plus the corner list behind
+  every failing constraint** — the stock campaign reports one global
+  `worst_case`, which is the wrong summary for a design decision because the
+  variant with the better worst margin routinely has fewer passing points.
+  `map` reports one measurement's distribution over the grid with its mean
+  grouped along each PVT axis (a temperature-dominated spread is a device
+  offset; a supply-dominated one is a reference mismatch) and the optimal
+  common trim for signed errors. `trace` dumps node trajectories at one point.
+
+  `circuit-opt signoff --margins` prints a per-constraint margin table ordered
+  tightest-first; `--tolerance R=20,C=10` re-runs with passives perturbed by
+  class or by element and reports which constraints break. A signoff that
+  holds only at nominal component values is not a signoff.
+
+  `circuit-opt verify-engine` runs one signoff case through both the native
+  BSIM4 engine and the ngspice model-card path and diffs the trajectories,
+  keying the verdict on the settled deviation. The defect this exists for
+  drifted a common mode to +0.42 V, failed every residue case at every PVT
+  point, and left the golden corpus bit-exact because no golden case
+  exercised that path.
+
+  `tools/passive_bom.py` inventories every resistor and capacitor with a
+  silicon-area estimate, deriving DUT-vs-testbench membership from which
+  generated decks an element appears in, and prints the passive/active area
+  ratio. On the MDAC design it shows one 40 pF compensation capacitor holding
+  64% of the passive area and the passives outweighing every transistor by
+  21x — true since the compensation was tuned, and invisible until something
+  added it up.
+
+  **中文：** 把 14-bit 流水线 MDAC OTA 推到 45/45 PVT 签核的过程中暴露出四个
+  工具缺口，此前都靠临时脚本顶着。
+
+  `tools/design_iterate.py` 用生成器模块驱动整个 PVT campaign，在内存里覆盖常量、
+  把网表暂存到临时目录。`run` 打印逐规格通过数**以及每条失败约束背后的角点清单**
+  ——内置 campaign 只报一个全局 `worst_case`，那对设计决策是错误的汇总，因为最差
+  余量更好的变体往往通过点更少。`map` 报告某测量量在网格上的分布及按每条 PVT 轴
+  分组的均值（跨度落在温度轴＝器件失调，落在电源轴＝参考不匹配），并给出有符号
+  误差的最优公共修调。`trace` 输出单点节点轨迹。
+
+  `circuit-opt signoff --margins` 打印按最紧优先排序的逐约束余量表；
+  `--tolerance R=20,C=10` 按器件类或单个器件扰动无源器件后重跑，报告哪条约束先破。
+  只在标称值下成立的签核不算签核。
+
+  `circuit-opt verify-engine` 把同一个 signoff case 交给内部 BSIM4 引擎与 ngspice
+  模型卡路径分别求解并对比轨迹，判定基于稳定后偏差。它要防的那个缺陷曾把共模推到
+  +0.42 V、让全部 45 点的 residue case 全灭，而 golden 语料始终逐位通过——因为没有
+  任何 golden case 走那条路径。
+
+  `tools/passive_bom.py` 枚举全部电阻电容并估算硅面积，由"元件出现在哪些生成 deck
+  中"推导 DUT 与测试台件，给出无源/有源面积比。在 MDAC 设计上它显示单个 40 pF 补偿
+  电容占了无源面积的 64%，无源总面积是全部晶体管的 21 倍——自补偿整定以来一直如此，
+  只是没有任何视图把它加起来。
+
 ## [2.5.0] - 2026-07-27
 
 ### Added / 新增

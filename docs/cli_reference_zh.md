@@ -18,6 +18,7 @@ python -m circuitopt --help
 |---|---|
 | `run` | 按 JSON 配置运行 AC、noise、transient、PSS、PAC、PNoise |
 | `signoff` | 在显式 PVT 网格上运行多个 signoff 测试台 |
+| `verify-engine` | 在内部引擎与 ngspice 之间交叉校验单个 signoff case |
 | `explore` | 从 `explore` 块采样、求解、筛约束并生成 Pareto 前沿 |
 | `corners` | AT4000TG 的 `typical/slow/fast` 固定工艺角扫描 |
 | `mc` | AT4000TG 逐器件 mismatch Monte Carlo |
@@ -74,12 +75,32 @@ circuit-opt run examples/tsmc28hpcp_5t_ota.json \
 ## `signoff`
 
 ```bash
-circuit-opt signoff CAMPAIGN.json [--workers N] [--output RESULT.json]
+circuit-opt signoff CAMPAIGN.json [--workers N] [--margins] [--tolerance SPEC] [--output RESULT.json]
 ```
 
 该命令运行 PVT 笛卡尔积中的全部测试台，保留 invalid case，并输出顺序确定的逐点
 及全局最差点信息。配置和结果契约见
 [Signoff Campaign](signoff_campaign_zh.md)。
+
+| 参数 | 作用 |
+|---|---|
+| `--margins` | 打印逐约束余量表（实测范围、最紧角点、失败点数），按最紧优先排序。内置的 `worst_case` 只给出单个测量量；余量表才能显示**其他哪些**规格也逼近极限。 |
+| `--tolerance SPEC` | 按元件容差扰动无源器件后重跑，报告哪条约束先破。`SPEC` 为逗号分隔的 `NAME=PERCENT`，`NAME` 可以是器件类（`R`、`C`）或单个器件名（`CC1`）：`--tolerance R=20,C=10`。只在标称值下成立的签核不算签核。 |
+
+## `verify-engine`
+
+```bash
+circuit-opt verify-engine CAMPAIGN.json --case NAME --point CORNER/TEMP/SUPPLY
+                          [--nodes A,B] [--tolerance-mv MV] [--top N]
+```
+
+把同一个 signoff case 分别交给内部 BSIM4 引擎与 ngspice 模型卡路径求解，逐节点
+对比轨迹。判定基于**稳定后**偏差：快速跃变期间，两个求解器仅仅步点位置不同就能
+产生几十 mV 的差，而真正的电路层面分歧在窗口末尾依然存在。默认排除由激励驱动的
+节点以及跨越输入不连续点的采样——这两类比较的都是波形与其自身。
+
+当某个设计结果看起来是**形态**错误而不是略有偏差时用它，那正是单引擎工具链无法
+诊断的失效模式。
 
 ## `explore`
 
@@ -408,6 +429,35 @@ circuit-opt mcp --transport stdio --workspace .
 
 等价独立入口为 `circuit-opt-mcp`。工具、resources 和客户端配置见
 [MCP 服务](mcp_server_zh.md)。
+
+## 模拟设计工具
+
+`tools/` 下的独立工具，服务于 signoff campaign **外面**的那层循环。
+
+```bash
+# 尺寸迭代：在内存里覆盖生成器常量，跑全 PVT 网格，
+# 打印逐规格通过数以及每条失败约束背后的角点清单。
+python tools/design_iterate.py run --generator tsmc28_mdac_ota_gen \
+    --manifest examples/tsmc28hpcp_mdac_ota_signoff.json CC=850e-15 SZ:M11=139.286/0.30
+
+# 根因定位：某个测量量在全网格上的分布、按每条 PVT 轴分组的均值，
+# 以及有符号误差的最优公共修调。
+python tools/design_iterate.py map --generator tsmc28_mdac_ota_gen \
+    --manifest examples/tsmc28hpcp_mdac_ota_signoff.json \
+    --case residue_plus_fs16 --measurement checkpoint_error --scale 1e3 --unit mV --limit 20
+
+# 单点轨迹解剖。
+python tools/design_iterate.py trace --generator tsmc28_mdac_ota_gen \
+    --manifest examples/tsmc28hpcp_mdac_ota_signoff.json \
+    --case residue_plus_fs16 --point ff/27/0.85 --nodes OUTP,OUTN,CTRL2
+
+# 无源物料清单与硅面积：DUT 与测试台件由 deck 成员关系推导，
+# 并给出无源/有源面积比。
+python tools/passive_bom.py --generator tsmc28_mdac_ota_gen --exclude CL1,CL2 --top 8
+```
+
+`map` 的分组是值得记住的根因判别器：跨度落在温度轴上说明是器件级失调，落在电源
+轴上说明是参考或电平位移不匹配。
 
 ## 校准与基准
 
