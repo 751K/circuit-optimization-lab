@@ -474,6 +474,160 @@ def _global_worst(points: list[Mapping[str, Any]]) -> dict[str, Any] | None:
     )
 
 
+def summarize_margins(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Per-constraint margin table across the whole grid.
+
+    A campaign's ``worst_case`` names the single tightest measurement; that is
+    the right thing to rank runs by and the wrong thing to design against,
+    because it hides which OTHER specs are also near their limits.  This walks
+    every (case, constraint) pair and reports its observed range, the corner
+    holding the tightest normalized margin, and how many points it fails.
+
+    Rows are ordered tightest-margin first, so the head of the table is the
+    list of specs that actually constrain the design.  ``normalized_margin``
+    keeps the campaign's own convention (fraction of the limit, negative when
+    violated), which makes rows with different units comparable.
+    """
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for point in result.get("points", ()):
+        pvt = point["pvt"]
+        label = (f"{pvt['corner']}/{pvt['temperature_c']:g}/{pvt['supply_v']:g}")
+        for case_name, case in point["cases"].items():
+            signoff = case.get("signoff") or {}
+            for name, detail in (signoff.get("constraints") or {}).items():
+                if not isinstance(detail, dict):
+                    continue
+                row = rows.setdefault((case_name, name), {
+                    "case": case_name, "constraint": name, "unit": None,
+                    "min": None, "max": None, "worst_margin": None,
+                    "worst_point": None, "fail_points": [], "total": 0,
+                })
+                row["total"] += 1
+                observed = detail.get("observed") or {}
+                value = observed.get("value")
+                if row["unit"] is None:
+                    row["unit"] = observed.get("unit") or ""
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    value = float(value)
+                    row["min"] = value if row["min"] is None else min(row["min"], value)
+                    row["max"] = value if row["max"] is None else max(row["max"], value)
+                margin = detail.get("normalized_margin")
+                margin = -math.inf if margin is None else float(margin)
+                if row["worst_margin"] is None or margin < row["worst_margin"]:
+                    row["worst_margin"] = margin
+                    row["worst_point"] = label
+                if detail.get("passed") is False:
+                    row["fail_points"].append(label)
+    ordered = sorted(rows.values(), key=lambda r: (
+        r["worst_margin"] if r["worst_margin"] is not None else -math.inf))
+    for row in ordered:
+        if row["worst_margin"] == -math.inf:
+            row["worst_margin"] = None
+    return ordered
+
+
+def format_margin_table(rows) -> str:
+    """Render :func:`summarize_margins` as fixed-width text."""
+    if not rows:
+        return "  (no constraints evaluated)"
+    width = max(len(f"{r['case']}/{r['constraint']}") for r in rows)
+    lines = [f"  {'case/constraint':<{width}}  {'observed range':>26}  "
+             f"{'margin':>9}  {'worst point':>16}  fail"]
+    for row in rows:
+        name = f"{row['case']}/{row['constraint']}"
+        unit = row["unit"] or ""
+        if row["min"] is None:
+            span = "n/a"
+        elif row["min"] == row["max"]:
+            span = f"{row['min']:.4g} {unit}".strip()
+        else:
+            span = f"{row['min']:.4g} .. {row['max']:.4g} {unit}".strip()
+        margin = ("n/a" if row["worst_margin"] is None
+                  else f"{row['worst_margin']:+.4f}")
+        fails = len(row["fail_points"])
+        flag = f"{fails}/{row['total']}" if fails else "-"
+        lines.append(f"  {name:<{width}}  {span:>26}  {margin:>9}  "
+                     f"{row['worst_point'] or '-':>16}  {flag}")
+    return "\n".join(lines)
+
+
+def _scale_passives(deck: dict[str, Any], factors: Mapping[str, float]) -> None:
+    """Scale resistor/capacitor values in place by class or by device name.
+
+    ``factors`` keys are ``"R"``/``"C"`` (the whole class) or an element name.
+    A name wins over its class so a single sensitive component can be perturbed
+    on its own."""
+    for kind, key, cls in (("resistors", "R", "R"), ("capacitors", "C", "C")):
+        for element in deck.get(kind, ()) or ():
+            factor = factors.get(element.get("name"), factors.get(cls))
+            if factor is not None and isinstance(element.get(key), (int, float)):
+                element[key] = float(element[key]) * factor
+
+
+def run_tolerance_sweep(
+    config_or_path: Mapping[str, Any] | str | Path,
+    tolerances: Mapping[str, float],
+    *,
+    workers: int = 1,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """Re-run the campaign with passive values perturbed by their tolerances.
+
+    A signoff that passes only at nominal component values is not a signoff:
+    poly resistors carry ~20% absolute tolerance and MOM capacitors ~10%, and
+    a compensation network tuned on a knife edge will not survive them.  For
+    each entry the campaign runs at ``1 +- tolerance`` (class-wide when the key
+    is ``"R"``/``"C"``, single-element when it is a device name) and the result
+    records which constraints break in each direction.
+
+    ``tolerances`` values are fractions (``{"R": 0.2, "C": 0.1}``).
+    """
+    if isinstance(config_or_path, Mapping):
+        config = validate_campaign_config(config_or_path)
+        manifest_path = Path.cwd() / "signoff_campaign.json"
+    else:
+        config, manifest_path = load_campaign_json(config_or_path)
+    for name, value in tolerances.items():
+        if not (0.0 < float(value) < 1.0):
+            raise CampaignConfigurationError(
+                f"tolerance {name}={value!r} must be a fraction in (0, 1)")
+
+    base_cases = _load_case_bases(config, manifest_path)
+    corners = [("nominal", {})]
+    for name, value in tolerances.items():
+        corners.append((f"{name}-{float(value) * 100:g}%", {name: 1.0 - float(value)}))
+        corners.append((f"{name}+{float(value) * 100:g}%", {name: 1.0 + float(value)}))
+
+    runs = []
+    for index, (label, factors) in enumerate(corners):
+        staged = deepcopy(config)
+        cases = []
+        for case, original in zip(staged["cases"], base_cases, strict=True):
+            base = deepcopy(original["base"])
+            _scale_passives(base, factors)
+            cases.append({"name": original["name"], "base": base,
+                          "overrides": original["overrides"]})
+        result = _run_prepared_campaign(staged, cases, workers=workers)
+        failing = sorted({
+            f"{row['case']}/{row['constraint']}"
+            for row in summarize_margins(result) if row["fail_points"]})
+        runs.append({
+            "label": label,
+            "factors": dict(factors),
+            "status": result["status"],
+            "passed": bool(result["passed"]),
+            "points": dict(result["summary"]["points"]),
+            "failing_constraints": failing,
+        })
+        if progress is not None:
+            progress(index + 1, len(corners))
+    return {
+        "tolerances": {k: float(v) for k, v in tolerances.items()},
+        "runs": runs,
+        "robust": all(run["passed"] for run in runs),
+    }
+
+
 def run_signoff_campaign(
     config_or_path: Mapping[str, Any] | str | Path,
     *,
@@ -495,6 +649,22 @@ def run_signoff_campaign(
     else:
         config, manifest_path = load_campaign_json(config_or_path)
     cases = _load_case_bases(config, manifest_path)
+    return _run_prepared_campaign(
+        config, cases, workers=workers, progress=progress, should_stop=should_stop)
+
+
+def _run_prepared_campaign(
+    config: Mapping[str, Any],
+    cases: list[dict[str, Any]],
+    *,
+    workers: int = 1,
+    progress: Callable[[int, int], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Campaign body over already-loaded case bases.
+
+    Split out so a tolerance sweep can perturb the loaded decks in memory and
+    reuse the identical evaluation and aggregation path."""
     pvt = config["pvt"]
     points = [
         (corner, temperature, supply)

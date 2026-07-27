@@ -250,9 +250,41 @@ def _add_signoff_parser(subparsers):
     p.add_argument("campaign", help="Path to signoff campaign JSON")
     p.add_argument("--workers", type=int, default=1,
                    help="PVT points evaluated concurrently (default: 1)")
+    p.add_argument("--margins", action="store_true",
+                   help="Print the per-constraint margin table (every spec, not "
+                        "just the single tightest one)")
+    p.add_argument("--tolerance", metavar="SPEC",
+                   help="Re-run with passives perturbed, e.g. 'R=20,C=10' "
+                        "(class-wide percentages) or 'CC1=10' (one element). "
+                        "A signoff that holds only at nominal values is not one.")
     _add_output_arg(p)
     p.add_argument("--quiet", action="store_true", help="Suppress progress output")
     return p
+
+
+def _parse_tolerance_spec(text):
+    """``"R=20,C=10"`` -> ``{"R": 0.2, "C": 0.1}`` (percent in, fraction out)."""
+    out = {}
+    for item in str(text).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, sep, value = item.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise SystemExit(f"--tolerance entry {item!r} is not NAME=PERCENT")
+        try:
+            percent = float(value)
+        except ValueError:
+            raise SystemExit(
+                f"--tolerance {name!r} percentage {value!r} is not a number") from None
+        if not 0.0 < percent < 100.0:
+            raise SystemExit(
+                f"--tolerance {name}={percent:g} must be a percentage in (0, 100)")
+        out[name] = percent / 100.0
+    if not out:
+        raise SystemExit("--tolerance needs at least one NAME=PERCENT entry")
+    return out
 
 
 def _cmd_signoff(args):
@@ -288,6 +320,33 @@ def _cmd_signoff(args):
                 f"{worst['supply_v']:g}V "
                 f"measurement={worst['measurement'] or 'invalid'}"
             )
+    if args.margins:
+        from .signoff_campaign import format_margin_table, summarize_margins
+
+        rows = summarize_margins(result)
+        result["margins"] = rows
+        if not args.quiet:
+            print("  margin table (tightest first):")
+            print(format_margin_table(rows))
+    if args.tolerance:
+        from .signoff_campaign import run_tolerance_sweep
+
+        tolerances = _parse_tolerance_spec(args.tolerance)
+        if not args.quiet:
+            print(f"  tolerance sweep {args.tolerance} "
+                  f"({1 + 2 * len(tolerances)} campaigns)")
+        sweep = run_tolerance_sweep(
+            args.campaign, tolerances, workers=args.workers)
+        result["tolerance"] = sweep
+        if not args.quiet:
+            for run in sweep["runs"]:
+                points = run["points"]
+                detail = (", ".join(run["failing_constraints"][:4])
+                          if run["failing_constraints"] else "-")
+                print(f"    {run['label']:<12} {run['status']:>7}  "
+                      f"{points['pass']:>3}/{points['total']} pass   {detail}")
+            print(f"  robust across the declared tolerances: "
+                  f"{'yes' if sweep['robust'] else 'NO'}")
     if args.output:
         os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as handle:
