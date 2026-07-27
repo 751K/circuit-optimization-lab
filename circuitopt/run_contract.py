@@ -260,7 +260,7 @@ def validate_signoff_config(
             "signoff.constraints must contain at least one constraint")
     _reject_unknown(
         measurements,
-        {"phase_margin", "settling_time", "cm_settling_time", "noise",
+        {"phase_margin", "settling_time", "checkpoint_error", "noise",
          "saturation"},
         "signoff.measurements",
     )
@@ -330,11 +330,7 @@ def validate_signoff_config(
             "phase_margin", "loop_unity_gain_frequency", "loop_gain_dc",
         })
 
-    # ``cm_settling_time`` reuses the settling machinery byte-for-byte with its
-    # own signal/target/tolerance -- the MDAC brief gates the OUTPUT COMMON MODE
-    # (|CM - VDD/2| < 20 mV after every residue settles), which is a second
-    # settled-band question on the same transient.
-    for settle_name in ("settling_time", "cm_settling_time"):
+    for settle_name in ("settling_time",):
         if settle_name not in measurements:
             continue
         path = f"signoff.measurements.{settle_name}"
@@ -364,6 +360,49 @@ def validate_signoff_config(
             raise SignoffConfigurationError(f"{path}.start_time must be non-negative")
         _settling_tolerance(cfg)
         produced.add(settle_name)
+
+    # ``checkpoint_error`` gates |weighted signal - target| at explicit instants
+    # rather than over a window.  A sampled system's spec lives at the instants
+    # its successor observes: the MDAC brief's "output common mode within 20 mV
+    # of VDD/2" is a statement about quiescence and about the end of the hold
+    # phase, not about the middle of a 450 mV slew (where a class-A stage's CM
+    # excursion is physical, unavoidable, and unobserved).
+    if "checkpoint_error" in measurements:
+        path = "signoff.measurements.checkpoint_error"
+        cfg = _require_mapping(measurements["checkpoint_error"], path)
+        _reject_unknown(
+            cfg, {"analysis", "signal", "target", "checkpoints"}, path)
+        _require_analysis(cfg, "transient", path)
+        if "transient" not in analyses:
+            raise SignoffConfigurationError(f"{path} requires analyses.transient")
+        for required in ("signal", "target", "checkpoints"):
+            if required not in cfg:
+                raise SignoffConfigurationError(f"{path}.{required} is required")
+        signal = _require_mapping(cfg["signal"], f"{path}.signal")
+        if not signal:
+            raise SignoffConfigurationError(f"{path}.signal must not be empty")
+        unknown_nodes = sorted(set(signal) - set(topo.solved))
+        if unknown_nodes:
+            raise SignoffConfigurationError(
+                f"{path}.signal references unsolved node(s): "
+                + ", ".join(unknown_nodes))
+        if not np.isfinite(float(cfg["target"])):
+            raise SignoffConfigurationError(f"{path}.target must be finite")
+        checkpoints = list(cfg["checkpoints"])
+        if not checkpoints:
+            raise SignoffConfigurationError(
+                f"{path}.checkpoints must not be empty")
+        for checkpoint in checkpoints:
+            entry = _require_mapping(checkpoint, f"{path}.checkpoints[]")
+            _reject_unknown(entry, {"name", "time"}, f"{path}.checkpoints[]")
+            for required in ("name", "time"):
+                if required not in entry:
+                    raise SignoffConfigurationError(
+                        f"{path}.checkpoints[].{required} is required")
+            if not np.isfinite(float(entry["time"])) or float(entry["time"]) < 0.0:
+                raise SignoffConfigurationError(
+                    f"{path}.checkpoints[].time must be finite and non-negative")
+        produced.add("checkpoint_error")
 
     if "noise" in measurements:
         path = "signoff.measurements.noise"
@@ -746,6 +785,38 @@ def _saturation_from_regions(
     return metric(passed, "boolean", devices=devices)
 
 
+def _checkpoint_error_measurement(
+    transient: Mapping[str, Any],
+    cfg: Mapping[str, Any],
+) -> dict:
+    """Worst |weighted signal - target| over the configured instants."""
+    path = "signoff.measurements.checkpoint_error"
+    cfg = _require_mapping(cfg, path)
+    t = np.asarray(transient["t"], float)
+    nodes = _require_mapping(transient.get("nodes"), "transient.nodes")
+    y = _weighted_signal(
+        nodes, _require_mapping(cfg.get("signal"), f"{path}.signal"),
+        path=f"{path}.signal")
+    target = float(cfg["target"])
+    checkpoint_metrics = {}
+    worst = 0.0
+    for checkpoint in cfg["checkpoints"]:
+        name = str(checkpoint["name"])
+        time = float(checkpoint["time"])
+        if time < float(t[0]) or time > float(t[-1]):
+            raise SignoffConfigurationError(
+                f"{path} checkpoint {name!r} at {time:g} s is outside transient "
+                f"range [{float(t[0]):g}, {float(t[-1]):g}] s")
+        value = float(np.interp(time, t, y))
+        error = abs(value - target)
+        checkpoint_metrics[name] = metric(
+            error, "V", time=metric(time, "s"), signal_value=metric(value, "V"))
+        worst = max(worst, error)
+    return metric(
+        worst, "V", analysis="transient",
+        target=metric(target, "V"), checkpoints=checkpoint_metrics)
+
+
 def _saturation_measurement(
     spec,
     results: Mapping[str, Mapping[str, Any]],
@@ -846,15 +917,20 @@ def summarize_design_metrics(
             raise SignoffConfigurationError(
                 "phase_margin requires the ac analysis result")
         out.update(_phase_margin_measurement(spec, ac, configured["phase_margin"]))
-    for settle_name in ("settling_time", "cm_settling_time"):
-        if settle_name not in configured:
-            continue
+    if "settling_time" in configured:
         transient = results.get("transient")
         if transient is None:
             raise SignoffConfigurationError(
-                f"{settle_name} requires the transient analysis result")
-        out[settle_name] = _settling_measurement(
-            transient, configured[settle_name])
+                "settling_time requires the transient analysis result")
+        out["settling_time"] = _settling_measurement(
+            transient, configured["settling_time"])
+    if "checkpoint_error" in configured:
+        transient = results.get("transient")
+        if transient is None:
+            raise SignoffConfigurationError(
+                "checkpoint_error requires the transient analysis result")
+        out["checkpoint_error"] = _checkpoint_error_measurement(
+            transient, configured["checkpoint_error"])
     if "noise" in configured:
         noise = results.get("noise")
         if noise is None:

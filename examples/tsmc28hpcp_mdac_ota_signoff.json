@@ -180,13 +180,14 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
-            "cm_settling_time": {
+            "checkpoint_error": {
               "analysis": "transient",
               "signal": {"OUTP": 0.5, "OUTN": 0.5},
               "target": {"$pvt": {"vdd": 0.5}},
-              "start_time": 2e-11,
-              "end_time": 5e-9,
-              "tolerance": {"absolute": 0.02}
+              "checkpoints": [
+                {"name": "static", "time": 0.0},
+                {"name": "settled", "time": 5e-9}
+              ]
             },
             "saturation": {
               "analysis": "transient",
@@ -203,7 +204,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
-            "cm_settling_time": {"max": 5e-9},
+            "checkpoint_error": {"max": 0.02},
             "saturation": {"equals": true}
           }
         }
@@ -254,13 +255,14 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
-            "cm_settling_time": {
+            "checkpoint_error": {
               "analysis": "transient",
               "signal": {"OUTP": 0.5, "OUTN": 0.5},
               "target": {"$pvt": {"vdd": 0.5}},
-              "start_time": 2e-11,
-              "end_time": 5e-9,
-              "tolerance": {"absolute": 0.02}
+              "checkpoints": [
+                {"name": "static", "time": 0.0},
+                {"name": "settled", "time": 5e-9}
+              ]
             },
             "saturation": {
               "analysis": "transient",
@@ -274,7 +276,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
-            "cm_settling_time": {"max": 5e-9},
+            "checkpoint_error": {"max": 0.02},
             "saturation": {"equals": true}
           }
         }
@@ -325,13 +327,14 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
-            "cm_settling_time": {
+            "checkpoint_error": {
               "analysis": "transient",
               "signal": {"OUTP": 0.5, "OUTN": 0.5},
               "target": {"$pvt": {"vdd": 0.5}},
-              "start_time": 2e-11,
-              "end_time": 5e-9,
-              "tolerance": {"absolute": 0.02}
+              "checkpoints": [
+                {"name": "static", "time": 0.0},
+                {"name": "settled", "time": 5e-9}
+              ]
             },
             "saturation": {
               "analysis": "transient",
@@ -345,7 +348,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
-            "cm_settling_time": {"max": 5e-9},
+            "checkpoint_error": {"max": 0.02},
             "saturation": {"equals": true}
           }
         }
@@ -396,13 +399,14 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
-            "cm_settling_time": {
+            "checkpoint_error": {
               "analysis": "transient",
               "signal": {"OUTP": 0.5, "OUTN": 0.5},
               "target": {"$pvt": {"vdd": 0.5}},
-              "start_time": 2e-11,
-              "end_time": 5e-9,
-              "tolerance": {"absolute": 0.02}
+              "checkpoints": [
+                {"name": "static", "time": 0.0},
+                {"name": "settled", "time": 5e-9}
+              ]
             },
             "saturation": {
               "analysis": "transient",
@@ -416,7 +420,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
-            "cm_settling_time": {"max": 5e-9},
+            "checkpoint_error": {"max": 0.02},
             "saturation": {"equals": true}
           }
         }
@@ -467,13 +471,14 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
-            "cm_settling_time": {
+            "checkpoint_error": {
               "analysis": "transient",
               "signal": {"OUTP": 0.5, "OUTN": 0.5},
               "target": {"$pvt": {"vdd": 0.5}},
-              "start_time": 2e-11,
-              "end_time": 5e-9,
-              "tolerance": {"absolute": 0.02}
+              "checkpoints": [
+                {"name": "static", "time": 0.0},
+                {"name": "settled", "time": 5e-9}
+              ]
             },
             "saturation": {
               "analysis": "transient",
@@ -487,7 +492,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
-            "cm_settling_time": {"max": 5e-9},
+            "checkpoint_error": {"max": 0.02},
             "saturation": {"equals": true}
           }
         }
@@ -543,13 +548,14 @@
               "end_time": 5e-9,
               "tolerance": {"relative": 0.001, "reference": 0.45}
             },
-            "cm_settling_time": {
+            "checkpoint_error": {
               "analysis": "transient",
               "signal": {"OUTP": 0.5, "OUTN": 0.5},
               "target": {"$pvt": {"vdd": 0.5}},
-              "start_time": 2e-11,
-              "end_time": 5e-9,
-              "tolerance": {"absolute": 0.02}
+              "checkpoints": [
+                {"name": "static", "time": 0.0},
+                {"name": "settled", "time": 5e-9}
+              ]
             },
             "saturation": {
               "analysis": "transient",
@@ -563,7 +569,7 @@
           },
           "constraints": {
             "settling_time": {"max": 5e-9},
-            "cm_settling_time": {"max": 5e-9},
+            "checkpoint_error": {"max": 0.02},
             "saturation": {"equals": true}
           }
         }

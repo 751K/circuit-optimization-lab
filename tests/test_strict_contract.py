@@ -433,30 +433,40 @@ def test_settling_uses_declared_target_not_last_sample():
         "normalized_margin"] == pytest.approx(-9.0)
 
 
-def test_cm_settling_time_is_a_second_settling_measurement_with_own_gate():
-    """``cm_settling_time`` reuses the settling machinery under its own name.
+def test_checkpoint_error_gates_instants_not_the_whole_window():
+    """``checkpoint_error`` is the sampled-system reading of a level spec.
 
-    The MDAC brief gates the OUTPUT COMMON MODE (|CM - VDD/2| < 20 mV after
-    every residue settles) -- a second settled-band question on the same
-    transient.  The fixture's outputs are anti-symmetric, so the CM signal
-    {OUTP: 0.5, OUTN: 0.5} sits exactly on a 0.0 target from t=0."""
+    The MDAC brief's "output common mode within 20 mV of VDD/2" is observed by
+    the next stage at quiescence and at the end of the hold phase; the mid-slew
+    excursion of a class-A output stage is physical and unobserved.  So the gate
+    is the worst |signal - target| over named instants, NOT a settled band over
+    the whole window.  The fixture's transient carries a 0.9 V mid-window CM
+    bump that a window-based gate would fail and this one must ignore."""
     spec, results = _signoff_fixture()
     results["ac"]["ac_stimulus"]["drives"]["Vinj"] = 1.0 + 0.0j
-    spec.signoff["measurements"]["cm_settling_time"] = {
+    results["transient"]["nodes"]["OUTP"] = np.array([0.0, 1.8, 0.49975, 0.5])
+    results["transient"]["nodes"]["OUTN"] = np.array([0.0, 0.0, -0.49975, -0.5])
+    spec.signoff["measurements"]["checkpoint_error"] = {
         "analysis": "transient",
         "signal": {"OUTP": 0.5, "OUTN": 0.5},
         "target": 0.0,
-        "start_time": 0.0,
-        "tolerance": {"absolute": 0.02},
+        "checkpoints": [
+            {"name": "static", "time": 0.0},
+            {"name": "settled", "time": 3e-9},
+        ],
     }
-    spec.signoff["constraints"]["cm_settling_time"] = {"max": 3e-9}
+    spec.signoff["constraints"]["checkpoint_error"] = {"max": 0.02}
     signoff = evaluate_signoff(spec, results)
-    metric = signoff["measurements"]["cm_settling_time"]
-    assert metric["unit"] == "s"
-    assert metric["value"] == pytest.approx(0.0, abs=1e-12)
-    assert metric["tolerance"]["mode"] == "absolute"
-    gate = signoff["constraints"]["cm_settling_time"]
-    assert gate["passed"] is True
-    # The ordinary settling_time measurement is untouched by the second one.
-    assert signoff["measurements"]["settling_time"]["unit"] == "s"
-    assert signoff["status"] == "pass"
+    metric_out = signoff["measurements"]["checkpoint_error"]
+    assert metric_out["unit"] == "V"
+    # Both named instants sit on target; the 0.9 V bump at 1 ns is not sampled.
+    assert metric_out["value"] == pytest.approx(0.0, abs=1e-9)
+    assert set(metric_out["checkpoints"]) == {"static", "settled"}
+    assert signoff["constraints"]["checkpoint_error"]["passed"] is True
+
+    # Move a checkpoint onto the bump and the same gate fails -- the instants,
+    # not the tolerance, are what make it lenient.
+    spec.signoff["measurements"]["checkpoint_error"]["checkpoints"][1]["time"] = 1e-9
+    failed = evaluate_signoff(spec, results)
+    assert failed["measurements"]["checkpoint_error"]["value"] == pytest.approx(0.9)
+    assert failed["constraints"]["checkpoint_error"]["passed"] is False

@@ -17,14 +17,14 @@ import numpy as np
 CS = 2.6e-12
 CF = CS / 8.0
 CL = 500e-15
-CC = 400e-15
+CC = 900e-15
 CSENSE = 100e-15
 VDD_NOM = 0.90
 
 # A small ratio trim offsets CMFB2's positive systematic error without moving the
 # large-signal common-mode trajectory outside its 5 ns window.
 RDIV_TOP = 67.2e3
-RDIV_BOTTOM = 60e3
+RDIV_BOTTOM = 73e3
 RSENSE = 100e3
 RSENSE1 = 100e3
 # iter5 wide-swing legs: NN1 ~ 20uA*RNC (density-matched MCND), A1 ~ VDD-20uA*RCP
@@ -33,14 +33,25 @@ RSENSE1 = 100e3
 RNC = 8.5e3
 RCP = 8.5e3
 RCM = 4e3
-RZ = 420.0
+RZ = 205.0
 RDEG2 = 100.0
 CSENSE1 = 50e-15
 CCMFB1 = 40e-12
 RCMFB1 = 5e3
-CMILL1 = 1.1e-12
-CCMFB2 = 40e-12
+CMILL1 = 10e-12
+CCMFB2 = 2e-12
 RCMFB2 = 200.0
+# iter6b capacitive CM feedforward.  One cap from each output to CTRL2: the
+# common-mode component couples into the M11/M12 gate immediately (CM sags ->
+# CTRL2 sags -> the PMOS loads source more -> CM recovers) while the
+# differential components cancel at CTRL2 by symmetry.  This is the ONLY
+# mechanism fast enough for the class-A stage's large-signal CM shift inside a
+# 5 ns hold window -- the CMFB2 loop itself crosses near 1 MHz because its
+# 2 uA diode drives an 11 pF gate.  Measured droop at the 5 ns checkpoint:
+# -82 mV with no feedforward, -38 mV at 2.2 pF, -28 mV at 4 pF (saturating).
+# CCMFB2 shrinks to 2 pF so the feedforward divider CFF/(CFF+CCMFB2+Cgate)
+# bites; CFF then also supplies CMFB2's phase lead.
+CFF = 3e-12
 
 # W/L in um.  The first revision is gm/Id-sized from the local TT model; every
 # value is subsequently checked with hierarchical foundry-model operating points.
@@ -64,7 +75,7 @@ SZ = {
     # (higher density than M9) so VREF1 -> CMFB1 -> O1/O2 CM sits a few tens of mV
     # HIGHER, giving the NMOS cascodes M3/M4 more Vds at fast/hot (ff/125/0.95).
     "MREPP": (6.0, 0.20),
-    "MREP": (10.5, 0.20),
+    "MREP": (7.875, 0.20),
     "MCMP": (3.0, 0.20),
     "MCMD": (5.0, 0.20),
     # C2 iter7: full C1 tail restored (noise needs gm1; the AC-coupled aux no
@@ -97,10 +108,10 @@ SZ = {
     # contributor; ~57 uA branch at a low-Vov point.
     "MFN1": (60.0, 0.50),
     "MFN2": (60.0, 0.50),
-    "M9": (200.0, 0.20),
-    "M10": (200.0, 0.20),
-    "M11": (371.428571, 0.40),
-    "M12": (371.428571, 0.40),
+    "M9": (150.0, 0.20),
+    "M10": (150.0, 0.20),
+    "M11": (185.714286, 0.40),
+    "M12": (185.714286, 0.40),
     "MS1": (10.0, 0.20),
     "MS2": (10.0, 0.20),
     "MS3": (10.0, 0.20),
@@ -112,8 +123,8 @@ SZ = {
     "MRA": (40.0, 0.20),
     "MRB": (40.0, 0.20),
     "MTB": (2.325, 0.20),
-    "MDL2": (0.4875, 0.30),
-    "MDS2": (0.4875, 0.30),
+    "MDL2": (0.55, 0.30),
+    "MDS2": (0.55, 0.30),
 }
 
 # Parallel-instance multiplicity (SPICE ``m=``): one drawn macro instance, M
@@ -299,6 +310,8 @@ def _port(deck: dict, vdd: float) -> dict:
         {"name": "CCMFB1", "a": "CTRL1", "b": "CMPC1", "C": CCMFB1},
         {"name": "CMILL1", "a": "CTRL1", "b": "CMS1", "C": CMILL1},
         {"name": "CCMFB2", "a": "CTRL2", "b": "CMPC2", "C": CCMFB2},
+        {"name": "CFF1", "a": "OUTP", "b": "CTRL2", "C": CFF},
+        {"name": "CFF2", "a": "OUTN", "b": "CTRL2", "C": CFF},
     ])
 
     for model in deck["models"].values():
