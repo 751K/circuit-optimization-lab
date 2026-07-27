@@ -37,6 +37,7 @@ nav:
       - Installation and First Run: getting_started.md
       - 安装与快速上手: getting_started_zh.md
   - User Guide:
+      - Agent Guide: agent_guide.md
       - CLI Reference: cli_reference.md
       - JSON Circuit Format: json_circuit_format.md
       - PDK Support Matrix: pdk_support.md
