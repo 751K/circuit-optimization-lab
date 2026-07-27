@@ -605,55 +605,90 @@ solver 参数后 dispatch/schema/docs 继续漂移。
 }
 ```
 
-`freqs` 可以是频点数组，也可以是 `{"start": 1.0, "stop": 1e4, "num": 41, "scale": "log"}`。
-`input_drive` 是 PAC/PNoise 小信号输入复幅值映射；JSON 中复数可写成数字、
-`[real, imag]` 或 `{"real": ..., "imag": ...}`。
-每个 analysis 都可以设置 `corner` 为 `"typical"`、`"slow"`、`"fast"` 或显式
-模型偏移 map。PAC/PNoise 必须和它们复用的 PSS 轨道保持同一 corner；当 PSS
-没有写 corner 时，dispatch 会继承唯一的 PAC/PNoise corner；如果依赖分析请求
-了和已有 PSS 不同的 corner，会直接报错，避免 typical/slow 混用。
-PSS 默认使用解析 monodromy Jacobian（`"analytic_jacobian": true`）：在收敛轨迹上
-一次性采样 G(t)/C(t) 小信号矩阵构建 Φ，替代 `n_state` 次有限差分瞬态。设置为
-`false` 可回退到原有限差分路径。Jacobian 构建后用 Broyden 更新复用；疑难收敛或
-极高精度对比时可设置 `"jacobian_reuse": false`，或用 `"jacobian_rebuild_interval": 2`
-周期性重建。
-Gear2 PSS/transient 可设置 `"adaptive": true` 启用 LTE-controlled adaptive timestepping。
-dispatch 会转发 `"adaptive_reltol"`、`"adaptive_vabstol"`、`"adaptive_iabstol"`、
-`"adaptive_max_steps"`、`"adaptive_h0"` 和 `"cap_mode"`；pulse/square 周期输入会在
-adaptive run 前自动补入边沿断点。`cap_mode` 只支持 `"charge"`（id 0）和
-`"average"`（id 1）及其文档别名。
-原生 BSIM transient 还接受单位为 V 的 `"bsim_model_bypass_tolerance"`。其默认值
-为 0，且不得超过 `"newton_vtol"`。正值只会在独占 transient Newton 环路内启用
-紧凑模型的标准 device bypass；应先完成对应电路的轨迹与 signoff A/B 再设置。
-adaptive 运行还接受 `"newton_error_fraction"`：默认值为 0，不得超过 1，固定网格
-会拒绝该选项。取正值时，每个节点的 Newton 更新需收敛到其自身步长误差预算
-`adaptive_reltol*|V| + adaptive_vabstol` 的这一比例，而不再是对轨电位节点和零
-电位节点一视同仁的绝对 `"newton_vtol"`。因此零附近的节点被收得更紧，而大电压
-节点在其残余误差相对步长控制器已接受的误差可忽略时就停止。选值方式与 bypass
-容差相同：与步长容差大幅收紧的参考解做 A/B，而不是靠目测。
-需要可复现的 PAC/PNoise 转换轨迹时，可同时设置 `"adaptive": true`、
-至少一个 stabilization period 和 `"final_n_points"`。adaptive Gear2 此时只
-提供 warm start，不冻结 accepted grid；dispatch 会构造带相同时钟边沿断点的
-确定性 final grid。shooting、monodromy、profile 和最终返回轨迹均使用该网格。
-PAC 默认使用解析伴随谐波平衡（`"analytic": true`）：在 PSS 轨道转换矩阵上每频率
-一次伴随线性求解，零额外瞬态运行。`"max_sideband"` 和 `"n_period_samples"` 控制
-HB 分辨率。对 rail-driven chopper 类电路，可设置 `"time_domain": true` 优先尝试
-加速的 time-domain Floquet PAC；`"td_integration"` 和 `"td_n_period_samples"` 控制
-这条路径的 BDF/grid 设置。不支持的拓扑会在 `"analytic": true` 时回退到 HB。
-只有需要原有限差分 shooting 时才设置 `"analytic": false`。
-PAC/PNoise 默认启用静态轨道 LTI fast path 和 PSS 结果缓存；如需逐次强制重算，
-可设置 `"lti_fast_path": false`、`"cache_linearization": false`、
-`"cache_forcing": false`。PNoise 会复用 `pss_result` 上的采样 `G(t)/C(t)`、
-HB block 和相同频点的 adjoint 解。PNoise HB 系统变大时，可设置
-`"hb_solver": "sparse"` 或 `"iterative"` 强制 sparse direct 或 block-Jacobi
-预条件 GMRES；默认 `"auto"` 会让小矩阵继续走 dense，只在矩阵足够大且非常稀疏时切换。
-PAC 边界矩阵 condition 诊断默认关闭，因为它每个频点都需要一次 SVD；需要排查数值
-病态时可设置 `"profile": true`、`"debug": true`，或显式设置
-`"compute_condition": true`。
+#### 频率网格与激励
 
-JSON dispatch 的 `pnoise` 入口目前是通用 HB 路径。Chopper 专用包装器
-`pmos_chopper_pnoise(...)` 已默认使用 TD-adjoint PNoise 来对齐 Cadence；如果需要
-无 HB 截断的 chopper PNoise，应使用该包装器，或直接调用
+| 键 | 适用分析 | 含义 |
+| --- | --- | --- |
+| `freqs` | `ac`、`noise`、`pac`、`pnoise` | 频点数组，或形如 `{"start": 1.0, "stop": 1e4, "num": 41, "scale": "log"}` 的对象。 |
+| `input_drive` | `pac`、`pnoise` | 每个输入的小信号复幅值。复数可写成数字、`[real, imag]` 或 `{"real": ..., "imag": ...}`。 |
+| `corner` | 全部 | `"typical"`、`"slow"`、`"fast"` 或显式模型偏移 map。 |
+
+PAC 与 PNoise 复用 PSS 轨道，因此三者必须运行在同一 corner。`pss` 未写 corner 时，
+dispatch 会继承唯一的 PAC/PNoise corner；依赖分析请求的 corner 与已构建的 PSS 不同时
+直接报错，避免 typical/slow 混用。
+
+#### PSS
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `analytic_jacobian` | `true` | 在收敛轨迹上一次采样 `G(t)`/`C(t)` 小信号矩阵构建 monodromy 矩阵。设为 `false` 回退到原路径，后者需要 `n_state` 次有限差分瞬态。 |
+| `jacobian_reuse` | `true` | 用 Broyden 更新在 shooting 迭代间复用 Jacobian。疑难收敛或高精度对比时设为 `false`。 |
+| `jacobian_rebuild_interval` | — | 每 N 次迭代重建一次 Jacobian（例如 `2`），而不是完全依赖 Broyden 更新。 |
+| `final_n_points` | — | 确定性 final grid 的点数，见下文[可复现的 PAC/PNoise 转换](#可复现的-pacpnoise-转换)。 |
+
+#### 自适应步长
+
+适用于 gear2 瞬态与 PSS。设置 `"adaptive": true` 启用 LTE 控制的自适应步长，
+dispatch 随后转发下列选项。pulse/square 周期输入会在自适应运行前补入边沿断点。
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `adaptive_reltol` | 见 `adaptive_config.py` | 相对局部误差容差。 |
+| `adaptive_vabstol` | 见 `adaptive_config.py` | 电压绝对误差容差。 |
+| `adaptive_iabstol` | 见 `adaptive_config.py` | 电流绝对误差容差。 |
+| `adaptive_max_steps` | 见 `adaptive_config.py` | 步数上限。 |
+| `adaptive_h0` | — | 初始步长。 |
+| `cap_mode` | `"charge"` | 电容算子。只接受 `"charge"`（id 0）与 `"average"`（id 1）及其文档别名。 |
+
+#### 原生 BSIM 瞬态
+
+下列两个选项默认值均为 0，且都应通过与步长容差大幅收紧的参考解做 A/B 来选值，
+而不是靠目测。
+
+| 键 | 取值约束 | 含义 |
+| --- | --- | --- |
+| `bsim_model_bypass_tolerance` | `0 ≤ x ≤ newton_vtol`，单位 V | 取正值时启用紧凑模型的标准 device bypass，且仅在独占瞬态 Newton 环路内生效。设置前应先完成该电路的轨迹与 signoff A/B。 |
+| `newton_error_fraction` | `0 ≤ x ≤ 1`，仅自适应可用（固定网格会拒绝） | 每个节点的 Newton 更新收敛到其自身步长误差预算 `adaptive_reltol*abs(V) + adaptive_vabstol` 的这一比例，而不再是对轨电位节点与零电位节点一视同仁的绝对 `newton_vtol`。因此零附近的节点被收得更紧，大电压节点在残余误差相对步长控制器已接受的误差可忽略时即停止。 |
+
+#### 可复现的 PAC/PNoise 转换
+
+同时设置 `final_n_points`、`"adaptive": true` 与至少一个 stabilization period。
+自适应 gear2 此时只提供 warm start，其 accepted grid 不被冻结；dispatch 构造带相同
+pulse/square 边沿断点的确定性 final grid。shooting、monodromy、profile 与最终返回的
+轨迹都使用该网格。
+
+#### PAC
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `analytic` | `true` | 解析伴随谐波平衡：在轨道转换矩阵上每频点一次伴随线性求解，无额外瞬态运行。只有需要原有限差分 shooting 时才设为 `false`。 |
+| `max_sideband` | — | 谐波平衡分辨率。 |
+| `n_period_samples` | — | 谐波平衡分辨率。 |
+| `time_domain` | `false` | 优先尝试加速的 time-domain Floquet 路径，面向 rail-driven chopper 类电路；不支持的拓扑在 `analytic` 为 `true` 时回退到谐波平衡。 |
+| `td_integration` | — | time-domain 路径的 BDF 设置。 |
+| `td_n_period_samples` | — | time-domain 路径的网格设置。 |
+
+#### PAC/PNoise 缓存
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `lti_fast_path` | `true` | 静态轨道 LTI 快速路径。 |
+| `cache_linearization` | `true` | 复用挂在 PSS 结果上的线性化。 |
+| `cache_forcing` | `true` | 复用挂在 PSS 结果上的激励项。 |
+
+将其中任一项设为 `false` 可强制重新做有限差分或谐波平衡计算。缓存开启时，PNoise 会
+复用 `pss_result` 上的采样 `G(t)`/`C(t)`、HB block 与相同频点的伴随解。
+
+#### PNoise
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `hb_solver` | `"auto"` | `"sparse"` 强制稀疏直接求解，`"iterative"` 强制 block-Jacobi 预条件 GMRES。`"auto"` 让小矩阵保持稠密，仅在 HB 矩阵足够大且非常稀疏时切换。 |
+| `compute_condition` | `false` | PAC 边界矩阵的 condition 诊断。默认关闭，因为它每个频点都需要一次 SVD；`"profile": true` 或 `"debug": true` 同样会启用它。 |
+
+JSON dispatch 的 `pnoise` 入口是通用 HB 路径。Chopper 专用包装器
+`pmos_chopper_pnoise(...)` 默认使用 TD-adjoint PNoise 以对齐 Cadence。需要无 HB 截断的
+chopper PNoise 时，应使用该包装器，或直接调用
 `circuitopt.pnoise_solver.pnoise_solve(..., time_domain=True)`。
 
 ### `signoff`

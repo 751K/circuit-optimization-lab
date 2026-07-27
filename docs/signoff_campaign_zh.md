@@ -33,6 +33,37 @@ PVT 点、495 次 case 求解。覆盖开环、差模环、两个 CMFB 环、闭
 模型 `section`、以 K 为单位的 MOS 温度、指定电源 bias、PMOS bulk、电压源数值
 和 DC 初始猜测。
 
+## 余量表
+
+`--margins` 为每一条约束打印一行，而不是只给出 `worst_case` 指名的那一项最紧测量。
+一条余量只剩 +0.02 的规格同样是设计约束，即使另一条规格还有 -0.5；只看最差项会让它
+完全消失。
+
+```bash
+circuit-opt signoff campaign.json --margins
+```
+
+每行给出该约束最差的归一化余量与产生它的 PVT 点、观测到的最小值与最大值及其单位、
+参与统计的点数，以及全部不合格的点。行按余量从紧到松排序。同样的数据可通过
+`circuitopt.signoff_campaign.summarize_margins(result)` 以程序方式获取。
+
+## 无源元件容差扫描
+
+只在标称元件值下通过的 signoff 不算 signoff。poly 电阻的绝对容差约 20%，MOM 电容约
+10%，压在刀刃上调出来的补偿网络无法通过流片。
+
+```bash
+circuit-opt signoff campaign.json --tolerance R=20,C=10
+```
+
+数值为百分比。键为 `R` 或 `C` 时扰动整个元件类别；其他键指定单个元件，例如
+`--tolerance CC1=10`。含 `N` 个条目的扫描运行 `1 + 2N` 次 campaign——标称，以及每个
+条目在 `1 - 容差` 与 `1 + 容差` 处各一次——并报告哪些约束在哪个方向失效。只有全部
+运行都通过时结果才标记为 `robust`。
+
+逐元件扰动与整类扰动回答的是不同问题：单独缩放一个调零电阻可以隔离出补偿网络，
+而同时缩放全部电阻还会移动为它设定目标的偏置网络。
+
 ## 结果契约
 
 每个 case 必须提供电路级 `signoff`。campaign 保存统一、带单位的 signoff

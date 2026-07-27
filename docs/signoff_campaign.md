@@ -63,6 +63,44 @@ This evaluates to `0.5 * VDD + 0.0 * temperature_c + 0.225`. At each point the
 runner also binds `section`, MOS temperature in kelvin, the named supply bias,
 PMOS bulk voltage, numeric voltage-source levels, and DC seeds.
 
+## Margin Table
+
+`--margins` prints one row per constraint instead of the single tightest
+measurement that `worst_case` names. A spec sitting at +0.02 of its limit is a
+design constraint even when another spec is at -0.5, and a worst-case view hides
+it entirely.
+
+```bash
+circuit-opt signoff campaign.json --margins
+```
+
+Each row carries the constraint's worst normalized margin and the PVT point that
+produced it, the observed minimum and maximum with their unit, the number of
+points evaluated, and every failing point. Rows are sorted tightest first.
+The same data is available programmatically from
+`circuitopt.signoff_campaign.summarize_margins(result)`.
+
+## Passive Tolerance Sweep
+
+A signoff that passes only at nominal component values is not a signoff. Poly
+resistors carry roughly 20% absolute tolerance and MOM capacitors roughly 10%, so
+a compensation network tuned on a knife edge will not survive fabrication.
+
+```bash
+circuit-opt signoff campaign.json --tolerance R=20,C=10
+```
+
+Values are percentages. A key of `R` or `C` perturbs that whole element class; any
+other key names a single element, for example `--tolerance CC1=10`. The sweep runs
+`1 + 2N` campaigns for `N` entries — nominal, then each entry at `1 - tolerance`
+and `1 + tolerance` — and reports which constraints break in which direction. The
+result is `robust` only when every run passes.
+
+Per-element perturbation answers a different question from class-wide
+perturbation: scaling one nulling resistor alone isolates the compensation network,
+while scaling every resistor together also moves the bias network that sets its
+target.
+
 ## Result Contract
 
 Every case must contain a circuit-level `signoff` block. The campaign stores

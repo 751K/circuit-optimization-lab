@@ -644,70 +644,93 @@ Unknown keys in an `analyses` block are rejected with an error (a typo such as
 }
 ```
 
-`freqs` can be an explicit list or an object such as
-`{"start": 1.0, "stop": 1e4, "num": 41, "scale": "log"}`. `input_drive` is the
-PAC/PNoise small-signal complex amplitude map; JSON complex values can be a
-number, `[real, imag]`, or `{"real": ..., "imag": ...}`.
-Each analysis may set `corner` to `"typical"`, `"slow"`, `"fast"`, or an explicit
-model-shift map. For PAC/PNoise, keep the PSS orbit on the same corner; when PSS
-does not specify a corner, dispatch inherits the unique PAC/PNoise corner, and it
-raises an error if a dependent analysis requests a different corner from an
-already-built PSS.
-PSS uses the analytic monodromy Jacobian by default (`"analytic_jacobian": true`):
-it builds Φ in one orbit pass from the small-signal G(t)/C(t) stamps instead of
-`n_state` finite-difference period runs. Set to `false` for the original FD path.
-The Jacobian is then reused with a Broyden update; for difficult convergence or
-tight reference comparisons, set `"jacobian_reuse": false` or periodically rebuild
-with `"jacobian_rebuild_interval": 2`.
-For gear2 PSS/transient, set `"adaptive": true` to enable LTE-controlled
-adaptive timestepping. The dispatch forwards `"adaptive_reltol"`,
-`"adaptive_vabstol"`, `"adaptive_iabstol"`, `"adaptive_max_steps"`,
-`"adaptive_h0"`, and `"cap_mode"`; pulse/square periodic inputs get edge
-breakpoints inserted before the adaptive run. `cap_mode` is limited to
-`"charge"` (id 0) and `"average"` (id 1), plus their documented aliases.
-Native BSIM transient also accepts `"bsim_model_bypass_tolerance"` in volts.
-It defaults to zero and must not exceed `"newton_vtol"`. A positive value uses
-the compact model's standard device bypass only inside the exclusive transient
-Newton loop; choose it only after circuit-level trajectory and signoff A/B.
-Adaptive runs also accept `"newton_error_fraction"`. It defaults to zero, may
-not exceed 1, and a fixed grid rejects it. A positive value makes each node's
-Newton update converge below that fraction of its own step-error budget
-`adaptive_reltol*|V| + adaptive_vabstol`, instead of the one absolute
-`"newton_vtol"` that holds a rail node and a node at zero to the same number.
-Nodes near zero are therefore held tighter, large ones stop once their
-remaining error is negligible against the error the step controller already
-accepts. Pick it the same way as the bypass tolerance: by A/B against a run
-with much tighter step tolerances, not by inspection.
-For reproducible PAC/PNoise conversion, set `"final_n_points"` together with
-`"adaptive": true` and at least one stabilization period. Adaptive Gear2 then
-supplies only the warm start; the accepted grid is not frozen, and dispatch
-builds a deterministic final grid with the same pulse/square edge breakpoints.
-Shooting, monodromy, profiling, and the returned orbit all use that final grid.
-PAC uses analytic-adjoint harmonic balance by default (`"analytic": true`): one
-adjoint linear solve per frequency on the orbit conversion matrix, with zero extra
-transient runs. `"max_sideband"` and `"n_period_samples"` control the HB resolution.
-For rail-driven chopper-like circuits, set `"time_domain": true` to try the
-accelerated time-domain Floquet PAC path first; `"td_integration"` and
-`"td_n_period_samples"` control that path's BDF/grid settings. Unsupported
-topologies fall back to HB when `"analytic": true`. Set `"analytic": false` only
-for the original finite-difference shooting path.
-PAC and PNoise enable the static-orbit LTI fast path and PSS-attached caches by default.
-Set `"lti_fast_path": false`, `"cache_linearization": false`, or
-`"cache_forcing": false` to force fresh finite-difference or harmonic-balance
-work. PNoise reuses sampled `G(t)/C(t)`, HB blocks, and identical-frequency
-adjoint solves from `pss_result`. For large PNoise HB systems, set
-`"hb_solver": "sparse"` or `"iterative"` to force sparse direct or block-Jacobi
-preconditioned GMRES; the default `"auto"` keeps small matrices dense and
-switches only when the HB matrix is large and very sparse. PAC boundary-matrix
-condition diagnostics are off by default because they require an SVD at every
-frequency; enable them with
-`"profile": true`, `"debug": true`, or explicit `"compute_condition": true`.
+#### Grid and stimulus
+
+| Key | Analyses | Meaning |
+| --- | --- | --- |
+| `freqs` | `ac`, `noise`, `pac`, `pnoise` | An explicit list of frequencies, or an object such as `{"start": 1.0, "stop": 1e4, "num": 41, "scale": "log"}`. |
+| `input_drive` | `pac`, `pnoise` | Small-signal complex amplitude per input. A complex value may be a number, `[real, imag]`, or `{"real": ..., "imag": ...}`. |
+| `corner` | all | `"typical"`, `"slow"`, `"fast"`, or an explicit model-shift map. |
+
+PAC and PNoise reuse a PSS orbit, so all three must run at the same corner. When
+`pss` sets no corner, dispatch inherits the unique PAC/PNoise corner. A dependent
+analysis that requests a corner different from an already-built PSS is an error.
+
+#### PSS
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `analytic_jacobian` | `true` | Build the monodromy matrix in one orbit pass from the small-signal `G(t)`/`C(t)` stamps. `false` selects the original path, which needs `n_state` finite-difference period runs. |
+| `jacobian_reuse` | `true` | Reuse the Jacobian across shooting iterations with a Broyden update. Set `false` for difficult convergence or tight reference comparisons. |
+| `jacobian_rebuild_interval` | — | Rebuild the Jacobian every N iterations, e.g. `2`, instead of relying on the Broyden update alone. |
+| `final_n_points` | — | Point count of the deterministic final grid; see [Reproducible conversion](#reproducible-pacpnoise-conversion). |
+
+#### Adaptive timestepping
+
+Applies to gear2 transient and PSS. Set `"adaptive": true` to enable LTE-controlled
+adaptive timestepping; dispatch then forwards the options below. Pulse and square
+periodic inputs get edge breakpoints inserted before the adaptive run.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `adaptive_reltol` | see `adaptive_config.py` | Relative local-error tolerance. |
+| `adaptive_vabstol` | see `adaptive_config.py` | Absolute voltage error tolerance. |
+| `adaptive_iabstol` | see `adaptive_config.py` | Absolute current error tolerance. |
+| `adaptive_max_steps` | see `adaptive_config.py` | Step-count ceiling. |
+| `adaptive_h0` | — | Initial step size. |
+| `cap_mode` | `"charge"` | Capacitance operator. Only `"charge"` (id 0) and `"average"` (id 1) and their documented aliases are accepted. |
+
+#### Native BSIM transient
+
+Both options below default to zero, and both should be chosen by A/B against a run
+with much tighter step tolerances rather than by inspection.
+
+| Key | Constraint | Meaning |
+| --- | --- | --- |
+| `bsim_model_bypass_tolerance` | `0 ≤ x ≤ newton_vtol`, in volts | A positive value enables the compact model's standard device bypass, and only inside the exclusive transient Newton loop. Validate with a circuit-level trajectory and signoff A/B before setting it. |
+| `newton_error_fraction` | `0 ≤ x ≤ 1`, adaptive only (a fixed grid rejects it) | Each node's Newton update converges below this fraction of its own step-error budget `adaptive_reltol*abs(V) + adaptive_vabstol`, instead of the single absolute `newton_vtol` that holds a rail node and a node at zero to the same number. Nodes near zero are therefore held tighter; large ones stop once their remaining error is negligible against the error the step controller already accepts. |
+
+#### Reproducible PAC/PNoise conversion
+
+Set `final_n_points` together with `"adaptive": true` and at least one stabilization
+period. Adaptive gear2 then supplies only the warm start and its accepted grid is not
+frozen; dispatch builds a deterministic final grid carrying the same pulse/square edge
+breakpoints. Shooting, monodromy, profiling, and the returned orbit all use that grid.
+
+#### PAC
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `analytic` | `true` | Analytic-adjoint harmonic balance: one adjoint linear solve per frequency on the orbit conversion matrix, with no extra transient runs. Set `false` only for the original finite-difference shooting path. |
+| `max_sideband` | — | Harmonic-balance resolution. |
+| `n_period_samples` | — | Harmonic-balance resolution. |
+| `time_domain` | `false` | Try the accelerated time-domain Floquet path first. Intended for rail-driven chopper-like circuits; unsupported topologies fall back to harmonic balance when `analytic` is `true`. |
+| `td_integration` | — | BDF setting of the time-domain path. |
+| `td_n_period_samples` | — | Grid setting of the time-domain path. |
+
+#### PAC/PNoise caches
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `lti_fast_path` | `true` | Static-orbit LTI fast path. |
+| `cache_linearization` | `true` | Reuse linearization attached to the PSS result. |
+| `cache_forcing` | `true` | Reuse forcing attached to the PSS result. |
+
+Set any of them to `false` to force fresh finite-difference or harmonic-balance work.
+With the caches on, PNoise reuses the sampled `G(t)`/`C(t)`, the HB blocks, and
+identical-frequency adjoint solves from `pss_result`.
+
+#### PNoise
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `hb_solver` | `"auto"` | `"sparse"` forces a sparse direct solve, `"iterative"` forces block-Jacobi preconditioned GMRES. `"auto"` keeps small matrices dense and switches only when the HB matrix is large and very sparse. |
+| `compute_condition` | `false` | PAC boundary-matrix condition diagnostics. Off by default because they require an SVD at every frequency; `"profile": true` or `"debug": true` also enable them. |
 
 The JSON dispatch `pnoise` entry is the generic HB path. The chopper helper
-`pmos_chopper_pnoise(...)` now defaults to the TD-adjoint PNoise path for Cadence
-alignment; use that wrapper, or call `circuitopt.pnoise_solver.pnoise_solve(...,
-time_domain=True)` directly, when the truncation-free chopper PNoise path is
-required.
+`pmos_chopper_pnoise(...)` defaults to the TD-adjoint PNoise path for Cadence
+alignment. Use that wrapper, or call `circuitopt.pnoise_solver.pnoise_solve(...,
+time_domain=True)` directly, when the truncation-free chopper PNoise path is required.
 
 ### `signoff`
 
