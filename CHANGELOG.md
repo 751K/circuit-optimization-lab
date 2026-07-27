@@ -81,6 +81,47 @@ release checklist.
   电容占了无源面积的 64%，无源总面积是全部晶体管的 21 倍——自补偿整定以来一直如此，
   只是没有任何视图把它加起来。
 
+### Changed / 变更
+
+- **Documentation readability pass / 文档可读性整理**
+
+  **English:** Reference material that had been written as continuous prose is
+  now structured for lookup: the `analyses` option block in the circuit JSON
+  format became eight grouped option tables, and `module_overview`'s longest
+  entries — one 1568-character bullet and two run-on paragraphs — became
+  headed sections and an element table. `signoff_campaign` gained the
+  `--margins` and `--tolerance` sections it never had. New page
+  `docs/solver_call_flow_zh.html` traces one request from the CLI to the Rust
+  core.
+
+  **中文：** 把本应供查阅、却写成连续散文的参考内容改为结构化：电路 JSON 的
+  `analyses` 选项块拆成八组选项表；`module_overview` 最长的三处——一个 1568
+  字符的 bullet 和两个跑长段落——改为带小标题的段落与元件表。`signoff_campaign`
+  补上了一直缺失的 `--margins` 与 `--tolerance` 两节。新增
+  `docs/solver_call_flow_zh.html`，追踪一次请求从命令行到 Rust 核心的完整路径。
+
+### Fixed / 修复
+
+- **Mermaid rendering, a stale import graph, and broken links / Mermaid 渲染、过时的导入图与坏链接**
+
+  **English:** `mkdocs.yml` registers the mermaid superfence, so ```mermaid
+  fences render as diagrams instead of plain code — one diagram in the MDAC OTA
+  design doc had been rendering as text since it was written.
+  `module_overview`'s import list was regenerated from the source AST after a
+  diff showed 17 modules with undocumented dependencies, and now carries a
+  layered dependency diagram. Three link defects: the changelog's `[1.4.1]`
+  heading had no link definition and rendered as literal text, `Changed / 性能`
+  paired an English section name with a Chinese one that means Performance, and
+  the TSMC28 design doc linked a repository path that is not a documentation
+  file, which aborted `mkdocs build --strict`.
+
+  **中文：** `mkdocs.yml` 注册 mermaid superfence，```mermaid 块从此渲染为图而非
+  代码——MDAC OTA 设计文档里的一张图自写下起就一直是纯文本。`module_overview`
+  的导入清单在与源码 AST 比对发现 17 个模块存在未记录依赖后重新生成，并新增分层
+  依赖图。三处链接缺陷：changelog 的 `[1.4.1]` 标题缺链接定义、被渲染成字面文字；
+  `Changed / 性能` 把英文小节名与含义为 Performance 的中文配成一对；TSMC28 设计
+  文档链接了一个非文档文件的仓库路径，导致 `mkdocs build --strict` 中止。
+
 ## [2.5.0] - 2026-07-27
 
 ### Added / 新增
@@ -1471,7 +1512,7 @@ release checklist.
 
 ## [2.1.0] - 2026-07-24
 
-### Changed / 性能
+### Changed / 变更
 
 - **Silicon corners / mismatch-MC / dataset route through the compiled campaign / 硅工艺 corners / 失配 MC / 数据集接入编译 campaign**
 
@@ -2381,6 +2422,7 @@ Initial public release.
 [2.0.2]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/751K/circuit-optimization-lab/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.1...v2.0.0
+[1.4.1]: https://github.com/751K/circuit-optimization-lab/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/751K/circuit-optimization-lab/compare/v1.1.0...v1.2.0
