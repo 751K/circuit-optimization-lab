@@ -61,7 +61,189 @@ release checklist.
   （`bw_Hz: 79034.5` 显示为 `Bandwidth 79.03 kHz`），瞬态可在面板内配置，不必再手
   改 JSON。
 
+- **Frontend: schematic auto-layout / 前端：原理图式自动布局**
+
+  **English:** The canvas placed nodes by *kind* — every rail in one column,
+  every mosfet in the next, then resistors, then capacitors — which is a
+  categorical arrangement and hides both axes an analog schematic is read by. A
+  new `model/layout.ts` reconstructs them from the netlist: each net gets an
+  altitude from its hop distance to the highest and lowest rail through the
+  *conduction* graph (drain–source, a–b; a gate is control and a capacitor
+  conducts only at AC), distinct altitudes become rows, and columns come from a
+  median crossing-reduction sweep plus an isotonic regression that pulls each
+  node to the median column of its neighbours without breaking its row order. A
+  5T OTA sorts itself into load pair / input pair / tail with nothing about OTAs
+  hard-coded anywhere. Supply rails span the drawing as a bus; a rail that only
+  drives gates is a tap, spliced in one column from the gate it feeds; an
+  AC-coupled input network is ranked by what it controls and steps into its own
+  rows rather than stretching one row four times the width of the amplifier
+  (`freepdk45_fd_ota` went from 4620 units wide to 1082). Symbols follow: a PMOS
+  is mirrored so its source faces the supply, a ground below the drawing wires
+  upward, and a load capacitor bridging a node to ground is drawn vertical.
+  Circuits with no resolvable rail keep the kind-column layout. A `Tidy` button
+  re-runs it over an edited circuit, and the viewport now re-fits when the
+  document is replaced — but not on an ordinary edit.
+
+  **中文：** 画布此前按*器件类型*摆放——所有电源轨一列、所有 MOS 一列，然后电阻、
+  电容——这是分类排布，把模拟原理图赖以阅读的两个轴都藏掉了。新增
+  `model/layout.ts` 从网表重建这两个轴：每条网络按其在*导通*图（漏–源、a–b；栅是
+  控制端，电容只在交流导通）中到最高/最低电源轨的跳数得到一个"高度"，不同高度成
+  行；列由中位数交叉消减扫描加一次保序回归（isotonic）确定，把每个节点拉向其邻居
+  的中位列而不破坏行内次序。5T OTA 会自己排成负载对／输入对／尾管，代码里没有任何
+  关于 OTA 的先验。电源轨画成横跨全图的母线；只驱动栅的轨是抽头，紧贴所驱动的栅一
+  列；交流耦合输入网络按其控制对象定高度，并逐跳下沉到自己的行，而不是把一行拉成
+  放大器本体的四倍宽（`freepdk45_fd_ota` 宽度从 4620 降到 1082）。符号随之调整：
+  PMOS 上下镜像使源极朝向电源，画在图下方的地向上出线，跨接到地的负载电容竖着画。
+  无法解析出电源轨的电路仍走原来的类型分列布局。新增 `Tidy` 按钮可对编辑过的电路
+  重跑布局；文档被整体替换时视口会重新适配——普通编辑则不会。
+
+- **Frontend: mirror a device horizontally / 前端：器件水平翻转**
+
+  **English:** A device can be flipped so its gate leaves on the right, from the
+  Inspector or with `Shift+H` over the selection (which flips a mixed selection
+  as a group rather than alternating it). Both halves of a differential pair can
+  then face each other, which is how the drawing tells them apart. It is display
+  only — no port, net or edge changes, and the exported `devices` block is
+  byte-identical — so it persists in `ui.mirrored` alongside `ui.positions`, and
+  is omitted entirely when nothing is flipped. The auto-layout reads it too: a
+  bias tap is spliced to the *right* of a mirrored device, since a tap left of a
+  right-hand gate has to loop back around the body.
+
+  **中文：** 器件可翻转成栅极朝右——在 Inspector 里点，或对选中项按 `Shift+H`（混
+  合选择整体翻转，不会翻成一正一反）。差分对的两半于是可以面对面，这正是图上区分
+  它们的方式。纯显示行为——端口、网络、连线都不变，导出的 `devices` 块逐字节相同
+  ——因此与 `ui.positions` 一起存进 `ui.mirrored`，没有翻转时该字段完全不写。自动
+  布局也读它：翻转器件的偏置抽头改接到*右*侧，否则抽头要绕过器件本体才能到栅极。
+
+- **Frontend: the stimulus each analysis will actually run with / 前端：每种仿真
+  实际使用的激励源**
+
+  **English:** A circuit declares its excitation in unrelated blocks and each
+  analysis reads a *different* one — `ac`/`noise` read `input_drives` (a device
+  gate) and `ac_drives` (a node); `transient` reads nothing at all unless a
+  `periodic` block exists. That asymmetry is silent and expensive:
+  `sky130_5t_ota` has `input_drives` and no `periodic`, so its AC run is properly
+  excited while its transient runs with every source pinned at DC — measured
+  `vout` peak-to-peak of exactly 0 V, reported as a successful solve. It also
+  explains why reading the JSON in the editor appears to show only a `VCM` level
+  on the inputs: the signal is on the devices, not on the rails.
+
+  The Simulate panel now states, per selected analysis and before the run, what
+  will drive it — resolved to net names (`vinp +1 (M1.G)`) rather than block
+  names — and flags a run that would be silent. Transient gains a one-click
+  derivation: a sine per AC input port, centred on that rail's own DC level, with
+  relative amplitude and the 180° of a differential pair taken from the sign of
+  the AC drive. It is written to `analyses.transient.periodic`, which the
+  dispatcher merges over any top-level `periodic`, so PSS/PAC/PNoise keep their
+  own excitation. Ports on internal nodes are refused rather than forced.
+
+  **中文：** 电路的激励分散在互不相关的块里，而每种分析读的是*不同的*块——
+  `ac`/`noise` 读 `input_drives`（器件栅）和 `ac_drives`（节点）；`transient` 除非
+  有 `periodic` 块，否则什么都不读。这种不对称是静默的且代价很高：
+  `sky130_5t_ota` 有 `input_drives` 没有 `periodic`，于是它的 AC 有正常激励，瞬态
+  却所有源都钉在直流上——实测 `vout` 峰峰值恰好为 0 V，且被报告为求解成功。这也解
+  释了为什么在编辑器里读 JSON 好像只看到输入上的 `VCM`：信号在器件上，不在轨上。
+
+  Simulate 面板现在会在开跑前逐项说明每个选中分析将由什么驱动——解析到网络名
+  （`vinp +1 (M1.G)`）而不是块名——并标红会静默跑空的分析。瞬态新增一键推导：按每
+  个 AC 输入端口生成一条正弦，以该轨自身的直流电平为中心，相对幅度和差分对的 180°
+  由 AC 驱动的符号决定。结果写入 `analyses.transient.periodic`，dispatcher 会把它
+  合并覆盖到顶层 `periodic` 之上，因此 PSS/PAC/PNoise 保持各自的激励。驱动内部节点
+  的端口会被拒绝而不是强行施加。
+
 ### Fixed / 修复
+
+- **The canvas did not re-frame when it changed size / 画布尺寸变化后不重新适配**
+
+  **English:** Collapsing the results dock roughly doubles the canvas height, and
+  React Flow kept the transform it already had — so the drawing stayed at its old
+  scale with half the canvas empty, and even its own Fit View button measured
+  against the stale size. The dock is resized by layout rather than by a window
+  resize, so nothing fired; the canvas element is now watched directly and
+  re-framed on a material size change (>5 %, first observation skipped, so a
+  scrollbar wobble does not throw away whatever the user had zoomed into).
+
+  **中文：** 收起结果面板会让画布高度大约翻倍，而 React Flow 沿用原来的变换——图仍
+  是旧比例，一半画布空着，连它自带的 Fit View 按钮也是按过时尺寸算的。面板是被布局
+  改变尺寸的，不是窗口 resize，所以没有任何事件触发；现在直接监听画布元素，尺寸有
+  实质变化（>5%，跳过首次观测）时重新适配，滚动条级别的抖动不会把用户已经放大的视
+  图丢掉。
+
+- **Bias wires were dimmed like power buses / 偏置连线被当成电源母线淡化**
+
+  **English:** The canvas drew every fixed-potential net as a thin dashed grey
+  line, on the reasoning that a schematic does not draw long power wires. That
+  holds for VDD and ground; it is wrong for a bias. `vbias`, `vinp`, `VB_CN` set
+  the operating point of one device each, they are one-column wires you are meant
+  to trace, and rendering them as faint dashes made them the hardest thing on the
+  canvas to read. The two are now told apart structurally rather than by name — a
+  rail every element port of which is a mosfet *gate* controls, it does not
+  supply — and a bias tap is drawn solid and tinted. The supply buses went solid
+  too: a dashed wire reads as "not a real connection", and on a supply-ranked
+  layout a bus is a short drop to a bar rather than the long diagonal that made
+  dimming worth it. They stay a shade lighter and thinner than signal, so the eye
+  still sorts supply from signal.
+
+  **中文：** 画布把所有固定电位网络都画成细虚灰线，理由是原理图不画长电源线。这对
+  VDD 和地成立，对偏置则不成立：`vbias`、`vinp`、`VB_CN` 各自决定一个器件的工作
+  点，是需要顺着看的一列长的短线，画成淡虚线反而成了画布上最难辨认的东西。现在两
+  者按结构区分而非按名字——某条轨如果所有元件端口都是 MOS 的*栅*，它就是控制而非
+  供电——偏置抽头画成实线并着色。电源母线随后也改回实线：虚线读起来像“不是真的连
+  接”，而在按电源栈排布的图上母线本就是落到横条的一小段，当初值得淡化的长斜线已经
+  不存在了；只保留比信号线略淡略细，眼睛仍分得开供电与信号。
+
+- **Dragging a device showed nothing until the mouse was released / 拖动器件时全程
+  不显示，松手才跳过去**
+
+  **English:** The canvas is a controlled projection of the store, and the store
+  only learns a new position when the drag *ends* — so there was nothing to
+  render in between. React Flow's own `applyNodeChanges` result was being
+  computed and discarded, which amounts to the same thing. The changes are now
+  held in local state and fed back to React Flow, so the node follows the cursor;
+  the document is still committed once, on drag end, so one drag remains one undo
+  step.
+
+  **中文：** 画布是 store 的受控投影，而 store 只在拖动*结束*时才知道新位置——中
+  间没有任何东西可渲染。React Flow 自己的 `applyNodeChanges` 结果被算出来后直接丢
+  弃，等于同一件事。现在把变更存进本地 state 再回喂给 React Flow，器件即跟随光标；
+  文档仍只在拖动结束时提交一次，一次拖动仍是一步撤销。
+
+- **MC ignored a requested measurement range / MC 忽略请求指定的测量量程**
+
+  **English:** `McJobRequest` never declared `freqs` or `band`, and pydantic
+  discards undeclared keys rather than rejecting them, so `POST /api/v1/jobs/mc`
+  accepted a range, returned 202, and measured over the circuit's own range
+  anyway. The PVT endpoint declared both and was covered by a test; the MC one
+  was not, which is why the gap survived. Both fields are now declared and
+  forwarded, with a test that asserts the range reaches the *result* rather than
+  that the request was accepted.
+
+  **中文：** `McJobRequest` 从未声明 `freqs` 与 `band`，而 pydantic 对未声明的键
+  是丢弃而非报错，因此 `POST /api/v1/jobs/mc` 会接受量程、返回 202，实际仍按电路
+  自带量程测量。PVT 端点两个字段都声明了且有测试覆盖，MC 端没有，这个缺口才得以
+  存活。现两个字段均已声明并转发，并补了断言量程进入*结果*（而非仅断言请求被接受）
+  的测试。
+
+- **Editor examples were a stale copy / 编辑器示例是一份陈旧副本**
+
+  **English:** The palette and the front-end round-trip tests read a curated
+  copy of the circuits under `src/model/__fixtures__/`. Three of its twelve
+  files had drifted from their `examples/` originals and twenty circuits added
+  since — every TSMC28 design, the MDAC testbenches, the SAR decks — never
+  appeared at all. Both now read `examples/` directly, selecting circuits by
+  shape so manifests and explore configs are excluded; coverage went from 12
+  files to 29 and the front-end suite from 146 tests to 227. Preserving that
+  corpus also exposed a real defect: passives authored in the tuple form
+  `[name, a, b, value]` were re-exported as objects, rewriting blocks the user
+  had not edited. The input form is now recorded and replayed.
+
+  **中文：** 调色板与前端往返测试读的是 `src/model/__fixtures__/` 下一份人工挑选
+  的电路副本。其中 12 个文件有 3 个已与 `examples/` 原件漂移，之后新增的 20 个电路
+  （全部 TSMC28 设计、MDAC 测试台、SAR deck）则完全没有出现。现两者都直接读
+  `examples/`，按结构筛选电路以排除 manifest 与 explore 配置；覆盖从 12 个文件增至
+  29 个，前端用例从 146 条增至 227 条。保留该语料还暴露了一个真实缺陷：以元组形式
+  `[name, a, b, value]` 书写的无源器件会被重新导出为对象，改写用户未编辑的块。现已
+  记录并回放输入形式。
 
 - **PVT and MC swept the AFE range on silicon circuits / PVT 与 MC 在硅工艺电路上
   按 AFE 量程扫描**

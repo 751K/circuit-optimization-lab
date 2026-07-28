@@ -196,6 +196,35 @@ identical ceiling, so the spread collapses to sigma zero — a design that looks
 remarkably tight is often one whose metric was never measured. Check the
 reported sweep range before believing a small sigma.
 
+**A sweep of a chopper measures nothing unless the chopper has an AC path.**
+`corners` and `mc` both measure gain, bandwidth and noise from an AC run. A
+testbench driven only through its `periodic` block has no `ac_drives`, so the
+sweep returns the -180 dB floor for every corner and every sample, and the
+input-referred noise — output noise divided by that floor — comes back around
+1e134 V. Nothing raises. Sweep such a circuit with PSS/PAC/PNoise, or give it an
+`ac_drives` entry first. A gain near the floor invalidates every other number in
+the same result.
+
+**Each analysis reads a different stimulus block, and transient reads none by
+default.** `ac`/`noise` are excited by `input_drives` (a device gate) and
+`ac_drives` (a node); `transient` is excited only by a `periodic` block, and
+`_run_transient` passes no inputs at all when there isn't one. So a deck with
+`input_drives` and no `periodic` — `sky130_5t_ota`, and most single-testbench
+decks — has a properly excited AC run and a transient in which every source sits
+at DC. It converges, every node is a flat line, and the result is reported as a
+successful solve: measured `vout` peak-to-peak is exactly `0.0`. Before believing
+a transient, check that the circuit has a `periodic` block or that you passed
+`inputs=` yourself; a zero-swing output is the signature. The GUI derives one
+from the AC ports on request and writes it to `analyses.transient.periodic`,
+which merges over the top-level block so PSS/PAC keep their own excitation.
+
+**A background job silently drops a field its request model does not declare.**
+The service uses pydantic only as a thin request wrapper, so an undeclared key
+is discarded rather than rejected — a caller passing `freqs` to an endpoint that
+never declared it gets a successful job measured over the wrong range. When
+adding a parameter, assert it reaches the *result*, not merely that the request
+returned 202.
+
 **Device state is path-dependent.** BSIM handles keep their warm start and
 limiting state between calls. Concurrent campaign points must lease into
 isolated cache scopes or results depend on worker count. This is already
