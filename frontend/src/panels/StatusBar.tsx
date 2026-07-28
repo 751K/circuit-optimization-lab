@@ -26,6 +26,7 @@ export default function StatusBar() {
   const caps = useEditor((s) => s.caps);
   const capsError = useEditor((s) => s.capsError);
   const exportJson = useEditor((s) => s.exportJson);
+  const setCircuitCorners = useEditor((s) => s.setCircuitCorners);
   const [state, setState] = useState<ValState>({ kind: "idle" });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seq = useRef(0);
@@ -57,6 +58,10 @@ export default function StatusBar() {
         .then((r: ValidateResponse) => {
           if (mySeq !== seq.current) return;
           setState(r.valid ? { kind: "ok" } : { kind: "errors", errors: r.errors ?? ["invalid"] });
+          // The corner menu follows the circuit: swapping a device's model family
+          // changes which corners resolve, and this is the call that already fires
+          // on that edit.
+          setCircuitCorners(r.corners ?? null, r.silicon ?? false);
         })
         .catch((e: unknown) => {
           if (mySeq !== seq.current) return;
@@ -66,7 +71,7 @@ export default function StatusBar() {
     return () => {
       if (timer.current) clearTimeout(timer.current);
     };
-  }, [graph, rest, netError, exportJson]);
+  }, [graph, rest, netError, exportJson, setCircuitCorners]);
 
   const connected = caps !== null;
 

@@ -65,6 +65,19 @@ export interface EditorState {
   /** Message + offending edge ids when resolveNets throws; null when clean. */
   netError: { message: string; edgeIds: string[] } | null;
 
+  // ── this circuit's corner set (from /validate) ────────────────────────
+  /**
+   * The corners *this* circuit admits, or null before the first validation.
+   * Not a slice of `caps.corners`: a circuit belongs to one model family, and
+   * the OTFT process names and silicon card corners are disjoint sets. The
+   * corner menu is driven from here so it can never offer a name that cannot
+   * resolve. `circuitSilicon` says whether the PVT temperature / supply axes
+   * exist at all for this circuit.
+   */
+  circuitCorners: string[] | null;
+  circuitSilicon: boolean;
+  setCircuitCorners: (corners: string[] | null, silicon: boolean) => void;
+
   // ── actions ───────────────────────────────────────────────────────────
   addNode: (kind: GraphNode["kind"], position: Position, opts?: NewNodeOptions) => string;
   moveNode: (id: string, position: Position) => void;
@@ -83,6 +96,13 @@ export interface EditorState {
   loadCircuit: (json: CircuitJson) => void;
   newCircuit: (name?: string) => void;
   exportJson: () => CircuitJson;
+  /**
+   * Write (or, with `null`, remove) one analysis's config in the circuit's
+   * `analyses` block. This is a real document edit — undo-able and exported —
+   * unlike the request-only defaults the Run panel injects, which never touch
+   * the document.
+   */
+  setAnalysisConfig: (name: string, config: Record<string, unknown> | null) => void;
 
   undo: () => void;
   redo: () => void;
@@ -188,6 +208,11 @@ export const useEditor = create<EditorState>((set, get) => {
     capsError: null,
     capsLoading: false,
     netError: null,
+    circuitCorners: null,
+    circuitSilicon: false,
+
+    setCircuitCorners: (corners, silicon) =>
+      set({ circuitCorners: corners, circuitSilicon: silicon }),
 
     addNode: (kind, position, opts) => {
       const { graph, rest } = get();
@@ -334,6 +359,25 @@ export const useEditor = create<EditorState>((set, get) => {
     exportJson: () => {
       const { graph, rest } = get();
       return graphToCircuitJson(graph, rest);
+    },
+
+    setAnalysisConfig: (name, config) => {
+      const { graph, rest } = get();
+      const current = rest.analyses;
+      // A malformed non-object `analyses` is passed through untouched everywhere
+      // else in this codebase; rewriting bytes we do not understand would be the
+      // one place a GUI could silently corrupt a hand-written circuit.
+      if (current !== undefined
+        && (typeof current !== "object" || current === null || Array.isArray(current))) {
+        return;
+      }
+      const analyses: Record<string, unknown> = { ...(current ?? {}) };
+      if (config === null) delete analyses[name];
+      else analyses[name] = config;
+      const nextRest = { ...rest };
+      if (Object.keys(analyses).length === 0) delete nextRest.analyses;
+      else nextRest.analyses = analyses;
+      commit({ graph, rest: nextRest });
     },
 
     undo: () => {

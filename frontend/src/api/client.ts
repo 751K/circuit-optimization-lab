@@ -2,9 +2,9 @@
  * Typed client for the circuitopt local FastAPI service (see docs/service_api.md).
  *
  * Every route is a thin adapter over the same solver stack the CLI drives. This
- * client models the synchronous endpoints (health / capabilities / validate /
- * solve) that the F1..F3 browser builder needs; background-job endpoints
- * (explore / mc) are intentionally out of scope for now.
+ * client covers the synchronous endpoints (health / capabilities / validate /
+ * solve) and the background-job endpoints (PVT sweep / mismatch MC), including
+ * their WebSocket progress stream and cooperative cancellation.
  *
  * Base URL, resolved once at load time in three tiers (highest first):
  *   1. `window.__CIRCUITOPT_API_BASE__` — injected by the Tauri desktop shell,
@@ -57,10 +57,23 @@ export interface CapabilitiesResponse {
   jobs: string[];
 }
 
-/** `POST /api/v1/validate` — always HTTP 200; the outcome is the payload. */
+/**
+ * `POST /api/v1/validate` — always HTTP 200; the outcome is the payload.
+ *
+ * `corners` is the corner set **this circuit** admits, and is absent when the
+ * circuit does not parse. It is not a subset of the capabilities menu: a circuit
+ * belongs to exactly one model family, and the OTFT process names
+ * (typical/slow/fast) and the silicon card corners (tt/ss/ff/sf/fs) are disjoint.
+ * Offering the union would offer corners that cannot resolve, so the corner
+ * dropdown is driven from here, not from capabilities. `silicon` additionally
+ * says whether the temperature / supply PVT axes exist for this circuit.
+ */
 export interface ValidateResponse {
   valid: boolean;
   errors?: string[];
+  corners?: string[];
+  silicon?: boolean;
+  corner_error?: string;
 }
 
 /** `POST /api/v1/solve` success (HTTP 200). Results are JSON-safe per to_jsonable. */
@@ -192,4 +205,156 @@ export function solve(
   if (selected !== undefined) payload.selected = selected;
   if (corner !== undefined) payload.corner = corner;
   return postJson<SolveResponse>("/api/v1/solve", payload);
+}
+
+// ── background jobs ──────────────────────────────────────────────────────
+
+/** A job's lifecycle state. The last three are terminal. */
+export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+
+/** `GET /api/v1/jobs/{id}` — snapshot plus, once terminal, result or error. */
+export interface JobSnapshot {
+  job_id: string;
+  kind: string;
+  status: JobStatus;
+  created: number;
+  started: number | null;
+  finished: number | null;
+  progress: JobProgress | null;
+  result?: Record<string, unknown>;
+  error?: ErrorEnvelope;
+}
+
+/** A progress frame. `unit` names what `done`/`total` count (samples, slices). */
+export interface JobProgress {
+  type: "progress";
+  done: number;
+  total: number;
+  frac: number;
+  unit?: string;
+  partial?: unknown;
+}
+
+export function isTerminal(status: JobStatus): boolean {
+  return status === "done" || status === "failed" || status === "cancelled";
+}
+
+/** `POST /api/v1/jobs/pvt` — a corner sweep, optionally gridded over PVT axes. */
+export interface PvtRequest {
+  /** Omit to sweep the circuit's own family (see {@link ValidateResponse}). */
+  corners?: string[];
+  /** Temperature axis in °C. Silicon only; a 422 otherwise. */
+  temps?: number[];
+  /** Uniform bias multipliers. Silicon only; a 422 otherwise. */
+  vdd_scale?: number[];
+  workers?: number;
+  /** Omit to inherit the circuit's own `analyses.ac.freqs`. */
+  freqs?: { start: number; stop: number; num: number; scale: string };
+  /** Omit to inherit the circuit's own `analyses.noise.band`. */
+  band?: [number, number];
+}
+
+export function submitPvt(
+  circuit: CircuitJson,
+  options: PvtRequest = {},
+): Promise<JobSnapshot> {
+  return postJson<JobSnapshot>("/api/v1/jobs/pvt", { circuit, ...options });
+}
+
+export function submitMc(
+  circuit: CircuitJson,
+  options: { n?: number; seed?: number; corner?: string; workers?: number } = {},
+): Promise<JobSnapshot> {
+  return postJson<JobSnapshot>("/api/v1/jobs/mc", { circuit, ...options });
+}
+
+export function getJob(jobId: string): Promise<JobSnapshot> {
+  return getJson<JobSnapshot>(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function listJobs(): Promise<{ jobs: JobSnapshot[] }> {
+  return getJson<{ jobs: JobSnapshot[] }>("/api/v1/jobs");
+}
+
+/**
+ * Request cooperative cancellation. Cancellation is not a hard kill: work already
+ * in flight runs to completion, so the job stays non-terminal for a while after
+ * this resolves. A 409 (already terminal) is swallowed — the caller's intent is
+ * satisfied either way.
+ */
+export async function cancelJob(jobId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/v1/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 409) throw await toApiError(res);
+}
+
+/** The frame the WS sends once a job reaches a terminal state. */
+export interface JobTerminalFrame {
+  type: "terminal";
+  status: JobStatus;
+  error?: ErrorEnvelope;
+}
+
+type JobEvent = JobProgress | JobTerminalFrame | { type: "error"; message: string };
+
+/**
+ * Stream a job's progress over the WebSocket, resolving when it terminates.
+ *
+ * The socket carries progress only; the *result* is fetched over HTTP once the
+ * terminal frame lands, because it can be large and the caller usually wants it
+ * as one JSON body rather than streamed. Returns a `cancel()` that closes the
+ * socket without cancelling the job — closing a viewer is not stopping the work.
+ *
+ * If the socket cannot be opened at all (some proxies, or a browser that blocks
+ * it), `onFallback` is invoked so the caller can degrade to polling rather than
+ * hanging forever on a stream that will never arrive.
+ */
+export function watchJob(
+  jobId: string,
+  handlers: {
+    onProgress?: (progress: JobProgress) => void;
+    onTerminal?: (frame: JobTerminalFrame) => void;
+    onFallback?: (reason: string) => void;
+  },
+): () => void {
+  const wsBase = API_BASE.replace(/^http/, "ws");
+  let socket: WebSocket;
+  try {
+    socket = new WebSocket(`${wsBase}/api/v1/jobs/${encodeURIComponent(jobId)}/events`);
+  } catch (e) {
+    handlers.onFallback?.(e instanceof Error ? e.message : String(e));
+    return () => {};
+  }
+
+  let settled = false;
+  socket.onmessage = (ev) => {
+    let event: JobEvent;
+    try {
+      event = JSON.parse(String(ev.data)) as JobEvent;
+    } catch {
+      return; // a frame we cannot parse is not a reason to tear the stream down
+    }
+    if (event.type === "progress") handlers.onProgress?.(event);
+    else if (event.type === "terminal") {
+      settled = true;
+      handlers.onTerminal?.(event);
+    } else if (event.type === "error") {
+      settled = true;
+      handlers.onFallback?.(event.message);
+    }
+  };
+  socket.onerror = () => {
+    if (!settled) handlers.onFallback?.("websocket error");
+  };
+  socket.onclose = () => {
+    // A close before any terminal frame means we lost the stream, not that the
+    // job ended: fall back so the caller can poll for the real outcome.
+    if (!settled) handlers.onFallback?.("websocket closed early");
+  };
+
+  return () => {
+    settled = true; // a deliberate close must not look like a lost stream
+    socket.close();
+  };
 }

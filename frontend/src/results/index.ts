@@ -1,2 +1,14 @@
 export { downloadJson } from "./download";
 export { ResultView } from "./ResultView";
+export { Chart } from "./Chart";
+export { OperatingPoint, hasOperatingPoint } from "./OperatingPoint";
+export { PvtView, flattenPvt, worstRows } from "./PvtView";
+export type { PvtResult, PvtRow } from "./PvtView";
+export { McView, histogram } from "./McView";
+export type { McResult } from "./McView";
+export { SignoffView } from "./SignoffView";
+export type { SignoffPayload } from "./SignoffView";
+export { formatValue, formatQuantity, formatDuration, formatPercent } from "./format";
+export { extractMetrics, extractHealth, bandwidthIsGridLimited } from "./metrics";
+export { buildPlots } from "./transform";
+export type { PlotSpec, PlotSeries } from "./transform";

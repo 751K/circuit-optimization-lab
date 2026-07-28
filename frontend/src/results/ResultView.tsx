@@ -1,5 +1,24 @@
-import ReactECharts from "echarts-for-react";
-import { buildPlot, extractMetrics } from "./transform";
+/**
+ * One analysis result, rendered in reading order:
+ *
+ *   health flags → headline metrics → operating point → plots → raw JSON
+ *
+ * The order is deliberate. A flag saying the shooting iteration never converged
+ * has to be read *before* the numbers it invalidates, and the raw tree comes
+ * last because it is for the question the curated view did not anticipate.
+ */
+import { useState } from "react";
+import { Chart } from "./Chart";
+import { formatQuantity } from "./format";
+import {
+  bandwidthIsGridLimited,
+  extractHealth,
+  extractMetrics,
+  responseIsAtGainFloor,
+  timeDomainIsFlat,
+} from "./metrics";
+import { OperatingPoint, hasOperatingPoint } from "./OperatingPoint";
+import { buildPlots } from "./transform";
 
 interface ResultViewProps {
   name: string;
@@ -16,9 +35,12 @@ function JsonNode({ label, value }: { label?: string; value: unknown }) {
           [{preview}]
         </summary>
         <div className="jt-children">
-          {value.map((item, index) => (
+          {value.slice(0, 200).map((item, index) => (
             <JsonNode key={index} label={String(index)} value={item} />
           ))}
+          {value.length > 200 && (
+            <div className="jt-leaf muted">… {value.length - 200} more</div>
+          )}
         </div>
       </details>
     );
@@ -50,58 +72,87 @@ function JsonNode({ label, value }: { label?: string; value: unknown }) {
 }
 
 export function ResultView({ name, result }: ResultViewProps) {
-  const metrics = extractMetrics(result);
-  const plot = buildPlot(result);
-  const option = plot
-    ? {
-        animation: false,
-        tooltip: { trigger: "axis" },
-        legend: { type: "scroll", top: 0 },
-        grid: { left: 62, right: 18, top: 36, bottom: 48 },
-        xAxis: {
-          type: plot.xLog ? "log" : "value",
-          name: plot.xLabel,
-          nameLocation: "middle",
-          nameGap: 30,
-        },
-        yAxis: {
-          type: plot.yLog ? "log" : "value",
-          name: plot.yLabel,
-          nameLocation: "middle",
-          nameGap: 46,
-        },
-        series: plot.series.map((series) => ({
-          name: series.name,
-          type: "line",
-          symbol: "none",
-          data: plot.x.map((x, index) => [x, series.values[index]]),
-        })),
-      }
-    : null;
+  const [showRaw, setShowRaw] = useState(false);
+  const metrics = extractMetrics(name, result);
+  const health = extractHealth(result);
+  const plots = buildPlots(name, result);
+  const showOp = hasOperatingPoint(result);
+  const gridLimited = bandwidthIsGridLimited(result);
+  const flat = (name === "transient" || name === "pss") && timeDomainIsFlat(result);
+  const noDrive = (name === "ac" || name === "pac") && responseIsAtGainFloor(result);
 
   return (
-    <>
-      {metrics.length > 0 && (
-        <div className="metric-row">
-          {metrics.map((metric) => (
-            <div className="metric-card" key={metric.key}>
-              <div className="metric-key">{metric.key}</div>
-              <div className="metric-val">{metric.value}</div>
-            </div>
-          ))}
+    <div className="result-view">
+      {health.map((flag) => (
+        <div key={flag.key} className={`health-flag ${flag.severity}`}>
+          <strong>{flag.label}</strong> — {flag.hint}
+        </div>
+      ))}
+
+      {noDrive && (
+        <div className="health-flag warn">
+          <strong>The response is on the numerical gain floor.</strong> A gain near
+          −180 dB across the whole sweep means the circuit was never driven, not
+          that it has no gain: add an <code>ac_drives</code> entry naming the
+          source and its magnitude. Check the stimulus before looking at devices.
         </div>
       )}
-      {option && (
-        <ReactECharts
-          option={option}
-          style={{ width: "100%", height: 280 }}
-          opts={{ renderer: "canvas" }}
-          aria-label={`${name} result plot`}
-        />
+
+      {flat && (
+        <div className="health-flag warn">
+          <strong>Every trace is constant.</strong> The run converged, so this is
+          almost always a missing stimulus rather than a broken circuit — a
+          transient needs a <code>drives</code> entry (or a <code>periodic</code>
+          block) to have anything to respond to. A balanced amplifier with no
+          input holds its output at exactly zero.
+        </div>
       )}
-      <div className="jt-wrap">
-        <JsonNode value={result} />
-      </div>
-    </>
+
+      {metrics.length > 0 && (
+        <div className="metric-row">
+          {metrics.map((metric) => {
+            const quantity = formatQuantity(metric.value, metric.unit);
+            const suspect = metric.key === "bw_Hz" && gridLimited;
+            return (
+              <div
+                className={`metric-card${suspect ? " suspect" : ""}`}
+                key={metric.key}
+                title={
+                  suspect
+                    ? "This value sits at the top of the swept frequency range, so "
+                      + "it is the sweep limit rather than a measured corner. Widen "
+                      + "the sweep to measure it."
+                    : metric.hint
+                }
+              >
+                <div className="metric-key">
+                  {metric.label}
+                  {suspect && <span className="metric-warn"> ⚠ sweep limit</span>}
+                </div>
+                <div className="metric-val">
+                  {quantity.value}
+                  {quantity.unit && <span className="metric-unit"> {quantity.unit}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {showOp && <OperatingPoint result={result} />}
+
+      {plots.map((plot, index) => (
+        <Chart key={plot.title ?? index} plot={plot} />
+      ))}
+
+      <button className="btn tiny raw-toggle" onClick={() => setShowRaw((v) => !v)}>
+        {showRaw ? "Hide raw result" : "Raw result…"}
+      </button>
+      {showRaw && (
+        <div className="jt-wrap">
+          <JsonNode value={result} />
+        </div>
+      )}
+    </div>
   );
 }
