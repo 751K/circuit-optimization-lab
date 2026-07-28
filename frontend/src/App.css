@@ -325,6 +325,14 @@ body {
 .stim-port { display: inline-block; margin-right: 8px; color: var(--node-ink); }
 .btn.wide { width: 100%; justify-content: center; }
 
+/* The picker offered for an analysis the circuit does not excite. */
+/* Stacked, not side by side: the option labels name real nets and get long
+   ("Differential sine — VINP / VINN"), and the right rail is narrow. */
+.stim-pick { display: flex; flex-direction: column; gap: 4px; margin-top: 5px; }
+.stim-pick select { width: 100%; min-width: 0; font-size: 11px; padding: 2px 4px; }
+.stim-pick .btn.tiny { align-self: flex-start; }
+.stim-params { margin-top: 6px; padding-top: 6px; border-top: 1px dotted var(--border); }
+
 /* ── right rail tabs ─────────────────────────────────────────────────── */
 .rail-tabs {
   display: flex;

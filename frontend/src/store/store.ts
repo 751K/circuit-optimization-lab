@@ -114,6 +114,18 @@ export interface EditorState {
    */
   mirrorNodes: (ids: string[]) => void;
   /**
+   * Set the circuit's AC excitation: per-device gate drives (`input_drives`,
+   * carried on the mosfet nodes) and per-node drives (`ac_drives`, a passthrough
+   * block). Both in one commit, so choosing a stimulus is one undo step rather
+   * than one per port. Replaces the existing drives rather than merging — the
+   * caller picked *a* stimulus, and leaving half of a previous one in place
+   * would excite a port nobody selected.
+   */
+  setAcStimulus: (
+    inputDrives: Record<string, number>,
+    acDrives: Record<string, number>,
+  ) => void;
+  /**
    * Bumped whenever the document is replaced wholesale (load / new / undo /
    * redo / relayout) rather than edited. The canvas watches it to re-fit the
    * viewport, which an ordinary edit must not do.
@@ -404,6 +416,25 @@ export const useEditor = create<EditorState>((set, get) => {
         return patched as GraphNode;
       });
       commit({ graph: { nodes, edges: graph.edges }, rest });
+    },
+
+    setAcStimulus: (inputDrives, acDrives) => {
+      const { graph, rest } = get();
+      const nodes = graph.nodes.map((n) => {
+        if (n.kind !== "mosfet") return n;
+        const drive = inputDrives[n.id];
+        if (drive === undefined) {
+          if (n.inputDrive === undefined) return n;
+          const { inputDrive: _drop, ...without } = n;
+          void _drop;
+          return without as GraphNode;
+        }
+        return { ...n, inputDrive: drive } as GraphNode;
+      });
+      const nextRest = { ...rest };
+      if (Object.keys(acDrives).length > 0) nextRest.ac_drives = { ...acDrives };
+      else delete nextRest.ac_drives;
+      commit({ graph: { nodes, edges: graph.edges }, rest: nextRest });
     },
 
     relayout: () => {

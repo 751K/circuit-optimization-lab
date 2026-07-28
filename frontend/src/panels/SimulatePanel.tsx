@@ -20,8 +20,8 @@ import { useEditor, useSession } from "../store";
 import { DEFAULT_SWEEP_LABEL, missingConfigMessage, prepareSolveCircuit } from "./runConfig";
 import { NumberField } from "./fields";
 import {
-  deriveBlocker,
-  deriveTransientPeriodic,
+  buildStimulus,
+  stimulusOptions,
   stimulusReport,
   type StimulusPort,
 } from "./stimulus";
@@ -39,6 +39,53 @@ const HINTS: Record<string, string> = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Choose a source for an analysis the circuit does not excite.
+ *
+ * The options are built from the circuit's own rails, so every entry names a net
+ * that exists and can legitimately be driven — the alternative to this menu is
+ * hand-editing `input_drives` or a `periodic` block in the JSON, which is what
+ * made a silent run the path of least resistance.
+ */
+function StimulusPicker({
+  analysis,
+  options,
+  value,
+  onPick,
+  onApply,
+}: {
+  analysis: string;
+  options: ReturnType<typeof stimulusOptions>;
+  value: string | undefined;
+  onPick: (id: string) => void;
+  onApply: () => void;
+}) {
+  if (options.length === 0) {
+    return (
+      <p className="muted small">
+        No rail in this circuit could take a stimulus — only a fixed-potential
+        net can be driven, and the only rails here are the supplies. Add an input
+        rail, or write the source into the circuit JSON by hand.
+      </p>
+    );
+  }
+  const selected = options.some((o) => o.id === value) ? value : options[0]!.id;
+  return (
+    <span className="stim-pick">
+      <select
+        value={selected}
+        aria-label={`Stimulus source for ${analysis}`}
+        onChange={(e) => onPick(e.target.value)}
+      >
+        {options.map((o) => (
+          <option key={o.id} value={o.id}>{o.label}</option>
+        ))}
+      </select>
+      <button className="btn tiny" onClick={onApply}>Use this source</button>
+    </span>
+  );
 }
 
 /** The resolved AC input ports, so "what drives this" is a net name, not a block name. */
@@ -99,19 +146,27 @@ export default function SimulatePanel() {
       : []),
     [circuit, selected],
   );
-  const blocker = circuit ? deriveBlocker(circuit) : null;
+  const setAcStimulus = useEditor((s) => s.setAcStimulus);
+  // Which source the user picked, per analysis. Reset is not needed on circuit
+  // change: an id that no longer resolves falls back to the first option.
+  const [picked, setPicked] = useState<Record<string, string>>({});
 
-  const deriveStimulus = (): void => {
+  const applyStimulus = (analysis: string): void => {
     if (!circuit) return;
-    const periodic = deriveTransientPeriodic(circuit, {
+    const options = stimulusOptions(circuit, analysis);
+    const option = options.find((o) => o.id === picked[analysis]) ?? options[0];
+    if (!option) return;
+    const patch = buildStimulus(circuit, option, analysis, {
       frequency: stimFreq,
       amplitude: stimAmp,
     });
-    if (!periodic) return;
-    // Under analyses.transient, not at the top level: the dispatcher merges it
-    // over any top-level `periodic`, so this configures the transient without
-    // changing what PSS/PAC/PNoise are excited by.
-    setAnalysisConfig("transient", { ...(transientCfg ?? {}), periodic });
+    if (patch.target === "ac") {
+      setAcStimulus(patch.inputDrives, patch.acDrives);
+      return;
+    }
+    const prior = configured[patch.owner];
+    const owner: Record<string, unknown> = isRecord(prior) ? prior : {};
+    setAnalysisConfig(patch.owner, { ...owner, periodic: patch.periodic });
   };
 
   const toggle = (key: string): void =>
@@ -175,9 +230,40 @@ export default function SimulatePanel() {
                   <span className="stim-detail">
                     {r.detail}
                     {r.kind === "ac" && <PortList ports={r.ports} />}
+                    {r.silent && circuit && (
+                      <StimulusPicker
+                        analysis={r.name}
+                        options={stimulusOptions(circuit, r.name)}
+                        value={picked[r.name]}
+                        onPick={(id) => setPicked((p) => ({ ...p, [r.name]: id }))}
+                        onApply={() => applyStimulus(r.name)}
+                      />
+                    )}
                   </span>
                 </div>
               ))}
+              {reports.some((r) => r.silent) && (
+                <div className="stim-params">
+                  <NumberField
+                    label="Frequency"
+                    unit="Hz"
+                    value={stimFreq}
+                    onCommit={(v) => v !== undefined && v > 0 && setStimFreq(v)}
+                  />
+                  <NumberField
+                    label="Amplitude"
+                    unit="V"
+                    value={stimAmp}
+                    onCommit={(v) => v !== undefined && setStimAmp(v)}
+                  />
+                  <p className="muted small">
+                    A waveform is centred on the driven rail’s own DC level, so the
+                    run starts from the operating point the circuit was designed
+                    around; a differential pair’s two halves are the same waveform
+                    inverted. Frequency applies to the time-domain sources only.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -192,36 +278,6 @@ export default function SimulatePanel() {
               </button>
               {showTransient && (
                 <>
-                  <div className="subhead">Input waveform</div>
-                  {blocker ? (
-                    <p className="muted small">{blocker}</p>
-                  ) : (
-                    <>
-                      <NumberField
-                        label="Frequency"
-                        unit="Hz"
-                        value={stimFreq}
-                        onCommit={(v) => v !== undefined && v > 0 && setStimFreq(v)}
-                      />
-                      <NumberField
-                        label="Amplitude"
-                        unit="V"
-                        value={stimAmp}
-                        onCommit={(v) => v !== undefined && setStimAmp(v)}
-                      />
-                      <button className="btn wide" onClick={deriveStimulus}>
-                        Drive the AC input ports with a sine
-                      </button>
-                      <p className="muted small">
-                        A sine per input port, centred on that rail’s own DC level
-                        and 180° apart for a differential pair — the same ports{" "}
-                        <code>ac</code> uses. Written to{" "}
-                        <code>analyses.transient.periodic</code>, so PSS/PAC keep
-                        their own excitation.
-                      </p>
-                    </>
-                  )}
-                  <div className="subhead">Time grid</div>
                   <NumberField
                     label="Stop time"
                     unit="s"

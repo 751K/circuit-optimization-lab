@@ -410,3 +410,51 @@ describe("store: mirrorNodes", () => {
     expect(s().exportJson().ui).not.toHaveProperty("mirrored");
   });
 });
+
+describe("store: setAcStimulus", () => {
+  beforeEach(reset);
+
+  function ota(): CircuitJson {
+    return JSON.parse(
+      readFileSync(join(FIX_DIR, "sky130_5t_ota.json"), "utf-8"),
+    ) as CircuitJson;
+  }
+  const mos = (id: string): MosfetNode =>
+    s().graph.nodes.find((n) => n.id === id) as MosfetNode;
+
+  it("writes gate drives onto the devices and exports them as input_drives", () => {
+    s().loadCircuit(ota());
+    s().setAcStimulus({ M1: 0.5, M2: -0.5 }, {});
+    expect(mos("M1").inputDrive).toBe(0.5);
+    expect(s().exportJson().input_drives).toEqual({ M1: 0.5, M2: -0.5 });
+  });
+
+  it("clears a drive the new stimulus does not name", () => {
+    // Leaving half of a previous stimulus in place would excite a port nobody
+    // selected — the run would be differential when a single-ended one was asked
+    // for, and nothing would say so.
+    s().loadCircuit(ota());
+    expect(mos("M2").inputDrive).toBe(-1);
+    s().setAcStimulus({ M1: 1 }, {});
+    expect(mos("M1").inputDrive).toBe(1);
+    expect(mos("M2").inputDrive).toBeUndefined();
+    expect(s().exportJson().input_drives).toEqual({ M1: 1 });
+  });
+
+  it("writes node drives to ac_drives, and removes the block when empty", () => {
+    s().loadCircuit(ota());
+    s().setAcStimulus({}, { vinp: 1 });
+    expect(s().exportJson().ac_drives).toEqual({ vinp: 1 });
+    s().setAcStimulus({ M1: 1 }, {});
+    expect(s().exportJson()).not.toHaveProperty("ac_drives");
+  });
+
+  it("is one undo step for the whole stimulus", () => {
+    s().loadCircuit(ota());
+    s().setAcStimulus({ M1: 0.25 }, { vinn: 2 });
+    s().undo();
+    expect(mos("M1").inputDrive).toBe(1);
+    expect(mos("M2").inputDrive).toBe(-1);
+    expect(s().exportJson()).not.toHaveProperty("ac_drives");
+  });
+});

@@ -130,12 +130,20 @@ release checklist.
 
   The Simulate panel now states, per selected analysis and before the run, what
   will drive it — resolved to net names (`vinp +1 (M1.G)`) rather than block
-  names — and flags a run that would be silent. Transient gains a one-click
-  derivation: a sine per AC input port, centred on that rail's own DC level, with
-  relative amplitude and the 180° of a differential pair taken from the sign of
-  the AC drive. It is written to `analyses.transient.periodic`, which the
-  dispatcher merges over any top-level `periodic`, so PSS/PAC/PNoise keep their
-  own excitation. Ports on internal nodes are refused rather than forced.
+  names — and, for one the circuit does not excite, offers a **menu of sources
+  built from that circuit's own rails**: the differential pair it detects (two
+  rails at one level gating devices that share a source), each rail
+  single-ended, and for a time-domain analysis a sine or a pulse on each. Apply
+  one and it is written where that analysis reads it — `input_drives` on the
+  gates or `ac_drives` on the node for AC, `analyses.<owner>.periodic` otherwise,
+  with PAC and PNoise routed to the PSS block they are excited through, so
+  configuring one analysis never changes another. A waveform is centred on the
+  driven rail's own DC level, so the run starts from the operating point the
+  design was solved for; a differential pair's inverting half is the same
+  waveform inverted, and a pulse gets finite edges rather than an ideal step. A
+  rail is only offered if it is not a supply — judged by whether current flows
+  in it, not by its potential, so a clock sitting at exactly `VDD` is still
+  offered while `VDD` itself is not.
 
   **中文：** 电路的激励分散在互不相关的块里，而每种分析读的是*不同的*块——
   `ac`/`noise` 读 `input_drives`（器件栅）和 `ac_drives`（节点）；`transient` 除非
@@ -145,11 +153,15 @@ release checklist.
   释了为什么在编辑器里读 JSON 好像只看到输入上的 `VCM`：信号在器件上，不在轨上。
 
   Simulate 面板现在会在开跑前逐项说明每个选中分析将由什么驱动——解析到网络名
-  （`vinp +1 (M1.G)`）而不是块名——并标红会静默跑空的分析。瞬态新增一键推导：按每
-  个 AC 输入端口生成一条正弦，以该轨自身的直流电平为中心，相对幅度和差分对的 180°
-  由 AC 驱动的符号决定。结果写入 `analyses.transient.periodic`，dispatcher 会把它
-  合并覆盖到顶层 `periodic` 之上，因此 PSS/PAC/PNoise 保持各自的激励。驱动内部节点
-  的端口会被拒绝而不是强行施加。
+  （`vinp +1 (M1.G)`）而不是块名——对电路没有配置激励的分析，直接给出一份**由该电
+  路自身电源轨生成的激励源菜单**：自动识别出的差分对（两条同电平、各驱动一个器件
+  且两器件共源的轨）、每条轨的单端驱动，时域分析还额外给出正弦和脉冲两种。选中应
+  用后写到该分析真正读取的位置——AC 写栅上的 `input_drives` 或节点上的
+  `ac_drives`，其余写 `analyses.<owner>.periodic`，其中 PAC/PNoise 归到它们赖以激
+  励的 PSS 块，因此配置一个分析绝不会改到另一个。波形以被驱动轨自身的直流电平为中
+  心，运行从设计所依据的工作点起步；差分对的反相半边是同一波形取反，脉冲带有限上
+  升沿而不是理想阶跃。只有非电源的轨才会出现在菜单里——判据是有没有电流流过它，而
+  不是它的电位，所以恰好坐在 `VDD` 电平上的时钟仍会被提供，而 `VDD` 本身不会。
 
 ### Fixed / 修复
 
