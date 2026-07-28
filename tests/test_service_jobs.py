@@ -361,6 +361,26 @@ def test_mc_sweep_inherits_the_circuits_frequency_range(client):
     assert res["summary"]["bw_Hz"]["std"] > 0.0
 
 
+def test_mc_request_frequency_range_overrides_the_circuit(client):
+    # The PVT side of this was covered and the MC side was not, so `freqs`/`band`
+    # were missing from McJobRequest entirely: pydantic dropped them silently and
+    # every MC measured over the circuit's range no matter what the caller asked
+    # for. A GUI range control would have appeared to work and changed nothing.
+    circuit = _load("sky130_fd_ota.json")
+    job_id = client.post("/api/v1/jobs/mc", json={
+        "circuit": circuit,
+        "n": 4,
+        "freqs": {"start": 100.0, "stop": 1e6, "num": 31, "scale": "log"},
+        "band": [100.0, 1e5],
+    }).json()["job_id"]
+    body = _wait_terminal(client, job_id, timeout=90.0)
+    assert body["status"] == "done", body.get("error")
+    res = body["result"]
+    assert res["freq_source"] == "request"
+    assert res["freq_range_hz"] == [100.0, 1e6]
+    assert res["noise_band_hz"] == [100.0, 1e5]
+
+
 def test_pvt_request_frequency_range_overrides_the_circuit(client):
     circuit = _load("sky130_fd_ota.json")
     job_id = client.post("/api/v1/jobs/pvt", json={

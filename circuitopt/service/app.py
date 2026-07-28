@@ -82,12 +82,27 @@ class McJobRequest(BaseModel):
     """Body of ``POST /api/v1/jobs/mc`` — same semantics as ``circuit-opt mc``.
 
     ``circuit`` is a full circuit-JSON object; ``n`` is the MC sample count,
-    ``seed`` the RNG seed, ``corner`` the base process corner (typical/slow/fast)."""
+    ``seed`` the RNG seed, ``corner`` the base process corner (typical/slow/fast).
+
+    ``freqs``/``band`` set the range the metrics are measured over, exactly as for
+    :class:`PvtJobRequest`. A caller that omits them inherits the circuit's own
+    ``analyses`` block, then the AFE defaults — which are four decades wrong for a
+    silicon amplifier, and wrong in the direction that collapses the MC spread to
+    zero (see :func:`~circuitopt.service.jobs._sweep_ranges`). Most decks carry no
+    ``analyses`` block at all, so a GUI generally does know better and should say
+    so."""
     circuit: dict[str, Any] = Field(..., description="Circuit JSON object")
     n: Optional[int] = Field(None, description="Number of MC samples")
     seed: Optional[int] = Field(None, description="RNG seed")
     corner: Optional[str] = Field(None, description="Base process corner (typical/slow/fast)")
     workers: Optional[int] = Field(None, ge=1, description="Parallel MC sample workers")
+    freqs: Optional[dict[str, Any]] = Field(
+        None, description="Frequency grid {start, stop, num, scale}; omit to inherit "
+                          "the circuit's own analyses.ac.freqs")
+    band: Optional[list[float]] = Field(
+        None, min_length=2, max_length=2,
+        description="Noise integration band [lo, hi] Hz; omit to inherit the "
+                    "circuit's own analyses.noise.band")
 
 
 class PvtJobRequest(BaseModel):
@@ -234,6 +249,10 @@ def create_app(job_workers: int = 1) -> FastAPI:
             params["corner"] = req.corner
         if req.workers is not None:
             params["workers"] = req.workers
+        if req.freqs is not None:
+            params["freqs"] = req.freqs
+        if req.band is not None:
+            params["band"] = req.band
         return _submit("mc", params, response)
 
     @app.post("/api/v1/jobs/pvt", status_code=202)
