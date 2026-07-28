@@ -84,8 +84,8 @@ export function SignoffView({ signoff }: { signoff: SignoffPayload }) {
           <thead>
             <tr>
               <th>Measurement</th>
-              <th>Value</th>
-              <th>Limit</th>
+              <th className="num">Value</th>
+              <th className="num">Limit</th>
               <th>Verdict</th>
             </tr>
           </thead>

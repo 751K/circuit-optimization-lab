@@ -6,5 +6,5 @@ export { default as Toolbar } from "./Toolbar";
 export { default as SimulatePanel } from "./SimulatePanel";
 export { default as SweepPanel } from "./SweepPanel";
 export { default as ResultsDock } from "./ResultsDock";
-export { FIXTURES } from "./fixtures";
-export type { FixtureEntry } from "./fixtures";
+export { FIXTURES, FIXTURE_GROUPS } from "./fixtures";
+export type { ExampleEntry as FixtureEntry } from "./fixtures";

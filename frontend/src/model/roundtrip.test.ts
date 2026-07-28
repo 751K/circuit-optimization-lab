@@ -12,20 +12,26 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import type { CircuitJson } from "./circuit";
+import { isCircuitJson } from "./examples";
 import { circuitJsonToGraph } from "./toGraph";
 import { graphToCircuitJson } from "./toJson";
 import { deepEqual } from "./util";
 
-const FIX_DIR = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__");
+const FIX_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "examples");
 
 function loadFixtures(): { name: string; json: CircuitJson }[] {
+  // `examples/` also holds explore configs and signoff manifests, which are not
+  // circuits and carry no `solved` array. Select by shape so a new deck is
+  // covered automatically and a new manifest is not mistaken for one.
   return readdirSync(FIX_DIR)
     .filter((f) => f.endsWith(".json"))
     .sort()
     .map((f) => ({
       name: f,
-      json: JSON.parse(readFileSync(join(FIX_DIR, f), "utf-8")) as CircuitJson,
-    }));
+      json: JSON.parse(readFileSync(join(FIX_DIR, f), "utf-8")) as unknown,
+    }))
+    .filter((entry): entry is { name: string; json: CircuitJson } =>
+      isCircuitJson(entry.json));
 }
 
 const fixtures = loadFixtures();
@@ -37,21 +43,30 @@ function roundtrip(json: CircuitJson): CircuitJson {
 }
 
 describe("fixture inventory", () => {
-  it("finds all 12 example fixtures", () => {
-    expect(fixtures.map((f) => f.name)).toEqual([
-      "afe_explore.json",
-      "freepdk45_5t_ota.json",
-      "freepdk45_fd_ota.json",
-      "periodic_rc.json",
-      "resistor_load_stage.json",
-      "sc_lpf.json",
-      "single_stage.json",
-      "sky130_5t_ota.json",
-      "sky130_chopper.json",
-      "sky130_fd_ota.json",
-      "vcvs_amplifier.json",
-      "voltage_divider.json",
-    ]);
+  it("covers every circuit in examples/, not a curated subset", () => {
+    // The previous corpus was a copy under src/model/__fixtures__/. It drifted
+    // from its originals and never gained the circuits added after it was made,
+    // so both the palette and this gate silently stopped covering them. Reading
+    // the directory means a new deck is covered the day it lands.
+    const names = fixtures.map((f) => f.name);
+    expect(names.length).toBeGreaterThanOrEqual(25);
+    for (const expected of [
+      "afe_explore.json",          // OTFT
+      "sky130_fd_ota.json",        // SKY130
+      "freepdk45_fd_ota.json",     // FreePDK45
+      "tsmc28hpcp_5t_ota.json",    // TSMC28 — absent from the old copy entirely
+      "tsmc28hpcp_chopper.json",
+    ]) {
+      expect(names).toContain(expected);
+    }
+  });
+
+  it("excludes files that are not circuits", () => {
+    // Explore configs and signoff manifests live in the same directory and have
+    // no `solved` array; loading one as a circuit throws.
+    const names = fixtures.map((f) => f.name);
+    expect(names).not.toContain("freepdk45_sar6_explore.json");
+    expect(names).not.toContain("tsmc28hpcp_mdac_ota_signoff.json");
   });
 });
 

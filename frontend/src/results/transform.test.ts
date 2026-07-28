@@ -6,8 +6,15 @@ import {
   responseIsAtGainFloor,
   timeDomainIsFlat,
 } from "./metrics";
-import { formatDuration, formatPercent, formatQuantity, formatValue } from "./format";
-import { histogram } from "./McView";
+import {
+  formatDuration,
+  formatPercent,
+  formatQuantity,
+  formatValue,
+  parseEngineering,
+} from "./format";
+import { histogram, metricIsGridPinned } from "./McView";
+import { axisTick } from "./Chart";
 
 /** The single plot a result was expected to produce. Fails loudly otherwise. */
 function only(plots: PlotSpec[]): PlotSpec {
@@ -139,6 +146,95 @@ describe("mismatch histogram", () => {
   it("declines to plot a degenerate distribution rather than drawing a fake one", () => {
     expect(histogram([2.5, 2.5, 2.5])).toBeNull();
     expect(histogram([1])).toBeNull();
+  });
+});
+
+describe("engineering-notation input", () => {
+  it("accepts the suffixes circuit values are actually written with", () => {
+    expect(parseEngineering("1n")).toBeCloseTo(1e-9);
+    expect(parseEngineering("20u")).toBeCloseTo(20e-6);
+    expect(parseEngineering("2.2k")).toBeCloseTo(2200);
+    expect(parseEngineering("1p")).toBeCloseTo(1e-12);
+    expect(parseEngineering("4.7f")).toBeCloseTo(4.7e-15);
+  });
+
+  it("lands on the exact value, not a float-multiplied approximation", () => {
+    // 20 * 1e-6 is 0.000019999999999999998, which would then be written into the
+    // exported circuit JSON as the stop time.
+    expect(parseEngineering("20u")).toBe(2e-5);
+    expect(parseEngineering("1n")).toBe(1e-9);
+    expect(parseEngineering("4.7p")).toBe(4.7e-12);
+  });
+
+  it("keeps mega and milli distinct", () => {
+    // Case is the only thing separating them, so folding it would turn a 1 mV
+    // offset into a megavolt.
+    expect(parseEngineering("1M")).toBeCloseTo(1e6);
+    expect(parseEngineering("1m")).toBeCloseTo(1e-3);
+  });
+
+  it("still accepts plain and exponent forms", () => {
+    expect(parseEngineering("2e-5")).toBeCloseTo(2e-5);
+    expect(parseEngineering("801")).toBe(801);
+    expect(parseEngineering("-0.5")).toBe(-0.5);
+  });
+
+  it("ignores a trailing unit", () => {
+    expect(parseEngineering("20us")).toBeCloseTo(20e-6);
+    expect(parseEngineering("1nF")).toBeCloseTo(1e-9);
+  });
+
+  it("returns null for anything it cannot read, rather than guessing", () => {
+    // A caller reverts on null; committing a guess would silently change a
+    // circuit value the user mistyped.
+    expect(parseEngineering("")).toBeNull();
+    expect(parseEngineering("abc")).toBeNull();
+    expect(parseEngineering("1x")).toBeNull();
+    expect(parseEngineering("--3")).toBeNull();
+  });
+});
+
+describe("axis tick labels", () => {
+  it("uses exponent form outside a readable range", () => {
+    // A noise PSD tick of 1e-18 rendered in full is unreadable and eats the plot.
+    expect(axisTick(1e-18)).toBe("1e-18");
+    expect(axisTick(2.5e-12)).toBe("2.5e-12");
+    expect(axisTick(1e9)).toBe("1e9");
+  });
+
+  it("leaves ordinary magnitudes alone", () => {
+    expect(axisTick(1000)).toBe("1000");
+    expect(axisTick(63.77)).toBe("63.77");
+    expect(axisTick(0)).toBe("0");
+  });
+
+  it("trims the float noise a log axis produces", () => {
+    expect(axisTick(0.30000000000000004)).toBe("0.3");
+  });
+});
+
+describe("MC grid-pinned metric", () => {
+  const base = { latched: [], summary: { n: 4, latched: 0, latch_rate: 0 } };
+
+  it("names a metric stuck on the sweep ceiling", () => {
+    expect(metricIsGridPinned(
+      { ...base, arrays: { bw_Hz: [1e4, 1e4, 1e4, 1e4] }, freq_range_hz: [1e-2, 1e4] },
+      "bw_Hz",
+    )).toBe(true);
+  });
+
+  it("does not flag a genuinely insensitive metric below the ceiling", () => {
+    expect(metricIsGridPinned(
+      { ...base, arrays: { bw_Hz: [790, 790, 790, 790] }, freq_range_hz: [1e-2, 1e4] },
+      "bw_Hz",
+    )).toBe(false);
+  });
+
+  it("does not flag a metric that actually varies", () => {
+    expect(metricIsGridPinned(
+      { ...base, arrays: { bw_Hz: [1e4, 9.9e3, 1e4, 1e4] }, freq_range_hz: [1e-2, 1e4] },
+      "bw_Hz",
+    )).toBe(false);
   });
 });
 

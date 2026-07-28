@@ -23,6 +23,7 @@ import type {
   ResistorNode,
 } from "./graph";
 import type { CircuitJson, ModelEntry } from "./circuit";
+import { schematicLayout, type LayoutNode } from "./layout";
 import {
   autoPosition,
   barycenterReorder,
@@ -81,6 +82,24 @@ function embeddedSize(
 }
 
 /**
+ * The DC potential a rail sits at, when it can be resolved. A rails-map value is
+ * either a number or a key into `bias`; anything that does not land on a finite
+ * number is left out, so it takes no part in choosing the top and bottom of the
+ * drawing rather than anchoring it somewhere arbitrary.
+ */
+function railPotentials(
+  rails: Record<string, string | number>,
+  bias: Record<string, number>,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const [net, value] of Object.entries(rails)) {
+    const v = typeof value === "number" ? value : bias[value];
+    if (typeof v === "number" && Number.isFinite(v)) out.set(net, v);
+  }
+  return out;
+}
+
+/**
  * Total order over net ports, used to lay a net out as a nearest-neighbor
  * chain: sort primarily by the host node's canvas position (x, then y), then
  * break ties deterministically by node id and port id. Purely geometric — it
@@ -116,12 +135,19 @@ export function circuitJsonToGraph(json: CircuitJson): ToGraphResult {
   // `ui.order`; export merges its computed positions into the same `ui` block.
   const nameOf2t = (el: unknown): string =>
     Array.isArray(el) ? (el[0] as string) : (el as { name: string }).name;
+  // Passives may be authored as objects or as [name, a, b, value] tuples; the
+  // loader takes both. Record which used the tuple form so export re-emits it
+  // rather than silently rewriting a block the user never touched.
+  const tupleForm = [...(json.resistors ?? []), ...(json.capacitors ?? [])]
+    .filter((el) => Array.isArray(el))
+    .map(nameOf2t);
   const order: NonNullable<CircuitJson["ui"]>["order"] = {
     solved: [...json.solved],
     devices: json.devices.map((d) => (Array.isArray(d) ? d[0] : d.name)),
     rails: Object.keys(json.rails),
     resistors: (json.resistors ?? []).map(nameOf2t),
     capacitors: (json.capacitors ?? []).map(nameOf2t),
+    ...(tupleForm.length > 0 ? { tupleForm } : {}),
   };
   rest.ui = { order };
 
@@ -174,6 +200,7 @@ export function circuitJsonToGraph(json: CircuitJson): ToGraphResult {
   // ── devices (mosfets) ─────────────────────────────────────────────────
   const inputDrives = (json.input_drives ?? {}) as Record<string, number>;
   const models = (json.models ?? {}) as Record<string, ModelEntry>;
+  const mirrored = new Set(json.ui?.mirrored ?? []);
   for (const raw of json.devices) {
     const d = normalizeDevice(raw);
     const hasEmbeddedWL = d.W !== undefined && d.L !== undefined;
@@ -214,6 +241,7 @@ export function circuitJsonToGraph(json: CircuitJson): ToGraphResult {
       }
     }
     if (d.name in inputDrives) node.inputDrive = inputDrives[d.name];
+    if (mirrored.has(d.name)) node.mirrored = true;
     nodes.push(node);
     registerPort(d.drain, d.name, "D");
     registerPort(d.gate, d.name, "G");
@@ -287,6 +315,30 @@ export function circuitJsonToGraph(json: CircuitJson): ToGraphResult {
     registerPort(net, id, "out");
   });
 
+  // ── schematic layout (supply rows x branch columns) ───────────────────
+  // Replaces the kind-column fallback for every auto-placed node whenever the
+  // circuit has a resolvable top and bottom rail to measure altitude against.
+  // Runs *before* edge synthesis on purpose: the chain below orders each net's
+  // ports by host position, so it should see the final coordinates.
+  const layoutNodes: LayoutNode[] = nodes.map((n) => ({
+    id: n.id,
+    kind: n.kind,
+    ports: n.ports
+      .filter((p) => p.originalNet !== undefined)
+      .map((p) => ({ id: p.id, net: p.originalNet! })),
+    ...(n.kind === "mosfet" && n.mirrored === true ? { mirrored: true } : {}),
+  }));
+  const placed = schematicLayout(layoutNodes, railPotentials(json.rails, bias));
+  if (placed) {
+    for (const n of nodes) {
+      // A node with a stored ui.positions entry keeps it — an archived layout is
+      // the user's, and is never recomputed.
+      if (!autoIds.has(n.id)) continue;
+      const p = placed.get(n.id);
+      if (p) n.position = [p[0], p[1]];
+    }
+  }
+
   // ── synthesize edges from shared net names ────────────────────────────
   // Ports sharing an original net name are electrically one net. We connect
   // them into a *nearest-neighbor chain* (each port to the next after sorting
@@ -312,19 +364,21 @@ export function circuitJsonToGraph(json: CircuitJson): ToGraphResult {
     }
   }
 
-  // ── barycenter layout tidy (auto-placed nodes only) ───────────────────
-  // Build node-level adjacency from the synthesized edges, then run one
-  // deterministic barycenter sweep to shorten the total wire length. Nodes with
-  // a stored ui.positions entry are pinned (their whole column is skipped), so
-  // an archived layout never shifts.
-  const adj = new Map<string, Set<string>>();
-  const link = (a: string, b: string): void => {
-    if (a === b) return;
-    (adj.get(a) ?? adj.set(a, new Set()).get(a)!).add(b);
-    (adj.get(b) ?? adj.set(b, new Set()).get(b)!).add(a);
-  };
-  for (const e of edges) link(e.source.node, e.target.node);
-  barycenterReorder(nodes, adj, autoIds);
+  // ── barycenter layout tidy (kind-column fallback only) ────────────────
+  // The kind-column fallback stacks each kind in one vertical run, so a single
+  // barycenter sweep to shorten the wires is worth doing. The schematic layout
+  // already solved its coordinates against the whole graph; re-sorting its rows
+  // by x-bucket would only undo that.
+  if (!placed) {
+    const adj = new Map<string, Set<string>>();
+    const link = (a: string, b: string): void => {
+      if (a === b) return;
+      (adj.get(a) ?? adj.set(a, new Set()).get(a)!).add(b);
+      (adj.get(b) ?? adj.set(b, new Set()).get(b)!).add(a);
+    };
+    for (const e of edges) link(e.source.node, e.target.node);
+    barycenterReorder(nodes, adj, autoIds);
+  }
 
   return { graph: { nodes, edges }, rest };
 }

@@ -11,6 +11,7 @@
 import { useMemo, useState } from "react";
 import { Chart } from "./Chart";
 import { formatValue } from "./format";
+import { NO_STIMULUS_HINT } from "./metrics";
 import type { PlotSpec } from "./transform";
 
 export interface McStats {
@@ -49,6 +50,28 @@ function isStats(value: unknown): value is McStats {
     typeof value === "object" && value !== null
     && typeof (value as McStats).mean === "number"
   );
+}
+
+/**
+ * Whether a metric is identical across every sample *because* it sat on the top
+ * of the swept range rather than because the design is insensitive.
+ *
+ * `bw_Hz` is found by scanning the swept response, so a circuit whose corner
+ * lies above the grid reports the last grid point — for every sample, giving a
+ * spread of exactly zero. Read as a statistic that is an extraordinarily robust
+ * design; read correctly it is a measurement that never happened. Exported for
+ * test.
+ */
+export function metricIsGridPinned(result: McResult, key: string): boolean {
+  const values = result.arrays?.[key];
+  const top = result.freq_range_hz?.[1];
+  if (!Array.isArray(values) || values.length < 2 || typeof top !== "number") {
+    return false;
+  }
+  const first = values[0];
+  if (typeof first !== "number") return false;
+  if (!values.every((v) => v === first)) return false;
+  return first >= top * 0.999;
 }
 
 /** Bin a sample array into a histogram plot. Exported for test. */
@@ -100,9 +123,19 @@ export function McView({ result }: { result: McResult }) {
 
   const { summary } = result;
   const latchRate = summary?.latch_rate ?? 0;
+  const pinned = active === "bw_Hz" && metricIsGridPinned(result, active);
+  // One check that explains all three rows at once: with no AC stimulus the gain
+  // is the numerical floor and everything derived from it is meaningless.
+  const gainStats = summary?.gain_peak_dB;
+  const noStimulus = isStats(gainStats) && gainStats.mean < -120;
 
   return (
     <div className="mc-view">
+      {noStimulus && (
+        <div className="health-flag error">
+          <strong>This sweep had no AC stimulus.</strong> {NO_STIMULUS_HINT}
+        </div>
+      )}
       <div className="sweep-meta">
         <span>{summary?.n ?? 0} samples</span>
         {result.stopped_early && <span className="warn">stopped early</span>}
@@ -133,8 +166,12 @@ export function McView({ result }: { result: McResult }) {
         <table className="dtable">
           <thead>
             <tr>
-              <th>Metric</th><th>Mean</th><th>σ</th><th>p5</th><th>p95</th>
-              <th title="σ as a fraction of the mean">σ/mean</th>
+              <th>Metric</th>
+              <th className="num">Mean</th>
+              <th className="num">σ</th>
+              <th className="num">p5</th>
+              <th className="num">p95</th>
+              <th className="num" title="σ as a fraction of the mean">σ/mean</th>
             </tr>
           </thead>
           <tbody>
@@ -180,10 +217,24 @@ export function McView({ result }: { result: McResult }) {
 
       {plot ? (
         <Chart plot={plot} height={260} />
+      ) : pinned ? (
+        <div className="health-flag warn">
+          <strong>{METRIC_UNITS[active]?.label ?? active} was not measured.</strong>{" "}
+          Every sample returned{" "}
+          {formatValue(
+            (result.arrays[active]?.[0] ?? 0) * (METRIC_UNITS[active]?.scale ?? 1),
+            METRIC_UNITS[active]?.unit ?? "",
+          )}
+          , which is the top of the swept range — the real value lies above it, so
+          the sweep reported its own ceiling instead. Widen{" "}
+          <strong>Measurement range</strong> in the Sweeps panel and run again.
+          A zero spread here means the metric never varied because it was never
+          resolved, not that the design is unusually tight.
+        </div>
       ) : (
         <p className="muted small">
-          Not enough spread in {active} to bin — every sample landed on the same
-          value.
+          Every sample of {METRIC_UNITS[active]?.label ?? active} landed on the
+          same value, so there is no distribution to bin.
         </p>
       )}
     </div>

@@ -108,6 +108,59 @@ export function formatDuration(seconds: number): string {
   return `${minutes} min ${Math.round(seconds - minutes * 60)} s`;
 }
 
+/**
+ * Suffix *exponents* accepted on input. `u` and `µ` are the same micro.
+ *
+ * Exponents rather than multipliers because the value is rebuilt as `20e-6`
+ * and parsed once: multiplying instead (`20 * 1e-6`) lands on
+ * 0.000019999999999999998, which then ships in the exported circuit JSON.
+ */
+const INPUT_EXPONENTS: Record<string, number> = {
+  f: -15,
+  p: -12,
+  n: -9,
+  u: -6,
+  µ: -6,
+  μ: -6,   // U+03BC, what most keyboards actually emit
+  m: -3,
+  k: 3,
+  K: 3,
+  M: 6,
+  G: 9,
+  T: 12,
+};
+
+/**
+ * Parse an engineering-notation entry: `1n`, `2.2u`, `4k7`-free plain forms,
+ * `100meg`-free — plus anything `Number()` already accepts (`2e-9`, `0.5`).
+ *
+ * Circuit values are written with suffixes, not exponents: a stop time is "20u",
+ * a capacitor is "1p". Requiring `2e-5` makes the field hostile to the notation
+ * the domain actually uses. Returns `null` for anything unparseable, so a caller
+ * can revert rather than commit a wrong number.
+ *
+ * `M` is mega and `m` is milli — case matters, as it does in SPICE's own
+ * documentation even though SPICE itself folds case. A unit letter may trail the
+ * suffix (`1nF`, `20us`) and is ignored.
+ */
+export function parseEngineering(text: string): number | null {
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+
+  // Plain numeric forms, including exponent notation, pass straight through.
+  const plain = Number(trimmed);
+  if (Number.isFinite(plain)) return plain;
+
+  const match = /^([+-]?(?:\d+\.?\d*|\.\d+))\s*([fpnuµμmkKMGT])[a-zA-Z]*$/.exec(trimmed);
+  if (!match) return null;
+  const exponent = INPUT_EXPONENTS[match[2] as string];
+  if (exponent === undefined) return null;
+  // Reassemble and parse once, so "20u" is exactly 2e-5 rather than the
+  // 1.9999999999999998e-5 that 20 * 1e-6 produces.
+  const value = Number(`${match[1]}e${exponent}`);
+  return Number.isFinite(value) ? value : null;
+}
+
 /** A signed percentage, for margins. Zero keeps its sign off. */
 export function formatPercent(fraction: number | null | undefined): string {
   if (fraction === null || fraction === undefined || !Number.isFinite(fraction)) {

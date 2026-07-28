@@ -232,6 +232,15 @@ export function responseIsAtGainFloor(result: unknown): boolean {
   return typeof peak === "number" && Number.isFinite(peak) && peak < -120;
 }
 
+/** The shared explanation for a sweep whose AC measurement had no stimulus. */
+export const NO_STIMULUS_HINT =
+  "Every metric here is derived from an AC measurement that had no stimulus, so "
+  + "none of them describe the circuit: the gain is the numerical floor, and the "
+  + "input-referred noise is the output noise divided by that floor. Add an "
+  + "`ac_drives` entry naming the source and its magnitude. A chopper or "
+  + "switched-capacitor testbench driven only through its `periodic` block has "
+  + "no AC path by construction — sweep it with PSS/PAC/PNoise instead.";
+
 /**
  * Whether every trace in a time-domain result is constant.
  *

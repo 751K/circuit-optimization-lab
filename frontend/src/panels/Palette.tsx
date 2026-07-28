@@ -9,7 +9,7 @@
 import { useState } from "react";
 import { useEditor } from "../store";
 import type { CircuitJson, GraphNode } from "../model";
-import { FIXTURES } from "./fixtures";
+import { FIXTURES, FIXTURE_GROUPS } from "./fixtures";
 
 const KINDS: { kind: GraphNode["kind"]; label: string; hint: string }[] = [
   { kind: "mosfet", label: "MOSFET", hint: "3-terminal device (D/G/S)" },
@@ -82,13 +82,17 @@ export default function Palette() {
 
       <h3>Load</h3>
       <label className="field">
-        <span>From example</span>
+        <span>From example — {FIXTURES.length}</span>
         <select defaultValue="" onChange={(e) => onLoadFixture(e.target.value)}>
           <option value="">— choose —</option>
-          {FIXTURES.map((f) => (
-            <option key={f.key} value={f.key}>
-              {f.label}
-            </option>
+          {FIXTURE_GROUPS.map((group) => (
+            <optgroup key={group.family} label={group.family}>
+              {group.entries.map((f) => (
+                <option key={f.key} value={f.key}>
+                  {f.label}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
       </label>

@@ -23,13 +23,13 @@ import type {
   ResistorNode,
 } from "./graph";
 import type {
-  CapacitorObject,
+  Capacitor,
   CircuitJson,
   CircuitUi,
   LoadCapArray,
   ModelEntry,
   RailValue,
-  ResistorObject,
+  Resistor,
 } from "./circuit";
 import { deviceToObject } from "./util";
 
@@ -318,12 +318,29 @@ export function graphToCircuitJson(
     return applyOrder([...byName.keys()], hint).map((n) => byName.get(n)!);
   };
 
-  const resistors: ResistorObject[] = orderNamed(resistorsRaw, orderHint.resistors).map(
-    (r) => ({ name: r.name, a: netAt(r.id, "a"), b: netAt(r.id, "b"), R: r.R }),
+  // Re-emit each passive in the form it arrived in. The loader takes both, but
+  // rewriting an untouched block from tuples to objects is a diff the user did
+  // not ask for — see CircuitUi.order.tupleForm.
+  const wasTuple = new Set(orderHint.tupleForm ?? []);
+
+  const resistors: Resistor[] = orderNamed(resistorsRaw, orderHint.resistors).map(
+    (r): Resistor => {
+      const a = netAt(r.id, "a");
+      const b = netAt(r.id, "b");
+      return wasTuple.has(r.name)
+        ? [r.name, a, b, r.R]
+        : { name: r.name, a, b, R: r.R };
+    },
   );
 
-  const capacitors: CapacitorObject[] = orderNamed(capsRaw, orderHint.capacitors).map(
-    (c) => ({ name: c.name, a: netAt(c.id, "a"), b: netAt(c.id, "b"), C: c.C }),
+  const capacitors: Capacitor[] = orderNamed(capsRaw, orderHint.capacitors).map(
+    (c): Capacitor => {
+      const a = netAt(c.id, "a");
+      const b = netAt(c.id, "b");
+      return wasTuple.has(c.name)
+        ? [c.name, a, b, c.C]
+        : { name: c.name, a, b, C: c.C };
+    },
   );
 
   // load_caps keep import order (id suffix __loadcap_<i>) for a stable diff.
@@ -370,7 +387,17 @@ export function graphToCircuitJson(
   if (Object.keys(models).length > 0) out.models = models;
   if (Object.keys(inputDrives).length > 0) out.input_drives = inputDrives;
 
+  // Which devices face right. Sorted, and omitted entirely when none do, so a
+  // circuit nobody mirrored exports exactly the bytes it did before the feature
+  // existed.
+  const mirrored = graph.nodes
+    .filter((n) => n.kind === "mosfet" && n.mirrored === true)
+    .map((n) => n.id)
+    .sort((a, b) => a.localeCompare(b));
+
   out.ui = { ...(out.ui ?? {}), positions };
+  if (mirrored.length > 0) out.ui.mirrored = mirrored;
+  else delete out.ui.mirrored;
 
   return out;
 }

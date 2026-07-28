@@ -14,10 +14,12 @@ import {
   circuitJsonToGraph,
   graphToCircuitJson,
   resolveNets,
+  schematicLayout,
   type CircuitGraph,
   type CircuitJson,
   type GraphEdge,
   type GraphNode,
+  type LayoutNode,
   type Position,
 } from "../model";
 import { capabilities, type CapabilitiesResponse } from "../api/client";
@@ -96,6 +98,27 @@ export interface EditorState {
   loadCircuit: (json: CircuitJson) => void;
   newCircuit: (name?: string) => void;
   exportJson: () => CircuitJson;
+  /**
+   * Re-run the schematic auto-layout over the whole graph, discarding the
+   * current positions. On import the layout runs for you, but a circuit that
+   * has since been edited by hand — or one whose archived `ui.positions` came
+   * from the old kind-column layout — needs a way to ask for it again. A no-op
+   * when the circuit has no rail to rank against; undo-able either way.
+   */
+  relayout: () => void;
+  /**
+   * Flip the given devices horizontally — gate on the other side. Display only:
+   * no port, net or edge changes, and the exported netlist is identical bar the
+   * `ui.mirrored` list. Ids that are not mosfets are ignored, so this can be
+   * handed a mixed selection.
+   */
+  mirrorNodes: (ids: string[]) => void;
+  /**
+   * Bumped whenever the document is replaced wholesale (load / new / undo /
+   * redo / relayout) rather than edited. The canvas watches it to re-fit the
+   * viewport, which an ordinary edit must not do.
+   */
+  viewEpoch: number;
   /**
    * Write (or, with `null`, remove) one analysis's config in the circuit's
    * `analyses` block. This is a real document edit — undo-able and exported —
@@ -210,6 +233,7 @@ export const useEditor = create<EditorState>((set, get) => {
     netError: null,
     circuitCorners: null,
     circuitSilicon: false,
+    viewEpoch: 0,
 
     setCircuitCorners: (corners, silicon) =>
       set({ circuitCorners: corners, circuitSilicon: silicon }),
@@ -339,6 +363,7 @@ export const useEditor = create<EditorState>((set, get) => {
         past: [...get().past, snapshot].slice(-HISTORY_LIMIT),
         future: [],
         netError: computeNetError(g),
+        viewEpoch: get().viewEpoch + 1,
       });
     },
 
@@ -353,12 +378,69 @@ export const useEditor = create<EditorState>((set, get) => {
         past: [...get().past, snapshot].slice(-HISTORY_LIMIT),
         future: [],
         netError: null,
+        viewEpoch: get().viewEpoch + 1,
       });
     },
 
     exportJson: () => {
       const { graph, rest } = get();
       return graphToCircuitJson(graph, rest);
+    },
+
+    mirrorNodes: (ids) => {
+      const { graph, rest } = get();
+      const flip = new Set(ids);
+      const targets = graph.nodes.filter((n) => flip.has(n.id) && n.kind === "mosfet");
+      if (targets.length === 0) return;
+      // A mixed selection flips as one: if any target is unmirrored they all
+      // become mirrored, so repeated presses toggle the group rather than
+      // scrambling it into alternating orientations.
+      const next = !targets.every((n) => (n as GraphNode & { mirrored?: boolean }).mirrored === true);
+      const nodes = graph.nodes.map((n) => {
+        if (!flip.has(n.id) || n.kind !== "mosfet") return n;
+        const patched = { ...n } as GraphNode & { mirrored?: boolean };
+        if (next) patched.mirrored = true;
+        else delete patched.mirrored;
+        return patched as GraphNode;
+      });
+      commit({ graph: { nodes, edges: graph.edges }, rest });
+    },
+
+    relayout: () => {
+      const { graph, rest } = get();
+      if (graph.nodes.length === 0) return;
+      // Feed the layout the *resolved* nets rather than each port's remembered
+      // originalNet: a port wired up in the editor has no original net, and
+      // laying out what the user has actually built is the whole point here.
+      let portNet: Map<string, string>;
+      try {
+        ({ portNet } = resolveNets(graph));
+      } catch {
+        return; // a double-rail short has no coherent netlist to lay out
+      }
+      const SEP = String.fromCharCode(31);
+      const layoutNodes: LayoutNode[] = graph.nodes.map((n) => ({
+        id: n.id,
+        kind: n.kind,
+        ports: n.ports
+          .map((p) => ({ id: p.id, net: portNet.get(`${n.id}${SEP}${p.id}`) }))
+          .filter((p): p is { id: string; net: string } => p.net !== undefined),
+        ...(n.kind === "mosfet" && n.mirrored === true ? { mirrored: true } : {}),
+      }));
+      const potentials = new Map<string, number>();
+      for (const n of graph.nodes) {
+        if (n.kind !== "rail") continue;
+        const v = typeof n.railValue === "number" ? n.railValue : n.biasValue;
+        if (typeof v === "number" && Number.isFinite(v)) potentials.set(n.net, v);
+      }
+      const placed = schematicLayout(layoutNodes, potentials);
+      if (!placed) return;
+      const nodes = graph.nodes.map((n) => {
+        const p = placed.get(n.id);
+        return p ? ({ ...n, position: [p[0], p[1]] as Position } as GraphNode) : n;
+      });
+      commit({ graph: { nodes, edges: graph.edges }, rest });
+      set({ viewEpoch: get().viewEpoch + 1 });
     },
 
     setAnalysisConfig: (name, config) => {
@@ -392,6 +474,7 @@ export const useEditor = create<EditorState>((set, get) => {
         future: [current, ...future].slice(0, HISTORY_LIMIT),
         selection: EMPTY_SELECTION,
         netError: computeNetError(prev.graph),
+        viewEpoch: get().viewEpoch + 1,
       });
     },
 
@@ -407,6 +490,7 @@ export const useEditor = create<EditorState>((set, get) => {
         future: future.slice(1),
         selection: EMPTY_SELECTION,
         netError: computeNetError(next.graph),
+        viewEpoch: get().viewEpoch + 1,
       });
     },
 

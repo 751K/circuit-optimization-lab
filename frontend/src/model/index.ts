@@ -23,6 +23,8 @@ export type {
 } from "./graph";
 export { circuitJsonToGraph } from "./toGraph";
 export type { ToGraphResult } from "./toGraph";
+export { COL_W, ROW_H, schematicLayout } from "./layout";
+export type { LayoutNode } from "./layout";
 export { graphToCircuitJson, resolveNets } from "./toJson";
 export type { NetResolution } from "./toJson";
 export { deepEqual } from "./util";

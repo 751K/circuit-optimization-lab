@@ -73,6 +73,12 @@ export interface MosfetNode extends BaseNode {
   modelKwargs?: Record<string, unknown>;
   /** AC small-signal gate drive from `input_drives`. */
   inputDrive?: number;
+  /**
+   * Draw the symbol with the gate on the right. Display only — no port, net or
+   * edge changes — and persisted through `ui.mirrored`, since which way a device
+   * faces is part of a saved schematic, not of the circuit.
+   */
+  mirrored?: boolean;
 }
 
 /**

@@ -19,22 +19,28 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import type { CircuitJson } from "./circuit";
+import { isCircuitJson } from "./examples";
 import { circuitJsonToGraph } from "./toGraph";
 import { resolveNets } from "./toJson";
 import { barycenterReorder } from "./util";
 import { junctionPortsByNode } from "../canvas/adapter";
 import type { GraphEdge } from "./graph";
 
-const FIX_DIR = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__");
+const FIX_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "examples");
 
 function loadFixtures(): { name: string; json: CircuitJson }[] {
+  // `examples/` also holds explore configs and signoff manifests, which are not
+  // circuits and carry no `solved` array. Select by shape so a new deck is
+  // covered automatically and a new manifest is not mistaken for one.
   return readdirSync(FIX_DIR)
     .filter((f) => f.endsWith(".json"))
     .sort()
     .map((f) => ({
       name: f,
-      json: JSON.parse(readFileSync(join(FIX_DIR, f), "utf-8")) as CircuitJson,
-    }));
+      json: JSON.parse(readFileSync(join(FIX_DIR, f), "utf-8")) as unknown,
+    }))
+    .filter((entry): entry is { name: string; json: CircuitJson } =>
+      isCircuitJson(entry.json));
 }
 
 const fixtures = loadFixtures();

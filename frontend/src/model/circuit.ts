@@ -107,6 +107,13 @@ export type LoadCap = LoadCapObject | LoadCapArray;
 export interface CircuitUi {
   /** node id -> [x, y] canvas position. */
   positions?: Record<string, [number, number]>;
+  /**
+   * Device names drawn with the gate on the right instead of the left. Purely
+   * how the symbol faces — the netlist is untouched — but it is the difference
+   * between a differential pair drawn as a mirrored pair and one drawn as two
+   * copies of the same device, so it belongs to the saved layout.
+   */
+  mirrored?: string[];
   /** original ordering hints (block name -> ordered key list). */
   order?: {
     /** original `solved` net order. */
@@ -121,6 +128,14 @@ export interface CircuitUi {
     capacitors?: string[];
     /** original `outputs` net order (usually implied by output-node `order`). */
     outputs?: string[];
+    /**
+     * Resistor/capacitor names that arrived in the tuple form
+     * `[name, a, b, value]` rather than as objects. The loader accepts both, so
+     * re-emitting everything as objects would still load — but it would rewrite
+     * blocks the user did not edit, which is not what "round-trips losslessly"
+     * should mean. The SAR decks author their binary-weighted arrays this way.
+     */
+    tupleForm?: string[];
   };
   [key: string]: unknown;
 }

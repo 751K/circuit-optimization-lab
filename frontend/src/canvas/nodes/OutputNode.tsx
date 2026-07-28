@@ -2,9 +2,10 @@
  * Output marker: single handle (left). Shows the +/- order for differential
  * outputs ([VOP, VON] -> order 0 is "+", order 1 is "-"), plus the resolved net.
  */
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { Handle, type NodeProps } from "@xyflow/react";
 import type { RfNodeData } from "../adapter";
 import type { OutputNode as OutputDomain } from "../../model";
+import { RF_SIDE } from "../sides";
 import Junction from "./Junction";
 
 export default function OutputNode({ data, selected }: NodeProps) {
@@ -13,10 +14,13 @@ export default function OutputNode({ data, selected }: NodeProps) {
   const sign = node.order === 0 ? "+" : node.order === 1 ? "−" : `#${node.order}`;
   const net = d.portNets["out"];
   const j = new Set(d.junctions ?? []);
+  // Faces whatever it marks — usually the left, but a marker the layout pushed
+  // below its net should take the wire on its top edge.
+  const side = d.sides?.["out"] ?? "left";
   return (
     <div className={`cnode output ${selected ? "selected" : ""}`}>
-      <Handle type="source" position={Position.Left} id="out" className="handle" />
-      <Junction active={j.has("out")} side="left" />
+      <Handle type="source" position={RF_SIDE[side]} id="out" className="handle" />
+      <Junction active={j.has("out")} side={side} />
       <svg width="34" height="34" viewBox="0 0 34 34" className="sym">
         <circle cx="17" cy="17" r="12" fill="none" stroke="currentColor" strokeWidth="2" />
         <text x="17" y="22" textAnchor="middle" fontSize="15" fill="currentColor">

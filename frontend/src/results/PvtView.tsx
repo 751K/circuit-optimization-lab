@@ -16,6 +16,7 @@
  *    reader should be asked to do.
  */
 import { formatValue } from "./format";
+import { NO_STIMULUS_HINT } from "./metrics";
 
 export interface PvtMetrics {
   gain_peak_dB?: number;
@@ -145,8 +146,20 @@ export function PvtView({ result }: { result: PvtResult }) {
   const hasTemp = Array.isArray(result.temps) && result.temps.length > 0;
   const hasVdd = Array.isArray(result.vdd_scale) && result.vdd_scale.length > 0;
 
+  // Every evaluated corner on the gain floor means the sweep was never driven,
+  // not that the design fails at every corner.
+  const evaluated = rows.filter((row) => row.metrics !== null);
+  const noStimulus = evaluated.length > 0 && evaluated.every((row) =>
+    typeof row.metrics?.gain_peak_dB === "number"
+    && row.metrics.gain_peak_dB < -120);
+
   return (
     <div className="pvt-view">
+      {noStimulus && (
+        <div className="health-flag error">
+          <strong>This sweep had no AC stimulus.</strong> {NO_STIMULUS_HINT}
+        </div>
+      )}
       <div className="sweep-meta">
         <span>{rows.length} grid point{rows.length === 1 ? "" : "s"}</span>
         <span>corners: {result.corners.join(", ")}</span>
@@ -180,10 +193,10 @@ export function PvtView({ result }: { result: PvtResult }) {
           <thead>
             <tr>
               <th>Corner</th>
-              {hasTemp && <th>Temp</th>}
-              {hasVdd && <th>Supply</th>}
+              {hasTemp && <th className="num">Temp</th>}
+              {hasVdd && <th className="num">Supply</th>}
               {COLUMNS.map((column) => (
-                <th key={column.key}>{column.label}</th>
+                <th className="num" key={column.key}>{column.label}</th>
               ))}
             </tr>
           </thead>

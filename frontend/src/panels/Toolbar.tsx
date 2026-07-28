@@ -13,6 +13,8 @@ export default function Toolbar() {
   const redo = useEditor((s) => s.redo);
   const canUndo = useEditor((s) => s.past.length > 0);
   const canRedo = useEditor((s) => s.future.length > 0);
+  const relayout = useEditor((s) => s.relayout);
+  const hasNodes = useEditor((s) => s.graph.nodes.length > 0);
   const capsError = useEditor((s) => s.capsError);
   const capsLoading = useEditor((s) => s.capsLoading);
   const caps = useEditor((s) => s.caps);
@@ -27,6 +29,14 @@ export default function Toolbar() {
         </button>
         <button className="btn" onClick={() => redo()} disabled={!canRedo} title="Redo">
           ↷ Redo
+        </button>
+        <button
+          className="btn"
+          onClick={() => relayout()}
+          disabled={!hasNodes}
+          title="Redraw as a schematic: supply rails top and bottom, each device at the height of the conduction path it sits in, one column per branch"
+        >
+          ⌗ Tidy
         </button>
       </div>
       {!caps && (capsError || !capsLoading) && (

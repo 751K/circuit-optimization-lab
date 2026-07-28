@@ -82,6 +82,7 @@ function NodeEditor({
 function MosfetEditor({ node, models }: { node: MosfetNode; models: string[] }) {
   const updateNodeProps = useEditor((s) => s.updateNodeProps);
   const renameNode = useEditor((s) => s.renameNode);
+  const mirrorNodes = useEditor((s) => s.mirrorNodes);
   const kwargs = (node.modelKwargs ?? {}) as Record<string, unknown>;
 
   const setKwarg = (key: string, value: unknown): void => {
@@ -95,6 +96,16 @@ function MosfetEditor({ node, models }: { node: MosfetNode; models: string[] }) 
     <div className="editor">
       <div className="badge">MOSFET</div>
       <TextField label="name" value={node.name} onCommit={(v) => renameNode(node.id, v)} />
+      <label className="field">
+        <span>orientation</span>
+        <button
+          className="btn wide"
+          onClick={() => mirrorNodes([node.id])}
+          title="Flip the symbol horizontally — gate on the other side. Display only; the netlist does not change. Shortcut: Shift+H"
+        >
+          {node.mirrored ? "◀ gate right" : "gate left ▶"} — flip
+        </button>
+      </label>
       <NumberField label="W" value={node.W} onCommit={(v) => updateNodeProps(node.id, { W: v })} />
       <NumberField label="L" value={node.L} onCommit={(v) => updateNodeProps(node.id, { L: v })} />
       <NumberField

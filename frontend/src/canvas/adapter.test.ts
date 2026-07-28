@@ -16,11 +16,12 @@ import {
   domainToRfEdge,
   domainToRfNode,
   netClass,
+  railKinds,
   rfToDomainEdge,
   rfToDomainNode,
 } from "./adapter";
 
-const FIX_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "model", "__fixtures__");
+const FIX_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "examples");
 
 function sampleNodes(): GraphNode[] {
   return [
@@ -141,10 +142,64 @@ describe("adapter edge identity", () => {
     expect(signal).not.toContain("edge-conflict");
     expect(signal).toContain("edge-signal");
     expect(signal).toContain("net-n1");
-    // A rail-net edge is tagged edge-rail (dimmed) instead of edge-signal.
-    const railEdge = domainToRfEdge(edge, "VDD", false, true).className!.split(" ");
+    // A power-bus edge is tagged edge-rail (dimmed) instead of edge-signal.
+    const railEdge = domainToRfEdge(edge, "VDD", false, "rail").className!.split(" ");
     expect(railEdge).toContain("edge-rail");
     expect(railEdge).not.toContain("edge-signal");
+    // A bias tap gets its own class — fixed-potential, but drawn to be traced.
+    const biasEdge = domainToRfEdge(edge, "vbias", false, "bias").className!.split(" ");
+    expect(biasEdge).toContain("edge-bias");
+    expect(biasEdge).not.toContain("edge-rail");
+    expect(biasEdge).not.toContain("edge-signal");
+  });
+});
+
+describe("railKinds separates power buses from bias taps", () => {
+  /** VDD sources M1; vbias only drives its gate; n1 is an ordinary net. */
+  function biased(): CircuitGraph {
+    return {
+      nodes: [
+        { id: "VDD", kind: "rail", net: "VDD", railValue: 1.8, ports: [{ id: "net", originalNet: "VDD" }], position: [0, 0] },
+        { id: "vbias", kind: "rail", net: "vbias", railValue: 0.7, ports: [{ id: "net", originalNet: "vbias" }], position: [0, 300] },
+        {
+          id: "M1", kind: "mosfet", name: "M1", W: 1, L: 1, position: [0, 150],
+          ports: [
+            { id: "D", originalNet: "n1" },
+            { id: "G", originalNet: "vbias" },
+            { id: "S", originalNet: "VDD" },
+          ],
+        },
+      ],
+      edges: [],
+    };
+  }
+
+  it("calls a rail that sources current a bus, and one that only drives gates a tap", () => {
+    const g = biased();
+    const { edges } = domainToRf(g);
+    void edges;
+    const portNets = new Map(
+      g.nodes.map((n) => [
+        n.id,
+        Object.fromEntries(n.ports.map((p) => [p.id, p.originalNet!])),
+      ]),
+    );
+    const { buses, taps } = railKinds(g, portNets);
+    expect([...buses]).toEqual(["VDD"]);
+    expect([...taps]).toEqual(["vbias"]);
+  });
+
+  it("dims the supply wire but not the bias wire", () => {
+    // The whole point: both are fixed-potential nets, and dimming them alike is
+    // what made every bias in the schematic near-invisible.
+    const g = biased();
+    g.edges = [
+      { id: "e1", source: { node: "VDD", port: "net" }, target: { node: "M1", port: "S" } },
+      { id: "e2", source: { node: "vbias", port: "net" }, target: { node: "M1", port: "G" } },
+    ];
+    const byId = new Map(domainToRf(g).edges.map((e) => [e.id, e]));
+    expect(byId.get("e1")!.data?.rail).toBe("rail");
+    expect(byId.get("e2")!.data?.rail).toBe("bias");
   });
 });
 
@@ -187,8 +242,9 @@ describe("whole-graph adapter over a fixture", () => {
       if (!r.equal) throw new Error(`node ${rf.id} diverged at ${r.diff}`);
       expect(r.equal).toBe(true);
     }
-    // every edge got a net label (this fixture has no net conflict)
-    for (const e of edges) expect(typeof e.label).toBe("string");
+    // every edge resolved to a net (this fixture has no net conflict) — the
+    // visible `label` is separate and length-gated, see below
+    for (const e of edges) expect(typeof e.data?.net).toBe("string");
   });
 
   it("labels edges with the resolved net", () => {
@@ -202,12 +258,34 @@ describe("whole-graph adapter over a fixture", () => {
           W: 1,
           L: 1,
           ports: [{ id: "D" }, { id: "G" }, { id: "S" }],
-          position: [0, 0],
+          position: [0, 900],
         },
       ],
       edges: [{ id: "e1", source: { node: "VDD", port: "net" }, target: { node: "M1", port: "S" } }],
     };
     const { edges } = domainToRf(g);
+    expect(edges[0]!.data?.net).toBe("VDD");
     expect(edges[0]!.label).toBe("VDD");
+  });
+
+  it("drops the on-wire label when the two ends are close enough to read together", () => {
+    // Both handles already print "VDD" next to themselves; repeating it on a
+    // 40 px wire is the clutter that made a dense schematic unreadable.
+    const near: CircuitGraph = {
+      nodes: [
+        { id: "VDD", kind: "rail", net: "VDD", railValue: 1.8, ports: [{ id: "net" }], position: [0, 0] },
+        {
+          id: "M1", kind: "mosfet", name: "M1", W: 1, L: 1,
+          ports: [{ id: "D" }, { id: "G" }, { id: "S" }], position: [0, 40],
+        },
+      ],
+      edges: [{ id: "e1", source: { node: "VDD", port: "net" }, target: { node: "M1", port: "S" } }],
+    };
+    const { edges } = domainToRf(near);
+    expect(edges[0]!.label).toBeUndefined();
+    // …but the net itself is still carried, so hover highlight and the net class
+    // work exactly as before.
+    expect(edges[0]!.data?.net).toBe("VDD");
+    expect(edges[0]!.className).toContain(netClass("VDD"));
   });
 });

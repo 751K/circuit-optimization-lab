@@ -109,15 +109,15 @@ export function OperatingPoint({ result }: { result: unknown }) {
                 <tr>
                   <th>Device</th>
                   <th>Region</th>
-                  <th title="Drain-source voltage">V<sub>ds</sub></th>
-                  <th title="Saturation voltage">V<sub>dsat</sub></th>
-                  <th title="|Vds| − |Vdsat|; negative means triode">Headroom</th>
-                  <th title="Channel current">I<sub>d</sub></th>
-                  <th title="Transconductance">g<sub>m</sub></th>
-                  <th title="Transconductance efficiency — the current-for-gain trade">
+                  <th className="num" title="Drain-source voltage">V<sub>ds</sub></th>
+                  <th className="num" title="Saturation voltage">V<sub>dsat</sub></th>
+                  <th className="num" title="|Vds| − |Vdsat|; negative means triode">Headroom</th>
+                  <th className="num" title="Channel current">I<sub>d</sub></th>
+                  <th className="num" title="Transconductance">g<sub>m</sub></th>
+                  <th className="num" title="Transconductance efficiency — the current-for-gain trade">
                     g<sub>m</sub>/I<sub>d</sub>
                   </th>
-                  <th title="Intrinsic gain available from this device">
+                  <th className="num" title="Intrinsic gain available from this device">
                     g<sub>m</sub>/g<sub>ds</sub>
                   </th>
                   <th title="Model bin the geometry selected">Bin</th>
@@ -192,7 +192,7 @@ export function OperatingPoint({ result }: { result: unknown }) {
             <div className="table-scroll short">
               <table className="dtable">
                 <thead>
-                  <tr><th>Source</th><th>V</th><th>I</th><th>P</th></tr>
+                  <tr><th>Source</th><th className="num">V</th><th className="num">I</th><th className="num">P</th></tr>
                 </thead>
                 <tbody>
                   {Object.keys(currents).map((name) => (

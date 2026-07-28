@@ -1,26 +1,31 @@
 /**
- * Built-in example circuits for the "load from example" dropdown. These are the
- * same 12 JSON fixtures F1's round-trip test pins; import.meta.glob eagerly
- * bundles them so the palette can load one with no backend round-trip.
+ * Built-in example circuits for the palette's "load an example" menu.
+ *
+ * Read straight from the repository's `examples/` directory — see
+ * `model/examples.ts` for why that is the only copy. `import.meta.glob` bundles
+ * them eagerly so the palette can load one with no backend round-trip; Vite
+ * needs `server.fs.allow` to reach outside `frontend/` (see vite.config.ts).
  */
-import type { CircuitJson } from "../model";
+import { exampleFamily, toEntries, type ExampleEntry } from "../model/examples";
 
-const modules = import.meta.glob<CircuitJson>(
-  "../model/__fixtures__/*.json",
+const modules = import.meta.glob<unknown>(
+  "../../../examples/*.json",
   { eager: true, import: "default" },
 );
 
-export interface FixtureEntry {
-  /** Base filename without extension, e.g. "sky130_5t_ota". */
-  key: string;
-  /** The circuit's declared name, or the key when absent. */
-  label: string;
-  json: CircuitJson;
-}
+export type { ExampleEntry } from "../model/examples";
+export { exampleFamily } from "../model/examples";
 
-export const FIXTURES: FixtureEntry[] = Object.entries(modules)
-  .map(([path, json]) => {
-    const key = path.slice(path.lastIndexOf("/") + 1).replace(/\.json$/, "");
-    return { key, label: json.name ? `${key} (${json.name})` : key, json };
-  })
-  .sort((a, b) => a.key.localeCompare(b.key));
+export const FIXTURES: ExampleEntry[] = toEntries(modules);
+
+/** The examples grouped by PDK family, for an <optgroup> menu. */
+export const FIXTURE_GROUPS: { family: string; entries: ExampleEntry[] }[] =
+  Object.entries(
+    FIXTURES.reduce<Record<string, ExampleEntry[]>>((groups, entry) => {
+      const family = exampleFamily(entry.key);
+      (groups[family] ??= []).push(entry);
+      return groups;
+    }, {}),
+  )
+    .map(([family, entries]) => ({ family, entries }))
+    .sort((a, b) => a.family.localeCompare(b.family));

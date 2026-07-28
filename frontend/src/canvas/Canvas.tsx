@@ -10,7 +10,7 @@
  *  - Delete/Backspace     -> deleteSelection
  *  - drop from palette     -> onDropNode(kind, position)  (wired by parent)
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   ConnectionMode,
@@ -29,6 +29,16 @@ import { useEditor } from "../store";
 import { domainToRf, netClass, type RfEdge, type RfNode } from "./adapter";
 import { nodeTypes } from "./nodeTypes";
 import type { GraphNode } from "../model";
+
+/**
+ * A ranked schematic is far larger than the kind columns it replaced — a
+ * 35-device amplifier spans several thousand units — and React Flow's default
+ * `minZoom` of 0.5 silently clamps `fitView`, so the drawing simply arrives
+ * cropped rather than framed. The floor has to clear the largest circuit in the
+ * corpus, not a typical one.
+ */
+const MIN_ZOOM = 0.04;
+const FIT = { padding: 0.12, minZoom: MIN_ZOOM } as const;
 
 export default function Canvas({
   onDropNode,
@@ -54,6 +64,67 @@ export default function Canvas({
     [graph, conflictSet],
   );
 
+  // React Flow is fed from `live`, not straight from the projection.
+  //
+  // The store only learns a new position when the drag *ends*, so a fully
+  // controlled node list has nothing to show in between: the node stays put
+  // under the cursor and jumps to its new home on mouse-up. RF's own
+  // `applyNodeChanges` output was being computed and thrown away, which is the
+  // same thing. Holding the changes here gives RF the in-flight positions to
+  // render, and the effect below resyncs from the store — including right after
+  // the drag commits, where the two agree and nothing moves.
+  const [live, setLive] = useState<RfNode[]>(nodes);
+  useEffect(() => setLive(nodes), [nodes]);
+
+  // Re-fit whenever the document is replaced wholesale. `fitView` on the
+  // component only runs at mount, so loading a second circuit used to drop it
+  // wherever the previous viewport happened to be — which the schematic layout
+  // made worse, since a ranked drawing is far taller than the old kind columns.
+  // Keyed on viewEpoch and not on `graph`, so an ordinary edit never yanks the
+  // view out from under the user mid-drag.
+  const viewEpoch = useEditor((s) => s.viewEpoch);
+  useEffect(() => {
+    if (graph.nodes.length === 0) return;
+    // One frame later: RF measures the new nodes before it can frame them.
+    const id = requestAnimationFrame(() => rf.fitView(FIT));
+    return () => cancelAnimationFrame(id);
+    // `graph` and `rf` are read but deliberately not dependencies: this must
+    // fire on viewEpoch alone.
+  }, [viewEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-frame when the canvas itself changes size. Collapsing the results dock
+  // roughly doubles the pane height, and React Flow keeps the transform it had —
+  // so the drawing stayed at its old scale with half the canvas left empty, and
+  // even its own Fit View button measured against the stale size. Watching the
+  // element is the only signal: the dock is resized by layout, not by a window
+  // resize, so nothing else fires.
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    let last: { w: number; h: number } | null = null;
+    let pending = 0;
+    const obs = new ResizeObserver(([entry]) => {
+      const { width: w, height: h } = entry!.contentRect;
+      if (w === 0 || h === 0) return;
+      // The first observation is the initial layout, which `fitView` on the
+      // component already handled; and a change of a few pixels is a scrollbar
+      // or a rounding wobble, not a resize the user would want re-framed over
+      // whatever they had zoomed into.
+      const material = last !== null
+        && (Math.abs(w - last.w) > last.w * 0.05 || Math.abs(h - last.h) > last.h * 0.05);
+      last = { w, h };
+      if (!material) return;
+      cancelAnimationFrame(pending);
+      pending = requestAnimationFrame(() => rf.fitView(FIT));
+    });
+    obs.observe(el);
+    return () => {
+      cancelAnimationFrame(pending);
+      obs.disconnect();
+    };
+  }, [rf]);
+
   // Net-level hover highlight. We keep only the hovered net *name* in local
   // state and drive the visual via a single CSS class on the wrapper
   // (`highlight-<safe>`), so hovering never rebuilds the (memoized) edge array —
@@ -78,7 +149,10 @@ export default function Canvas({
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
-      // Persist a drag only when it finishes (position change with dragging:false).
+      // Render every change immediately — this is what makes a drag visible.
+      setLive((current) => applyNodeChanges(changes, current) as RfNode[]);
+      // …but only commit to the document when the drag finishes, so the undo
+      // stack gets one entry per drag rather than one per mouse-move.
       for (const c of changes) {
         if (c.type === "position" && c.dragging === false && c.position) {
           moveNode(c.id, [c.position.x, c.position.y]);
@@ -87,11 +161,23 @@ export default function Canvas({
           deleteNodes([c.id]);
         }
       }
-      // Live drag preview is handled by RF internally on the derived nodes via
-      // applyNodeChanges; we don't store transient positions.
-      void applyNodeChanges(changes, nodes as RfNode[]);
     },
-    [moveNode, deleteNodes, nodes],
+    [moveNode, deleteNodes],
+  );
+
+  // Shift+H flips the whole selection. The Inspector button only reaches one
+  // device at a time, and mirroring is usually something you want for a pair.
+  const mirrorNodes = useEditor((s) => s.mirrorNodes);
+  const selectedNodes = useEditor((s) => s.selection.nodes);
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key !== "H" && e.key !== "h") return;
+      if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (selectedNodes.length === 0) return;
+      e.preventDefault();
+      mirrorNodes(selectedNodes);
+    },
+    [mirrorNodes, selectedNodes],
   );
 
   const onEdgesChange = useCallback(
@@ -143,10 +229,10 @@ export default function Canvas({
   }, []);
 
   return (
-    <div className="canvas-wrap" onDrop={onDrop} onDragOver={onDragOver}>
+    <div className="canvas-wrap" ref={wrapRef} onDrop={onDrop} onDragOver={onDragOver} onKeyDown={onKeyDown}>
       {hoverStyle && <style>{hoverStyle}</style>}
       <ReactFlow
-        nodes={nodes}
+        nodes={live}
         edges={edges}
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
@@ -157,7 +243,9 @@ export default function Canvas({
         onEdgeMouseLeave={onEdgeLeave}
         connectionMode={ConnectionMode.Loose}
         deleteKeyCode={["Delete", "Backspace"]}
+        minZoom={MIN_ZOOM}
         fitView
+        fitViewOptions={FIT}
         proOptions={{ hideAttribution: true }}
       >
         <Background gap={16} />

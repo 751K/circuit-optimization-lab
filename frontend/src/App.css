@@ -142,6 +142,8 @@ body {
   color: var(--ink);
 }
 .field input:focus, .field select:focus, textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+/* Echoes what an engineering-notation entry parsed to ("20u" = 20 µs). */
+.field-echo { color: var(--accent); font-family: var(--mono); }
 
 .import-box { margin-top: 8px; }
 .import-box textarea { width: 100%; font-family: var(--mono); font-size: 11px; resize: vertical; }
@@ -195,6 +197,11 @@ body {
 
 .cnode.rail { background: #eef2ff; }
 .cnode.output { background: #f0fdf4; }
+/* A two-terminal drawn along the vertical stacks its symbol over its label, so
+   the body stays roughly square instead of growing a wide horizontal box in the
+   middle of a column. */
+.cnode.twot.vert { flex-direction: column; gap: 2px; padding: 8px 10px; }
+.cnode.twot.vert .cnode-body { align-items: center; text-align: center; }
 
 /* handles */
 .handle {
@@ -220,19 +227,50 @@ body {
 .netlbl-left { left: -4px; top: -14px; }
 .netlbl-right { right: -4px; top: -14px; }
 
+/* Terminal letters. The mosfet symbol flips for a P-type so its source faces
+   the supply, so which end is the drain has to be readable, not inferred. */
+.portlbl {
+  position: absolute;
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--muted);
+  font-family: var(--mono);
+  pointer-events: none;
+  line-height: 1;
+}
+.portlbl-top { top: 2px; left: 50%; transform: translateX(-50%); }
+.portlbl-bottom { bottom: 2px; left: 50%; transform: translateX(-50%); }
+.portlbl-left { left: 2px; top: 50%; transform: translateY(-50%); }
+.portlbl-right { right: 2px; top: 50%; transform: translateY(-50%); }
+
+/* A mirrored device puts its gate on the right, so the symbol has to sit on
+   that side of the label block too — otherwise the gate lead would leave the
+   symbol and cross the text to reach its handle. */
+.cnode.mosfet.mirror { flex-direction: row-reverse; }
+.cnode.mosfet.mirror .cnode-body { align-items: flex-end; text-align: right; }
+
 /* ── edges (EDA-style: signal solid & dark, power dimmed & dashed) ─────── */
 /* Signal nets: the readable path. Solid, darker, a touch wider. */
 .react-flow__edge.edge-signal .react-flow__edge-path {
   stroke: #64748b;
   stroke-width: 1.6px;
 }
-/* Power/ground rail nets: real schematics don't draw long power wires, so we
-   dim them hard — thin, light, dashed, low opacity — to keep signal flow read. */
+/* Power/ground buses. Solid, like every other wire — a dashed supply reads as
+   "not a real connection", and on a ranked layout the buses are short drops to
+   a bar rather than the long diagonals that made dimming worth it. Kept a shade
+   lighter and thinner than signal so the eye still sorts supply from signal. */
 .react-flow__edge.edge-rail .react-flow__edge-path {
-  stroke: #b6bdc9;
-  stroke-width: 1px;
-  stroke-dasharray: 4 3;
-  stroke-opacity: 0.6;
+  stroke: #9aa3b2;
+  stroke-width: 1.3px;
+  stroke-opacity: 0.95;
+}
+/* Bias / input taps. Fixed-potential like a supply, but they set the operating
+   point of one device each and you are meant to trace them — solid, and tinted
+   so they still read as "held at a potential" rather than as signal. */
+.react-flow__edge.edge-bias .react-flow__edge-path {
+  stroke: #8b5cf6;
+  stroke-width: 1.5px;
+  stroke-opacity: 0.9;
 }
 /* Net-conflict short: loud red over everything. */
 .react-flow__edge.edge-conflict .react-flow__edge-path {
@@ -265,6 +303,27 @@ body {
 .jdot-bottom { bottom: -3.5px; left: 50%; transform: translateX(-50%); }
 .jdot-left { left: -3.5px; top: 50%; transform: translateY(-50%); }
 .jdot-right { right: -3.5px; top: 50%; transform: translateY(-50%); }
+
+/* ── stimulus summary (Simulate panel) ───────────────────────────────── */
+/* Says what will drive each selected run *before* it runs: a silent AC returns
+   the -180 dB floor and a silent transient returns a flat line, and both look
+   like results. */
+.stimulus { margin: 8px 0; }
+.stim-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 6px;
+  border-left: 2px solid var(--border-strong);
+  font-size: 11px;
+  margin-bottom: 3px;
+}
+.stim-row.silent { border-left-color: var(--err); background: #fef2f2; }
+.stim-analysis { font-family: var(--mono); font-weight: 700; flex: none; min-width: 56px; }
+.stim-detail { color: var(--muted); }
+.stim-ports { display: block; margin-top: 2px; }
+.stim-port { display: inline-block; margin-right: 8px; color: var(--node-ink); }
+.btn.wide { width: 100%; justify-content: center; }
 
 /* ── right rail tabs ─────────────────────────────────────────────────── */
 .rail-tabs {
@@ -411,6 +470,9 @@ body {
   letter-spacing: 0.4px; color: var(--muted); font-weight: 600;
 }
 .dtable tbody tr:hover { background: #f8fafc; }
+/* A numeric header must sit over its own column. Left-aligned above
+   right-aligned cells it reads as belonging to the column before it. */
+.dtable th.num { text-align: right; }
 .dtable .num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
 .dtable .mono { font-family: var(--mono); }
 .dtable .tiny { font-size: 10px; color: var(--muted); }

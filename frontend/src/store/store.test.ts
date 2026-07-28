@@ -11,9 +11,10 @@ import { useEditor } from "./store";
 import { circuitJsonToGraph } from "../model/toGraph";
 import { graphToCircuitJson } from "../model/toJson";
 import { deepEqual } from "../model/util";
+import { isCircuitJson } from "../model/examples";
 import type { CircuitJson, MosfetNode } from "../model";
 
-const FIX_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "model", "__fixtures__");
+const FIX_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "examples");
 
 /** Reset the singleton store to a clean document before each test. */
 function reset(): void {
@@ -244,9 +245,13 @@ describe("store: load / new", () => {
 });
 
 describe("store: fixture -> store -> export round-trip", () => {
+  // `examples/` also holds explore configs and signoff manifests; select the
+  // circuits by shape rather than by an allow-list that would go stale.
   const files = readdirSync(FIX_DIR)
     .filter((f) => f.endsWith(".json"))
-    .sort();
+    .sort()
+    .filter((f) =>
+      isCircuitJson(JSON.parse(readFileSync(join(FIX_DIR, f), "utf-8"))));
 
   for (const f of files) {
     it(`${f} exports deep-equal to source (ignoring ui)`, () => {
@@ -271,5 +276,137 @@ describe("store: fixture -> store -> export round-trip", () => {
     const { graph, rest } = circuitJsonToGraph(json);
     const viaModel = graphToCircuitJson(graph, rest);
     expect(deepEqual(viaStore, viaModel).equal).toBe(true);
+  });
+});
+
+describe("store: relayout", () => {
+  beforeEach(reset);
+
+  function ota(): CircuitJson {
+    return JSON.parse(
+      readFileSync(join(FIX_DIR, "sky130_5t_ota.json"), "utf-8"),
+    ) as CircuitJson;
+  }
+  const yOf = (id: string): number =>
+    s().graph.nodes.find((n) => n.id === id)!.position[1];
+
+  it("restores the supply ranking after the positions have been scrambled", () => {
+    s().loadCircuit(ota());
+    // Pile every node onto one point, as a hand-edited (or legacy kind-column)
+    // circuit effectively does to the ranking.
+    useEditor.setState({
+      graph: {
+        nodes: s().graph.nodes.map((n) => ({ ...n, position: [0, 0] as [number, number] })),
+        edges: s().graph.edges,
+      },
+    });
+    s().relayout();
+    expect(yOf("VDD")).toBeLessThan(yOf("M3"));
+    expect(yOf("M3")).toBeLessThan(yOf("M1"));
+    expect(yOf("M1")).toBeLessThan(yOf("M5"));
+    expect(yOf("M5")).toBeLessThan(yOf("GND"));
+  });
+
+  it("reproduces the import layout exactly, and is undo-able", () => {
+    s().loadCircuit(ota());
+    const onImport = s().graph.nodes.map((n) => `${n.id}:${n.position}`);
+    useEditor.setState({
+      graph: {
+        nodes: s().graph.nodes.map((n) => ({ ...n, position: [7, 7] as [number, number] })),
+        edges: s().graph.edges,
+      },
+    });
+    s().relayout();
+    // Idempotent: the action reads the resolved nets while import reads each
+    // port's remembered `originalNet`, and the two must agree — otherwise
+    // pressing Tidy on an untouched circuit would move it.
+    expect(s().graph.nodes.map((n) => `${n.id}:${n.position}`)).toEqual(onImport);
+    s().undo();
+    expect(s().graph.nodes.every((n) => n.position[0] === 7)).toBe(true);
+  });
+
+  it("changes nothing when the circuit has no rail to rank against", () => {
+    // Two bare devices and no rails: there is no supply stack to draw, so the
+    // action must decline rather than pile everything on the origin.
+    s().addNode("mosfet", [10, 20]);
+    s().addNode("mosfet", [30, 40]);
+    const before = s().graph.nodes.map((n) => `${n.id}:${n.position}`);
+    s().relayout();
+    expect(s().graph.nodes.map((n) => `${n.id}:${n.position}`)).toEqual(before);
+  });
+
+  it("bumps viewEpoch so the canvas refits, and only on a wholesale change", () => {
+    s().loadCircuit(ota());
+    const afterLoad = s().viewEpoch;
+    s().moveNode("M1", [1, 2]);
+    expect(s().viewEpoch).toBe(afterLoad); // an edit must not yank the viewport
+    s().relayout();
+    expect(s().viewEpoch).toBeGreaterThan(afterLoad);
+  });
+});
+
+describe("store: mirrorNodes", () => {
+  beforeEach(reset);
+
+  function ota(): CircuitJson {
+    return JSON.parse(
+      readFileSync(join(FIX_DIR, "sky130_5t_ota.json"), "utf-8"),
+    ) as CircuitJson;
+  }
+  const mos = (id: string): MosfetNode =>
+    s().graph.nodes.find((n) => n.id === id) as MosfetNode;
+
+  it("flips a device and back, and is undo-able", () => {
+    s().loadCircuit(ota());
+    expect(mos("M2").mirrored).toBeUndefined();
+    s().mirrorNodes(["M2"]);
+    expect(mos("M2").mirrored).toBe(true);
+    s().mirrorNodes(["M2"]);
+    expect(mos("M2").mirrored).toBeUndefined();
+    s().undo();
+    expect(mos("M2").mirrored).toBe(true);
+  });
+
+  it("moves a mixed selection as one group instead of alternating it", () => {
+    s().loadCircuit(ota());
+    s().mirrorNodes(["M1"]);
+    // M1 mirrored, M2 not. Flipping both must make them agree, not swap them.
+    s().mirrorNodes(["M1", "M2"]);
+    expect(mos("M1").mirrored).toBe(true);
+    expect(mos("M2").mirrored).toBe(true);
+    s().mirrorNodes(["M1", "M2"]);
+    expect(mos("M1").mirrored).toBeUndefined();
+    expect(mos("M2").mirrored).toBeUndefined();
+  });
+
+  it("ignores ids that are not devices, and never touches the netlist", () => {
+    s().loadCircuit(ota());
+    const before = JSON.stringify(s().exportJson().devices);
+    s().mirrorNodes(["VDD", "__loadcap_0", "M5"]);
+    expect(s().graph.nodes.find((n) => n.id === "VDD")).not.toHaveProperty("mirrored");
+    expect(mos("M5").mirrored).toBe(true);
+    // Orientation is display only: the exported devices block is byte-identical.
+    expect(JSON.stringify(s().exportJson().devices)).toBe(before);
+  });
+
+  it("round-trips the orientation through ui.mirrored", () => {
+    s().loadCircuit(ota());
+    s().mirrorNodes(["M4", "M2"]);
+    const exported = s().exportJson();
+    expect(exported.ui?.mirrored).toEqual(["M2", "M4"]); // sorted, for a stable diff
+    s().newCircuit();
+    s().loadCircuit(exported);
+    expect(mos("M2").mirrored).toBe(true);
+    expect(mos("M4").mirrored).toBe(true);
+    expect(mos("M1").mirrored).toBeUndefined();
+  });
+
+  it("omits ui.mirrored entirely when nothing is mirrored", () => {
+    // A circuit nobody flipped must export the bytes it did before the feature.
+    s().loadCircuit(ota());
+    expect(s().exportJson().ui).not.toHaveProperty("mirrored");
+    s().mirrorNodes(["M1"]);
+    s().mirrorNodes(["M1"]);
+    expect(s().exportJson().ui).not.toHaveProperty("mirrored");
   });
 });

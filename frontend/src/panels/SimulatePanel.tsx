@@ -15,10 +15,17 @@
  * so it exports and undoes like any other change — unlike the AC/noise sweep
  * defaults, which are injected into the request only.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useEditor, useSession } from "../store";
 import { DEFAULT_SWEEP_LABEL, missingConfigMessage, prepareSolveCircuit } from "./runConfig";
 import { NumberField } from "./fields";
+import {
+  deriveBlocker,
+  deriveTransientPeriodic,
+  stimulusReport,
+  type StimulusPort,
+} from "./stimulus";
+import { formatValue } from "../results/format";
 
 /** Analyses in the order they are usually reached, with a one-line purpose. */
 const HINTS: Record<string, string> = {
@@ -32,6 +39,23 @@ const HINTS: Record<string, string> = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The resolved AC input ports, so "what drives this" is a net name, not a block name. */
+function PortList({ ports }: { ports: StimulusPort[] }) {
+  if (ports.length === 0) return null;
+  return (
+    <span className="stim-ports">
+      {ports.map((p) => (
+        <span className="stim-port" key={`${p.via}:${p.device ?? p.net}`}>
+          <code>{p.net}</code>
+          {p.magnitude >= 0 ? " +" : " −"}
+          {formatValue(Math.abs(p.magnitude), "")}
+          {p.device && <span className="muted"> ({p.device}.G)</span>}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 export default function SimulatePanel() {
@@ -59,6 +83,36 @@ export default function SimulatePanel() {
 
   const configured = isRecord(rest.analyses) ? rest.analyses : {};
   const transientCfg = isRecord(configured.transient) ? configured.transient : null;
+
+  // Stimulus is read from the exported circuit, not from `rest`: the AC drives
+  // live on the devices, which only exist once the graph is serialised.
+  const [stimFreq, setStimFreq] = useState(1e3);
+  const [stimAmp, setStimAmp] = useState(1e-3);
+  const circuit = useMemo(
+    () => (nodeCount > 0 ? exportJson() : null),
+    // exportJson reads the live graph; recompute whenever the document changes.
+    [nodeCount, rest, exportJson],
+  );
+  const reports = useMemo(
+    () => (circuit
+      ? selected.map((name) => ({ name, ...stimulusReport(circuit, name) }))
+      : []),
+    [circuit, selected],
+  );
+  const blocker = circuit ? deriveBlocker(circuit) : null;
+
+  const deriveStimulus = (): void => {
+    if (!circuit) return;
+    const periodic = deriveTransientPeriodic(circuit, {
+      frequency: stimFreq,
+      amplitude: stimAmp,
+    });
+    if (!periodic) return;
+    // Under analyses.transient, not at the top level: the dispatcher merges it
+    // over any top-level `periodic`, so this configures the transient without
+    // changing what PSS/PAC/PNoise are excited by.
+    setAnalysisConfig("transient", { ...(transientCfg ?? {}), periodic });
+  };
 
   const toggle = (key: string): void =>
     setSelected((prev) =>
@@ -112,6 +166,21 @@ export default function SimulatePanel() {
             })}
           </div>
 
+          {reports.length > 0 && (
+            <div className="stimulus">
+              <div className="subhead">Stimulus</div>
+              {reports.map((r) => (
+                <div className={`stim-row${r.silent ? " silent" : ""}`} key={r.name}>
+                  <span className="stim-analysis">{r.name}</span>
+                  <span className="stim-detail">
+                    {r.detail}
+                    {r.kind === "ac" && <PortList ports={r.ports} />}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
           {selected.includes("transient") && (
             <div className="sub-config">
               <button
@@ -123,8 +192,39 @@ export default function SimulatePanel() {
               </button>
               {showTransient && (
                 <>
+                  <div className="subhead">Input waveform</div>
+                  {blocker ? (
+                    <p className="muted small">{blocker}</p>
+                  ) : (
+                    <>
+                      <NumberField
+                        label="Frequency"
+                        unit="Hz"
+                        value={stimFreq}
+                        onCommit={(v) => v !== undefined && v > 0 && setStimFreq(v)}
+                      />
+                      <NumberField
+                        label="Amplitude"
+                        unit="V"
+                        value={stimAmp}
+                        onCommit={(v) => v !== undefined && setStimAmp(v)}
+                      />
+                      <button className="btn wide" onClick={deriveStimulus}>
+                        Drive the AC input ports with a sine
+                      </button>
+                      <p className="muted small">
+                        A sine per input port, centred on that rail’s own DC level
+                        and 180° apart for a differential pair — the same ports{" "}
+                        <code>ac</code> uses. Written to{" "}
+                        <code>analyses.transient.periodic</code>, so PSS/PAC keep
+                        their own excitation.
+                      </p>
+                    </>
+                  )}
+                  <div className="subhead">Time grid</div>
                   <NumberField
-                    label="Stop time (s)"
+                    label="Stop time"
+                    unit="s"
                     value={typeof transientCfg?.tstop === "number"
                       ? transientCfg.tstop : undefined}
                     onCommit={(v) => v !== undefined && patchTransient({ tstop: v })}
@@ -136,6 +236,7 @@ export default function SimulatePanel() {
                     onCommit={(v) => v !== undefined && patchTransient({ n_points: v })}
                   />
                   <p className="muted small">
+                    Accepts <code>20u</code>, <code>1n</code>, <code>2e-5</code>.
                     Written into the circuit’s <code>analyses</code> block, so it
                     exports and undoes with the rest of the design.
                   </p>

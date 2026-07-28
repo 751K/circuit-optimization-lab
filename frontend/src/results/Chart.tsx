@@ -11,6 +11,30 @@ import ReactECharts from "echarts-for-react";
 import type { PlotSpec } from "./transform";
 
 /**
+ * Axis tick label for a value that may span many decades.
+ *
+ * ECharts writes a noise PSD tick of 1e-18 as "0.000000000000000001", which is
+ * unreadable and pushes the axis area across the plot. Anything outside a
+ * comfortable reading range becomes `1e-18`; values inside it keep their plain
+ * form, because "1000" reads better than "1e3".
+ */
+export function axisTick(value: number): string {
+  if (!Number.isFinite(value)) return "";
+  if (value === 0) return "0";
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1e-3 && magnitude < 1e5) {
+    // Trim the float noise a log axis produces (0.30000000000000004).
+    return String(Number(value.toPrecision(6)));
+  }
+  const exponent = Math.floor(Math.log10(magnitude));
+  const mantissa = value / Math.pow(10, exponent);
+  const shown = Number(mantissa.toPrecision(3));
+  return shown === 1 ? `1e${exponent}`
+    : shown === -1 ? `-1e${exponent}`
+    : `${shown}e${exponent}`;
+}
+
+/**
  * Traces shown by default. Beyond this the plot is drawn with only the first few
  * enabled and the rest one legend click away — a wall of overlapping lines
  * conveys less than four.
@@ -47,6 +71,8 @@ export function Chart({ plot, height = 300 }: { plot: PlotSpec; height?: number 
         axisPointer: { type: "cross" },
         confine: true,
         textStyle: { fontSize: 11 },
+        valueFormatter: (v: unknown) =>
+          typeof v === "number" ? axisTick(v) : String(v),
       },
       legend: {
         type: "scroll",
@@ -68,7 +94,7 @@ export function Chart({ plot, height = 300 }: { plot: PlotSpec; height?: number 
         nameLocation: "middle",
         nameGap: 26,
         nameTextStyle: { fontSize: 11 },
-        axisLabel: { fontSize: 10 },
+        axisLabel: { fontSize: 10, formatter: axisTick },
         // A *value* axis includes zero by default, which collapses data
         // clustered far from it — a mismatch histogram spanning 63.71–63.77 dB
         // — into one pixel at the right edge. A log axis never includes zero
@@ -82,7 +108,7 @@ export function Chart({ plot, height = 300 }: { plot: PlotSpec; height?: number 
           nameLocation: "middle",
           nameGap: 48,
           nameTextStyle: { fontSize: 11 },
-          axisLabel: { fontSize: 10 },
+          axisLabel: { fontSize: 10, formatter: axisTick },
           scale: !plot.yFromZero,
         },
         ...(hasSecondary
@@ -92,7 +118,7 @@ export function Chart({ plot, height = 300 }: { plot: PlotSpec; height?: number 
               nameLocation: "middle" as const,
               nameGap: 46,
               nameTextStyle: { fontSize: 11 },
-              axisLabel: { fontSize: 10 },
+              axisLabel: { fontSize: 10, formatter: axisTick },
               splitLine: { show: false },
               scale: true,
             }]
