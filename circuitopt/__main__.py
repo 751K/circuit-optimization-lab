@@ -42,8 +42,8 @@ from .chopper import (chopper_analysis, pmos_chopper_analysis,
                       pmos_chopper_pnoise, pmos_chopper_pss,
                       pmos_chopper_transient)
 from .circuit_loader import load_circuit_json
-from .corners import corner_table, mismatch_mc_from_dict, silicon_corner_names
-from .device_factory import is_silicon_model_types
+from .corners import (corner_plan, corner_table, mismatch_mc_from_dict,
+                      pvt_axes_error)
 from .dataset import add_cli_args as dataset_add_cli_args
 from .dataset import run_cli as dataset_run_cli
 from .explore import add_cli_args as explore_add_cli_args
@@ -648,20 +648,18 @@ def _cmd_corners(args):
     lo, hi = args.noise_band
     temps, vdd_scale = args.temps, args.vdd_scale
 
-    # Carry the per-device model binding so a silicon circuit keeps its BSIM4 cards
-    # (and routes through the compiled campaign) instead of silently reverting to the
-    # default OTFT PDK; silicon then sweeps card corners, OTFT keeps typical/slow/fast.
-    binding = spec.binding()
-    silicon = is_silicon_model_types(binding.model_types)
-    corners = (silicon_corner_names(binding.model_types) if silicon
-               else ("typical", "slow", "fast"))
+    # corner_plan carries the per-device model binding so a silicon circuit keeps its
+    # BSIM4 cards (and routes through the compiled campaign) instead of silently
+    # reverting to the default OTFT PDK; silicon then sweeps card corners, OTFT keeps
+    # typical/slow/fast. The service's PVT job resolves both through the same call.
+    binding, corners, silicon = corner_plan(spec)
 
     # The PVT axes are silicon-only (corner_table enforces the same guard); fail early
     # and cleanly here so an OTFT circuit gets a message, not a partial table + trace.
-    if (temps is not None or vdd_scale is not None) and not silicon:
-        raise SystemExit(
-            "corners: --temps/--vdd-scale require an all-silicon circuit; this "
-            "OTFT/default-PDK circuit has no temperature or supply-scale axis")
+    if temps is not None or vdd_scale is not None:
+        message = pvt_axes_error(silicon)
+        if message is not None:
+            raise SystemExit(f"corners: {message}")
 
     if not args.quiet:
         print(f"Corner sweep for {args.circuit}")

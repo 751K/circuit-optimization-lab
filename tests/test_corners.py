@@ -14,6 +14,7 @@ import circuitopt.corners as corners_mod
 from circuitopt.corners import (
     CORNERS,
     corner_table,
+    corner_table_from_dict,
     latch_screen,
     metrics,
     mismatch_mc,
@@ -84,6 +85,94 @@ def test_corner_table_rejects_invalid_workers():
     with pytest.raises(ValueError, match="workers"):
         corner_table(ROBUST["sizes"], ROBUST["bias"], nf=ROBUST["nf"],
                      freqs=FREQS, workers=0)
+
+
+def test_corner_table_progress_hook_leaves_the_table_untouched():
+    # The hook exists for a background job's progress bar. It runs after a slice is
+    # already computed, so supplying one must not move a single number.
+    kwargs = dict(nf=ROBUST["nf"], freqs=FREQS, include_noise=False)
+    plain = corner_table(ROBUST["sizes"], ROBUST["bias"], **kwargs)
+
+    calls = []
+    hooked = corner_table(ROBUST["sizes"], ROBUST["bias"],
+                          progress=lambda done, total: calls.append((done, total)),
+                          **kwargs)
+    assert calls == [(1, 1)]                # a sweep with no PVT axis is one slice
+    for corner in plain:
+        for key in ("gain_peak_dB", "bw_Hz", "latch_dV"):
+            assert hooked[corner][key] == plain[corner][key]
+        assert hooked[corner]["dc_op"] == plain[corner]["dc_op"]
+
+
+def test_corner_table_survives_a_broken_progress_hook():
+    # A reporting callback belongs to the caller's transport. If a client
+    # disconnects mid-sweep and the hook raises, the computed table must still be
+    # returned -- losing a finished numerical result to a dead socket is not a
+    # trade anyone would accept.
+    def boom(done, total):
+        raise RuntimeError("websocket closed")
+
+    table = corner_table(ROBUST["sizes"], ROBUST["bias"], nf=ROBUST["nf"],
+                         freqs=FREQS, include_noise=False, progress=boom)
+    assert set(table) == {"typical", "slow", "fast"}
+    assert table["typical"]["gain_peak_dB"] > 0.0
+
+
+def test_corner_table_from_dict_picks_each_familys_own_corner_names():
+    # The one thing that must not drift between `circuit-opt corners` and the
+    # service's PVT job: which corner names a circuit sweeps. The OTFT process
+    # names and the silicon card corners are disjoint, so picking from the wrong
+    # space yields corners that cannot resolve, not merely different ones.
+    import json
+    from pathlib import Path
+
+    from circuitopt.corners import circuit_corner_names
+
+    examples = Path(__file__).resolve().parent.parent / "examples"
+    otft = json.loads((examples / "afe_explore.json").read_text())
+    silicon = json.loads((examples / "sky130_fd_ota.json").read_text())
+
+    otft_names, otft_silicon = circuit_corner_names(otft)
+    assert otft_names == ("typical", "slow", "fast")
+    assert otft_silicon is False
+
+    si_names, si_silicon = circuit_corner_names(silicon)
+    assert si_silicon is True
+    assert set(si_names).issubset({"tt", "ss", "ff", "sf", "fs"})
+    assert not set(si_names) & set(otft_names)
+
+    # And the sweep actually keys on them.
+    table = corner_table_from_dict(otft, freqs=FREQS, include_noise=False)
+    assert set(table) == set(otft_names)
+
+
+def test_corner_table_from_dict_rejects_a_pvt_axis_an_otft_circuit_lacks():
+    # `corner_table` guards the axis too, so matching on "all-silicon" alone would
+    # pass with this guard deleted. The distinct claim is that the rejection comes
+    # from the *shared* wording -- the one both the CLI and the service quote --
+    # which says "circuit" where the numerical layer says "binding".
+    import json
+    from pathlib import Path
+
+    from circuitopt.corners import pvt_axes_error
+
+    examples = Path(__file__).resolve().parent.parent / "examples"
+    otft = json.loads((examples / "afe_explore.json").read_text())
+    with pytest.raises(ValueError) as excinfo:
+        corner_table_from_dict(otft, freqs=FREQS, temps=[0.0, 85.0])
+    assert str(excinfo.value) == pvt_axes_error(silicon=False)
+    assert "all-silicon circuit" in str(excinfo.value)
+
+
+def test_pvt_axes_error_is_the_single_wording_both_surfaces_quote():
+    # The CLI raises SystemExit and the service raises a 422; the sentence a user
+    # reads must not depend on which one they happened to be using.
+    from circuitopt.corners import pvt_axes_error
+
+    assert pvt_axes_error(silicon=True) is None
+    message = pvt_axes_error(silicon=False)
+    assert "--temps/--vdd-scale" in message      # names the CLI flags
+    assert "all-silicon circuit" in message
 
 
 def test_latch_screen_separates_latch_prone_from_robust(monkeypatch):

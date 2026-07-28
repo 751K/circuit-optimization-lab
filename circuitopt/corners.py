@@ -18,6 +18,7 @@ live in dedicated verification scripts instead of the core solver package.
 """
 import dataclasses
 import itertools
+import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import wraps
 
@@ -247,7 +248,7 @@ def _is_silicon_binding(binding) -> bool:
 def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
                  corners=("typical", "slow", "fast"), freqs=None, band=(0.05, 100.0),
                  include_noise=True, workers=1, *, binding=None, temps=None,
-                 vdd_scale=None):
+                 vdd_scale=None, progress=None):
     """Evaluate a design across process corners -> {corner: metrics-or-None}.
 
     ``binding`` (a :class:`CircuitBinding`): when it binds a silicon circuit the whole
@@ -275,7 +276,13 @@ def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
     ``tests/test_pvt_semantics.test_ac_ngspice_gain_tracks_supply``); it is a
     supply-ratioed scaling, **not** an independent-VDD-with-regenerated-bias sweep.
     Both axes are silicon-only: an OTFT / default-PDK circuit rejects them (no defined
-    temperature or supply-scale semantics)."""
+    temperature or supply-scale semantics).
+
+    ``progress(done, total)`` is an optional reporting hook for long-running callers
+    (the service's PVT job). It fires once per completed grid **slice** — never
+    per candidate — so it cannot perturb a batch, and the results it reports on are
+    already computed. ``progress=None`` (the default) leaves every path byte-for-byte
+    as it was."""
     if workers is None or workers < 1:
         raise ValueError("workers must be a positive integer")
     corner_names = tuple(corners)
@@ -296,13 +303,16 @@ def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
                 "vdd_scale must be a non-empty sequence of factors, or None")
         freqs_eff = _DEFAULT_FREQS if freqs is None else freqs
         return _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs_eff, band,
-                                 include_noise, workers, binding, temps, vdd_scale)
+                                 include_noise, workers, binding, temps, vdd_scale,
+                                 progress)
 
     if _is_silicon_binding(binding):
         freqs_eff = _DEFAULT_FREQS if freqs is None else freqs
         camp = silicon_campaign_for(topo, sizes, bias, nf, binding, freqs_eff, band)
-        return _corner_table_silicon(camp, sizes, bias, nf, topo, corner_names,
-                                     freqs_eff, band, include_noise, workers, binding)
+        table = _corner_table_silicon(camp, sizes, bias, nf, topo, corner_names,
+                                      freqs_eff, band, include_noise, workers, binding)
+        _report_progress(progress, 1, 1)
+        return table
 
     corner_values = tuple(CORNERS[c] for c in corner_names)
 
@@ -315,7 +325,24 @@ def corner_table(sizes, bias, nf=None, topo=AFE_TOPO,
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             values = list(executor.map(evaluate_corner, corner_values))
-    return dict(zip(corner_names, values))
+    table = dict(zip(corner_names, values))
+    _report_progress(progress, 1, 1)
+    return table
+
+
+def _report_progress(progress, done, total):
+    """Call an optional ``progress(done, total)`` hook, ignoring its failures.
+
+    A reporting callback belongs to the caller's transport (a WebSocket queue, a
+    terminal), not to the sweep. A broken one must not take the numerical result
+    down with it, so the exception is recorded and swallowed — the table is already
+    computed by the time this runs."""
+    if progress is None:
+        return
+    try:
+        progress(done, total)
+    except Exception as exc:                        # noqa: BLE001 - see docstring
+        diagnostics.note("corners.progress_hook_failed", exc)
 
 
 def _corner_table_silicon(camp, sizes, bias, nf, topo, corner_names, freqs, band,
@@ -404,7 +431,8 @@ def _supply_scaled_binding(binding, scale, devices):
 
 
 def _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs, band,
-                      include_noise, workers, binding, temps, vdd_scale=None):
+                      include_noise, workers, binding, temps, vdd_scale=None,
+                      progress=None):
     """PVT grid: nest the silicon corner sweep over the temperature (°C) and
     supply-scale axes.
 
@@ -436,6 +464,12 @@ def _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs, band,
     # One slice -> spend workers on its batch; many slices -> one worker per slice.
     inner_workers = workers if len(slice_keys) == 1 else 1
 
+    # Completion counter for the optional progress hook. Slices may finish out of
+    # order under a worker pool, so this reports *how many* are done, never which —
+    # the assembled table below stays in slice order regardless.
+    done_lock = threading.Lock()
+    done_count = itertools.count(1)
+
     def run_slice(key):
         tc, vs = key
         tbind = _temperature_binding(binding, tc, devices)
@@ -443,8 +477,12 @@ def _corner_table_pvt(sizes, bias, nf, topo, corner_names, freqs, band,
         sbias = (bias if vs is None
                  else {k: v * float(vs) for k, v in bias.items()})
         camp = silicon_campaign_for(topo, sizes, sbias, nf, tbind, freqs, band)
-        return _corner_table_silicon(camp, sizes, sbias, nf, topo, corner_names,
-                                     freqs, band, include_noise, inner_workers, tbind)
+        table = _corner_table_silicon(camp, sizes, sbias, nf, topo, corner_names,
+                                      freqs, band, include_noise, inner_workers, tbind)
+        if progress is not None:
+            with done_lock:
+                _report_progress(progress, next(done_count), len(slice_keys))
+        return table
 
     if workers == 1 or len(slice_keys) == 1:
         slice_tables = [run_slice(key) for key in slice_keys]
@@ -818,3 +856,79 @@ def mismatch_mc_from_dict(data, n=300, seed=0, corner="typical", freqs=None,
                        base=base, n=n, seed=seed, freqs=freqs, band=band,
                        progress=progress, should_stop=should_stop, workers=workers,
                        binding=binding)
+
+
+def corner_plan(spec):
+    """The corner sweep a parsed circuit spec admits -> ``(binding, names, silicon)``.
+
+    Silicon circuits sweep their card family's corners (:func:`silicon_corner_names`);
+    AFE / default-PDK circuits sweep the OTFT ``typical/slow/fast`` process names. The
+    two name spaces are disjoint, so offering the wrong one is not a cosmetic mistake
+    — it is a corner that cannot resolve. ``silicon`` additionally tells a caller
+    whether the temperature / supply-scale PVT axes exist at all.
+
+    ``binding`` is returned because every caller needs it next: it carries the
+    per-device BSIM4 cards that keep a silicon circuit on the compiled campaign
+    instead of silently reverting to the default OTFT PDK.
+
+    The one place this decision is made. ``circuit-opt corners`` and
+    :func:`corner_table_from_dict` both come through here."""
+    binding = spec.binding()
+    silicon = is_silicon_model_types(binding.model_types)
+    names = (tuple(silicon_corner_names(binding.model_types)) if silicon
+             else ("typical", "slow", "fast"))
+    return binding, names, silicon
+
+
+def pvt_axes_error(silicon):
+    """The message for a PVT axis requested on a circuit that has no such axis, or
+    ``None`` when the axes are available. Shared so the CLI's ``SystemExit`` and the
+    service's 422 say the same thing."""
+    if silicon:
+        return None
+    return ("--temps/--vdd-scale require an all-silicon circuit; this "
+            "OTFT/default-PDK circuit has no temperature or supply-scale axis")
+
+
+def circuit_corner_names(data):
+    """:func:`corner_plan` for a circuit-JSON *dict* -> ``(names, silicon)``.
+
+    The service's self-description path: a GUI asks what corners this circuit can
+    actually run before offering them in a menu."""
+    _binding, names, silicon = corner_plan(circuit_from_dict(data))
+    return names, silicon
+
+
+def corner_table_from_dict(data, corners=None, freqs=None, band=(0.05, 100.0),
+                           include_noise=True, workers=1, temps=None,
+                           vdd_scale=None, progress=None):
+    """Run a PVT corner sweep from a parsed circuit-JSON *dict*. Returns the
+    :func:`corner_table` result table.
+
+    The shared entry point for ``circuit-opt corners`` (via
+    :meth:`__main__._cmd_corners`) and the service's ``POST /api/v1/jobs/pvt`` — both
+    reach :func:`corner_table` through :func:`corner_plan`, so the two surfaces can't
+    drift. This is the contract :func:`mismatch_mc_from_dict` provides for the MC pair.
+
+    ``corners=None`` picks the circuit's own family names. ``temps`` (°C) and
+    ``vdd_scale`` are the silicon-only PVT axes; requesting either for an OTFT /
+    default-PDK circuit raises :class:`ValueError` here, before any solving, so the
+    caller gets a message instead of a partial table.
+
+    ``progress`` is threaded to :func:`corner_table` as the background-job hook: it
+    fires once per completed PVT grid slice. A sweep with no PVT axis is a single
+    slice and reports only its completion."""
+    spec = circuit_from_dict(data)
+    binding, names, silicon = corner_plan(spec)
+    if corners is not None:
+        names = tuple(corners)
+    if temps is not None or vdd_scale is not None:
+        message = pvt_axes_error(silicon)
+        if message is not None:
+            raise ValueError(message)
+
+    return corner_table(spec.sizes, spec.bias, nf=spec.nf, topo=spec.topology,
+                        corners=names, freqs=freqs, band=band,
+                        include_noise=include_noise, workers=workers,
+                        binding=binding, temps=temps, vdd_scale=vdd_scale,
+                        progress=progress)
