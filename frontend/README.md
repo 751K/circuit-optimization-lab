@@ -2,8 +2,34 @@
 
 A React + React Flow circuit editor for the `circuitopt` solver stack. Draw a
 circuit on a canvas, validate it live against the local service, run analyses,
-and see Bode / noise / transient plots — all in the browser. The circuit JSON
-is the single source of truth; the editor round-trips it losslessly.
+sweep corners and mismatch, and read the results — all in the browser. The
+circuit JSON is the single source of truth; the editor round-trips it losslessly.
+
+## Layout
+
+A toolbar, three columns (palette | canvas | right rail), a results dock along
+the bottom, and a status bar.
+
+Results sit at the bottom rather than in the right rail because a frequency
+sweep needs **width**: in a 300 px rail a Bode plot is 250 px across, which is
+not enough to read one decade. The rail carries what drives a run — the
+inspector, the analysis picker, and the background sweeps — and the dock is
+drag-resizable, trading canvas height for plot height.
+
+## What each result view shows
+
+| View | Content |
+| --- | --- |
+| Per-analysis | Health flags first, then headline metrics, then plots. AC/PAC draw magnitude and unwrapped phase on a dual axis with the unity-gain crossing marked; PSS adds its shooting-convergence history. |
+| Operating point | Every AC result already carries it: per-device saturation with Vds/Vdsat/headroom, derived gm/Id and gm/gds, the selected model bin, node voltages, and per-source current and power. A device out of saturation is called out explicitly. |
+| Signoff | Per-constraint verdict with limits, when the circuit declares a `signoff` block. |
+| Sweep | PVT grid with the worst cell per column marked and skipped grid points listed as skipped; MC statistics with a per-metric histogram. |
+
+Three guards exist because the underlying numbers are honest but easy to
+misread: a bandwidth sitting on the sweep ceiling is flagged rather than printed
+plainly, an AC response on the −180 dB floor is named as a missing stimulus, and
+a transient whose every trace is constant says so instead of looking like a dead
+circuit.
 
 ## Prerequisites: the backend
 

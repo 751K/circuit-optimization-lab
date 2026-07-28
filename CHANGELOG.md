@@ -19,6 +19,88 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Added / 新增
+
+- **PVT corner sweep as a service job / PVT 角点扫描作为后台任务**
+
+  **English:** `corner_table` was reachable only from `circuit-opt corners`, so
+  no GUI or agent could run a corner sweep. `corners.corner_table_from_dict` is
+  now the shared entry point — the contract `mismatch_mc_from_dict` already
+  provided for the MC pair — behind a new `pvt` job kind, `POST
+  /api/v1/jobs/pvt`, and an MCP `submit_pvt` tool. The CLI resolves its corner
+  names through the same `corner_plan` helper, so the two surfaces cannot drift.
+  Progress reports once per completed PVT grid slice; `corner_table` gained an
+  optional `progress` hook that leaves every existing path byte-for-byte
+  unchanged when unset.
+
+  **中文：** `corner_table` 此前只有 `circuit-opt corners` 一条入口，GUI 和 agent
+  都跑不了角点扫描。现新增共享入口 `corners.corner_table_from_dict`（与 MC 侧
+  `mismatch_mc_from_dict` 同一契约），并接出 `pvt` 任务类型、`POST
+  /api/v1/jobs/pvt` 路由与 MCP `submit_pvt` 工具。CLI 改走同一个 `corner_plan`
+  解析角点名，两条通路无法漂移。进度按 PVT 网格切片上报；`corner_table` 新增可选
+  `progress` 钩子，不传时所有既有路径逐字节不变。
+
+- **Frontend: results workspace, operating point, and sweeps / 前端：结果工作区、
+  工作点与扫描**
+
+  **English:** Results moved from the 300 px right rail into a full-width,
+  drag-resizable bottom dock with one tab per analysis — a Bode plot went from
+  250 px wide to 1100. New views render data the UI previously discarded: the DC
+  operating point already present in every AC result (per-device saturation with
+  Vds/Vdsat/headroom, derived gm/Id and gm/gds, selected model bin, node
+  voltages, per-source power), the signoff verdict `/solve` already returned, and
+  PVT/MC sweep results with live WebSocket progress and cancellation. Metrics are
+  labelled and SI-formatted (`bw_Hz: 79034.5` reads as `Bandwidth 79.03 kHz`),
+  and transient is configurable in-panel instead of only by hand-editing JSON.
+
+  **中文：** 结果从 300 px 右栏移到整宽、可拖拽调高的底部停靠区，每个分析一个页
+  签——伯德图从 250 px 宽变为 1100 px。新增视图渲染此前被丢弃的数据：每次 AC 结果
+  里就已带的直流工作点（逐管饱和状态与 Vds/Vdsat/裕度、导出的 gm/Id 与 gm/gds、
+  选中的模型 bin、节点电压、各电源功耗）、`/solve` 早已返回的签核判定，以及带
+  WebSocket 实时进度和取消的 PVT/MC 扫描结果。指标带标签并按 SI 前缀格式化
+  （`bw_Hz: 79034.5` 显示为 `Bandwidth 79.03 kHz`），瞬态可在面板内配置，不必再手
+  改 JSON。
+
+### Fixed / 修复
+
+- **PVT and MC swept the AFE range on silicon circuits / PVT 与 MC 在硅工艺电路上
+  按 AFE 量程扫描**
+
+  **English:** `corner_table` and `mismatch_mc` default to a 0.01 Hz – 10 kHz
+  grid and a 0.05–100 Hz noise band. On a silicon amplifier those are four
+  decades wrong, and wrong silently: the sweep reports the top of its own grid as
+  `bw_Hz`, so a 79 kHz OTA came back as "BW = 10 kHz" with 2.1 V of
+  input-referred noise. In an MC summary it was worse — every sample hit the same
+  ceiling, so sigma collapsed to zero and the result read as a remarkably robust
+  design. The `pvt` and `mc` jobs now inherit the circuit's own
+  `analyses.ac.freqs` and `analyses.noise.band`, and echo back `freq_range_hz`,
+  `freq_source` and `noise_band_hz`. The CLI defaults are unchanged; the trap is
+  documented in the agent guide.
+
+  **中文：** `corner_table` 与 `mismatch_mc` 默认 0.01 Hz – 10 kHz 网格、
+  0.05–100 Hz 噪声带。用在硅工艺放大器上差四个数量级，且是静默出错：扫描把自己网格
+  的上界当作 `bw_Hz` 上报，79 kHz 的 OTA 因此显示为「BW = 10 kHz」、输入参考噪声
+  2.1 V。在 MC 汇总里更糟——所有样本都撞同一个天花板，sigma 塌成 0，结果读起来像
+  一个异常稳健的设计。现 `pvt` 与 `mc` 任务继承电路自身的 `analyses.ac.freqs` 和
+  `analyses.noise.band`，并回传 `freq_range_hz`/`freq_source`/`noise_band_hz`。
+  CLI 默认值不变；该陷阱已写入 agent 指南。
+
+- **Capabilities omitted the TSMC28 corner family / capabilities 缺失 TSMC28 角点族**
+
+  **English:** `GET /api/v1/capabilities` listed otft, sky130 and freepdk45 only,
+  so a client had no corner names for a TSMC28HPC+ circuit at all. Separately,
+  offering the union of all families was already wrong: a circuit belongs to
+  exactly one, and the OTFT process names and silicon card corners are disjoint
+  sets, so a union menu offers corners that cannot resolve. `POST
+  /api/v1/validate` now also reports the corner set that circuit admits and
+  whether the silicon-only PVT axes apply, and re-reports on every edit.
+
+  **中文：** `GET /api/v1/capabilities` 只列了 otft、sky130、freepdk45，TSMC28HPC+
+  电路完全拿不到角点名。另外，把所有族并集提供本身就是错的：一个电路只属于一个族，
+  而 OTFT 工艺名与硅工艺卡角点是不相交的两套命名，并集里会出现无法解析的角点。现
+  `POST /api/v1/validate` 会一并报告该电路允许的角点集合以及硅工艺专属 PVT 轴是否
+  适用，且每次编辑都会重新上报。
+
 ## [2.6.0] - 2026-07-28
 
 ### Added / 新增

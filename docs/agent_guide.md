@@ -74,10 +74,16 @@ need arbitrary file access.
 | `run_analysis` | seconds | Bounded DC/AC/noise/transient summary for one circuit. |
 | `submit_exploration` | job | Candidate sweep with Pareto selection. |
 | `submit_mismatch_mc` | job | Per-device mismatch Monte Carlo. |
+| `submit_pvt` | job | Corner sweep of one circuit; temperature and supply axes on silicon. |
 | `submit_signoff` | job | Multi-testbench PVT campaign from a manifest. |
 | `list_jobs` / `get_job` / `cancel_job` | free | Poll and cooperative cancellation. |
 | `signoff_margins` | free | Per-constraint margin table from a saved result. |
 | `inspect_signoff_result` | free | Selected failing points from a saved result. |
+
+`submit_pvt` and `submit_signoff` also answer different questions. A PVT sweep
+shows how one testbench *moves* across corners — gain, bandwidth, input-referred
+noise per grid point. A signoff campaign runs a whole manifest against declared
+constraints and returns a verdict. Sweep to understand, sign off to decide.
 
 `signoff_margins` and `inspect_signoff_result` answer different questions.
 Margins rank every spec by how much room is left and tell you what constrains
@@ -173,6 +179,22 @@ senses `OUTP - OUTN`. A single output senses to ground.
 **An AC run with no `ac_drives` has no stimulus.** It returns the -180 dB gain
 floor rather than an error. If a gain looks impossibly bad, check that a
 stimulus is configured before you touch the circuit.
+
+**A measured bandwidth can be the top of the sweep.** `bw_Hz` is found by
+scanning the swept response, so a circuit whose corner lies above the grid
+reports the last grid point — and it reports it as a number, indistinguishable
+from a measurement. `corner_table` (behind `circuit-opt corners`) defaults to
+the AFE range of 0.01 Hz – 10 kHz, which makes a 79 kHz silicon OTA read as
+"BW = 10 kHz" and its 84 µV input noise read as 2.1 V. Pass `--freqs-*` and
+`--noise-band` to match the circuit, and treat a bandwidth sitting exactly on
+the grid ceiling as unmeasured. The service's `pvt` and `mc` jobs inherit the
+circuit's own `analyses.ac.freqs` and `analyses.noise.band` for this reason and
+echo back what they used.
+
+**In an MC summary this same trap reads as robustness.** Every sample hits the
+identical ceiling, so the spread collapses to sigma zero — a design that looks
+remarkably tight is often one whose metric was never measured. Check the
+reported sweep range before believing a small sigma.
 
 **Device state is path-dependent.** BSIM handles keep their warm start and
 limiting state between calls. Concurrent campaign points must lease into

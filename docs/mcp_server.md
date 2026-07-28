@@ -65,6 +65,7 @@ testbench references remain project-relative and portable.
 | `run_analysis` | Run selected analyses synchronously and return a bounded summary |
 | `submit_exploration` | Queue design-space exploration |
 | `submit_mismatch_mc` | Queue mismatch Monte Carlo |
+| `submit_pvt` | Queue a PVT corner sweep of one circuit |
 | `submit_signoff` | Queue a workspace-relative multi-testbench PVT campaign |
 | `list_jobs` | List background jobs |
 | `get_job` | Poll state and optionally retrieve/save a result |

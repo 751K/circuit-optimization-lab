@@ -72,6 +72,7 @@ else is allowed to call the API from a browser context.
 | `POST` | `/api/v1/solve` | Run the analysis suite synchronously |
 | `POST` | `/api/v1/jobs/explore` | Submit a design-space exploration job |
 | `POST` | `/api/v1/jobs/mc` | Submit a mismatch Monte-Carlo job |
+| `POST` | `/api/v1/jobs/pvt` | Submit a PVT corner sweep job |
 | `GET` | `/api/v1/jobs` | List jobs (newest first, no result payload) |
 | `GET` | `/api/v1/jobs/{id}` | Job status + (once terminal) result/error |
 | `DELETE` | `/api/v1/jobs/{id}` | Request cooperative cancellation |
@@ -148,11 +149,25 @@ curl -X POST http://127.0.0.1:8341/api/v1/validate \
 ```
 
 ```json
-{"valid": true}
+{"valid": true, "corners": ["typical", "slow", "fast"], "silicon": false}
+```
+
+A circuit that parses also reports the corner sweep **it** admits, and whether
+the silicon-only PVT axes apply to it. This is not a subset of the
+`capabilities` corner menu: that menu lists every family the server knows, while
+a circuit belongs to exactly one, and the OTFT and silicon name spaces are
+disjoint. A client that offers the union offers corners that cannot resolve, so
+a corner picker should be driven from here — it also re-reports on every edit,
+so swapping a device's model family updates the list.
+
+```json
+{"valid": true, "corners": ["tt", "ss", "ff", "sf", "fs"], "silicon": true}
 ```
 
 A broken circuit (missing required field, or a typo'd option key inside
-`analyses`) still returns 200:
+`analyses`) still returns 200. `corners` is then absent: it is derived from the
+circuit's model binding, so a circuit that does not parse has none, and
+reporting a default would be a guess.
 
 ```json
 {"valid": false, "errors": ["'solved' is a required property", "..."]}
@@ -303,6 +318,62 @@ curl -i -X POST http://127.0.0.1:8341/api/v1/jobs/mc \
 HTTP/1.1 202 Accepted
 {"job_id": "f6e5d4c3b2a1", "kind": "mc", "status": "queued"}
 ```
+
+### `POST /api/v1/jobs/pvt`
+
+Same semantics as `circuit-opt corners` (via the shared `corner_table_from_dict`
+entry point).
+
+Omit `corners` to sweep the circuit's own family names. A circuit belongs to
+exactly one model family, and the OTFT process names (`typical`/`slow`/`fast`)
+and the silicon card corners (`tt`/`ss`/`ff`/`sf`/`fs`) are disjoint sets, so
+the default is the only universally correct choice; `POST /validate` reports
+which set a given circuit admits.
+
+`temps` (°C) and `vdd_scale` are the PVT axes and are **silicon only**. Requesting
+either for an OTFT circuit returns 422 at submission rather than queueing a job
+that fails a moment later.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `corners` | the circuit's own family set | Corner names to sweep |
+| `temps` | none | Temperature axis in °C (silicon only) |
+| `vdd_scale` | none | Uniform bias multipliers (silicon only) |
+| `freqs` | the circuit's `analyses.ac.freqs` | Frequency grid to measure over |
+| `band` | the circuit's `analyses.noise.band` | Noise integration band |
+| `workers` | 1 | Parallel grid slices |
+
+`freqs`/`band` default to the circuit's own AC and noise ranges rather than to
+`corner_table`'s AFE defaults (0.01 Hz – 10 kHz, 0.05–100 Hz). Those defaults are
+four decades wrong for a silicon amplifier and wrong *silently*: the sweep
+reports the top of its own grid as `bw_Hz`, so a 79 kHz OTA comes back as
+"10 kHz". The result echoes `freq_range_hz`, `freq_source` and `noise_band_hz`
+so a reader can see what was measured over. `POST /api/v1/jobs/mc` resolves the
+same two ranges the same way.
+
+```json
+{
+  "circuit": { "...": "circuit JSON object" },
+  "temps": [0, 27, 85],
+  "workers": 4
+}
+```
+
+The result nests by whichever axes are active, in the fixed order
+`[temp_c, vdd_scale]`; a corner whose cards select zero bins for the geometry is
+recorded as `null` rather than omitted, so a skipped grid point stays visible
+instead of shrinking the grid.
+
+```
+HTTP/1.1 202 Accepted
+{"job_id": "9a8b7c6d5e4f", "kind": "pvt", "status": "queued"}
+```
+
+Progress is reported once per completed grid **slice**, not per corner:
+`corner_table` dispatches whole corner batches into the compiled campaign, where
+a per-candidate Python callback is exactly what the batching exists to avoid.
+For the same reason `pvt` does not support cooperative cancellation mid-sweep —
+`DELETE` is accepted but only takes effect between slices.
 
 ### `GET /api/v1/jobs`
 
@@ -482,6 +553,7 @@ each command.
 | `POST /api/v1/solve` | `circuit-opt run` | `run_analysis_suite` |
 | `POST /api/v1/jobs/explore` | `circuit-opt explore` | `explore_from_dict` |
 | `POST /api/v1/jobs/mc` | `circuit-opt mc` | `mismatch_mc_from_dict` |
+| `POST /api/v1/jobs/pvt` | `circuit-opt corners` | `corner_table_from_dict` |
 | `POST /api/v1/validate` | (no direct CLI equivalent) | `circuit_from_dict` + `validate_analysis_cfg` |
 | `GET /api/v1/capabilities` | (no direct CLI equivalent) | `registered_models`, `analysis_options.known_keys`, `device_factory.CORNERS`/`SKY130_CORNERS`, `freepdk45_model.FREEPDK45_CORNERS` |
 
