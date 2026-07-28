@@ -34,6 +34,7 @@ except ImportError as exc:  # optional dependency (serve extra)
     ) from exc
 
 from .. import __version__
+from ..corners import circuit_corner_names, pvt_axes_error
 from .jobs import JOB_KINDS, JobManager
 from .operations import (
     OperationError,
@@ -87,6 +88,31 @@ class McJobRequest(BaseModel):
     seed: Optional[int] = Field(None, description="RNG seed")
     corner: Optional[str] = Field(None, description="Base process corner (typical/slow/fast)")
     workers: Optional[int] = Field(None, ge=1, description="Parallel MC sample workers")
+
+
+class PvtJobRequest(BaseModel):
+    """Body of ``POST /api/v1/jobs/pvt`` — same semantics as ``circuit-opt corners``.
+
+    ``corners`` omitted sweeps the circuit's own family names (OTFT
+    ``typical/slow/fast``, or the silicon card corners) — the two name spaces are
+    disjoint, so the default is the only universally correct choice. ``temps`` (°C)
+    and ``vdd_scale`` add the silicon-only PVT axes; requesting either for an
+    OTFT / default-PDK circuit is a 422, not a silently flat sweep."""
+    circuit: dict[str, Any] = Field(..., description="Circuit JSON object")
+    corners: Optional[list[str]] = Field(
+        None, description="Corner names; omit for the circuit's own family set")
+    temps: Optional[list[float]] = Field(
+        None, description="Temperature axis in °C (silicon only)")
+    vdd_scale: Optional[list[float]] = Field(
+        None, description="Supply-scale axis, uniform bias multipliers (silicon only)")
+    workers: Optional[int] = Field(None, ge=1, description="Parallel grid workers")
+    freqs: Optional[dict[str, Any]] = Field(
+        None, description="Frequency grid {start, stop, num, scale}; omit to inherit "
+                          "the circuit's own analyses.ac.freqs")
+    band: Optional[list[float]] = Field(
+        None, min_length=2, max_length=2,
+        description="Noise integration band [lo, hi] Hz; omit to inherit the "
+                    "circuit's own analyses.noise.band")
 
 
 # ── capabilities assembly ─────────────────────────────────────────────────────
@@ -209,6 +235,40 @@ def create_app(job_workers: int = 1) -> FastAPI:
         if req.workers is not None:
             params["workers"] = req.workers
         return _submit("mc", params, response)
+
+    @app.post("/api/v1/jobs/pvt", status_code=202)
+    def submit_pvt(req: PvtJobRequest, response: Response) -> dict:
+        """Queue a PVT corner sweep (semantics of ``circuit-opt corners``). Returns
+        202 with ``{"job_id", "kind", "status"}``; see ``submit_explore``.
+
+        A PVT axis on a circuit that has no such axis is rejected here, before the
+        job is queued, so the caller gets a 422 rather than a job that fails a second
+        later with the same message."""
+        params: dict[str, Any] = {"circuit": req.circuit}
+        if req.corners is not None:
+            params["corners"] = req.corners
+        if req.temps is not None:
+            params["temps"] = req.temps
+        if req.vdd_scale is not None:
+            params["vdd_scale"] = req.vdd_scale
+        if req.workers is not None:
+            params["workers"] = req.workers
+        if req.freqs is not None:
+            params["freqs"] = req.freqs
+        if req.band is not None:
+            params["band"] = req.band
+        if req.temps is not None or req.vdd_scale is not None:
+            try:
+                _silicon = circuit_corner_names(req.circuit)[1]
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"stage": "parse", "message": str(exc)}) from exc
+            message = pvt_axes_error(_silicon)
+            if message is not None:
+                raise HTTPException(
+                    status_code=422, detail={"stage": "parse", "message": message})
+        return _submit("pvt", params, response)
 
     @app.get("/api/v1/jobs")
     def list_jobs() -> dict:

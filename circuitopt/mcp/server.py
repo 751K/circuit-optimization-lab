@@ -18,6 +18,7 @@ except ImportError as exc:
         'pip install "circuit-optimization[mcp]"'
     ) from exc
 
+from ..corners import circuit_corner_names, pvt_axes_error
 from ..service.jobs import JOB_KINDS, JobManager
 from ..service.operations import (
     OperationError,
@@ -38,7 +39,9 @@ Circuit Optimization MCP workflow:
 1. Call get_capabilities and validate_circuit before simulation.
 2. Call run_analysis for a bounded DC/AC/noise/transient result summary.
 3. Use submit_exploration or submit_mismatch_mc for long candidate sweeps.
-4. Use submit_signoff for a workspace-relative campaign manifest.
+4. Use submit_pvt to see how one testbench moves across process corners (and,
+   on silicon, temperature and supply); use submit_signoff for a
+   workspace-relative campaign manifest judged against declared constraints.
 5. Poll get_job until done/failed/cancelled; cancel_job is cooperative.
 6. Signoff details are written under results/mcp and can be queried with
    inspect_signoff_result. Invalid models or non-convergence are never replaced.
@@ -315,6 +318,48 @@ def create_mcp_server(
                 "workers": workers,
             },
         )
+        return job.snapshot()
+
+    @server.tool()
+    def submit_pvt(
+        circuit: dict[str, Any],
+        ctx: McpContext,
+        corners: list[str] | None = None,
+        temps: list[float] | None = None,
+        vdd_scale: list[float] | None = None,
+        workers: int = 1,
+    ) -> dict[str, Any]:
+        """Submit a PVT corner sweep as a cancellable background job.
+
+        Omit ``corners`` to sweep the circuit's own family names; the OTFT
+        typical/slow/fast names and the silicon card corners are disjoint, so a
+        hand-supplied list from the wrong family cannot resolve. ``validate_circuit``
+        reports which set a given circuit admits.
+
+        ``temps`` (°C) and ``vdd_scale`` are silicon-only; requesting either for an
+        OTFT circuit is rejected here rather than queued and failed.
+
+        Cheaper than ``submit_signoff``: this sweeps one testbench for gain / BW /
+        input-referred noise, where a signoff campaign runs a whole manifest against
+        declared constraints. Use this to see how a design moves across corners, and
+        signoff to decide whether it passes.
+        """
+        if workers < 1:
+            raise ToolError("workers must be at least 1")
+        if temps is not None or vdd_scale is not None:
+            try:
+                silicon = circuit_corner_names(circuit)[1]
+            except Exception as exc:
+                raise ToolError(str(exc)) from exc
+            message = pvt_axes_error(silicon)
+            if message is not None:
+                raise ToolError(message)
+        params: dict[str, Any] = {"circuit": circuit, "workers": workers}
+        for key, value in (("corners", corners), ("temps", temps),
+                           ("vdd_scale", vdd_scale)):
+            if value is not None:
+                params[key] = value
+        job = ctx.request_context.lifespan_context.jobs.submit("pvt", params)
         return job.snapshot()
 
     @server.tool()

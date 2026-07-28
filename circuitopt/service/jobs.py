@@ -1,9 +1,10 @@
-"""In-process background-job manager for long solver tasks (explore / mismatch MC).
+"""In-process background-job manager for long solver tasks (explore / MC / PVT).
 
-The service layer runs two kinds of work that are too slow for a synchronous
-request: design-space *explore* and per-device mismatch *Monte-Carlo*. This
-module owns those as background **jobs** so the HTTP layer can submit one, poll
-its status, stream its progress over a WebSocket, and request cancellation.
+The service layer runs three kinds of work that are too slow for a synchronous
+request: design-space *explore*, per-device mismatch *Monte-Carlo*, and the
+*PVT* corner sweep. This module owns those as background **jobs** so the HTTP
+layer can submit one, poll its status, stream its progress over a WebSocket, and
+request cancellation.
 
 Design (all deliberate, for a **local single-user** service — no persistence,
 no multi-tenant isolation):
@@ -53,15 +54,17 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from ..analysis_dispatch import _frequency_grid
 from ..explore import explore_from_dict
-from ..corners import mismatch_mc_from_dict
+from ..corners import (circuit_corner_names, corner_table_from_dict,
+                       mismatch_mc_from_dict)
 from .serialize import to_jsonable
 
 # How many jobs to retain in memory before evicting the oldest terminal one.
 MAX_JOBS = 50
 
 # The kinds of job the manager knows how to run (also surfaced in capabilities).
-JOB_KINDS = ("explore", "mc")
+JOB_KINDS = ("explore", "mc", "pvt")
 
 # Terminal states — a job in any of these never changes again.
 _TERMINAL = frozenset({"done", "failed", "cancelled"})
@@ -141,13 +144,125 @@ def _run_mc(params: dict, emit: Callable[[dict], None],
               "frac": (done / total) if total else 1.0,
               "partial": to_jsonable(partial)})
 
+    freqs, band, freq_source = _sweep_ranges(circuit, params)
+    kwargs = {} if band is None else {"band": band}
     results = mismatch_mc_from_dict(circuit, n=n, seed=seed, corner=corner,
-                                    progress=progress, should_stop=should_stop,
-                                    workers=workers)
-    return to_jsonable(results)
+                                    freqs=freqs, progress=progress,
+                                    should_stop=should_stop, workers=workers,
+                                    **kwargs)
+    payload = to_jsonable(results)
+    payload["freq_range_hz"] = ([float(freqs[0]), float(freqs[-1])]
+                                if freqs is not None else None)
+    payload["freq_source"] = freq_source
+    payload["noise_band_hz"] = list(band) if band is not None else None
+    return payload
 
 
-_RUNNERS: dict[str, Callable] = {"explore": _run_explore, "mc": _run_mc}
+def _sweep_ranges(circuit: dict, params: dict):
+    """Resolve the ``(freqs, band, source)`` a corner or MC sweep should measure over.
+
+    Both :func:`~circuitopt.corners.corner_table` and
+    :func:`~circuitopt.corners.mismatch_mc` default to the AFE ranges — a
+    0.01–10 kHz grid and a 0.05–100 Hz noise band. Those are wrong for a silicon
+    amplifier by four decades, and wrong *silently*: the sweep reports the top of its
+    own grid as ``bw_Hz``, so a 79 kHz OTA comes back as "BW = 10 kHz". A number that
+    reads as a measurement but is really a grid ceiling is the worst failure mode a
+    result view can have — and in an MC summary it is worse still, because every
+    sample hits the same ceiling and the spread collapses to σ = 0, which reads as a
+    remarkably robust design rather than as a measurement that never happened.
+
+    So the resolution order is: an explicit request range, else the circuit's own
+    ``analyses.ac.freqs`` / ``analyses.noise.band`` (the ranges the same circuit's AC
+    and noise runs already use, so the sweep agrees with the single-point run the
+    user just did), else ``None`` — which leaves the frozen defaults in place for
+    the AFE circuits they were written for.
+
+    ``source`` names which of the three won, so the result can say what it measured
+    over rather than leaving the reader to guess."""
+    analyses = circuit.get("analyses") or {}
+    if not isinstance(analyses, dict):
+        analyses = {}
+
+    freqs = None
+    source = "corner_table default (AFE 0.01 Hz - 10 kHz)"
+    if params.get("freqs") is not None:
+        freqs = _frequency_grid(params["freqs"])
+        source = "request"
+    else:
+        ac_cfg = analyses.get("ac")
+        if isinstance(ac_cfg, dict) and ac_cfg.get("freqs") is not None:
+            freqs = _frequency_grid(ac_cfg["freqs"])
+            source = "circuit analyses.ac.freqs"
+
+    band = None
+    if params.get("band") is not None:
+        band = tuple(float(x) for x in params["band"])
+    else:
+        noise_cfg = analyses.get("noise")
+        if isinstance(noise_cfg, dict) and noise_cfg.get("band") is not None:
+            band = tuple(float(x) for x in noise_cfg["band"])
+    return freqs, band, source
+
+
+def _run_pvt(params: dict, emit: Callable[[dict], None],
+             should_stop: Callable[[], bool]) -> dict:
+    """PVT corner sweep (semantics of ``circuit-opt corners``).
+
+    ``corner_table`` has no per-candidate callback and no cooperative-cancel hook —
+    it dispatches whole corner batches into the compiled campaign, where a Python
+    callback between candidates is exactly what the batching exists to avoid. So
+    ``should_stop`` is checked once before the sweep starts and progress is reported
+    per completed PVT grid *slice*. A sweep with no temperature/supply axis is a
+    single slice; those are the fast case (seconds), so the coarser granularity costs
+    nothing in practice.
+
+    The result carries the ``corners``/``temps``/``vdd_scale`` axes and the measured
+    frequency range alongside the table, so a consumer can label the grid without
+    re-deriving the circuit's family or guessing what the numbers span."""
+    circuit = params["circuit"]
+    corners = params.get("corners")
+    temps = params.get("temps")
+    vdd_scale = params.get("vdd_scale")
+    workers = int(params.get("workers", 1))
+
+    if should_stop():
+        return to_jsonable({"table": {}, "stopped_early": True})
+
+    # Resolve the defaulted corner set here so the result always names its own axes;
+    # a consumer plotting the grid should not have to re-derive the circuit's family.
+    names, silicon = circuit_corner_names(circuit)
+    if corners:
+        names = tuple(corners)
+    freqs, band, freq_source = _sweep_ranges(circuit, params)
+    slices = (len(temps) if temps else 1) * (len(vdd_scale) if vdd_scale else 1)
+
+    def progress(done: int, total: int) -> None:
+        emit({"type": "progress", "done": done, "total": total,
+              "frac": (done / total) if total else 1.0,
+              "unit": "slice"})
+
+    emit({"type": "progress", "done": 0, "total": slices, "frac": 0.0,
+          "unit": "slice"})
+    kwargs = {} if band is None else {"band": band}
+    table = corner_table_from_dict(
+        circuit, corners=corners, temps=temps, vdd_scale=vdd_scale,
+        freqs=freqs, workers=workers, progress=progress, **kwargs)
+    return to_jsonable({
+        "table": table,
+        "corners": list(names),
+        "temps": list(temps) if temps else None,
+        "vdd_scale": list(vdd_scale) if vdd_scale else None,
+        "silicon": silicon,
+        "slices": slices,
+        "freq_range_hz": ([float(freqs[0]), float(freqs[-1])]
+                          if freqs is not None else None),
+        "freq_source": freq_source,
+        "noise_band_hz": list(band) if band is not None else None,
+    })
+
+
+_RUNNERS: dict[str, Callable] = {
+    "explore": _run_explore, "mc": _run_mc, "pvt": _run_pvt}
 
 
 class JobManager:

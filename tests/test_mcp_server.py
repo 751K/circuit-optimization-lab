@@ -111,15 +111,23 @@ def test_protocol_lists_tools_resources_and_runs_analysis(tmp_path):
 
             capabilities = await session.call_tool("get_capabilities", {})
             assert not capabilities.isError
-            assert capabilities.structuredContent["jobs"] == [
-                "explore", "mc", "signoff",
-            ]
+            advertised = capabilities.structuredContent["jobs"]
+            assert advertised == ["explore", "mc", "pvt", "signoff"]
+            # Every advertised kind must have a tool that can submit it. A kind
+            # with no submit tool reads as available and is not.
+            submitters = {"explore": "submit_exploration", "mc": "submit_mismatch_mc",
+                          "pvt": "submit_pvt", "signoff": "submit_signoff"}
+            assert {submitters[kind] for kind in advertised} <= names
 
             validation = await session.call_tool(
                 "validate_circuit", {"circuit": _periodic_rc()}
             )
             assert not validation.isError
-            assert validation.structuredContent == {"valid": True}
+            assert validation.structuredContent["valid"] is True
+            # A parseable circuit also reports the corner set it admits.
+            assert validation.structuredContent["corners"] == [
+                "typical", "slow", "fast",
+            ]
 
             solved = await session.call_tool(
                 "run_analysis",
