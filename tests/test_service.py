@@ -67,11 +67,13 @@ def test_capabilities(client):
     assert "band" in analyses["noise"]
     assert "max_sideband" in analyses["pnoise"]
 
-    # Corner families.
+    # Corner families. Every silicon family the loader accepts must appear: a
+    # family missing here is a process a GUI cannot offer corners for at all.
     corners = cap["corners"]
     assert set(corners["otft"]) == {"typical", "slow", "fast"}
     assert set(corners["sky130"]) == {"tt", "ss", "ff", "sf", "fs"}
     assert set(corners["freepdk45"]) == {"nom", "tt", "ss", "ff", "sf", "fs"}
+    assert set(corners["tsmc28"]) == {"tt", "ss", "ff", "sf", "fs"}
 
 
 # ── validate ──────────────────────────────────────────────────────────────────
@@ -79,7 +81,33 @@ def test_capabilities(client):
 def test_validate_valid_circuit(client):
     r = client.post("/api/v1/validate", json=_load("periodic_rc.json"))
     assert r.status_code == 200
-    assert r.json() == {"valid": True}
+    body = r.json()
+    assert body["valid"] is True
+    assert "errors" not in body
+
+
+def test_validate_reports_the_circuits_own_corner_set(client):
+    # A circuit admits exactly one family's corner names. The server-level
+    # capabilities menu lists every family; this is the per-circuit answer, and it
+    # is what a client must offer -- an OTFT circuit handed "tt" cannot resolve it.
+    otft = client.post("/api/v1/validate", json=_load("afe_explore.json")).json()
+    assert otft["corners"] == ["typical", "slow", "fast"]
+    assert otft["silicon"] is False
+
+    silicon = client.post("/api/v1/validate", json=_load("sky130_fd_ota.json")).json()
+    assert silicon["silicon"] is True
+    assert set(silicon["corners"]).issubset({"tt", "ss", "ff", "sf", "fs"})
+    assert not set(silicon["corners"]) & set(otft["corners"])   # disjoint spaces
+
+
+def test_validate_omits_corners_for_an_unparseable_circuit(client):
+    # The corner set is derived from the circuit's model binding, so a circuit that
+    # does not parse has none. Reporting a default here would be a guess.
+    circuit = _load("periodic_rc.json")
+    del circuit["solved"]
+    body = client.post("/api/v1/validate", json=circuit).json()
+    assert body["valid"] is False
+    assert "corners" not in body
 
 
 def test_validate_valid_voltage_divider(client):

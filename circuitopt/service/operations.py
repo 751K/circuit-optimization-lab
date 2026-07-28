@@ -14,6 +14,7 @@ from .. import __version__
 from ..analysis_dispatch import ANALYSIS_ORDER, run_analysis_suite
 from ..analysis_options import known_keys, validate_analysis_cfg
 from ..circuit_loader import circuit_from_dict
+from ..corners import corner_plan
 from ..device_factory import CORNERS, SKY130_CORNERS
 from ..device_model import registered_models
 from ..freepdk45_model import FREEPDK45_CORNERS
@@ -44,7 +45,11 @@ class OperationError(RuntimeError):
 
 
 def build_capabilities(*, jobs: Iterable[str] = JOB_KINDS) -> dict[str, Any]:
-    """Return capabilities assembled from the authoritative registries."""
+    """Return capabilities assembled from the authoritative registries.
+
+    ``corners`` lists what each model family *accepts*. It is a server-level menu,
+    not a per-circuit one: a given circuit admits exactly one family's names (see
+    :func:`validate_circuit`, which reports that circuit's own set)."""
     analyses = {name: sorted(known_keys(name)) for name in ANALYSIS_ORDER}
     return {
         "version": __version__,
@@ -55,13 +60,24 @@ def build_capabilities(*, jobs: Iterable[str] = JOB_KINDS) -> dict[str, Any]:
             "otft": sorted(CORNERS),
             "sky130": sorted(SKY130_CORNERS),
             "freepdk45": sorted(FREEPDK45_CORNERS),
+            # TSMC28HPC+ takes the same tt/ss/ff/sf/fs card sections as SKY130
+            # (device_factory.SKY130_CORNERS documents the shared set); it is a
+            # separate family here because it is a separate model namespace.
+            "tsmc28": sorted(SKY130_CORNERS),
         },
         "jobs": list(jobs),
     }
 
 
 def validate_circuit(circuit: dict[str, Any]) -> dict[str, Any]:
-    """Parse and validate a circuit without running numerical analyses."""
+    """Parse and validate a circuit without running numerical analyses.
+
+    A circuit that parses also reports the corner sweep it admits (``corners``) and
+    whether the silicon-only PVT axes apply (``silicon``). Those depend on the
+    circuit's own model family, not on the server: the OTFT ``typical/slow/fast``
+    names and the silicon card corners are disjoint sets, so a client that offers a
+    static union offers corners that cannot resolve. Both fields are absent when the
+    circuit does not parse, because neither is knowable then."""
     errors: list[str] = []
     try:
         spec = circuit_from_dict(circuit)
@@ -78,7 +94,21 @@ def validate_circuit(circuit: dict[str, Any]) -> dict[str, Any]:
         validate_signoff_config(spec)
     except Exception as exc:
         errors.append(str(exc))
-    return {"valid": not errors, **({"errors": errors} if errors else {})}
+
+    out: dict[str, Any] = {"valid": not errors}
+    if errors:
+        out["errors"] = errors
+    try:
+        _binding, names, silicon = corner_plan(spec)
+    except Exception as exc:
+        # An unresolvable model binding is a real circuit error, but it is not a
+        # *validation* error at this layer: report the corner set as unknown rather
+        # than failing a circuit whose analyses block is fine.
+        out["corner_error"] = str(exc)
+    else:
+        out["corners"] = list(names)
+        out["silicon"] = silicon
+    return out
 
 
 def solve_circuit(
