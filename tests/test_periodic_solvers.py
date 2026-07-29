@@ -1035,8 +1035,27 @@ def test_pac_forcing_solve_is_shared_across_frequencies():
 
     Every frequency's per-sample right-hand side is now solved in one
     multi-right-hand-side call per orbit sample instead of one call per
-    (sample, frequency). Same factorization, same LAPACK routine -- the
-    response must be bit-identical to the per-frequency form.
+    (sample, frequency): same factorization, same LAPACK routine, only a
+    different `nrhs`.
+
+    NOT bit-exact, and asserting that it was is what broke this test on Linux
+    and Windows while it passed on macOS. `?getrs` reaches `?trsm`, and every
+    tuned BLAS dispatches nrhs=1 to a different kernel from nrhs>1 -- different
+    blocking, different vectorization, so a different summation order. Accelerate
+    happened to agree; OpenBLAS/MKL differ in the last bit (reported: 2.8e-17
+    absolute, 1.6e-17 relative, ~0.07 ULP).
+
+    So the tolerance has to admit reassociation while still catching what this
+    test is for. Verified by mutation at rtol=1e-12: rolling the consumer's
+    frequency index, reversing the frequency axis during assembly, and laying
+    the right-hand sides out row-wise all fail. Those are O(1) wrong, twelve
+    orders above the floor set here.
+
+    Scope, so nobody over-trusts it: both sides call the same function, so this
+    can only see errors that depend on `len(freqs)`. An error in the solve
+    itself — every sample reusing sample 0's factorization, say — corrupts the
+    batched and the one-at-a-time runs identically and passes. That class is
+    covered by the golden-corpus comparisons, not here.
     """
     spec, pss = _sky130_chopper_pss()
     freqs = np.array([1e3, 3e3, 1e4, 3e4])
@@ -1060,7 +1079,7 @@ def test_pac_forcing_solve_is_shared_across_frequencies():
         one_at_a_time[index] = single["response"][0]
 
     np.testing.assert_allclose(
-        batched["response"], one_at_a_time, rtol=0.0, atol=0.0)
+        batched["response"], one_at_a_time, rtol=1e-12, atol=0.0)
 
 
 def test_flicker_fold_windows_match_the_per_sideband_slices():

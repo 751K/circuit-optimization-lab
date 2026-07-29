@@ -296,7 +296,10 @@ release checklist.
   7x7. Those solves are independent in both indices; only the monodromy
   recurrences are sequential. Every frequency's forcing is now assembled first
   and each sample solved once with all of them as right-hand sides: 72.1 ms to
-  3.8 ms, same factorization, same LAPACK routine, bit-identical.
+  3.8 ms, same factorization and same LAPACK routine — but only the same `nrhs`
+  on macOS. A tuned BLAS dispatches `?trsm` with nrhs=1 to a different kernel
+  from nrhs>1, so the summation order differs: Accelerate agrees to the bit,
+  OpenBLAS and MKL differ in the last one (1.6e-17 relative on the chopper).
 
   `_psd_matrix_sqrt` ran one `eigh` per (orbit sample, device); it now takes the
   whole stack in one call — 73.5 ms to 15.5 ms for a 9984-matrix orbit,
@@ -320,7 +323,9 @@ release checklist.
   PAC 此前对每个（轨道采样，频点）单独解一次逐步强迫项 `A_m x = f_m`——16128 次
   调用，每次 4.4 us，而 7x7 的实际算术只有 0.03 us。这些解在两个下标上都互相独立，
   真正顺序的只有单值矩阵递推。现在先装配出所有频点的强迫项，每个采样以它们为多右端
-  项解一次：72.1 ms → 3.8 ms，同一次分解、同一个 LAPACK 例程，逐位相同。
+  项解一次：72.1 ms → 3.8 ms，同一次分解、同一个 LAPACK 例程——但 `nrhs` 不同。
+  调优过的 BLAS 会把 `?trsm` 的 nrhs=1 派发到与 nrhs>1 不同的内核，求和顺序随之改
+  变：Accelerate 逐位相同，OpenBLAS 与 MKL 差最后一位（斩波上实测 1.6e-17 相对）。
 
   `_psd_matrix_sqrt` 原本对每个（轨道采样，器件）调一次 `eigh`，现在整摞一次调用
   ——9984 个矩阵的轨道由 73.5 ms 降到 15.5 ms，逐位相同。

@@ -1042,8 +1042,12 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     # samples and frequencies -- only the recurrences below are sequential. Done
     # one (sample, frequency) at a time it costs 4.4 us a call against 0.03 us of
     # arithmetic on a 7x7; assembling every frequency's forcing first and solving
-    # each sample once with all of them as right-hand sides is 19x faster and
-    # bit-identical (the same LAPACK routine on the same factorization).
+    # each sample once with all of them as right-hand sides is 19x faster.
+    # Same factorization and same LAPACK routine, but NOT bit-identical across
+    # platforms: `?getrs` reaches `?trsm`, and a tuned BLAS dispatches nrhs=1 to
+    # a different kernel from nrhs>1 (different blocking and vectorization, so a
+    # different summation order). Accelerate agrees to the bit; OpenBLAS and MKL
+    # differ in the last one, measured at 1.6e-17 relative on the chopper.
     wfs = 2.0 * np.pi * np.asarray(freqs, dtype=float)
     ph_all = np.exp(1j * np.outer(tm, wfs))                      # (sample, freq)
     if integration == "be":
