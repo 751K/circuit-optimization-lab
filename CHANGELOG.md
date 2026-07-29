@@ -165,6 +165,29 @@ release checklist.
 
 ### Changed / 变更
 
+- **PNoise folds every sideband in one contraction / PNoise 一次收缩折叠全部边带**
+
+  **English:** The cyclostationary 1/f fold contracted its flicker harmonics one
+  sideband at a time, each against a window of the harmonic vector that slides
+  by one row. On 4x4 operands that recomputes `einsum`'s contraction path far
+  more often than it does arithmetic; gathering the windows and contracting once
+  costs 4.3 ms against 33.3 ms over a whole fold. PNoise drops from 154 ms to
+  127 ms on `examples/sky130_chopper.json` and 168 ms to 144 ms on
+  `tsmc28hpcp_chopper`.
+
+  This is the one step in the periodic-solver work that moves
+  `sky130_chopper`: 3.9e-16 relative, a couple of ulp of summation
+  reassociation inside `einsum`.
+
+  **中文：** 循环平稳 1/f 折叠此前逐个边带收缩闪烁谐波，每个边带对应谐波向量中一
+  个逐行滑动的窗口。在 4x4 操作数上，这让 `einsum` 重算收缩路径的次数远多于它做的
+  算术；把窗口聚集起来一次收缩，全程由 33.3 ms 降到 4.3 ms。PNoise 在
+  `examples/sky130_chopper.json` 上从 154 ms 降到 127 ms，在 `tsmc28hpcp_chopper`
+  上从 168 ms 降到 144 ms。
+
+  这是整个周期性求解器工作中唯一一处让 `sky130_chopper` 发生变化的改动：相对
+  3.9e-16，即 `einsum` 内部求和重结合的几个 ulp。
+
 - **Wider device batches and a shared PAC forcing solve / 更宽的器件批与共享的 PAC
   强迫项求解**
 

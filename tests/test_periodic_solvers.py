@@ -1061,3 +1061,52 @@ def test_pac_forcing_solve_is_shared_across_frequencies():
 
     np.testing.assert_allclose(
         batched["response"], one_at_a_time, rtol=0.0, atol=0.0)
+
+
+def test_flicker_fold_windows_match_the_per_sideband_slices():
+    """The gathered sideband windows must reproduce the sliding slices.
+
+    Each sideband contracts a window of the flicker harmonics that slides by one
+    row; the windows are now gathered and contracted in one einsum. An off-by-one
+    or reversed gather still yields a plausible positive PSD, so this checks the
+    contraction against an explicit per-sideband reference rather than against
+    its own output.
+
+    The white grid is zeroed deliberately. With a realistic one the white term is
+    O(100) while the 1/f term is divided by nu ~ f0 and lands near 1e-10, so a
+    completely wrong window still agrees to 1e-12 -- the first version of this
+    test passed against all three mutations for exactly that reason. The white
+    contraction has its own test above.
+    """
+    max_sideband = 3
+    nb = 2 * max_sideband + 1
+    rng = np.random.default_rng(11)
+    frequency, fundamental = 1e3, 2.5e5
+    ks = np.arange(-max_sideband, max_sideband + 1)
+
+    white = np.zeros((nb, nb, 4, 4), dtype=complex)
+    flicker = (rng.normal(size=(4 * max_sideband + 1, 4, 4))
+               + 1j * rng.normal(size=(4 * max_sideband + 1, 4, 4)))
+    adj = rng.normal(size=3) + 1j * rng.normal(size=3)
+    terminal_indices = (np.array([0]), np.array([1]), np.array([2]), None)
+
+    actual = _fold_terminal_noise_source(
+        adj, terminal_indices, white, flicker, frequency, ks,
+        fundamental, max_sideband)
+
+    zterm = np.zeros((nb, 4), dtype=complex)
+    for terminal, indices in enumerate(terminal_indices):
+        if indices is not None:
+            zterm[:, terminal] = adj[indices]
+    expected = float(np.real(np.einsum(
+        "ra,rlab,lb->", zterm, white, np.conj(zterm), optimize=True)))
+    nu = np.abs(frequency + ks * fundamental)
+    nu[nu < 1e-9] = 1e-9
+    two_k = 2 * max_sideband
+    for sideband in range(nb):
+        window = flicker[two_k - sideband:two_k - sideband + nb]
+        modulated = np.einsum("rt,rtq->q", zterm, window, optimize=True)
+        expected += float(np.sum(
+            (modulated.real ** 2 + modulated.imag ** 2) / nu[sideband]))
+
+    assert actual == pytest.approx(max(expected, 0.0), rel=1e-12)
