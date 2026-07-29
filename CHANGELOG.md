@@ -165,6 +165,37 @@ release checklist.
 
 ### Changed / 变更
 
+- **PNoise no longer solves an operating point it throws away / PNoise 不再求解
+  一个自己丢弃的工作点**
+
+  **English:** The periodic-noise linearization loop called `get_ss_params` for
+  every (orbit sample, device) pair, but only the `gds_noise_devices`
+  conductance-gated branch ever read the result — the terminal-noise and
+  noise-PSD branches query the compact model directly. With no gate list
+  configured, which is every bundled deck, that was a second full BSIM4 solve
+  per sample thrown away: 9984 evaluations and 17% of the analysis on
+  `examples/sky130_chopper.json`. The solve is now performed only for gated
+  devices. PNoise on the two silicon chopper decks drops from ~4.16 s to
+  ~3.44 s.
+
+  The computed quantity is unchanged: with the OTFT internal-node warm-start
+  chain held fixed, the result is bit-identical. `examples/sc_lpf.json` does
+  move by 8.2e-8 relative, because the discarded solve had been perturbing that
+  chain's Newton warm start; the chain's own warm-vs-cold sensitivity on the
+  same deck is 6.3e-3, five orders of magnitude larger.
+
+  **中文：** 周期性噪声线性化循环对每个（轨道采样，器件）都调用一次
+  `get_ss_params`，但只有 `gds_noise_devices` 电导门控分支会读它的结果——端子噪声
+  和噪声 PSD 两个分支直接查紧凑模型。而在没有配置门控列表时（自带的所有 deck 都
+  是如此），这就是每个采样白算一次完整 BSIM4：在 `examples/sky130_chopper.json`
+  上是 9984 次求值、占整个分析的 17%。现在只对被门控的器件求解。两个硅工艺斩波
+  deck 的 PNoise 从约 4.16 s 降到约 3.44 s。
+
+  计算的量没有变：固定 OTFT 内部节点热启动链后，结果逐位相同。
+  `examples/sc_lpf.json` 会有 8.2e-8 的相对变化，因为那次被丢弃的求解原本在扰动
+  该链的 Newton 热启动；同一个 deck 上这条链自身的热/冷启动敏感度是 6.3e-3，比它
+  大五个数量级。
+
 - **MCP Python SDK 2.0 migration / MCP Python SDK 2.0 迁移**
 
   **English:** The optional MCP adapter now requires `mcp>=2,<3`, uses

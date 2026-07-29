@@ -693,3 +693,76 @@ def test_adaptive_breakpoints_merge_near_duplicate_edge_times():
     assert np.any(merged == 2e-11)
     assert merged[0] == 0.0
     assert merged[-1] == 5e-9
+
+
+def _sky130_chopper_pss(n_points=41):
+    """A real BSIM4 PSS orbit on a small grid, or skip if SKY130 is absent."""
+    pytest.importorskip("circuitopt_core")
+    from pathlib import Path
+
+    from circuitopt.pdk.sky130.library import _BUNDLED_CARD_DIR
+
+    if not _BUNDLED_CARD_DIR.exists() or not any(_BUNDLED_CARD_DIR.iterdir()):
+        pytest.skip("SKY130 bundled cards not present")
+
+    from circuitopt import analysis_dispatch as ad
+    from circuitopt.circuit_loader import load_circuit_json
+
+    deck = Path(__file__).resolve().parents[1] / "examples" / "sky130_chopper.json"
+    spec = load_circuit_json(deck)
+    cfg = {k: (dict(v) if isinstance(v, dict) else v)
+           for k, v in (spec.analyses or {}).items()}
+    pss_cfg, periodic = ad._pss_config(spec, cfg, cfg.get("pss", {}))
+    pss_cfg["n_points"] = n_points
+    return spec, ad._run_pss(spec, spec.binding(), pss_cfg, periodic)
+
+
+def test_pnoise_solves_the_operating_point_only_for_gated_devices():
+    """The periodic-noise loop must not evaluate the small-signal operating
+    point for devices it does not conductance-gate.
+
+    ``gds_noise_devices`` is the only consumer of that solve: the terminal-noise
+    and noise-PSD branches read the compact model directly. Computing it for
+    every device would be a second full BSIM4 solve per (orbit sample, device)
+    whose result is then discarded -- on the chopper deck that was 9984 wasted
+    evaluations, 17% of the whole analysis.
+    """
+    spec, pss = _sky130_chopper_pss()
+    names = [name for name, *_ in pss["topology"].devices]
+    freqs = np.array([1e3, 1e4])
+
+    calls = []
+
+    from circuitopt.pdk.sky130 import device as sky130_device
+
+    original = sky130_device._Sky130NativeFet.get_ss_params
+
+    def counted(self, Vs, Vd, Vg):
+        calls.append((Vs, Vd, Vg))
+        return original(self, Vs, Vd, Vg)
+
+    def run(**kwargs):
+        calls.clear()
+        sky130_device._Sky130NativeFet.get_ss_params = counted
+        try:
+            return pnoise_solve(
+                spec.sizes, spec.bias, freqs, pss_result=pss,
+                binding=spec.binding(), fundamental=250e3,
+                max_sideband=1, n_period_samples=8, cache_linearization=False,
+                input_drive={"vinp": 0.5, "vinn": -0.5},
+                **kwargs,
+            ), len(calls)
+        finally:
+            sky130_device._Sky130NativeFet.get_ss_params = original
+
+    ungated, ungated_calls = run()
+    assert ungated_calls == 0, (
+        f"{ungated_calls} operating-point solves for devices nothing gates")
+
+    gated, gated_calls = run(gds_noise_devices=[names[0]])
+    # 8 orbit samples for the one gated device -- the gate is still wired up.
+    assert gated_calls == 8, gated_calls
+    # Gating replaces that device's terminal noise with 4kT*gds, so the two
+    # runs must not agree; a vacuous gate would make this test pass trivially.
+    assert not np.allclose(
+        gated["out_psd"], ungated["out_psd"], rtol=1e-9, atol=0.0)

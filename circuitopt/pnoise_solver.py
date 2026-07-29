@@ -752,12 +752,16 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
                 Vs = term_value(s, m)
                 Vd = term_value(d, m)
                 Vg = term_value(g, m)
-                p = get_ss_params(
-                    all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
-                    corner=dev_corner(corner, name), nf=dev_nf(all_nf, name),
-                    dev_inst=dev_inst[name],
-                )
                 if name in gated_noise:
+                    # Only the conductance-gated branch reads the small-signal
+                    # operating point. Evaluating it for every device would be a
+                    # second full compact-model solve per orbit sample whose
+                    # result the other two branches discard.
+                    p = get_ss_params(
+                        all_sizes[name][0], all_sizes[name][1], Vs, Vd, Vg,
+                        corner=dev_corner(corner, name), nf=dev_nf(all_nf, name),
+                        dev_inst=dev_inst[name],
+                    )
                     S_th = 4.0 * _KB * _TEMP * abs(p["gds"])
                     S_fl1 = 0.0
                     if j in terminal_white:
