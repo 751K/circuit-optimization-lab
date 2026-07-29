@@ -343,6 +343,46 @@ def _otft_param_vector(params):
     ]
 
 
+def _fill_dense_linearization_batched(dense_g, dense_c, dense_info, dev_inst,
+                                      n_samples, orbit_value):
+    """Fill the orbit G/C tensors one sample per compiled-backend call.
+
+    Returns ``False`` when the device set cannot be batched (OTFT, a backend
+    without the batch entry point) or the batch fails, leaving ``dense_g`` and
+    ``dense_c`` for the caller's scalar loop to fill instead. Partial writes are
+    harmless here: the scalar loop assigns every ``[sample, position]`` slot.
+    """
+    from ._device_batch import open_orbit_batch
+
+    batch = open_orbit_batch(dev for dev, *_rest in dense_info)
+    if batch is None:
+        return False
+    count = len(dense_info)
+    vs = np.empty(count)
+    vd = np.empty(count)
+    vg = np.empty(count)
+    try:
+        with batch:
+            for sample in range(n_samples):
+                for position, (_dev, d, g, s) in enumerate(dense_info):
+                    vs[position] = orbit_value(s, sample)
+                    vd[position] = orbit_value(d, sample)
+                    vg[position] = orbit_value(g, sample)
+                _i, conductance, _q, capacitance = batch.evaluate(vs, vd, vg)
+                dense_g[sample] = conductance
+                dense_c[sample] = capacitance
+    except Exception as exc:
+        # Re-run through the scalar adapter: it reports the offending device by
+        # name, which a batch status index cannot.
+        diagnostics.note(
+            "pac.dense_linearization_batch_fallback", exc,
+            detail="periodic orbit linearization batch failed; "
+                   "re-evaluating device by device",
+        )
+        return False
+    return True
+
+
 def _rust_pac_linearization(
         all_sizes, all_nf, corner, topo, tbias, t_uniform, node_wave,
         input_wave, node_inputs, drive_list, *, charge_caps,
@@ -453,13 +493,15 @@ def _rust_pac_linearization(
         if input_keys else np.empty((0, N), dtype=float))
     dense_g = np.empty((N, len(dense_info), 4, 4), dtype=float)
     dense_c = np.empty_like(dense_g)
-    for sample in range(N):
-        for position, (dev, d, g, s) in enumerate(dense_info):
-            G4, C4 = dev.get_terminal_linearization(
-                orbit_value(s, sample), orbit_value(d, sample),
-                orbit_value(g, sample))
-            dense_g[sample, position] = np.asarray(G4, dtype=float)
-            dense_c[sample, position] = np.asarray(C4, dtype=float)
+    if not _fill_dense_linearization_batched(
+            dense_g, dense_c, dense_info, dev_inst, N, orbit_value):
+        for sample in range(N):
+            for position, (dev, d, g, s) in enumerate(dense_info):
+                G4, C4 = dev.get_terminal_linearization(
+                    orbit_value(s, sample), orbit_value(d, sample),
+                    orbit_value(g, sample))
+                dense_g[sample, position] = np.asarray(G4, dtype=float)
+                dense_c[sample, position] = np.asarray(C4, dtype=float)
     Gt, Ct, Gin, Cin = problem.linearize(
         node_wave_arr, input_wave_arr, node_dot_arr, input_dot_arr,
         dense_g, dense_c)

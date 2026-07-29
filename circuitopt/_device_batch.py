@@ -25,6 +25,33 @@ def _hermitian_violation(matrices):
         matrices - np.conjugate(np.swapaxes(matrices, -1, -2)))))
 
 
+def _close_at_reference(values, floor, absolute_tolerance, label):
+    """Close BSIM's terminal residual at the bulk terminal, batch-wide.
+
+    BSIM's cutoff-state load equations leave an abstol/gmin-scale remainder in
+    the four-terminal sum; the scalar adapter absorbs it into the reference
+    terminal before enforcing the public KCL contract, and the batch ABI hands
+    back the same unreduced kernel output. This is that reduction, applied to a
+    leading device axis: ``values`` is ``(device, 4)`` or ``(device, 4, 4)``,
+    summed over the terminal axis. A genuinely broken reduction still raises.
+    """
+    from .compact_models.bsim4 import Bsim4NativeError
+
+    error = np.sum(values, axis=1)
+    flat = np.abs(values).reshape(len(values), -1)
+    scale = np.maximum(flat.max(axis=1) if flat.size else np.zeros(len(values)),
+                       floor)
+    limit = np.maximum(1e-8 * scale, absolute_tolerance)
+    worst = np.abs(error).reshape(len(values), -1).max(axis=1) if len(values) else ()
+    if len(values) and bool(np.any(worst > limit)):
+        index = int(np.argmax(worst - limit))
+        raise Bsim4NativeError(
+            f"BSIM4 terminal-{label} reduction failed at batch index {index}: "
+            f"residual={float(worst[index]):.6g}")
+    values[:, 3] -= error
+    return values
+
+
 class NativeOrbitBatch:
     """One native BSIM4 handle per device, re-biased sample by sample.
 
@@ -59,13 +86,26 @@ class NativeOrbitBatch:
         """Bias every handle and return (currents, conductance, charges, caps).
 
         ``vs``/``vd``/``vg`` are per-device terminal voltages for one sample.
+        The four returned blocks carry the same bulk-terminal reduction the
+        scalar adapter applies, so they are interchangeable with
+        ``get_terminal_currents`` / ``get_terminal_linearization``.
         """
-        from .compact_models.bsim4 import NativeBsim4Backend
+        from .compact_models.bsim4 import Bsim4NativeError, NativeBsim4Backend
 
         self._terminals[:, 0] = vd
         self._terminals[:, 1] = vg
         self._terminals[:, 2] = vs
-        return NativeBsim4Backend.evaluate_batch(self._handles, self._terminals)
+        currents, conductance, charges, capacitance = (
+            NativeBsim4Backend.evaluate_batch(self._handles, self._terminals))
+        for block in (currents, conductance, charges, capacitance):
+            if not np.all(np.isfinite(block)):
+                raise Bsim4NativeError(
+                    "BSIM4 batch evaluation contains non-finite values")
+        _close_at_reference(currents, 1e-18, 1e-9, "current")
+        _close_at_reference(conductance, 1e-18, 1e-9, "conductance")
+        _close_at_reference(charges, 1e-24, 1e-18, "charge")
+        _close_at_reference(capacitance, 1e-24, 1e-18, "capacitance")
+        return currents, conductance, charges, capacitance
 
     def noise(self, frequencies):
         """Terminal-noise (total, flicker) for the last biased operating point.
@@ -93,16 +133,15 @@ class NativeOrbitBatch:
         return total, white, flicker
 
 
-def open_orbit_batch(dev_inst, names):
-    """Open a :class:`NativeOrbitBatch` over ``names``, or ``None``.
+def open_orbit_batch(devices):
+    """Open a :class:`NativeOrbitBatch` over ``devices``, or ``None``.
 
     ``None`` means at least one device has no independent native handle to
     offer, so the caller must keep evaluating that set one device at a time.
     """
-    names = list(names)
-    if not names:
+    devices = list(devices)
+    if not devices:
         return None
-    devices = [dev_inst.get(name) for name in names]
     if any(dev is None or not callable(
             getattr(dev, "create_native_solver_handle", None))
             for dev in devices):

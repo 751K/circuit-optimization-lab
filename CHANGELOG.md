@@ -165,6 +165,40 @@ release checklist.
 
 ### Changed / 变更
 
+- **PAC orbit linearization batched too / PAC 轨道线性化同样批量化**
+
+  **English:** The orbit G/C tensors that PAC stamps — and that PNoise reuses —
+  were built by calling `get_terminal_linearization` once per (orbit sample,
+  device), ~73 us each against ~1-3 us of actual model evaluation. That loop now
+  goes through the same batch helper, one call per orbit sample. PAC on the two
+  silicon chopper decks drops from ~0.93 s to ~0.33 s, and PNoise, which shares
+  the loop, from ~1.09 s to ~0.52 s. End to end for the periodic suite:
+  `sky130_chopper` 5.15 s to 0.88 s, `tsmc28hpcp_chopper` 5.04 s to 0.86 s.
+
+  The C batch entry point returns raw kernel output, so the batch now applies
+  the scalar adapter's bulk-terminal KCL/charge closure itself; without it PAC
+  would stamp matrices whose columns do not sum to zero. `sky130_chopper` stays
+  bit-identical. `tsmc28hpcp_chopper` moves by 2.7e-13, which is BSIM4 handle
+  state carry-over rather than arithmetic: the scalar path's own answer moves
+  2.74e-13 when only `BSIM4_DEVICE_CACHE_SIZE` changes, while the batched path,
+  which owns one dedicated handle per device walking the orbit in order, is
+  invariant to it (0.000e+00). With both paths on fresh handles they agree to
+  2.9e-15.
+
+  **中文：** PAC 装配（并被 PNoise 复用）的轨道 G/C 张量此前是对每个（轨道采样，
+  器件）调一次 `get_terminal_linearization` 建起来的，每次约 73 us，而其中真正的
+  模型求值只有约 1-3 us。该循环现在走同一个批量助手，每个轨道采样一次调用。两个
+  硅工艺斩波 deck 的 PAC 从约 0.93 s 降到约 0.33 s；共用该循环的 PNoise 从约
+  1.09 s 降到约 0.52 s。周期性分析全链端到端：`sky130_chopper` 5.15 s → 0.88 s，
+  `tsmc28hpcp_chopper` 5.04 s → 0.86 s。
+
+  C 批量入口返回的是未归约的内核输出，因此批量路径现在自行施加标量适配层的体端
+  KCL/电荷归零；没有它，PAC 装配的矩阵各列将不满足零和。`sky130_chopper` 仍逐位
+  相同。`tsmc28hpcp_chopper` 变化 2.7e-13，其成因是 BSIM4 句柄状态延续而非算术：
+  只改 `BSIM4_DEVICE_CACHE_SIZE`、标量路径自身的结果就会变动 2.74e-13，而按轨道
+  顺序为每个器件独占一个句柄的批量路径对它完全不敏感（0.000e+00）。两条路径都换
+  用全新句柄时，二者相差 2.9e-15。
+
 - **PNoise reads the orbit through the BSIM4 batch ABI / PNoise 改用 BSIM4 批量
   ABI 读取轨道**
 

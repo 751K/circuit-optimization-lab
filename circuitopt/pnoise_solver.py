@@ -821,7 +821,7 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
             if j in terminal_white and name not in gated_noise
         ]
         batched_rows = set()
-        batch = open_orbit_batch(dev_inst, [item[1] for item in batch_entries])
+        batch = open_orbit_batch(dev_inst[item[1]] for item in batch_entries)
         if batch is not None:
             try:
                 with batch:

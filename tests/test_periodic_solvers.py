@@ -854,3 +854,125 @@ def test_terminal_noise_batch_failure_falls_back_without_partial_grids(monkeypat
     assert pns.open_orbit_batch is not None
     np.testing.assert_allclose(
         recovered["out_psd"], reference["out_psd"], rtol=1e-12, atol=0.0)
+
+
+def test_batched_orbit_linearization_matches_the_scalar_adapter(monkeypatch):
+    """The batched orbit G/C tensors must equal the scalar adapter's.
+
+    The C batch entry point hands back unreduced kernel output: the scalar
+    adapter's bulk-terminal KCL/charge closure lives in Python. A batch that
+    skipped it would feed PAC and PNoise conductance and capacitance matrices
+    whose columns do not sum to zero.
+    """
+    spec, pss = _sky130_chopper_pss()
+    freqs = np.array([1e3, 1e4])
+
+    def run_pac():
+        return pac_solve(
+            spec.sizes, spec.bias, freqs, pss_result=pss, binding=spec.binding(),
+            input_drive={"vinp": 0.5, "vinn": -0.5}, time_domain=True,
+            td_n_period_samples=16, cache_linearization=False,
+            cache_forcing=False,
+        )
+
+    batched = run_pac()
+
+    import circuitopt.pac_solver as pacs
+
+    calls = []
+    original = pacs._fill_dense_linearization_batched
+    monkeypatch.setattr(
+        pacs, "_fill_dense_linearization_batched",
+        lambda *a, **k: (calls.append(1), False)[1])
+    scalar = run_pac()
+
+    assert original is not None and calls, "the scalar run never reached the hook"
+    np.testing.assert_allclose(
+        batched["gains"], scalar["gains"], rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(
+        batched["response"], scalar["response"], rtol=1e-12, atol=0.0)
+
+
+def test_orbit_batch_reduces_terminals_like_the_scalar_adapter():
+    """One batched evaluation must equal `get_terminal_linearization` exactly.
+
+    This is the contract the PAC/PNoise orbit tensors rest on, checked against
+    the scalar adapter device by device rather than through an analysis.
+    """
+    spec, pss = _sky130_chopper_pss()
+
+    from circuitopt._device_batch import open_orbit_batch
+    from circuitopt.device_factory import build_devices
+
+    topo = pss["topology"]
+    dev_inst = build_devices(
+        spec.sizes, nf=spec.nf, topo=topo, model_types=spec.model_types,
+        device_kwargs=spec.device_kwargs)
+    names = [name for name, *_ in topo.devices]
+    devices = [dev_inst[name] for name in names]
+
+    batch = open_orbit_batch(devices)
+    assert batch is not None, "SKY130 devices must be batchable"
+
+    vs = np.zeros(len(devices))
+    vd = np.linspace(0.3, 1.5, len(devices))
+    vg = np.linspace(0.2, 1.6, len(devices))
+    with batch:
+        _i, conductance, _q, capacitance = batch.evaluate(vs, vd, vg)
+
+    for position, dev in enumerate(devices):
+        G4, C4 = dev.get_terminal_linearization(
+            float(vs[position]), float(vd[position]), float(vg[position]))
+        np.testing.assert_allclose(
+            conductance[position], np.asarray(G4, float), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            capacitance[position], np.asarray(C4, float), rtol=0.0, atol=0.0)
+
+
+def test_orbit_batch_closes_the_terminal_residual_at_the_bulk_node(monkeypatch):
+    """Every block the batch returns must carry the scalar adapter's reduction.
+
+    The C batch entry point returns raw kernel output; closing BSIM's
+    abstol/gmin-scale four-terminal remainder at the reference terminal is the
+    Python adapter's job, and PAC stamps the returned conductance and
+    capacitance straight into the orbit tensors. On the bundled SKY130 cards
+    the kernel's own residual measures exactly zero across a bias sweep, so the
+    reduction is injected here rather than waited for.
+    """
+    from circuitopt import _device_batch
+    from circuitopt.compact_models.bsim4 import NativeBsim4Backend
+
+    count = 3
+    residual_i = np.array([1e-13, -2e-13, 4e-13])
+    residual_q = np.array([3e-22, -1e-22, 5e-22])
+
+    def fake_batch(handles, terminals):
+        currents = np.zeros((count, 4))
+        currents[:, 0] = 1e-3
+        currents[:, 1] = -1e-3
+        currents[:, 2] = residual_i           # column sum is the residual
+        conductance = np.zeros((count, 4, 4))
+        conductance[:, 0, 0] = 1e-4
+        conductance[:, 1, 0] = -1e-4
+        conductance[:, 2, 1] = residual_i
+        charges = np.zeros((count, 4))
+        charges[:, 0] = residual_q
+        capacitance = np.zeros((count, 4, 4))
+        capacitance[:, 0, 2] = residual_q
+        return currents, conductance, charges, capacitance
+
+    monkeypatch.setattr(NativeBsim4Backend, "evaluate_batch",
+                        staticmethod(fake_batch))
+
+    batch = _device_batch.NativeOrbitBatch([], np.zeros(0))
+    batch._terminals = np.zeros((count, 4))
+    currents, conductance, charges, capacitance = batch.evaluate(
+        np.zeros(count), np.zeros(count), np.zeros(count))
+
+    # The residual is absorbed at the bulk terminal, index 3, and nowhere else.
+    np.testing.assert_allclose(currents[:, 3], -residual_i, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(charges[:, 3], -residual_q, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(currents[:, 0], 1e-3, rtol=0.0, atol=0.0)
+    for block in (currents, conductance, charges, capacitance):
+        np.testing.assert_allclose(
+            block.sum(axis=1), 0.0, rtol=0.0, atol=1e-30)
