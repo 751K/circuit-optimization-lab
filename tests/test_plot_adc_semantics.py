@@ -12,9 +12,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-matplotlib = pytest.importorskip("matplotlib")
-matplotlib.use("Agg")
-
 from circuitopt.toolchain import pdk_root                   # noqa: E402
 
 
@@ -23,6 +20,14 @@ EXAMPLE3 = ROOT / "examples" / "freepdk45_sar3.json"
 _HAVE = (Path(pdk_root()) / "freepdk45" / "models_nom" / "NMOS_VTG.inc").is_file()
 needs_freepdk45 = pytest.mark.skipif(
     not _HAVE, reason="FreePDK45 cards not present")
+
+
+@pytest.fixture(scope="module")
+def plot_adc():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from examples import plot_adc as module
+    return module
 
 
 def _fake_mc(dnl, inl, offset, *, dnl_thr=0.5, inl_thr=0.5):
@@ -40,53 +45,49 @@ def _fake_mc(dnl, inl, offset, *, dnl_thr=0.5, inl_thr=0.5):
     }
 
 
-def test_mc_plot_survives_all_overflow(tmp_path):
+def test_mc_plot_survives_all_overflow(tmp_path, plot_adc):
     """Every trial non-monotonic (inf DNL/INL, NaN offset): the figure must still
     render with only overflow bins — np.histogram on an all-inf array is a
     classic crash site."""
-    from examples.plot_adc import plot_sar_mc
     mc = _fake_mc([np.inf] * 4, [np.inf] * 4, [np.nan] * 4)
-    out = plot_sar_mc(mc, out_dir=tmp_path)
+    out = plot_adc.plot_sar_mc(mc, out_dir=tmp_path)
     assert Path(out).is_file() and Path(out).stat().st_size > 1024
 
 
-def test_mc_plot_single_trial(tmp_path):
+def test_mc_plot_single_trial(tmp_path, plot_adc):
     """n=1 with zero spread: histogram range collapses to a point."""
-    from examples.plot_adc import plot_sar_mc
-    out = plot_sar_mc(_fake_mc([0.0], [0.0], [0.0]), out_dir=tmp_path)
+    out = plot_adc.plot_sar_mc(
+        _fake_mc([0.0], [0.0], [0.0]), out_dir=tmp_path)
     assert Path(out).is_file()
 
 
-def test_static_plot_with_missing_codes_and_nan_transitions(tmp_path):
+def test_static_plot_with_missing_codes_and_nan_transitions(tmp_path, plot_adc):
     """A ramp with a skipped code produces NaN transitions and a missing-code
     entry — the staircase overlay and DNL bars must tolerate the NaNs."""
     from circuitopt.adc import static_ramp_metrics
-    from examples.plot_adc import plot_sar_static
     vin = (np.arange(8) + 0.5) / 8.0
     codes = np.array([0, 1, 3, 3, 4, 5, 6, 7])          # code 2 missing
     metrics = static_ramp_metrics(vin, codes, 3, vmin=0.0, vmax=1.0)
     assert len(metrics["missing_codes"]) > 0            # test data is as intended
     sweep = {"vin": vin, "codes": codes, "metrics": metrics, "n_bits": 3, "vref": 1.0}
-    out = plot_sar_static(sweep, out_dir=tmp_path)
+    out = plot_adc.plot_sar_static(sweep, out_dir=tmp_path)
     assert Path(out).is_file() and Path(out).stat().st_size > 1024
 
 
-def test_spectrum_plot_small_record(tmp_path):
+def test_spectrum_plot_small_record(tmp_path, plot_adc):
     """Shortest legal record (8 samples, 1 cycle): only 5 rfft bins, harmonics all
     alias — annotation placement must not index outside the spectrum."""
     from circuitopt.adc import dynamic_metrics
-    from examples.plot_adc import plot_sar_spectrum
     codes = np.round(3.5 + 3.5 * np.sin(2 * np.pi * np.arange(8) / 8)).astype(int)
     sig = {"codes": codes, "metrics": dynamic_metrics(codes, 1e6, fundamental_bin=1),
            "n_bits": 3, "vref": 1.0}
-    out = plot_sar_spectrum(sig, out_dir=tmp_path)
+    out = plot_adc.plot_sar_spectrum(sig, out_dir=tmp_path)
     assert Path(out).is_file()
 
 
-def test_conversion_plot_derives_keys_from_spec_not_hardcoded(tmp_path):
+def test_conversion_plot_derives_keys_from_spec_not_hardcoded(tmp_path, plot_adc):
     """Rename every waveform key in a synthetic conversion result: the plot must
     follow the adc block's names (a hardcoded 'clk'/'sample' would KeyError)."""
-    from examples.plot_adc import plot_sar_conversion
     n = 64
     t = np.linspace(0.0, 1e-7, n)
     keys = ["strobe_x", "smp", "smp_b", "m2", "m1", "m0"]
@@ -104,7 +105,7 @@ def test_conversion_plot_derives_keys_from_spec_not_hardcoded(tmp_path):
            "sample_bar_input": "smp_b", "comparator_node": "cmp",
            "comparator_threshold": 0.5, "sample_end": 1e-8, "bit_period": 2e-8,
            "edge_time": 2e-10, "clock": {"input": "strobe_x"}}
-    out = plot_sar_conversion(conversion, adc, out_dir=tmp_path)
+    out = plot_adc.plot_sar_conversion(conversion, adc, out_dir=tmp_path)
     assert Path(out).is_file() and Path(out).stat().st_size > 1024
 
 
@@ -130,11 +131,11 @@ def test_cli_mc_exclusive_with_vin():
     assert proc.returncode != 0
 
 
-def test_plot_results_dir_not_polluted_by_tests(tmp_path):
+def test_plot_results_dir_not_polluted_by_tests(tmp_path, plot_adc):
     """Figure functions honor out_dir strictly — nothing may leak into results/."""
-    from examples.plot_adc import plot_sar_mc
     results_dir = ROOT / "results"
     before = set(results_dir.glob("*.png")) if results_dir.is_dir() else set()
-    plot_sar_mc(_fake_mc([0.1, 0.2], [0.1, 0.2], [0.0, 0.1]), out_dir=tmp_path)
+    plot_adc.plot_sar_mc(
+        _fake_mc([0.1, 0.2], [0.1, 0.2], [0.0, 0.1]), out_dir=tmp_path)
     after = set(results_dir.glob("*.png")) if results_dir.is_dir() else set()
     assert before == after

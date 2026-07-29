@@ -61,7 +61,16 @@ def run_cli(args) -> None:
     server = create_mcp_server(
         workspace=Path(args.workspace),
         job_workers=args.job_workers,
-        host=args.host,
-        port=args.port,
     )
-    server.run(transport=args.transport)
+    run_options = {}
+    if args.transport == "streamable-http":
+        run_options = {
+            "host": args.host,
+            "port": args.port,
+            "json_response": True,
+            "stateless_http": False,
+        }
+    try:
+        server.run(transport=args.transport, **run_options)
+    except KeyboardInterrupt:
+        pass

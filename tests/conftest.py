@@ -15,7 +15,17 @@ reviewable inventory of everything the default suite skips.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
+
+# Keep Matplotlib's font cache writable and reusable across pytest subprocesses.
+# Without this, sandboxed/home-read-only runs rebuild it in a temporary
+# directory on every process start.
+_MPLCONFIGDIR = Path(__file__).resolve().parent.parent / ".pytest_cache" / "matplotlib"
+_MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 
 # Whole files whose tests are all heavyweight end-to-end conversions.
 _HEAVY_E2E_FILES = {

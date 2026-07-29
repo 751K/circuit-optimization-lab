@@ -76,9 +76,7 @@ serve = [
     "uvicorn>=0.27",     # circuitopt/service/cli.py  (programmatic server start)
 ]
 mcp = [
-    # v2 is pre-release as of 2026-07-24; keep the stable v1 API until an
-    # intentional migration updates the server and protocol tests together.
-    "mcp>=1.27,<2",
+    "mcp>=2,<3",
 ]
 test = [
     "pytest>=8.0",
@@ -87,7 +85,7 @@ test = [
     "fastapi>=0.110",    # tests/test_service.py imports circuitopt.service.app
     "uvicorn>=0.27",     # serve extra's runtime pair (kept aligned with fastapi)
     "httpx>=0.27",       # fastapi.testclient.TestClient requires httpx
-    "mcp>=1.27,<2",      # tests/test_mcp_server.py protocol-level in-memory client
+    "mcp>=2,<3",         # tests/test_mcp_server.py protocol-level in-memory client
 ]
 dev = [
     "pytest>=8.0",
@@ -96,7 +94,7 @@ dev = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "httpx>=0.27",
-    "mcp>=1.27,<2",
+    "mcp>=2,<3",
     "ruff>=0.6",
 ]
 # Everything installable at once (excludes torch, which is heavy / env-specific).
@@ -108,7 +106,7 @@ all = [
     "flask>=3.0",
     "fastapi>=0.110",
     "uvicorn>=0.27",
-    "mcp>=1.27,<2",
+    "mcp>=2,<3",
 ]
 
 [project.scripts]

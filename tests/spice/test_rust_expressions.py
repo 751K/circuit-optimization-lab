@@ -15,7 +15,6 @@ parameter value in this file, in assertion messages, or in output.
 from __future__ import annotations
 
 import math
-import os
 import threading
 
 import pytest
@@ -363,36 +362,8 @@ def test_shared_scope_resolves_parameters_concurrently():
 # ---------------------------------------------------------------------------
 
 
-def _tsmc_expression_corpus() -> list[str] | None:
-    """All parameter expressions from the licensed model, or ``None`` if absent.
-
-    Reads only at runtime; the returned strings are never persisted or logged.
-    """
-    from circuitopt.spice import parse_spice_library
-    from circuitopt.toolchain import tsmc28_model_dir
-
-    path = os.path.join(tsmc28_model_dir(), "cln28hpcp_1d8_elk_v1d0_2p2.l")
-    if not os.path.isfile(path):
-        return None
-
-    library = parse_spice_library(path)
-    expressions: list[str] = []
-    for section in library.sections.values():
-        statements = list(section.statements)
-        for subcircuit in section.subcircuits.values():
-            statements.extend(subcircuit.statements)
-            for parameter in subcircuit.parameters:
-                expressions.append(parameter.expression)
-        for statement in statements:
-            for parameter in statement.parameters:
-                expressions.append(parameter.expression)
-    return expressions
-
-
-def test_all_real_tsmc_parameter_expressions_match_reference():
-    expressions = _tsmc_expression_corpus()
-    if expressions is None:
-        pytest.skip("licensed TSMC28HPC+ model is not installed")
+def test_all_real_tsmc_parameter_expressions_match_reference(tsmc_parity_deck):
+    expressions = tsmc_parity_deck.expressions
 
     total = len(expressions)
     value_matches = 0

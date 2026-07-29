@@ -8,6 +8,10 @@ simulate, explore, and sign off circuits through the same application
 operations used by the local HTTP service. It is a protocol adapter: numerical
 work still runs in the Rust solver and native BSIM backend.
 
+The adapter uses MCP Python SDK 2.x and negotiates the MCP `2026-07-28`
+protocol. The server publishes the installed Circuit Optimization version in
+its initialization response.
+
 ## Install and Start
 
 ```bash
@@ -32,7 +36,8 @@ circuit-opt mcp \
 ```
 
 The HTTP transport intentionally rejects non-loopback bind addresses because
-this local server has no authentication.
+this local server has no authentication. Its endpoint is
+`http://127.0.0.1:8342/mcp` with the defaults above.
 
 ## Client Configuration
 

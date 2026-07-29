@@ -537,9 +537,41 @@ _CHOP_D3_NF = {"M6": 4, "M7": 128, "M8": 128, "M9": 6, "M10": 6,
 _CHOP_D3_BIAS = {"VDD": 40.0, "VCM": 31.38, "VB": 10.6, "VC": 16.47}
 
 
+@pytest.fixture(scope="module")
+def _chop_d3_slow_pss():
+    return pmos_chopper_pss(
+        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
+        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
+        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
+        fallback_least_squares=False, n_points=161,
+        output_filter=(1e6, 680e-12), corner="slow")
+
+
+@pytest.fixture
+def chop_d3_slow_pss(_chop_d3_slow_pss):
+    """A test-local copy of the shared orbit; PAC/PNoise attach private caches."""
+    return copy.deepcopy(_chop_d3_slow_pss)
+
+
+@pytest.fixture(scope="module")
+def _chop_d3_typical_gear2_pss():
+    return pmos_chopper_pss(
+        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
+        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
+        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
+        fallback_least_squares=False, n_points=321, max_shooting_iters=5,
+        output_filter=(1e6, 680e-12), corner="typical",
+        integration_method="gear2", analytic_jacobian=False)
+
+
+@pytest.fixture
+def chop_d3_typical_gear2_pss(_chop_d3_typical_gear2_pss):
+    return copy.deepcopy(_chop_d3_typical_gear2_pss)
+
+
 @pytest.mark.cadence_regression
 @pytest.mark.slow_regression
-def test_pmos_chopper_pnoise_matches_cadence_band():
+def test_pmos_chopper_pnoise_matches_cadence_band(chop_d3_slow_pss):
     # PSS-based LPTV PNoise vs official chop_tb_d3 slow-corner Cadence reference
     # (IRN=12.4886 uVrms over 0.05-100 Hz; re-run at maxsideband=40 converges to
     # 12.498).  The local HB noise conversion converges more slowly in sidebands
@@ -549,12 +581,7 @@ def test_pmos_chopper_pnoise_matches_cadence_band():
     # input-referral is consistent.  The converged local slow IRN sits ~+1.4%
     # above Spectre (a small corner-dependent noise residual).
     freqs = _spectre_dec_grid(0.05, 200.0, points_per_dec=10)
-    pss = pmos_chopper_pss(
-        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
-        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
-        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
-        fallback_least_squares=False, n_points=161,
-        output_filter=(1e6, 680e-12), corner="slow")
+    pss = chop_d3_slow_pss
     r = pmos_chopper_pnoise(
         _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
         nf=_CHOP_D3_NF, corner="slow", band=(0.05, 100.0))
@@ -573,18 +600,13 @@ def test_pmos_chopper_pnoise_matches_cadence_band():
 
 @pytest.mark.cadence_regression
 @pytest.mark.slow_regression
-def test_pmos_chopper_pnoise_time_domain_is_truncation_free():
+def test_pmos_chopper_pnoise_time_domain_is_truncation_free(chop_d3_slow_pss):
     # The time-domain Floquet-adjoint PNoise (sparse BVP solve of F^H zeta = c)
     # computes the adjoint transfer EXACTLY in the sideband index, so its output is
     # ~independent of max_sideband -- unlike the HB fold, whose K-truncation needs
     # K~96 to converge (K=32 is +1.8% on the slow chopper). Guards that the TD path
     # is taken and is truncation-free.
-    pss = pmos_chopper_pss(
-        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
-        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
-        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
-        fallback_least_squares=False, n_points=161,
-        output_filter=(1e6, 680e-12), corner="slow")
+    pss = chop_d3_slow_pss
     freqs = np.array([0.05, 1.0, 100.0])
 
     def irn(td, K):
@@ -609,18 +631,13 @@ def test_pmos_chopper_pnoise_time_domain_is_truncation_free():
 
 @pytest.mark.cadence_regression
 @pytest.mark.slow_regression
-def test_pmos_chopper_pac_matches_cadence_baseband_gain():
+def test_pmos_chopper_pac_matches_cadence_baseband_gain(chop_d3_slow_pss):
     # PSS+PAC vs Cadence design-#3 PSS/PAC reference at f_chop=200 Hz.
     # The official ADE netlist is slow corner. The default chopper PAC path is
     # the time-domain shooting solver with PMOS gate1 internal states retained;
     # this avoids both HB sideband truncation and the old terminal-cap collapse.
     freqs = np.array([0.05, 1.0, 200.0])
-    pss = pmos_chopper_pss(
-        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
-        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
-        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
-        fallback_least_squares=False, n_points=161,
-        output_filter=(1e6, 680e-12), corner="slow")
+    pss = chop_d3_slow_pss
     pac = pmos_chopper_pac(
         _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
         nf=_CHOP_D3_NF, corner="slow")
@@ -635,19 +652,15 @@ def test_pmos_chopper_pac_matches_cadence_baseband_gain():
 
 @pytest.mark.cadence_regression
 @pytest.mark.slow_regression
-def test_pmos_chopper_pac_gear2_matches_cadence_within_1pct():
+def test_pmos_chopper_pac_gear2_matches_cadence_within_1pct(
+    chop_d3_typical_gear2_pss,
+):
     # gear2/BDF2 transient closes the backward-Euler switch-edge error: chopper
     # PAC baseband lands within 1% of Cadence (typical corner 13.921 V/V), vs
     # ~-2.6% with backward-Euler. Uses the Python gear2 path + FD shooting
     # Jacobian (the analytic monodromy is BE-specific).
     freqs = np.array([0.05, 200.0])
-    pss = pmos_chopper_pss(
-        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
-        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
-        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
-        fallback_least_squares=False, n_points=321, max_shooting_iters=5,
-        output_filter=(1e6, 680e-12), corner="typical",
-        integration_method="gear2", analytic_jacobian=False)
+    pss = chop_d3_typical_gear2_pss
     pac = pmos_chopper_pac(
         _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
         nf=_CHOP_D3_NF, corner="typical")
@@ -656,20 +669,16 @@ def test_pmos_chopper_pac_gear2_matches_cadence_within_1pct():
 
 @pytest.mark.cadence_regression
 @pytest.mark.slow_regression
-def test_pmos_chopper_pac_time_domain_matches_cadence():
+def test_pmos_chopper_pac_time_domain_matches_cadence(
+    chop_d3_typical_gear2_pss,
+):
     # The default time-domain (shooting) PAC integrates the linearized orbit with
     # the Floquet BC x(T)=e^{jwT}x(0): a frequency-independent monodromy + a small
     # boundary solve per frequency, truncation-free. It must stay within 1% of
     # Cadence (13.921 V/V) while retaining the hidden PMOS gate1 states that
     # Spectre keeps during PAC conversion.
     freqs = np.array([0.05, 200.0])
-    pss = pmos_chopper_pss(
-        _CHOP_D3_SIZES, _CHOP_D3_BIAS, 200.0, switch_size=(5000.0, 30.0),
-        switch_nf=1, nf=_CHOP_D3_NF, edge_time=20e-6, input_diff=0.0,
-        input_common_mode=31.38, charge_injection=False, tstab_periods=2,
-        fallback_least_squares=False, n_points=321, max_shooting_iters=5,
-        output_filter=(1e6, 680e-12), corner="typical",
-        integration_method="gear2", analytic_jacobian=False)
+    pss = chop_d3_typical_gear2_pss
     td = pmos_chopper_pac(
         _CHOP_D3_SIZES, _CHOP_D3_BIAS, freqs, 200.0, pss_result=pss,
         nf=_CHOP_D3_NF, corner="typical")

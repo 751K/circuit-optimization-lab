@@ -90,7 +90,7 @@ circuitopt/
     serialize.py        to_jsonable()/serialize_results() — numpy/complex/NaN → strict-JSON conventions.
     cli.py              add_cli_args()/run_cli() — shared `serve` subcommand argument wiring (lazy fastapi/uvicorn import).
   mcp/                 Optional stdio/Streamable HTTP MCP adapter (the `mcp` extra).
-    server.py          FastMCP tools/resources, bounded results, and background signoff adapter.
+    server.py          MCPServer tools/resources, bounded results, and background signoff adapter.
     workspace.py       Workspace-relative input validation and atomic result artifacts.
     cli.py             Shared `mcp` subcommand and standalone entry-point arguments.
 ```

@@ -1,7 +1,6 @@
 """HSPICE expression compiler and lazy-scope tests."""
 from __future__ import annotations
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
@@ -78,26 +77,9 @@ def test_shared_scope_resolves_parameters_concurrently_without_false_cycles():
     assert results == [(12.0,) * 100] * 8
 
 
-def test_all_real_tsmc_parameter_expressions_compile_when_locally_installed():
-    from circuitopt.spice import parse_spice_library
-    from circuitopt.toolchain import tsmc28_model_dir
-
-    path = os.path.join(
-        tsmc28_model_dir(), "cln28hpcp_1d8_elk_v1d0_2p2.l")
-    if not os.path.isfile(path):
-        pytest.skip("licensed TSMC28HPC+ model is not installed")
-
-    library = parse_spice_library(path)
-    count = 0
-    for section in library.sections.values():
-        statements = list(section.statements)
-        for subcircuit in section.subcircuits.values():
-            statements.extend(subcircuit.statements)
-            for parameter in subcircuit.parameters:
-                compile_expression(parameter.expression)
-                count += 1
-        for statement in statements:
-            for parameter in statement.parameters:
-                compile_expression(parameter.expression)
-                count += 1
-    assert count > 100_000
+def test_all_real_tsmc_parameter_expressions_compile_when_locally_installed(
+    tsmc_parity_deck,
+):
+    for expression in tsmc_parity_deck.expressions:
+        compile_expression(expression)
+    assert len(tsmc_parity_deck.expressions) > 100_000

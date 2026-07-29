@@ -7,6 +7,9 @@
 探索和签核。MCP 与本地 HTTP 服务调用同一组 application operations；数值计算仍由
 Rust 求解器和原生 BSIM 后端完成，MCP 本身不包含器件方程。
 
+适配层使用 MCP Python SDK 2.x，并协商 MCP `2026-07-28` 协议。初始化响应会明确
+上报当前安装的 Circuit Optimization 版本。
+
 ## 安装与启动
 
 ```bash
@@ -30,7 +33,8 @@ circuit-opt mcp \
   --workspace .
 ```
 
-该服务没有鉴权，因此 HTTP transport 会主动拒绝非 loopback 监听地址。
+该服务没有鉴权，因此 HTTP transport 会主动拒绝非 loopback 监听地址。使用上述
+默认参数时，端点为 `http://127.0.0.1:8342/mcp`。
 
 ## 客户端配置
 

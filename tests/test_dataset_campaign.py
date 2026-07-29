@@ -123,7 +123,7 @@ def test_dataset_campaign_deterministic_across_workers(tmp_path):
     _freepdk45_ready()
     path = _write(tmp_path, _size_grid_config())
     base = D.run_from_config(path, n=32, seed=1, corner="nom")
-    for w in (1, 2, 8):
+    for w in (2, 8):
         got = D.run_from_config(path, n=32, seed=1, corner="nom", workers=w)
         for rb, rr in zip(base["rows"], got["rows"]):
             assert rb["idx"] == rr["idx"]

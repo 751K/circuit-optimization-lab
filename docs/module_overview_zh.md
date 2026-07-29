@@ -79,7 +79,7 @@ circuitopt/
     serialize.py        to_jsonable()/serialize_results() —— numpy/complex/NaN → 严格 JSON 的转换约定。
     cli.py              add_cli_args()/run_cli() —— 共享的 `serve` 子命令参数定义（延迟导入 fastapi/uvicorn）。
   mcp/                 可选 stdio/Streamable HTTP MCP 适配层（`mcp` extra）。
-    server.py          FastMCP 工具/resources、有界响应和后台 signoff 适配。
+    server.py          MCPServer 工具/resources、有界响应和后台 signoff 适配。
     workspace.py       工作区相对路径校验与原子结果写入。
     cli.py             `mcp` 子命令和独立入口共用参数。
 ```

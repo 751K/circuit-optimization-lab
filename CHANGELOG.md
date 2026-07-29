@@ -163,6 +163,40 @@ release checklist.
   升沿而不是理想阶跃。只有非电源的轨才会出现在菜单里——判据是有没有电流流过它，而
   不是它的电位，所以恰好坐在 `VDD` 电平上的时钟仍会被提供，而 `VDD` 本身不会。
 
+### Changed / 变更
+
+- **MCP Python SDK 2.0 migration / MCP Python SDK 2.0 迁移**
+
+  **English:** The optional MCP adapter now requires `mcp>=2,<3`, uses
+  `MCPServer` and the v2 `Client`, and negotiates the MCP `2026-07-28`
+  protocol. Transport-specific HTTP settings now belong to `run()` instead of
+  server construction, initialization reports the installed Circuit
+  Optimization version explicitly, and interrupting the CLI shuts the server
+  down without a traceback. Protocol tests cover the v2 tool and resource
+  interfaces.
+
+  **中文：** 可选 MCP 适配层现要求 `mcp>=2,<3`，改用 `MCPServer` 与 v2
+  `Client`，并协商 MCP `2026-07-28` 协议。HTTP 专属参数从服务构造阶段移到
+  `run()`；初始化会显式上报已安装的 Circuit Optimization 版本；中断 CLI 时会正常
+  关闭而不打印 traceback。协议测试现覆盖 v2 的工具与资源接口。
+
+- **Faster regression-test setup and fixture reuse / 更快的回归测试准备与夹具复用**
+
+  **English:** Deselected ADC plotting modules no longer import Matplotlib
+  during collection, and pytest keeps its font cache under the writable
+  `.pytest_cache`. Worker-determinism tests no longer execute the serial
+  baseline twice. Identical chopper PSS orbits are solved once per module while
+  each consumer receives a deep copy, and licensed TSMC parser/elaboration
+  parity tests share one read-only, in-memory deck AST and expression tuple per
+  session. On the reference local run, the default suite fell from about 117 s
+  to 89 s without changing its selected-test set.
+
+  **中文：** 被取消选择的 ADC 绘图模块不再在 collection 阶段导入 Matplotlib，
+  pytest 的字体缓存统一保存在可写的 `.pytest_cache`。worker 确定性测试不再重复执行
+  串行基准；相同配置的 chopper PSS orbit 每个模块只求解一次，各测试拿到独立深拷贝；
+  TSMC parser/elaboration parity 在会话内共享一份只读内存 AST 和表达式 tuple。参考
+  本地运行中，默认套件在测试集合不变的前提下从约 117 秒降至 89 秒。
+
 ### Fixed / 修复
 
 - **The canvas did not re-frame when it changed size / 画布尺寸变化后不重新适配**

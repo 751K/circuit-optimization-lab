@@ -11,8 +11,6 @@ assertions report counts and the worst observed relative error.
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from circuitopt.spice import expressions as E
@@ -188,22 +186,12 @@ def test_duplicate_model_subckt_name_parity(tmp_path):
 # --- real TSMC28 library: deep numericization (D12: counts + worst_rel only)
 
 
-def _tsmc_path():
-    from circuitopt.toolchain import tsmc28_model_dir
-
-    path = os.path.join(tsmc28_model_dir(), "cln28hpcp_1d8_elk_v1d0_2p2.l")
-    return path if os.path.isfile(path) else None
-
-
 _TSMC_SECTIONS = ["setup", "tt", "global", "total", "stat"]
 
 
-def test_tsmc_real_instance_numericization():
-    path = _tsmc_path()
-    if path is None:
-        pytest.skip("licensed TSMC28HPC+ model is not installed")
-
-    library = P.parse_spice_library(path)
+def test_tsmc_real_instance_numericization(tsmc_parity_deck):
+    path = tsmc_parity_deck.path
+    library = tsmc_parity_deck.library
     overrides = {"temper": 27.0}
     elaborated = elaborate_library(library, _TSMC_SECTIONS, initial_values=overrides)
 
@@ -235,14 +223,12 @@ def test_tsmc_real_instance_numericization():
     assert worst <= _TOL
 
 
-def test_tsmc_real_section_level_models():
-    path = _tsmc_path()
-    if path is None:
-        pytest.skip("licensed TSMC28HPC+ model is not installed")
-
+def test_tsmc_real_section_level_models(tsmc_parity_deck):
+    path = tsmc_parity_deck.path
     overrides = {"temper": 27.0}
     rust = cc.spice_elaborate(path, _TSMC_SECTIONS, overrides)
-    ref = _ref_section_models(P.parse_spice_library(path), _TSMC_SECTIONS, overrides)
+    ref = _ref_section_models(
+        tsmc_parity_deck.library, _TSMC_SECTIONS, overrides)
     assert set(rust) == set(ref)
     worst = 0.0
     count = 0

@@ -1,15 +1,12 @@
 """Syntax-layer tests for the in-process SPICE/HSPICE model parser."""
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from circuitopt.spice.parser import (
     SpiceSyntaxError,
     logical_lines,
     parse_assignments,
-    parse_spice_library,
     parse_spice_library_text,
     parse_spice_number,
 )
@@ -99,15 +96,8 @@ r0 d s 10k
     assert library.top_level.statements[0].arguments == ('"other.lib"', "support")
 
 
-def test_real_tsmc_library_syntax_when_locally_installed():
-    from circuitopt.toolchain import tsmc28_model_dir
-
-    path = os.path.join(
-        tsmc28_model_dir(), "cln28hpcp_1d8_elk_v1d0_2p2.l")
-    if not os.path.isfile(path):
-        pytest.skip("licensed TSMC28HPC+ model is not installed")
-
-    library = parse_spice_library(path)
+def test_real_tsmc_library_syntax_when_locally_installed(tsmc_parity_deck):
+    library = tsmc_parity_deck.library
     for section in ("setup", "tt", "ss", "ff", "sf", "fs", "global", "total", "stat"):
         assert section in library.sections
     model_statements = [

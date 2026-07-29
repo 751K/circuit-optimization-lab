@@ -12,8 +12,6 @@ raise a fixed message (never echoing card content).
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from circuitopt.spice import parser as P
@@ -205,20 +203,11 @@ def test_structural_errors_parity(source):
 # --- real TSMC28 library: structure and counts only (D12: no card text emitted)
 
 
-def _tsmc_path():
-    from circuitopt.toolchain import tsmc28_model_dir
-
-    path = os.path.join(tsmc28_model_dir(), "cln28hpcp_1d8_elk_v1d0_2p2.l")
-    return path if os.path.isfile(path) else None
-
-
-def test_tsmc_real_library_structural_parity():
-    path = _tsmc_path()
-    if path is None:
-        pytest.skip("licensed TSMC28HPC+ model is not installed")
-
+def test_tsmc_real_library_structural_parity(tsmc_parity_deck):
+    path = tsmc_parity_deck.path
     rust = cc.spice_parse_library(path)
-    ref = _canon_library(P.parse_spice_library(path))
+    py = tsmc_parity_deck.library
+    ref = _canon_library(py)
 
     # Section set identical.
     if set(rust["sections"]) != set(ref["sections"]):
@@ -232,7 +221,6 @@ def test_tsmc_real_library_structural_parity():
         raise AssertionError("TSMC canonical tree mismatch (details suppressed for D12)")
 
     # Structural counts (numbers only).
-    py = P.parse_spice_library(path)
     model_statements = [
         s
         for sec in py.sections.values()

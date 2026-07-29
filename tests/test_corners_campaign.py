@@ -128,7 +128,7 @@ def test_corner_table_silicon_deterministic_across_workers(key):
                               workers=w, binding=binding)
 
     base = run(1)
-    for w in (1, 2, 8):
+    for w in (2, 8):
         got = run(w)
         for c in cs:
             a, b = base[c], got[c]
@@ -254,7 +254,7 @@ def test_mismatch_mc_silicon_deterministic_across_workers(key):
     spec = load_circuit_json(path)
     binding = spec.binding()
     base_res = _mc(spec, binding, base, workers=1)
-    for w in (1, 2, 8):
+    for w in (2, 8):
         got = _mc(spec, binding, base, workers=w)
         assert got["summary"] == base_res["summary"], (key, w, "summary")
         for k in ("gain_peak_dB", "bw_Hz", "irn_uV", "latch_dV"):
@@ -500,7 +500,7 @@ def test_corner_table_temps_deterministic_across_workers(key):
                               binding=binding, temps=_TEMPS)
 
     base = run(1)
-    for w in (1, 2, 8):
+    for w in (2, 8):
         got = run(w)
         for c in cs:
             for t in _TEMPS:

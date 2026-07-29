@@ -9,15 +9,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 try:
-    from mcp.server.fastmcp import Context, FastMCP
-    from mcp.server.fastmcp.exceptions import ToolError
-    from mcp.server.session import ServerSession
+    from mcp.server.mcpserver import Context, MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError as exc:
     raise ImportError(
         'the MCP server needs the optional SDK; '
         'pip install "circuit-optimization[mcp]"'
     ) from exc
 
+from .. import __version__
 from ..corners import circuit_corner_names, pvt_axes_error
 from ..service.jobs import JOB_KINDS, JobManager
 from ..service.operations import (
@@ -60,7 +60,7 @@ class McpApplication:
     jobs: JobManager
 
 
-McpContext = Context[ServerSession, McpApplication]
+McpContext = Context[McpApplication, Any]
 
 
 def _tool_error(exc: Exception) -> ToolError:
@@ -192,14 +192,14 @@ def create_mcp_server(
     *,
     workspace: str | Path = ".",
     job_workers: int = 1,
-    host: str = "127.0.0.1",
-    port: int = 8342,
-) -> FastMCP:
+) -> MCPServer[McpApplication]:
     """Build an MCP server bound to one local workspace."""
     workspace_root = Workspace(workspace)
 
     @asynccontextmanager
-    async def lifespan(_server: FastMCP) -> AsyncIterator[McpApplication]:
+    async def lifespan(
+        _server: MCPServer[McpApplication],
+    ) -> AsyncIterator[McpApplication]:
         jobs = JobManager(
             workers=job_workers,
             runners={"signoff": _run_signoff_job},
@@ -209,16 +209,17 @@ def create_mcp_server(
         finally:
             jobs.shutdown()
 
-    server = FastMCP(
+    server = MCPServer(
         name="circuit-optimization",
+        title="Circuit Optimization",
+        description=(
+            "Local analog-circuit simulation, optimization, and PVT signoff."
+        ),
         instructions=(
             "Local transistor-level simulation, optimization, and PVT signoff. "
             "Validate before solving; treat invalid results as failed candidates."
         ),
-        host=host,
-        port=port,
-        json_response=True,
-        stateless_http=False,
+        version=__version__,
         lifespan=lifespan,
     )
 

@@ -9,10 +9,9 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from mcp.shared.memory import (  # noqa: E402
-    create_connected_server_and_client_session,
-)
+from mcp.client import Client  # noqa: E402
 
+from circuitopt import __version__  # noqa: E402
 from circuitopt.mcp.server import create_mcp_server  # noqa: E402
 from circuitopt.mcp.workspace import Workspace, WorkspaceError  # noqa: E402
 
@@ -90,8 +89,10 @@ def test_workspace_rejects_absolute_and_parent_paths(tmp_path):
 def test_protocol_lists_tools_resources_and_runs_analysis(tmp_path):
     async def scenario():
         server = create_mcp_server(workspace=tmp_path)
-        async with create_connected_server_and_client_session(server) as session:
-            tools = await session.list_tools()
+        async with Client(server) as client:
+            assert client.protocol_version == "2026-07-28"
+            assert client.server_info.version == __version__
+            tools = await client.list_tools()
             names = {tool.name for tool in tools.tools}
             assert {
                 "get_capabilities",
@@ -103,15 +104,15 @@ def test_protocol_lists_tools_resources_and_runs_analysis(tmp_path):
                 "inspect_signoff_result",
             } <= names
 
-            resources = await session.list_resources()
+            resources = await client.list_resources()
             assert {str(item.uri) for item in resources.resources} == {
                 "circuitopt://capabilities",
                 "circuitopt://workflow",
             }
 
-            capabilities = await session.call_tool("get_capabilities", {})
-            assert not capabilities.isError
-            advertised = capabilities.structuredContent["jobs"]
+            capabilities = await client.call_tool("get_capabilities", {})
+            assert not capabilities.is_error
+            advertised = capabilities.structured_content["jobs"]
             assert advertised == ["explore", "mc", "pvt", "signoff"]
             # Every advertised kind must have a tool that can submit it. A kind
             # with no submit tool reads as available and is not.
@@ -119,22 +120,22 @@ def test_protocol_lists_tools_resources_and_runs_analysis(tmp_path):
                           "pvt": "submit_pvt", "signoff": "submit_signoff"}
             assert {submitters[kind] for kind in advertised} <= names
 
-            validation = await session.call_tool(
+            validation = await client.call_tool(
                 "validate_circuit", {"circuit": _periodic_rc()}
             )
-            assert not validation.isError
-            assert validation.structuredContent["valid"] is True
+            assert not validation.is_error
+            assert validation.structured_content["valid"] is True
             # A parseable circuit also reports the corner set it admits.
-            assert validation.structuredContent["corners"] == [
+            assert validation.structured_content["corners"] == [
                 "typical", "slow", "fast",
             ]
 
-            solved = await session.call_tool(
+            solved = await client.call_tool(
                 "run_analysis",
                 {"circuit": _periodic_rc(), "selected": ["ac"]},
             )
-            assert not solved.isError
-            payload = solved.structuredContent
+            assert not solved.is_error
+            payload = solved.structured_content
             assert payload["status"] == "valid"
             assert set(payload["analyses"]) == {"ac"}
             assert payload["signoff"]["status"] == "not_configured"
@@ -148,22 +149,22 @@ def test_signoff_job_writes_artifact_and_is_inspectable(tmp_path):
 
     async def scenario():
         server = create_mcp_server(workspace=tmp_path)
-        async with create_connected_server_and_client_session(server) as session:
-            submitted = await session.call_tool(
+        async with Client(server) as client:
+            submitted = await client.call_tool(
                 "submit_signoff",
                 {"campaign_path": "campaign.json", "workers": 1},
             )
-            assert not submitted.isError
-            job_id = submitted.structuredContent["job_id"]
+            assert not submitted.is_error
+            job_id = submitted.structured_content["job_id"]
 
             terminal = None
             for _ in range(200):
-                polled = await session.call_tool(
+                polled = await client.call_tool(
                     "get_job",
                     {"job_id": job_id, "include_result": True},
                 )
-                assert not polled.isError
-                terminal = polled.structuredContent
+                assert not polled.is_error
+                terminal = polled.structured_content
                 if terminal["status"] in {"done", "failed", "cancelled"}:
                     break
                 await asyncio.sleep(0.01)
@@ -173,12 +174,12 @@ def test_signoff_job_writes_artifact_and_is_inspectable(tmp_path):
             assert result_path.startswith("results/mcp/signoff-")
             assert (tmp_path / result_path).is_file()
 
-            inspected = await session.call_tool(
+            inspected = await client.call_tool(
                 "inspect_signoff_result",
                 {"result_path": result_path, "case": "ac"},
             )
-            assert not inspected.isError
-            details = inspected.structuredContent
+            assert not inspected.is_error
+            details = inspected.structured_content
             assert details["status"] == "pass"
             assert details["match_count"] == 1
             assert details["matched_points"][0]["pvt"]["corner"] == "tt"
@@ -189,12 +190,12 @@ def test_signoff_job_writes_artifact_and_is_inspectable(tmp_path):
 def test_signoff_path_cannot_escape_workspace(tmp_path):
     async def scenario():
         server = create_mcp_server(workspace=tmp_path)
-        async with create_connected_server_and_client_session(server) as session:
-            result = await session.call_tool(
+        async with Client(server) as client:
+            result = await client.call_tool(
                 "submit_signoff",
                 {"campaign_path": "../campaign.json"},
             )
-            assert result.isError
+            assert result.is_error
             assert "parent path" in result.content[0].text
 
     _call(scenario())
@@ -210,24 +211,24 @@ def test_signoff_margins_ranks_every_constraint(tmp_path):
 
     async def scenario():
         server = create_mcp_server(workspace=tmp_path)
-        async with create_connected_server_and_client_session(server) as session:
-            submitted = await session.call_tool(
+        async with Client(server) as client:
+            submitted = await client.call_tool(
                 "submit_signoff", {"campaign_path": "campaign.json"})
-            job_id = submitted.structuredContent["job_id"]
+            job_id = submitted.structured_content["job_id"]
             for _ in range(200):
-                polled = await session.call_tool(
+                polled = await client.call_tool(
                     "get_job", {"job_id": job_id, "include_result": True})
-                terminal = polled.structuredContent
+                terminal = polled.structured_content
                 if terminal["status"] in {"done", "failed", "cancelled"}:
                     break
                 await asyncio.sleep(0.01)
             assert terminal["status"] == "done"
             result_path = terminal["result"]["result_path"]
 
-            margins = await session.call_tool(
+            margins = await client.call_tool(
                 "signoff_margins", {"result_path": result_path})
-            assert not margins.isError
-            payload = margins.structuredContent
+            assert not margins.is_error
+            payload = margins.structured_content
             assert payload["status"] == "pass"
             assert payload["constraint_count"] >= 1
             row = payload["constraints"][0]
@@ -245,10 +246,10 @@ def test_signoff_margins_ranks_every_constraint(tmp_path):
 def test_signoff_margins_rejects_paths_outside_the_workspace(tmp_path):
     async def scenario():
         server = create_mcp_server(workspace=tmp_path)
-        async with create_connected_server_and_client_session(server) as session:
-            result = await session.call_tool(
+        async with Client(server) as client:
+            result = await client.call_tool(
                 "signoff_margins", {"result_path": "../escape.json"})
-            assert result.isError
+            assert result.is_error
 
     _call(scenario())
 
@@ -270,17 +271,17 @@ def test_passive_inventory_needs_more_than_one_deck(tmp_path):
 
     async def scenario():
         server = create_mcp_server(workspace=tmp_path)
-        async with create_connected_server_and_client_session(server) as session:
-            single = await session.call_tool(
+        async with Client(server) as client:
+            single = await client.call_tool(
                 "passive_inventory", {"paths": ["circuit.json"]})
-            assert single.isError
+            assert single.is_error
             assert "two decks" in single.content[0].text
 
-            both = await session.call_tool(
+            both = await client.call_tool(
                 "passive_inventory",
                 {"paths": ["circuit.json", "circuit_probe.json"]})
-            assert not both.isError
-            report = both.structuredContent
+            assert not both.is_error
+            report = both.structured_content
             names = {row["name"]: row for row in report["rows"]}
             assert names["R1"]["dut"] is True
             assert names["RPROBE"]["dut"] is False
