@@ -52,23 +52,48 @@ def _close_at_reference(values, floor, absolute_tolerance, label):
     return values
 
 
+#: Orbit samples carried by one compiled-backend call. One sample is only as
+#: wide as the circuit's device count, which leaves the backend's Rayon pool
+#: with almost nothing to spread; several samples per call give it real width.
+#: Measured on the 13-device chopper (evaluate + 2-frequency noise, 768-sample
+#: orbit): 1 sample 121.6 ms, 4 samples 45.3 ms, 16 samples 18.8 ms, 48 samples
+#: 12.9 ms. Handles cost 41.2 us each to build and are held for the whole orbit,
+#: so 16 pays 8.6 ms to save 103 ms while 48 pays 25.7 ms to save only 5.9 ms
+#: more.
+ORBIT_BATCH_SAMPLES = 16
+
+
 class NativeOrbitBatch:
-    """One native BSIM4 handle per device, re-biased sample by sample.
+    """Native BSIM4 handles for ``samples`` x ``devices``, re-biased per block.
 
     ``evaluate`` and ``noise`` mirror the scalar adapter's contract, including
-    its Hermitian/positive-semidefinite noise validation -- checked across the
-    whole batch with one vectorized pass instead of one dataclass construction
-    per device.
+    its bulk-terminal reduction and its Hermitian/positive-semidefinite noise
+    validation -- checked across the whole block with one vectorized pass
+    instead of one dataclass construction per device.
+
+    Each orbit sample owns its own row of handles, so a device's handle sees a
+    strided subsequence of the orbit rather than every sample. BSIM4 evaluation
+    carries state between calls on one handle, so this changes the answer at the
+    level that state is worth: measured at 1e-13 on tsmc28hpcp_chopper, zero on
+    sky130_chopper.
     """
 
-    def __init__(self, handles, bulk):
+    def __init__(self, handles, bulk, devices_per_sample):
         self._handles = list(handles)
+        self._stride = int(devices_per_sample)
+        self._samples = len(self._handles) // max(self._stride, 1)
         self._bulk = np.asarray(bulk, dtype=float)
         self._terminals = np.empty((len(self._handles), 4), dtype=float)
-        self._terminals[:, 3] = self._bulk
+        self._terminals[:, 3] = np.tile(self._bulk, self._samples)
+        self._active = self._stride
 
     def __len__(self):
         return len(self._handles)
+
+    @property
+    def samples_per_call(self):
+        """How many orbit samples one :meth:`evaluate` can carry."""
+        return self._samples
 
     def __enter__(self):
         return self
@@ -83,20 +108,30 @@ class NativeOrbitBatch:
         self._handles = []
 
     def evaluate(self, vs, vd, vg):
-        """Bias every handle and return (currents, conductance, charges, caps).
+        """Bias one block of samples; return (currents, conductance, charges, caps).
 
-        ``vs``/``vd``/``vg`` are per-device terminal voltages for one sample.
-        The four returned blocks carry the same bulk-terminal reduction the
-        scalar adapter applies, so they are interchangeable with
+        ``vs``/``vd``/``vg`` are ``(block, devices)`` or a single sample's
+        ``(devices,)``; ``block`` may be shorter than :attr:`samples_per_call`
+        for the orbit's last, partial block. The returned arrays are
+        ``(block * devices, ...)`` and carry the same bulk-terminal reduction
+        the scalar adapter applies, so they are interchangeable with
         ``get_terminal_currents`` / ``get_terminal_linearization``.
         """
         from .compact_models.bsim4 import Bsim4NativeError, NativeBsim4Backend
 
-        self._terminals[:, 0] = vd
-        self._terminals[:, 1] = vg
-        self._terminals[:, 2] = vs
+        flat_d = np.ravel(vd)
+        count = flat_d.size
+        if count > len(self._handles) or count % self._stride:
+            raise ValueError(
+                f"orbit batch takes whole samples of {self._stride} devices, "
+                f"up to {self._samples}; got {count} values")
+        self._active = count
+        terminals = self._terminals[:count]
+        terminals[:, 0] = flat_d
+        terminals[:, 1] = np.ravel(vg)
+        terminals[:, 2] = np.ravel(vs)
         currents, conductance, charges, capacitance = (
-            NativeBsim4Backend.evaluate_batch(self._handles, self._terminals))
+            NativeBsim4Backend.evaluate_batch(self._handles[:count], terminals))
         for block in (currents, conductance, charges, capacitance):
             if not np.all(np.isfinite(block)):
                 raise Bsim4NativeError(
@@ -108,15 +143,15 @@ class NativeOrbitBatch:
         return currents, conductance, charges, capacitance
 
     def noise(self, frequencies):
-        """Terminal-noise (total, flicker) for the last biased operating point.
+        """Terminal-noise (total, white, flicker) for the last biased block.
 
-        Shapes are ``(device, frequency, 4, 4)``. The handles must already have
-        been biased through :meth:`evaluate`.
+        Shapes are ``(block * devices, frequency, 4, 4)``, matching the block
+        the preceding :meth:`evaluate` biased.
         """
         from .compact_models.bsim4 import Bsim4ValidationError, NativeBsim4Backend
 
         total, flicker = NativeBsim4Backend.noise_batch(
-            self._handles, np.asarray(frequencies, dtype=float))
+            self._handles[:self._active], np.asarray(frequencies, dtype=float))
         white = total - flicker
         if not (np.all(np.isfinite(total)) and np.all(np.isfinite(flicker))):
             raise Bsim4ValidationError("noise matrix contains non-finite values")
@@ -133,11 +168,16 @@ class NativeOrbitBatch:
         return total, white, flicker
 
 
-def open_orbit_batch(devices):
+def open_orbit_batch(devices, n_samples=ORBIT_BATCH_SAMPLES):
     """Open a :class:`NativeOrbitBatch` over ``devices``, or ``None``.
 
     ``None`` means at least one device has no independent native handle to
     offer, so the caller must keep evaluating that set one device at a time.
+
+    ``n_samples`` is how many orbit samples the caller has to walk, NOT the
+    batch width: the width is ``min(n_samples, ORBIT_BATCH_SAMPLES)``, because
+    each sample in the block costs one handle per device and a whole orbit's
+    worth would cost far more to build than the batching saves.
     """
     devices = list(devices)
     if not devices:
@@ -146,12 +186,15 @@ def open_orbit_batch(devices):
             getattr(dev, "create_native_solver_handle", None))
             for dev in devices):
         return None
+    samples_per_call = max(1, min(int(n_samples), ORBIT_BATCH_SAMPLES))
     handles = []
     try:
-        for dev in devices:
-            handles.append(dev.create_native_solver_handle())
+        for _ in range(samples_per_call):
+            for dev in devices:
+                handles.append(dev.create_native_solver_handle())
         return NativeOrbitBatch(
-            handles, [float(getattr(dev, "vb", 0.0)) for dev in devices])
+            handles, [float(getattr(dev, "vb", 0.0)) for dev in devices],
+            len(devices))
     except Exception as exc:
         for handle in handles:
             handle.close()

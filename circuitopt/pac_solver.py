@@ -354,23 +354,31 @@ def _fill_dense_linearization_batched(dense_g, dense_c, dense_info, dev_inst,
     """
     from ._device_batch import open_orbit_batch
 
-    batch = open_orbit_batch(dev for dev, *_rest in dense_info)
+    batch = open_orbit_batch(
+        (dev for dev, *_rest in dense_info), n_samples=n_samples)
     if batch is None:
         return False
     count = len(dense_info)
-    vs = np.empty(count)
-    vd = np.empty(count)
-    vg = np.empty(count)
+    width = batch.samples_per_call
+    vs = np.empty((width, count))
+    vd = np.empty((width, count))
+    vg = np.empty((width, count))
     try:
         with batch:
-            for sample in range(n_samples):
-                for position, (_dev, d, g, s) in enumerate(dense_info):
-                    vs[position] = orbit_value(s, sample)
-                    vd[position] = orbit_value(d, sample)
-                    vg[position] = orbit_value(g, sample)
-                _i, conductance, _q, capacitance = batch.evaluate(vs, vd, vg)
-                dense_g[sample] = conductance
-                dense_c[sample] = capacitance
+            for start in range(0, n_samples, width):
+                block = min(width, n_samples - start)
+                for offset in range(block):
+                    sample = start + offset
+                    for position, (_dev, d, g, s) in enumerate(dense_info):
+                        vs[offset, position] = orbit_value(s, sample)
+                        vd[offset, position] = orbit_value(d, sample)
+                        vg[offset, position] = orbit_value(g, sample)
+                _i, conductance, _q, capacitance = batch.evaluate(
+                    vs[:block], vd[:block], vg[:block])
+                dense_g[start:start + block] = conductance.reshape(
+                    block, count, 4, 4)
+                dense_c[start:start + block] = capacitance.reshape(
+                    block, count, 4, 4)
     except Exception as exc:
         # Re-run through the scalar adapter: it reports the offending device by
         # name, which a batch status index cannot.
@@ -1030,13 +1038,33 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
     response = np.empty(len(freqs), dtype=complex)
     boundary_solve_time = 0.0
     replay_time = 0.0
+    # The per-step forcing solve A_m x = f_m is independent across both orbit
+    # samples and frequencies -- only the recurrences below are sequential. Done
+    # one (sample, frequency) at a time it costs 4.4 us a call against 0.03 us of
+    # arithmetic on a 7x7; assembling every frequency's forcing first and solving
+    # each sample once with all of them as right-hand sides is 19x faster and
+    # bit-identical (the same LAPACK routine on the same factorization).
+    wfs = 2.0 * np.pi * np.asarray(freqs, dtype=float)
+    ph_all = np.exp(1j * np.outer(tm, wfs))                      # (sample, freq)
+    if integration == "be":
+        php_all = np.exp(1j * np.outer(tm - h, wfs))
+        fm_all = -((Cin[:, None, :] * ph_all[:, :, None]
+                    - Cin1[:, None, :] * php_all[:, :, None]) / h
+                   + Gin[:, None, :] * ph_all[:, :, None])
+    else:
+        p1_all = np.exp(1j * np.outer(tm - h, wfs))
+        p2_all = np.exp(1j * np.outer(tm - 2 * h, wfs))
+        fm_all = -((a0 * Cin[:, None, :] * ph_all[:, :, None]
+                    + a1 * Cin1[:, None, :] * p1_all[:, :, None]
+                    + a2 * Cin2[:, None, :] * p2_all[:, :, None]) / h
+                   + Gin[:, None, :] * ph_all[:, :, None])
+    forced = np.empty_like(fm_all)                        # (sample, freq, state)
+    for m in range(N):
+        forced[m] = lu_solve(luA[m], fm_all[m].T).T
     for fi, f in enumerate(freqs):
         wf = 2.0 * np.pi * float(f)
-        ph = np.exp(1j * wf * tm)
         if integration == "be":
-            php = np.exp(1j * wf * (tm - h))
-            fm = -((Cin * ph[:, None] - Cin1 * php[:, None]) / h + Gin * ph[:, None])
-            r = np.array([lu_solve(luA[m], fm[m]) for m in range(N)])
+            r = forced[:, fi]
             g = np.zeros(n_state, dtype=complex)
             for m in range(1, N + 1):
                 g = P[m % N] @ g + r[m % N]
@@ -1045,12 +1073,8 @@ def _time_domain_pac(all_sizes, tbias, freqs, *, pss_result, input_drive,
             for m in range(1, N):
                 x[m] = P[m] @ x[m - 1] + r[m]
         else:
-            p1 = np.exp(1j * wf * (tm - h)); p2 = np.exp(1j * wf * (tm - 2 * h))
-            fm = -((a0 * Cin * ph[:, None] + a1 * Cin1 * p1[:, None]
-                    + a2 * Cin2 * p2[:, None]) / h + Gin * ph[:, None])
             s = np.zeros((N, 2 * n_state), dtype=complex)
-            for m in range(N):
-                s[m, :n_state] = lu_solve(luA[m], fm[m])
+            s[:, :n_state] = forced[:, fi]
             gamma = np.exp(1j * wf * period)
             direct_ok = td_boundary_mode == "monodromy"
             if direct_ok:

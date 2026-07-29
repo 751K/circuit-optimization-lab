@@ -165,6 +165,59 @@ release checklist.
 
 ### Changed / 变更
 
+- **Wider device batches and a shared PAC forcing solve / 更宽的器件批与共享的 PAC
+  强迫项求解**
+
+  **English:** Three measured follow-ups to the batching work above.
+
+  A batch one orbit sample wide is only as wide as the circuit's device count,
+  which leaves the compiled backend's thread pool almost nothing to spread.
+  Carrying several samples per call fixes that: on the 13-device chopper an
+  `evaluate` + two-frequency `noise` sweep of a 768-sample orbit costs 121.6 ms
+  at one sample per call, 45.3 ms at four, 18.8 ms at sixteen and 12.9 ms at
+  forty-eight. Handles cost 41.2 us each and are held for the orbit, so sixteen
+  pays 8.6 ms to save 103 ms while forty-eight pays 25.7 ms to save 5.9 ms more;
+  `ORBIT_BATCH_SAMPLES` is therefore 16.
+
+  PAC solved its per-step forcing `A_m x = f_m` once per (orbit sample,
+  frequency) — 16128 calls at 4.4 us each against 0.03 us of arithmetic on a
+  7x7. Those solves are independent in both indices; only the monodromy
+  recurrences are sequential. Every frequency's forcing is now assembled first
+  and each sample solved once with all of them as right-hand sides: 72.1 ms to
+  3.8 ms, same factorization, same LAPACK routine, bit-identical.
+
+  `_psd_matrix_sqrt` ran one `eigh` per (orbit sample, device); it now takes the
+  whole stack in one call — 73.5 ms to 15.5 ms for a 9984-matrix orbit,
+  identical to the last bit.
+
+  Together: PAC 294 ms to 184 ms and PNoise 491 ms to 154 ms on
+  `examples/sky130_chopper.json`, PAC 320 ms to 183 ms and PNoise 525 ms to
+  168 ms on `tsmc28hpcp_chopper`. `sky130_chopper` stays bit-identical;
+  `tsmc28hpcp_chopper` moves 4.4e-13, the same BSIM4 handle-state effect
+  documented above — a sample's handles now see a strided subsequence of the
+  orbit rather than all of it.
+
+  **中文：** 对上面批量化工作的三项实测跟进。
+
+  只有一个轨道采样宽的批，其宽度就等于电路的器件数，编译后端的线程池几乎无从铺
+  开。每次调用携带多个采样即可解决：在 13 器件斩波上，768 采样轨道的
+  `evaluate` + 双频 `noise` 全程，每次 1 个采样耗时 121.6 ms，4 个 45.3 ms，16 个
+  18.8 ms，48 个 12.9 ms。句柄每个 41.2 us 且整条轨道持有，所以 16 个花 8.6 ms 省
+  103 ms，而 48 个花 25.7 ms 只多省 5.9 ms；因此 `ORBIT_BATCH_SAMPLES` 取 16。
+
+  PAC 此前对每个（轨道采样，频点）单独解一次逐步强迫项 `A_m x = f_m`——16128 次
+  调用，每次 4.4 us，而 7x7 的实际算术只有 0.03 us。这些解在两个下标上都互相独立，
+  真正顺序的只有单值矩阵递推。现在先装配出所有频点的强迫项，每个采样以它们为多右端
+  项解一次：72.1 ms → 3.8 ms，同一次分解、同一个 LAPACK 例程，逐位相同。
+
+  `_psd_matrix_sqrt` 原本对每个（轨道采样，器件）调一次 `eigh`，现在整摞一次调用
+  ——9984 个矩阵的轨道由 73.5 ms 降到 15.5 ms，逐位相同。
+
+  合计：`examples/sky130_chopper.json` 上 PAC 294 ms → 184 ms、PNoise 491 ms →
+  154 ms；`tsmc28hpcp_chopper` 上 PAC 320 ms → 183 ms、PNoise 525 ms → 168 ms。
+  `sky130_chopper` 仍逐位相同；`tsmc28hpcp_chopper` 变动 4.4e-13，仍是上面记录的
+  BSIM4 句柄状态效应——现在一个采样的句柄看到的是轨道的跨步子序列而非全部采样。
+
 - **PAC orbit linearization batched too / PAC 轨道线性化同样批量化**
 
   **English:** The orbit G/C tensors that PAC stamps — and that PNoise reuses —

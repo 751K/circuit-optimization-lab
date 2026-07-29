@@ -768,13 +768,19 @@ def test_pnoise_solves_the_operating_point_only_for_gated_devices():
         gated["out_psd"], ungated["out_psd"], rtol=1e-9, atol=0.0)
 
 
-def _pnoise_on(spec, pss, **kwargs):
+def _pnoise_on(spec, pss, samples=8, **kwargs):
     return pnoise_solve(
         spec.sizes, spec.bias, np.array([1e3, 1e4]), pss_result=pss,
         binding=spec.binding(), fundamental=250e3, max_sideband=1,
-        n_period_samples=8, cache_linearization=False,
+        n_period_samples=samples, cache_linearization=False,
         input_drive={"vinp": 0.5, "vinn": -0.5}, **kwargs,
     )
+
+
+def _device_batch_width():
+    from circuitopt._device_batch import ORBIT_BATCH_SAMPLES
+
+    return int(ORBIT_BATCH_SAMPLES)
 
 
 def _count_scalar_noise_evaluations(monkeypatch):
@@ -832,8 +838,11 @@ def test_terminal_noise_batch_failure_falls_back_without_partial_grids(monkeypat
     the samples the batch had already written, the analysis would silently
     report noise from a partly zeroed orbit instead of failing or recovering.
     """
+    # Several blocks wide, so the failure genuinely lands mid-orbit: the first
+    # block is written before the second one dies.
+    samples = 4 * _device_batch_width()
     spec, pss = _sky130_chopper_pss()
-    reference = _pnoise_on(spec, pss)
+    reference = _pnoise_on(spec, pss, samples=samples)
 
     import circuitopt.pnoise_solver as pns
     from circuitopt import _device_batch
@@ -843,14 +852,14 @@ def test_terminal_noise_batch_failure_falls_back_without_partial_grids(monkeypat
 
     def dying_noise(self, frequencies):
         state["calls"] += 1
-        if state["calls"] > 3:      # three orbit samples land, then it breaks
+        if state["calls"] > 1:      # one block lands, then it breaks
             raise RuntimeError("simulated native noise-batch failure")
         return original_noise(self, frequencies)
 
     monkeypatch.setattr(_device_batch.NativeOrbitBatch, "noise", dying_noise)
-    recovered = _pnoise_on(spec, pss)
+    recovered = _pnoise_on(spec, pss, samples=samples)
 
-    assert state["calls"] > 3, "the batch never reached the failure point"
+    assert state["calls"] > 1, "the batch never reached the failure point"
     assert pns.open_orbit_batch is not None
     np.testing.assert_allclose(
         recovered["out_psd"], reference["out_psd"], rtol=1e-12, atol=0.0)
@@ -964,8 +973,7 @@ def test_orbit_batch_closes_the_terminal_residual_at_the_bulk_node(monkeypatch):
     monkeypatch.setattr(NativeBsim4Backend, "evaluate_batch",
                         staticmethod(fake_batch))
 
-    batch = _device_batch.NativeOrbitBatch([], np.zeros(0))
-    batch._terminals = np.zeros((count, 4))
+    batch = _device_batch.NativeOrbitBatch([None] * count, np.zeros(count), count)
     currents, conductance, charges, capacitance = batch.evaluate(
         np.zeros(count), np.zeros(count), np.zeros(count))
 
@@ -976,3 +984,80 @@ def test_orbit_batch_closes_the_terminal_residual_at_the_bulk_node(monkeypatch):
     for block in (currents, conductance, charges, capacitance):
         np.testing.assert_allclose(
             block.sum(axis=1), 0.0, rtol=0.0, atol=1e-30)
+
+
+@pytest.mark.parametrize("width", [1, 3, 8])
+def test_orbit_batch_result_is_independent_of_the_block_width(monkeypatch, width):
+    """Reshaping a multi-sample block must not scramble sample/device order.
+
+    A block carries ``width`` orbit samples laid out device-fastest; getting the
+    stride or the reshape wrong would silently attribute one sample's noise to
+    another. Compared against the scalar adapter rather than against another
+    width, because the two agree exactly only when the mapping is right.
+    """
+    from circuitopt import _device_batch
+
+    monkeypatch.setattr(_device_batch, "ORBIT_BATCH_SAMPLES", width)
+    spec, pss = _sky130_chopper_pss()
+    batched = _pnoise_on(spec, pss, samples=8)
+
+    import circuitopt.pnoise_solver as pns
+
+    monkeypatch.setattr(pns, "open_orbit_batch", lambda *a, **k: None)
+    scalar = _pnoise_on(spec, pss, samples=8)
+
+    np.testing.assert_allclose(
+        batched["out_psd"], scalar["out_psd"], rtol=1e-12, atol=0.0)
+
+
+def test_psd_matrix_sqrt_stacks_without_changing_a_single_matrix():
+    """The stacked square root must equal the one-at-a-time result exactly.
+
+    `_psd_matrix_sqrt` is applied to a whole orbit of 4x4 flicker matrices in
+    one `eigh` call; a transpose that mixes the leading axes into the matrix
+    axes would still produce plausible Hermitian output.
+    """
+    rng = np.random.default_rng(7)
+    stack = (rng.normal(size=(5, 3, 4, 4)) + 1j * rng.normal(size=(5, 3, 4, 4)))
+    stack = stack + np.conjugate(np.swapaxes(stack, -1, -2))
+
+    stacked = _psd_matrix_sqrt(stack)
+    assert stacked.shape == stack.shape
+    for i in range(stack.shape[0]):
+        for j in range(stack.shape[1]):
+            np.testing.assert_allclose(
+                stacked[i, j], _psd_matrix_sqrt(stack[i, j]),
+                rtol=0.0, atol=0.0)
+
+
+def test_pac_forcing_solve_is_shared_across_frequencies():
+    """Hoisting the forcing solve out of the frequency loop must not change it.
+
+    Every frequency's per-sample right-hand side is now solved in one
+    multi-right-hand-side call per orbit sample instead of one call per
+    (sample, frequency). Same factorization, same LAPACK routine -- the
+    response must be bit-identical to the per-frequency form.
+    """
+    spec, pss = _sky130_chopper_pss()
+    freqs = np.array([1e3, 3e3, 1e4, 3e4])
+
+    def run():
+        return pac_solve(
+            spec.sizes, spec.bias, freqs, pss_result=pss, binding=spec.binding(),
+            input_drive={"vinp": 0.5, "vinn": -0.5}, time_domain=True,
+            td_n_period_samples=16, cache_linearization=False, cache_forcing=False,
+        )
+
+    batched = run()
+    one_at_a_time = np.empty(len(freqs), dtype=complex)
+    for index, frequency in enumerate(freqs):
+        single = pac_solve(
+            spec.sizes, spec.bias, np.array([frequency]), pss_result=pss,
+            binding=spec.binding(), input_drive={"vinp": 0.5, "vinn": -0.5},
+            time_domain=True, td_n_period_samples=16,
+            cache_linearization=False, cache_forcing=False,
+        )
+        one_at_a_time[index] = single["response"][0]
+
+    np.testing.assert_allclose(
+        batched["response"], one_at_a_time, rtol=0.0, atol=0.0)
