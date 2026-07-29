@@ -766,3 +766,91 @@ def test_pnoise_solves_the_operating_point_only_for_gated_devices():
     # runs must not agree; a vacuous gate would make this test pass trivially.
     assert not np.allclose(
         gated["out_psd"], ungated["out_psd"], rtol=1e-9, atol=0.0)
+
+
+def _pnoise_on(spec, pss, **kwargs):
+    return pnoise_solve(
+        spec.sizes, spec.bias, np.array([1e3, 1e4]), pss_result=pss,
+        binding=spec.binding(), fundamental=250e3, max_sideband=1,
+        n_period_samples=8, cache_linearization=False,
+        input_drive={"vinp": 0.5, "vinn": -0.5}, **kwargs,
+    )
+
+
+def _count_scalar_noise_evaluations(monkeypatch):
+    """Count scalar compact-model noise evaluations, live, into a list."""
+    from circuitopt.pdk.sky130 import device as sky130_device
+
+    seen = []
+    original = sky130_device._Sky130NativeFet.get_terminal_noise
+
+    def counted(self, Vs, Vd, Vg, frequency):
+        seen.append(float(frequency))
+        return original(self, Vs, Vd, Vg, frequency)
+
+    monkeypatch.setattr(
+        sky130_device._Sky130NativeFet, "get_terminal_noise", counted)
+    return seen
+
+
+def test_batched_terminal_noise_matches_the_scalar_adapter(monkeypatch):
+    """Reading the orbit through the batch ABI must not change the answer.
+
+    The batched path re-biases one dedicated native handle per device and reads
+    both 1/f probe frequencies back in a single call, instead of three scalar
+    compact-model solves per (orbit sample, device). BSIM4 device state is
+    path-dependent, so "same formula" is not enough -- the two paths must agree
+    on the actual orbit.
+    """
+    spec, pss = _sky130_chopper_pss()
+    scalar_calls = _count_scalar_noise_evaluations(monkeypatch)
+
+    batched = _pnoise_on(spec, pss)
+    assert scalar_calls == [], (
+        f"the batched run made {len(scalar_calls)} scalar noise evaluations")
+
+    import circuitopt.pnoise_solver as pns
+
+    monkeypatch.setattr(pns, "open_orbit_batch", lambda *a, **k: None)
+    scalar = _pnoise_on(spec, pss)
+
+    # Not vacuous: the scalar path really does evaluate every device at every
+    # sample, at both probe frequencies, and the batched run did none of that.
+    assert sorted(set(scalar_calls)) == [1.0, 10.0]
+    assert len(scalar_calls) == 2 * 8 * len(pss["topology"].devices)
+
+    np.testing.assert_allclose(
+        batched["out_psd"], scalar["out_psd"], rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(
+        batched["irn_psd"], scalar["irn_psd"], rtol=1e-12, atol=0.0)
+
+
+def test_terminal_noise_batch_failure_falls_back_without_partial_grids(monkeypatch):
+    """A batch that dies mid-orbit must not leave half-filled noise grids.
+
+    The fallback re-runs the whole set through the scalar adapter; if it kept
+    the samples the batch had already written, the analysis would silently
+    report noise from a partly zeroed orbit instead of failing or recovering.
+    """
+    spec, pss = _sky130_chopper_pss()
+    reference = _pnoise_on(spec, pss)
+
+    import circuitopt.pnoise_solver as pns
+    from circuitopt import _device_batch
+
+    original_noise = _device_batch.NativeOrbitBatch.noise
+    state = {"calls": 0}
+
+    def dying_noise(self, frequencies):
+        state["calls"] += 1
+        if state["calls"] > 3:      # three orbit samples land, then it breaks
+            raise RuntimeError("simulated native noise-batch failure")
+        return original_noise(self, frequencies)
+
+    monkeypatch.setattr(_device_batch.NativeOrbitBatch, "noise", dying_noise)
+    recovered = _pnoise_on(spec, pss)
+
+    assert state["calls"] > 3, "the batch never reached the failure point"
+    assert pns.open_orbit_batch is not None
+    np.testing.assert_allclose(
+        recovered["out_psd"], reference["out_psd"], rtol=1e-12, atol=0.0)

@@ -165,6 +165,43 @@ release checklist.
 
 ### Changed / 变更
 
+- **PNoise reads the orbit through the BSIM4 batch ABI / PNoise 改用 BSIM4 批量
+  ABI 读取轨道**
+
+  **English:** The periodic terminal-noise loop evaluated the compact model
+  once per (orbit sample, device) at the 1 Hz reference and again at the 10 Hz
+  1/f slope probe, one scalar call at a time. At ~250 us per device-sample for
+  the pair, that was 2.5 s of the analysis — and only ~1% of it was the model:
+  the rest was the per-call handle lease, six small array allocations, and
+  dataclass contract validation. The set is now re-biased and read back through
+  the stable `co_bsim4_eval_batch` / `co_bsim4_noise_batch` entry points, one
+  call per orbit sample carrying every device and both probe frequencies, with
+  the Hermitian and positive-semidefinite noise checks kept but vectorized over
+  the whole batch. That is 12.4 us per device-sample, 20x faster. Combined with
+  the discarded-operating-point fix above, PNoise on the two silicon chopper
+  decks drops from ~4.16 s to ~1.09 s.
+
+  Batching is used only when every device in the set can supply an independent
+  native handle; OTFT decks and any backend without the batch entry point keep
+  the scalar path, and a batch that fails mid-orbit falls back to it without
+  leaving partial state behind. `examples/sky130_chopper.json` is bit-identical
+  to the scalar path; `tsmc28hpcp_chopper` differs by 6.1e-16 (a few ulp of
+  summation reassociation) and is reproducible run to run.
+
+  **中文：** 周期性端子噪声循环对每个（轨道采样，器件）要求值紧凑模型两次——1 Hz
+  参考点一次、10 Hz 的 1/f 斜率探针一次——而且是逐个标量调用。两次合计约 250 us
+  每器件采样，占掉分析 2.5 s，其中真正属于模型的只有约 1%：其余是每次调用的句柄
+  租借、六个小数组分配和数据类契约校验。现在改为通过稳定的
+  `co_bsim4_eval_batch` / `co_bsim4_noise_batch` 入口重新加偏置并读回，每个轨道
+  采样一次调用即覆盖全部器件与两个探针频率；Hermitian 与半正定校验保留，但改为对
+  整批做一次向量化检查。单位成本 12.4 us 每器件采样，快 20 倍。与上面那条丢弃工作
+  点的修复合计，两个硅工艺斩波 deck 的 PNoise 从约 4.16 s 降到约 1.09 s。
+
+  只有当集合中每个器件都能提供独立原生句柄时才走批量路径；OTFT deck 以及没有批量
+  入口的后端仍走标量路径，批量在轨道中途失败时会退回标量且不留下半填充状态。
+  `examples/sky130_chopper.json` 与标量路径逐位相同；`tsmc28hpcp_chopper` 相差
+  6.1e-16（求和重结合的几个 ulp），且逐次运行可复现。
+
 - **PNoise no longer solves an operating point it throws away / PNoise 不再求解
   一个自己丢弃的工作点**
 

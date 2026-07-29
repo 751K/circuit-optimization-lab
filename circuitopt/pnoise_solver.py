@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover - scipy is a project dependency
     _spla = None
 
 from .ac_mna import branch_incidence
+from ._device_batch import open_orbit_batch
 from .device_factory import (
     apply_silicon_corner,
     build_devices,
@@ -61,6 +62,70 @@ def _psd_matrix_sqrt(matrix):
     values, vectors = np.linalg.eigh(hermitian)
     values = np.maximum(values.real, 0.0)
     return (vectors * np.sqrt(values)[None, :]) @ vectors.conj().T
+
+
+#: 1/f reference and slope-probe frequencies. The exponent is read off the two
+#: as a log-log slope; both come back from one noise call per orbit sample.
+_FLICKER_REFERENCE_HZ = 1.0
+_FLICKER_PROBE_HZ = 10.0
+
+
+def _flicker_exponent(reference, probe):
+    """Log-log 1/f slope between the reference and probe flicker matrices.
+
+    Returns ``None`` when either trace is non-positive, i.e. the device has no
+    resolvable 1/f content at this sample.
+    """
+    ref_power = max(float(np.real(np.trace(reference))), 0.0)
+    probe_power = max(float(np.real(np.trace(probe))), 0.0)
+    if ref_power <= 0.0 or probe_power <= 0.0:
+        return None
+    exponent = -np.log(probe_power / ref_power) / np.log(
+        _FLICKER_PROBE_HZ / _FLICKER_REFERENCE_HZ)
+    return float(exponent) if np.isfinite(exponent) else None
+
+
+def _batched_terminal_noise(batch, entries, n_samples, term_value):
+    """Terminal-noise grids for ``entries``, one orbit sample per backend call.
+
+    ``entries`` is ``[(row, name, drain, gate, source), ...]`` aligned with the
+    handles inside ``batch``. Each sample costs one compiled-backend evaluation
+    plus one noise call for the whole device set, in place of three scalar
+    compact-model solves per device.
+
+    Returns freshly allocated ``(white, flicker_factor, exponents)`` keyed by
+    row. Nothing is written into the caller's grids, so a batch that dies
+    mid-orbit leaves no half-filled state behind and the caller can simply fall
+    back to evaluating the same devices one at a time. That matters most for
+    the exponent lists, which are appended to rather than indexed: a partial
+    batch followed by a full scalar pass would shift their median.
+    """
+    frequencies = np.array([_FLICKER_REFERENCE_HZ, _FLICKER_PROBE_HZ], float)
+    rows = [row for row, *_rest in entries]
+    white_grid = {row: np.zeros((n_samples, 4, 4), dtype=complex) for row in rows}
+    flicker_grid = {row: np.zeros((n_samples, 4, 4), dtype=complex) for row in rows}
+    exponents = {row: [] for row in rows}
+    count = len(entries)
+    vs = np.empty(count)
+    vd = np.empty(count)
+    vg = np.empty(count)
+    for m in range(n_samples):
+        for position, (_row, _name, d, g, s) in enumerate(entries):
+            vs[position] = term_value(s, m)
+            vd[position] = term_value(d, m)
+            vg[position] = term_value(g, m)
+        batch.evaluate(vs, vd, vg)
+        _total, white, flicker = batch.noise(frequencies)
+        for position, row in enumerate(rows):
+            reference = white[position, 0]
+            white_grid[row][m] = 0.5 * (reference + reference.conj().T)
+            flicker_reference = flicker[position, 0]
+            flicker_grid[row][m] = _psd_matrix_sqrt(flicker_reference)
+            exponent = _flicker_exponent(
+                flicker_reference, flicker[position, 1])
+            if exponent is not None:
+                exponents[row].append(exponent)
+    return white_grid, flicker_grid, exponents
 
 
 def _fold_terminal_noise_source(
@@ -747,8 +812,40 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
         noise_failure_count = 0
         noise_failure_devices = set()
         noise_failure_reason = ""
+        # Devices whose terminal noise comes straight from the compact model and
+        # which nothing conductance-gates: the whole set is re-biased and read
+        # back one orbit sample per compiled-backend call. Everything else stays
+        # on the scalar loop below.
+        batch_entries = [
+            (j, name, d, g, s) for j, (name, d, g, s) in enumerate(devices)
+            if j in terminal_white and name not in gated_noise
+        ]
+        batched_rows = set()
+        batch = open_orbit_batch(dev_inst, [item[1] for item in batch_entries])
+        if batch is not None:
+            try:
+                with batch:
+                    white_grid, flicker_grid, exponents = _batched_terminal_noise(
+                        batch, batch_entries, N, term_value)
+            except Exception as exc:
+                # Re-run the set through the scalar adapter instead of guessing:
+                # it names the offending device, which a batch status cannot.
+                # Nothing has been written yet, so the scalar loop below simply
+                # covers every device as if the batch had never been opened.
+                diagnostics.note(
+                    "pnoise.terminal_noise_batch_fallback", exc,
+                    detail="periodic terminal-noise batch failed; "
+                           "re-evaluating device by device",
+                )
+            else:
+                terminal_white.update(white_grid)
+                terminal_flicker_factor.update(flicker_grid)
+                terminal_flicker_exponents.update(exponents)
+                batched_rows = set(white_grid)
         for m in range(N):
             for j, (name, d, g, s) in enumerate(devices):
+                if j in batched_rows:
+                    continue
                 Vs = term_value(s, m)
                 Vd = term_value(d, m)
                 Vg = term_value(g, m)
@@ -773,7 +870,7 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
                 elif j in terminal_white:
                     try:
                         noise = dev_inst[name].get_terminal_noise(
-                            Vs, Vd, Vg, frequency=1.0)
+                            Vs, Vd, Vg, frequency=_FLICKER_REFERENCE_HZ)
                         white = noise.components.get("white")
                         flicker = noise.components.get("flicker")
                         if white is not None:
@@ -783,20 +880,14 @@ def pnoise_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, fl
                             terminal_flicker_factor[j][m] = (
                                 _psd_matrix_sqrt(flicker))
                             probe = dev_inst[name].get_terminal_noise(
-                                Vs, Vd, Vg, frequency=10.0
+                                Vs, Vd, Vg, frequency=_FLICKER_PROBE_HZ
                             ).components.get("flicker")
-                            ref_power = max(
-                                float(np.real(np.trace(flicker))), 0.0)
-                            probe_power = (
-                                max(float(np.real(np.trace(probe))), 0.0)
-                                if probe is not None else 0.0
+                            exponent = (
+                                _flicker_exponent(flicker, probe)
+                                if probe is not None else None
                             )
-                            if ref_power > 0.0 and probe_power > 0.0:
-                                exponent = -np.log(
-                                    probe_power / ref_power) / np.log(10.0)
-                                if np.isfinite(exponent):
-                                    terminal_flicker_exponents[j].append(
-                                        float(exponent))
+                            if exponent is not None:
+                                terminal_flicker_exponents[j].append(exponent)
                         continue
                     except Exception as exc:
                         raise ModelEvaluationError(
