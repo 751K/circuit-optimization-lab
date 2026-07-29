@@ -19,6 +19,74 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
+### Fixed / 修复
+
+- **A subsampled SAR explore scored on DNL silently rejected every candidate /
+  子采样 SAR 探索按 DNL 打分会静默清空候选集**
+
+  **English:** Below full ramp density `max_abs_dnl`/`max_abs_inl`/`missing_codes`
+  are NaN by design — a sparse ramp aliases several code boundaries onto one
+  midpoint, so a number there would be wrong rather than incomplete — and the
+  Pareto stage drops any candidate whose objective is NaN. Naming one of the
+  three in a subsampled config therefore returned `feasible=0`, `pareto=0` and
+  no diagnostic, which reads as "this design space has no solution". Exactly the
+  12-bit screening mode that needs a sparse ramp walks into it. `sar_explore`
+  now raises before the first conversion, naming the metrics and pointing at
+  `max_abs_code_err`/`monotonic`; the guard keys on the ramp (`sweep_points`
+  versus `2**n_bits`), so a full-density config that scores on DNL — both
+  shipped example configs — is untouched. The rule was already documented; it
+  is now enforced.
+
+  **中文：** 低于满密度时 `max_abs_dnl`/`max_abs_inl`/`missing_codes` 按设计为
+  NaN——稀疏 ramp 把多个码界混叠到同一中点，给出数字是错的而不是不全的——而
+  Pareto 阶段会丢弃目标为 NaN 的候选。于是子采样配置里点名这三者之一，结果就是
+  `feasible=0`、`pareto=0` 且无任何诊断，看起来像"这个设计空间无解"。恰恰是必须用
+  稀疏 ramp 的 12-bit 筛查模式会踩中。`sar_explore` 现在在第一次转换前就报错，点名
+  相关指标并指向 `max_abs_code_err`/`monotonic`；判据看的是 ramp 本身
+  （`sweep_points` 对 `2**n_bits`），因此满密度下按 DNL 打分的配置——两个随包示例
+  都是——完全不受影响。这条规则本来就写在文档里，现在开始强制执行。
+
+- **An unregistered model class was reported as a mixed-PDK deck / 未注册的模型类
+  被报成混用 PDK**
+
+  **English:** The `<pdk>_ngspice` oracle classes register only on import of
+  their own module, by design (a fresh `import circuitopt` registers none, and a
+  test pins that). `adapter_for_model_types` returns `None` both for a registered
+  class with no ngspice adapter and for a class that does not exist, so a deck
+  whose module was never imported fell through to the FreePDK45 renderer and got
+  `mixed FreePDK45/other-model ngspice analysis is not supported` — sending the
+  reader hunting for a second PDK in a deck that binds exactly one. That
+  misdirection is what kept the TSMC28 oracle test dead for 13 days. The
+  renderer now separates the two cases, and `engine_crosscheck.ensure_oracle_registered`
+  is public so callers stop hand-rolling the import.
+
+  **中文：** `<pdk>_ngspice` 这批 oracle 类按设计只在导入其所属模块时注册（裸
+  `import circuitopt` 一个都不注册，有测试钉住这点）。而
+  `adapter_for_model_types` 对"已注册但没有 ngspice 适配器"和"类根本不存在"都返回
+  `None`，于是没导入模块的 deck 掉进 FreePDK45 渲染器，收到
+  `mixed FreePDK45/other-model ngspice analysis is not supported`——让人在一个只绑
+  了一个 PDK 的 deck 里去找第二个 PDK。TSMC28 oracle 测试死了 13 天没人看出来，就
+  是被这句话误导的。渲染器现在区分两种情形，并把
+  `engine_crosscheck.ensure_oracle_registered` 提为公开接口，调用方不必再自己手写
+  那行导入。
+
+- **AC and noise rejected a non-contiguous frequency array / AC 与噪声拒收非连续
+  频率数组**
+
+  **English:** The compiled LTI entry points require a contiguous float64
+  buffer, and `np.asarray(freqs, float)` does not supply one — handed an array
+  that is already float64 it returns the same strided view. Any caller reading
+  its frequencies from a column of a 2-D table (`raw[:, 0]` out of an ngspice
+  rawfile, most obviously) hit `ValueError: frequencies must be a contiguous
+  float64 array` from `ac_solve`, and a silent demotion to the scalar path from
+  the BSIM4 noise batch. All three call sites now use `np.ascontiguousarray`.
+
+  **中文：** 编译版 LTI 入口要求连续的 float64 缓冲，而 `np.asarray(freqs, float)`
+  给不了——传进去的若本来就是 float64，返回的仍是那个跨步视图。凡是从二维表某一列
+  取频率的调用方（最典型的是 ngspice rawfile 的 `raw[:, 0]`），在 `ac_solve` 会撞上
+  `ValueError: frequencies must be a contiguous float64 array`，在 BSIM4 噪声批量
+  那边则被静默降级到标量路径。三处调用点均改用 `np.ascontiguousarray`。
+
 ### Added / 新增
 
 - **PVT corner sweep as a service job / PVT 角点扫描作为后台任务**

@@ -64,7 +64,16 @@ _ORACLE_MODULES = {
 }
 
 
-def _ensure_oracle_registered(pdk: str) -> None:
+def ensure_oracle_registered(pdk: str) -> None:
+    """Import whatever module registers ``<pdk>_ngspice``, if it is not already.
+
+    Public because this lazy import is the *only* way the oracle classes reach
+    the registry, and every caller that hand-rolled it (a bare
+    ``import circuitopt.tsmc28_model  # noqa``) is one refactor away from
+    silently severing its oracle path -- which has happened once already.
+    Silent when the pdk has no oracle module; callers check
+    :func:`list_pdks` afterwards and report their own error.
+    """
     import importlib
 
     if f"{pdk}_ngspice" in set(list_pdks()):
@@ -93,7 +102,7 @@ def oracle_deck(deck: Mapping[str, Any]) -> dict[str, Any]:
         pdk = model.get("pdk")
         if pdk is None or str(pdk).endswith("_ngspice"):
             continue
-        _ensure_oracle_registered(str(pdk))
+        ensure_oracle_registered(str(pdk))
         available = set(list_pdks())
         alias = f"{pdk}_ngspice"
         if alias not in available:

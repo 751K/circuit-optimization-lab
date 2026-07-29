@@ -445,7 +445,11 @@ def ac_solve(sizes: Mapping[str, tuple[float, float]], bias: Mapping[str, float]
     lti_problem = build_lti_problem(
         plan, devs, _dev_inst, bpts, ss, ac_caps, ac_res,
         plan.ac_vccs(ac_drives), ac_drives)
-    V = complex_array(lti_problem.solve(np.asarray(freqs, float)))
+    # ascontiguousarray, not asarray: the Rust binding demands a contiguous
+    # float64 buffer, and asarray leaves an already-float64 strided view strided
+    # (a column of a 2-D table -- e.g. ngspice's `raw[:, 0]` frequency column --
+    # reaches here with a row-width stride and the solve rejects it).
+    V = complex_array(lti_problem.solve(np.ascontiguousarray(freqs, dtype=float)))
     out = np.zeros(len(freqs), dtype=complex)
     for node, weight in out_weights.items():
         out += weight * V[:, plan.idx[node]]

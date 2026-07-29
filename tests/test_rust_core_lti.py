@@ -128,6 +128,42 @@ def test_public_ac_and_noise_run_on_rust_lti():
 
 
 @requires_rust_lti
+def test_ac_and_noise_accept_a_strided_frequency_array():
+    """A non-contiguous float64 frequency array must solve, not raise.
+
+    The compiled entry points demand a contiguous float64 buffer, and
+    ``np.asarray(freqs, float)`` does NOT provide one: handed an array that is
+    already float64 it returns the same strided view. Every caller that reads
+    its frequencies out of a column of a 2-D table — ``raw[:, 0]`` from an
+    ngspice rawfile, most obviously — arrives here with a row-width stride and
+    used to get ``ValueError: frequencies must be a contiguous float64 array``
+    from AC, and a silent demotion to the scalar path from the noise batch.
+    The answer must also be identical to the contiguous one, not merely present.
+    """
+    topo = Topology(
+        solved=["OUT"], devices=[], rails={"IN": 0.0, "GND": 0.0},
+        resistors=[("R1", "IN", "OUT", 1e3), ("R2", "OUT", "GND", 1e3)],
+        capacitors=[("C", "OUT", "GND", 1e-9)],
+        ac_drives={"IN": 1.0}, outputs=("OUT",))
+
+    contiguous = np.logspace(0, 6, 21)
+    # A column of a 2-D table: float64 already, so asarray leaves it strided.
+    table = np.column_stack([contiguous, np.zeros_like(contiguous)])
+    strided = table[:, 0]
+    assert not strided.flags["C_CONTIGUOUS"] and strided.dtype == np.float64
+
+    ac_ref = ac_solver.ac_solve({}, {}, contiguous, topo=topo)
+    ac_got = ac_solver.ac_solve({}, {}, strided, topo=topo)
+    np.testing.assert_array_equal(ac_got["response"], ac_ref["response"])
+
+    noise_ref = noise_solver.noise_analysis(
+        {}, {}, contiguous, topo=topo, ac_result=ac_ref)
+    noise_got = noise_solver.noise_analysis(
+        {}, {}, strided, topo=topo, ac_result=ac_got)
+    np.testing.assert_array_equal(noise_got["out_psd"], noise_ref["out_psd"])
+
+
+@requires_rust_lti
 def test_rust_ac_preserves_complex_source_phase():
     topology = Topology(
         solved=["IN", "OUT"],

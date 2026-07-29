@@ -23,6 +23,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from .device_factory import dev_mult, dev_nf
+from .device_model import get_model_class
 from .freepdk45_model import FREEPDK45_CORNERS, corner_card_dir, normalize_corner
 from .ngspice_process import adapter_for_model_types
 from .toolchain import pdk_root
@@ -110,6 +111,22 @@ def resolve_freepdk45_cards(model_types, device_kwargs, device_names):
         if name in device_names and not str(mt).startswith(prefixes)
     }
     if bad:
+        # A model type nobody registered lands here too, because
+        # adapter_for_model_types cannot see an adapter on a class that does not
+        # exist and hands the deck to this FreePDK45 renderer.  Reporting that as
+        # "mixed PDK" sends the reader hunting for a second PDK in a deck that
+        # binds exactly one; say which names are simply unknown, and where their
+        # classes come from.  See engine_crosscheck.ensure_oracle_registered --
+        # the `<pdk>_ngspice` oracle classes register only on import of their own
+        # module, so a caller that skips that import arrives here.
+        unknown = {k: v for k, v in bad.items() if get_model_class(str(v)) is None}
+        if unknown:
+            raise NotImplementedError(
+                "unregistered ngspice model classes: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(unknown.items()))
+                + " -- the module that registers them was never imported "
+                  "(circuitopt.engine_crosscheck.ensure_oracle_registered does "
+                  "this for the '<pdk>_ngspice' oracle classes)")
         raise NotImplementedError(
             "mixed FreePDK45/other-model ngspice analysis is not supported: "
             + ", ".join(f"{k}={v}" for k, v in sorted(bad.items())))

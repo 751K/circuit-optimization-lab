@@ -33,7 +33,9 @@ def _small_cfg():
             "unit_cap": {"min": 9e-15, "max": 1.1e-14, "targets": ["C:C0P", "C:C0N"]},
         },
         "constraints": {"monotonic": {"min": 1}},
-        "objectives": {"max_abs_dnl": "min", "power_uw": "min"},
+        # Four samples over a 3-bit (8-code) ramp is subsampled, where DNL/INL
+        # and missing_codes are NaN by design -- score on the sampled code error.
+        "objectives": {"max_abs_code_err": "min", "power_uw": "min"},
     })
 
 
@@ -74,8 +76,14 @@ def test_sar_explore_end_to_end(tmp_path):
         assert c["converged"]
         m = c["metrics"]
         for key in ("power_uw", "conv_time_ns", "energy_per_conv_pj",
-                    "max_abs_dnl", "missing_codes", "monotonic"):
+                    "max_abs_code_err", "monotonic"):
             assert np.isfinite(m[key]), key
+        # The other half of the contract: below full ramp density these read
+        # "not measured", not a number. A monotonic candidate must not report a
+        # transition DNL a sparse ramp cannot see.
+        if m["monotonic"]:
+            for key in ("max_abs_dnl", "max_abs_inl", "missing_codes"):
+                assert np.isnan(m[key]), key
         assert m["conv_time_ns"] > 0.0 and m["power_uw"] > 0.0
     # Pareto points are a subset of the feasible set.
     assert res["summary"]["pareto"] <= res["summary"]["feasible"]
@@ -91,6 +99,43 @@ def test_sar_explore_end_to_end(tmp_path):
     assert len(jsonl_path.read_text().splitlines()) == 2
 
 
+def test_subsampled_config_rejects_metrics_the_sweep_cannot_measure():
+    """Scoring a sparse ramp on DNL/INL/missing_codes must raise, not return nothing.
+
+    Those three read NaN below full density, and the Pareto stage drops any
+    candidate with a NaN objective — so the run completes with feasible=0 and
+    pareto=0 and looks like an empty design space rather than a config error.
+    The guard fires before a single conversion runs.
+    """
+    from circuitopt.sar_explore import parse_sar_explore, sar_explore
+    spec = _spec()                                        # 3-bit -> 8 codes
+
+    def cfg_with(**overrides):
+        base = {
+            "sweep_points": 4,
+            "variables": {"in_pair_W": {"min": 0.9, "max": 1.3, "targets": ["W:M1"]}},
+            "objectives": {"power_uw": "min"},
+        }
+        base.update(overrides)
+        return parse_sar_explore(base)
+
+    for metric in ("max_abs_dnl", "max_abs_inl", "missing_codes"):
+        with pytest.raises(ValueError, match="subsamples the 8-code ramp"):
+            sar_explore(spec, cfg_with(objectives={metric: "min"}), n=1)
+        with pytest.raises(ValueError, match="subsamples the 8-code ramp"):
+            sar_explore(spec, cfg_with(constraints={metric: {"max": 1.0}}), n=1)
+
+    # Full density scores on them legitimately -- the guard keys on the ramp, not
+    # on sweep_points being present. (The shipped example configs sit here.)
+    full = parse_sar_explore({
+        "sweep_points": 8,
+        "variables": {"in_pair_W": {"min": 0.9, "max": 1.3, "targets": ["W:M1"]}},
+        "objectives": {"max_abs_dnl": "min"},
+    })
+    from circuitopt.sar_explore import _reject_density_dependent
+    _reject_density_dependent(spec, full)                 # must not raise
+
+
 def test_sar_explore_workers_match_serial():
     """The candidate set is order-preserving and identical across worker counts."""
     from circuitopt.sar_explore import sar_explore
@@ -100,9 +145,15 @@ def test_sar_explore_workers_match_serial():
     parallel = sar_explore(spec, cfg, n=2, seed=1, workers=2)
     for a, b in zip(serial["candidates"], parallel["candidates"]):
         assert a["idx"] == b["idx"]
-        assert a["metrics"]["max_abs_dnl"] == b["metrics"]["max_abs_dnl"]
-        assert a["metrics"]["power_uw"] == pytest.approx(
-            b["metrics"]["power_uw"], rel=1e-12, abs=1e-12)
+        # Every metric, NaN-aware: several read NaN below full ramp density, and
+        # `nan == nan` is False, so a plain equality on one of them asserts
+        # nothing. assert_allclose(equal_nan=True) compares the whole dict and
+        # still fails on a real numeric drift between worker counts.
+        assert a["metrics"].keys() == b["metrics"].keys()
+        for key in a["metrics"]:
+            np.testing.assert_allclose(
+                a["metrics"][key], b["metrics"][key],
+                rtol=1e-12, atol=1e-12, equal_nan=True, err_msg=key)
 
 
 def test_example_config_loads_and_matches_positional():

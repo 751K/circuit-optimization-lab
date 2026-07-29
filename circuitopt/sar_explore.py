@@ -48,9 +48,11 @@ DNL/INL are not measurable there (``max_abs_dnl``/``max_abs_inl`` read NaN, so
 constrain/objective on ``max_abs_code_err`` instead — ``|INL|`` at each sample
 lies within half an LSB of it), and ``missing_codes`` reads NaN too (a sparse
 ramp cannot prove a code present or absent), so drop any ``missing_codes``
-constraint from a subsampled config. This is the intended screening mode for
-resolutions where the full ramp is unaffordable (a 12-bit full ramp is 4096
-conversions; ``sweep_points: 256`` is 16x fewer).
+constraint from a subsampled config. :func:`sar_explore` *enforces* this: a
+subsampled config that scores on one of the three raises ``ValueError`` rather
+than dropping every candidate for a NaN objective. This is the intended
+screening mode for resolutions where the full ramp is unaffordable (a 12-bit
+full ramp is 4096 conversions; ``sweep_points: 256`` is 16x fewer).
 """
 from __future__ import annotations
 
@@ -371,6 +373,38 @@ def _has_finite_objectives(metrics, objectives):
         np.isfinite(metrics.get(name, float("nan"))) for name in objectives)
 
 
+# Metrics a sparse ramp reports as NaN ("not measured") rather than wrong --
+# see the NaN branches in :func:`evaluate_sar`.
+_DENSITY_DEPENDENT = ("max_abs_dnl", "max_abs_inl", "missing_codes")
+
+
+def _reject_density_dependent(spec, cfg):
+    """Refuse a subsampled config that scores on a metric the sweep cannot measure.
+
+    ``max_abs_dnl``/``max_abs_inl``/``missing_codes`` are NaN below full ramp
+    density, and :func:`_has_finite_objectives` drops any candidate whose
+    objective is NaN.  Scoring a subsampled run on one of them therefore
+    excludes *every* candidate and reports ``feasible=0``/``pareto=0`` -- which
+    reads as "this design space has no solution" when the truth is that the
+    objective is undefined at this density.  Fail loudly at the entry point
+    instead, naming the screening metrics that do work here.
+    """
+    sweep_points = cfg.sweep_points
+    if sweep_points is None:
+        return
+    levels = 1 << _sar_config(spec)["n_bits"]
+    if sweep_points >= levels:
+        return
+    scored = [name for name in _DENSITY_DEPENDENT
+              if name in cfg.objectives or name in cfg.constraints]
+    if scored:
+        raise ValueError(
+            f"sweep_points={sweep_points} subsamples the {levels}-code ramp, where "
+            f"{', '.join(scored)} read NaN (not measurable) -- scoring on them would "
+            "silently reject every candidate; screen on 'max_abs_code_err' and "
+            "'monotonic' instead, or raise sweep_points to the full ramp")
+
+
 # ── driver ────────────────────────────────────────────────────────────────────
 def sar_explore(spec: CircuitSpec, cfg: SarExploreConfig, *, n=50, seed=0,
                 method="lhs", corner=None, workers=1, progress=None) -> dict:
@@ -390,9 +424,13 @@ def sar_explore(spec: CircuitSpec, cfg: SarExploreConfig, *, n=50, seed=0,
     candidates also keep peak memory at one sweep. ``progress(done, total)``
     fires from the main thread as each candidate finishes, with a monotonic
     completed count.
+
+    Raises :class:`ValueError` when a subsampled config scores on a metric only
+    the full ramp can measure (see :func:`_reject_density_dependent`).
     """
     if workers is None or workers < 1:
         raise ValueError("workers must be a positive integer")
+    _reject_density_dependent(spec, cfg)
     samples = sample(cfg.variables, n, seed=seed, method=method)
 
     candidates: list[dict] = []

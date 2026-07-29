@@ -168,7 +168,11 @@ def test_explore_end_to_end_deterministic_and_writable(tmp_path):
     from circuitopt.sar_explore import (METRICS, load_sar_explore_json, sar_explore,
                                         sar_write_csv, sar_write_jsonl)
     spec, cfg = load_sar_explore_json(EXPLORE_CFG)
-    cfg.sweep_points = 4                              # trim runtime; still exercises DNL
+    # Keep the config's full 8-code ramp. This used to trim to 4 "still
+    # exercises DNL" -- it did not: below full density max_abs_dnl is NaN, the
+    # NaN-tolerant comparison below passed on nan-vs-nan, and every candidate
+    # was dropped for a NaN objective. Full density on a 3-bit part is 8
+    # conversions, which is not a runtime problem worth a vacuous assertion.
     caps_before = [tuple(c) for c in spec.topology.capacitors]
     a = sar_explore(spec, cfg, n=2, seed=9, workers=2)
     b = sar_explore(spec, cfg, n=2, seed=9, workers=1)
@@ -194,7 +198,9 @@ def test_explore_end_to_end_deterministic_and_writable(tmp_path):
 def test_impossible_constraint_yields_no_feasible_candidates():
     from circuitopt.sar_explore import load_sar_explore_json, sar_explore
     spec, cfg = load_sar_explore_json(EXPLORE_CFG)
-    cfg.sweep_points = 2
+    # Full ramp on purpose: at sweep_points=2 the max_abs_dnl objective is NaN
+    # and every candidate is dropped for that instead, so feasible==0 would
+    # hold whether or not the constraint did anything.
     cfg.constraints = {"power_uw": {"max": -1.0}}     # unsatisfiable on purpose
     result = sar_explore(spec, cfg, n=2, seed=0)
     assert result["summary"]["feasible"] == 0

@@ -186,8 +186,11 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
                 for name, (Vs, Vd, Vg) in bpts.items()
             ], dtype=float)
             NativeBsim4Backend.evaluate_batch(native_handles, terminals)
+            # Contiguous, not merely float64: a strided caller array (an ngspice
+            # frequency column, say) would otherwise be rejected by the batch ABI
+            # and silently demote this to the scalar terminal-noise path.
             native_noise = NativeBsim4Backend.noise_batch(
-                native_handles, np.asarray(freqs, dtype=float))
+                native_handles, np.ascontiguousarray(freqs, dtype=float))
         except Exception as exc:
             diagnostics.note(
                 "model.terminal_noise_batch_fallback", exc,
@@ -203,7 +206,7 @@ def noise_analysis(sizes: Mapping[str, tuple[float, float]],
     lti_problem = build_lti_problem(
         plan, devs, dev_inst, bpts, ss, ac_caps, ac_res, ac_vccs)
     tvec = complex_array(lti_problem.solve_transpose(
-        np.asarray(freqs, float), sense))
+        np.ascontiguousarray(freqs, dtype=float), sense))
 
     def transimpedance(term_d, term_s):
         Z = np.zeros(len(freqs), dtype=complex)

@@ -113,9 +113,15 @@ def test_native_5t_ota_periodic_noise_uses_terminal_matrix_path():
 @needs_oracle
 def test_native_5t_ota_matches_ngspice_ac_and_noise():
     from circuitopt import ac_solve, load_circuit_json, noise_analysis
+    from circuitopt.engine_crosscheck import ensure_oracle_registered
     from circuitopt.ngspice_ac import ac_ngspice, ac_response, noise_ngspice
 
     spec = load_circuit_json(CONFIG)
+    # The tsmc28hpcp_ngspice classes register on import of circuitopt.tsmc28_model
+    # and nothing in the import graph pulls it in; renaming the models without
+    # this leaves them unregistered and the deck falls through to the FreePDK45
+    # renderer.
+    ensure_oracle_registered("tsmc28hpcp")
     oracle_models = {
         name: model.replace("tsmc28hpcp.", "tsmc28hpcp_ngspice.")
         for name, model in spec.model_types.items()

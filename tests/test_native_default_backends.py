@@ -63,6 +63,44 @@ print(json.dumps({
     assert state["top_level_ngspice"] is False
 
 
+def test_unregistered_model_class_is_not_reported_as_a_mixed_pdk_deck():
+    """The other side of lazy registration: forgetting the import must say so.
+
+    Because a fresh import registers no ``_ngspice`` classes (above), a caller
+    that renames its models to ``<pdk>_ngspice.*`` without importing the module
+    hands the deck to a renderer that cannot find the classes at all.
+    ``adapter_for_model_types`` returns None either way — for a registered class
+    with no adapter AND for a class that does not exist — so the deck falls
+    through to the FreePDK45 renderer, whose "mixed PDK" complaint sends the
+    reader hunting for a second PDK in a deck that binds exactly one. That
+    misdirection kept the TSMC28 native-vs-ngspice check dead for 13 days.
+
+    Registers ``tsmc28hpcp_ngspice`` in this process as a side effect, exactly
+    as ``verify-engine`` does; the fresh-import invariant above is a subprocess
+    and stays unaffected.
+    """
+    import pytest
+
+    from circuitopt.engine_crosscheck import ensure_oracle_registered
+    from circuitopt.ngspice_render import resolve_freepdk45_cards
+
+    # Unregistered: no class exists under this name.
+    with pytest.raises(NotImplementedError, match="unregistered ngspice model classes"):
+        resolve_freepdk45_cards(
+            {"MN": "nowhere.nmos"}, {"MN": {"corner": "tt"}}, {"MN"})
+
+    # Registered but adapter-less: "mixed PDK" is then the correct diagnosis.
+    assert get_model_class("at4000tg.pmos") is not None
+    with pytest.raises(NotImplementedError, match="mixed FreePDK45/other-model"):
+        resolve_freepdk45_cards(
+            {"MN": "at4000tg.pmos"}, {"MN": {"corner": "tt"}}, {"MN"})
+
+    # And the one sanctioned entry point really does register them, so callers
+    # need not hand-roll a bare `import circuitopt.tsmc28_model`.
+    ensure_oracle_registered("tsmc28hpcp")
+    assert get_model_class("tsmc28hpcp_ngspice.nmos") is not None
+
+
 def test_sky130_cards_are_packaged_with_the_adapter():
     path = sky130_card_path("nmos", 1.0, 0.15, "tt")
     assert path.is_file()
