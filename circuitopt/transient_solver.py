@@ -520,7 +520,13 @@ def _marshal_transient(
 
     tft = build_devices(sizes, nf=nf, corner=corner, topo=topo,
                         model_types=model_types, device_kwargs=device_kwargs)
-    tgrid = np.asarray(tgrid, float)
+    # ascontiguousarray, not asarray: every compiled entry point downstream --
+    # integration_rows, the fixed-grid solve, the adaptive solve -- borrows a
+    # contiguous float64 slice and rejects anything else, and asarray returns an
+    # already-float64 strided view unchanged. A caller who slices its time base
+    # out of a 2-D table column would otherwise reach the Rust boundary strided.
+    # Normalising once here covers all of them and cannot drift out of sync.
+    tgrid = np.ascontiguousarray(tgrid, dtype=float)
     N = len(tgrid)
 
     # Per-call cap operator override (default = the module/env-selected mode).

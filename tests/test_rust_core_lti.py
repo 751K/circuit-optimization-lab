@@ -164,6 +164,32 @@ def test_ac_and_noise_accept_a_strided_frequency_array():
 
 
 @requires_rust_lti
+def test_transient_accepts_a_strided_time_grid():
+    """Same contract for the time base, which reaches three compiled entries.
+
+    `tgrid` is borrowed by `integration_rows`, the fixed-grid solve and the
+    adaptive solve, and each rejects a strided buffer. `transient` used to pass
+    the caller's array through `np.asarray`, so a time base sliced out of a 2-D
+    table raised `times must be a contiguous float64 array` from inside the
+    compiled path -- surfaced as a bare "Rust fixed-grid transient failed".
+    Normalising once at the entry point covers all three.
+    """
+    topo = Topology(
+        solved=["OUT"], devices=[], rails={"IN": "IN", "GND": 0.0},
+        resistors=[("R1", "IN", "OUT", 1e3)],
+        capacitors=[("C", "OUT", "GND", 1e-9)], outputs=("OUT",))
+    contiguous = np.linspace(0.0, 1e-6, 51)
+    strided = np.column_stack([contiguous, np.zeros_like(contiguous)])[:, 0]
+    assert not strided.flags["C_CONTIGUOUS"] and strided.dtype == np.float64
+    wave = np.linspace(0.0, 1.0, 51)
+
+    from circuitopt import transient
+    ref = transient({}, {"IN": 0.0}, contiguous, topo=topo, inputs={"IN": wave})
+    got = transient({}, {"IN": 0.0}, strided, topo=topo, inputs={"IN": wave})
+    np.testing.assert_array_equal(got["vout"], ref["vout"])
+
+
+@requires_rust_lti
 def test_rust_ac_preserves_complex_source_phase():
     topology = Topology(
         solved=["IN", "OUT"],
