@@ -19,94 +19,7 @@ release checklist.
 
 ## [Unreleased] / 未发布
 
-### Fixed / 修复
-
-- **The default test run no longer excludes 181 tests / 默认测试不再排除 181 个用例**
-
-  **English:** `addopts` dropped the `ngspice_oracle` and `heavy_e2e` markers —
-  16% of the suite — and CI runs a plain `pytest`, so those tests ran in no
-  automation at all and rotted: a `sar_explore` config broke on 2026-07-27 and
-  the TSMC28 native-vs-ngspice oracle on 2026-07-17, neither noticed. The
-  exclusion dated from v1.4.0 when the heavy conversions cost ~22 min; the
-  compiled kernels have since taken them to ~23 s and ~81 s against a 79 s
-  default run. Both markers are back in the default gate (still selectable by
-  name), and each test self-skips without its ngspice binary or PDK cards. Three
-  real defects surfaced and are fixed below; the restored TSMC28 oracle passes
-  (AC within 1%, integrated output noise within 2%).
-
-  **中文：** `addopts` 排掉了 `ngspice_oracle` 与 `heavy_e2e` 两个标记——占全套
-  16%——而 CI 跑的是裸 `pytest`，于是这些用例没有任何自动化在跑，也就烂掉了：一个
-  `sar_explore` 配置 2026-07-27 失效、TSMC28 原生对 ngspice 的交叉校验
-  2026-07-17 失效，都没人发现。排除是 v1.4.0 时定的，当时重型转换要 ~22 分钟；编译
-  内核落地后它们已降到 ~23 s 和 ~81 s，而默认套件本身 79 s。两个标记重回默认门
-  （仍可按名选跑），缺 ngspice 或 PDK 卡时逐条自跳过。由此暴露并修掉三个真缺陷（见
-  下）；恢复运行的 TSMC28 oracle 通过（AC 1% 内、积分输出噪声 2% 内）。
-
-- **A subsampled SAR explore scored on DNL silently rejected every candidate /
-  子采样 SAR 探索按 DNL 打分会静默清空候选集**
-
-  **English:** Below full ramp density `max_abs_dnl`/`max_abs_inl`/`missing_codes`
-  are NaN by design — a sparse ramp aliases several code boundaries onto one
-  midpoint, so a number there would be wrong rather than incomplete — and the
-  Pareto stage drops any candidate whose objective is NaN. Naming one of the
-  three in a subsampled config therefore returned `feasible=0`, `pareto=0` and
-  no diagnostic, which reads as "this design space has no solution". Exactly the
-  12-bit screening mode that needs a sparse ramp walks into it. `sar_explore`
-  now raises before the first conversion, naming the metrics and pointing at
-  `max_abs_code_err`/`monotonic`; the guard keys on the ramp (`sweep_points`
-  versus `2**n_bits`), so a full-density config that scores on DNL — both
-  shipped example configs — is untouched. The rule was already documented; it
-  is now enforced.
-
-  **中文：** 低于满密度时 `max_abs_dnl`/`max_abs_inl`/`missing_codes` 按设计为
-  NaN——稀疏 ramp 把多个码界混叠到同一中点，给出数字是错的而不是不全的——而
-  Pareto 阶段会丢弃目标为 NaN 的候选。于是子采样配置里点名这三者之一，结果就是
-  `feasible=0`、`pareto=0` 且无任何诊断，看起来像"这个设计空间无解"。恰恰是必须用
-  稀疏 ramp 的 12-bit 筛查模式会踩中。`sar_explore` 现在在第一次转换前就报错，点名
-  相关指标并指向 `max_abs_code_err`/`monotonic`；判据看的是 ramp 本身
-  （`sweep_points` 对 `2**n_bits`），因此满密度下按 DNL 打分的配置——两个随包示例
-  都是——完全不受影响。这条规则本来就写在文档里，现在开始强制执行。
-
-- **An unregistered model class was reported as a mixed-PDK deck / 未注册的模型类
-  被报成混用 PDK**
-
-  **English:** The `<pdk>_ngspice` oracle classes register only on import of
-  their own module, by design (a fresh `import circuitopt` registers none, and a
-  test pins that). `adapter_for_model_types` returns `None` both for a registered
-  class with no ngspice adapter and for a class that does not exist, so a deck
-  whose module was never imported fell through to the FreePDK45 renderer and got
-  `mixed FreePDK45/other-model ngspice analysis is not supported` — sending the
-  reader hunting for a second PDK in a deck that binds exactly one. That
-  misdirection is what kept the TSMC28 oracle test dead for 13 days. The
-  renderer now separates the two cases, and `engine_crosscheck.ensure_oracle_registered`
-  is public so callers stop hand-rolling the import.
-
-  **中文：** `<pdk>_ngspice` 这批 oracle 类按设计只在导入其所属模块时注册（裸
-  `import circuitopt` 一个都不注册，有测试钉住这点）。而
-  `adapter_for_model_types` 对"已注册但没有 ngspice 适配器"和"类根本不存在"都返回
-  `None`，于是没导入模块的 deck 掉进 FreePDK45 渲染器，收到
-  `mixed FreePDK45/other-model ngspice analysis is not supported`——让人在一个只绑
-  了一个 PDK 的 deck 里去找第二个 PDK。TSMC28 oracle 测试死了 13 天没人看出来，就
-  是被这句话误导的。渲染器现在区分两种情形，并把
-  `engine_crosscheck.ensure_oracle_registered` 提为公开接口，调用方不必再自己手写
-  那行导入。
-
-- **AC and noise rejected a non-contiguous frequency array / AC 与噪声拒收非连续
-  频率数组**
-
-  **English:** The compiled LTI entry points require a contiguous float64
-  buffer, and `np.asarray(freqs, float)` does not supply one — handed an array
-  that is already float64 it returns the same strided view. Any caller reading
-  its frequencies from a column of a 2-D table (`raw[:, 0]` out of an ngspice
-  rawfile, most obviously) hit `ValueError: frequencies must be a contiguous
-  float64 array` from `ac_solve`, and a silent demotion to the scalar path from
-  the BSIM4 noise batch. All three call sites now use `np.ascontiguousarray`.
-
-  **中文：** 编译版 LTI 入口要求连续的 float64 缓冲，而 `np.asarray(freqs, float)`
-  给不了——传进去的若本来就是 float64，返回的仍是那个跨步视图。凡是从二维表某一列
-  取频率的调用方（最典型的是 ngspice rawfile 的 `raw[:, 0]`），在 `ac_solve` 会撞上
-  `ValueError: frequencies must be a contiguous float64 array`，在 BSIM4 噪声批量
-  那边则被静默降级到标量路径。三处调用点均改用 `np.ascontiguousarray`。
+## [2.7.0] - 2026-07-30
 
 ### Added / 新增
 
@@ -600,6 +513,105 @@ release checklist.
   而 OTFT 工艺名与硅工艺卡角点是不相交的两套命名，并集里会出现无法解析的角点。现
   `POST /api/v1/validate` 会一并报告该电路允许的角点集合以及硅工艺专属 PVT 轴是否
   适用，且每次编辑都会重新上报。
+
+- **The default test run no longer excludes 181 tests / 默认测试不再排除 181 个用例**
+
+  **English:** `addopts` dropped the `ngspice_oracle` and `heavy_e2e` markers —
+  16% of the suite — and CI runs a plain `pytest`, so those tests ran in no
+  automation at all and rotted: a `sar_explore` config broke on 2026-07-27 and
+  the TSMC28 native-vs-ngspice oracle on 2026-07-17, neither noticed. The
+  exclusion dated from v1.4.0 when the heavy conversions cost ~22 min; the
+  compiled kernels have since taken them to ~23 s and ~81 s against a 79 s
+  default run. Both markers are back in the default gate (still selectable by
+  name), and each test self-skips without its ngspice binary or PDK cards. Three
+  real defects surfaced and are fixed below; the restored TSMC28 oracle passes
+  (AC within 1%, integrated output noise within 2%).
+
+  **中文：** `addopts` 排掉了 `ngspice_oracle` 与 `heavy_e2e` 两个标记——占全套
+  16%——而 CI 跑的是裸 `pytest`，于是这些用例没有任何自动化在跑，也就烂掉了：一个
+  `sar_explore` 配置 2026-07-27 失效、TSMC28 原生对 ngspice 的交叉校验
+  2026-07-17 失效，都没人发现。排除是 v1.4.0 时定的，当时重型转换要 ~22 分钟；编译
+  内核落地后它们已降到 ~23 s 和 ~81 s，而默认套件本身 79 s。两个标记重回默认门
+  （仍可按名选跑），缺 ngspice 或 PDK 卡时逐条自跳过。由此暴露并修掉三个真缺陷（见
+  下）；恢复运行的 TSMC28 oracle 通过（AC 1% 内、积分输出噪声 2% 内）。
+
+- **A subsampled SAR explore scored on DNL silently rejected every candidate /
+  子采样 SAR 探索按 DNL 打分会静默清空候选集**
+
+  **English:** Below full ramp density `max_abs_dnl`/`max_abs_inl`/`missing_codes`
+  are NaN by design — a sparse ramp aliases several code boundaries onto one
+  midpoint, so a number there would be wrong rather than incomplete — and the
+  Pareto stage drops any candidate whose objective is NaN. Naming one of the
+  three in a subsampled config therefore returned `feasible=0`, `pareto=0` and
+  no diagnostic, which reads as "this design space has no solution". Exactly the
+  12-bit screening mode that needs a sparse ramp walks into it. `sar_explore`
+  now raises before the first conversion, naming the metrics and pointing at
+  `max_abs_code_err`/`monotonic`; the guard keys on the ramp (`sweep_points`
+  versus `2**n_bits`), so a full-density config that scores on DNL — both
+  shipped example configs — is untouched. The rule was already documented; it
+  is now enforced.
+
+  **中文：** 低于满密度时 `max_abs_dnl`/`max_abs_inl`/`missing_codes` 按设计为
+  NaN——稀疏 ramp 把多个码界混叠到同一中点，给出数字是错的而不是不全的——而
+  Pareto 阶段会丢弃目标为 NaN 的候选。于是子采样配置里点名这三者之一，结果就是
+  `feasible=0`、`pareto=0` 且无任何诊断，看起来像"这个设计空间无解"。恰恰是必须用
+  稀疏 ramp 的 12-bit 筛查模式会踩中。`sar_explore` 现在在第一次转换前就报错，点名
+  相关指标并指向 `max_abs_code_err`/`monotonic`；判据看的是 ramp 本身
+  （`sweep_points` 对 `2**n_bits`），因此满密度下按 DNL 打分的配置——两个随包示例
+  都是——完全不受影响。这条规则本来就写在文档里，现在开始强制执行。
+
+- **An unregistered model class was reported as a mixed-PDK deck / 未注册的模型类
+  被报成混用 PDK**
+
+  **English:** The `<pdk>_ngspice` oracle classes register only on import of
+  their own module, by design (a fresh `import circuitopt` registers none, and a
+  test pins that). `adapter_for_model_types` returns `None` both for a registered
+  class with no ngspice adapter and for a class that does not exist, so a deck
+  whose module was never imported fell through to the FreePDK45 renderer and got
+  `mixed FreePDK45/other-model ngspice analysis is not supported` — sending the
+  reader hunting for a second PDK in a deck that binds exactly one. That
+  misdirection is what kept the TSMC28 oracle test dead for 13 days. The
+  renderer now separates the two cases, and `engine_crosscheck.ensure_oracle_registered`
+  is public so callers stop hand-rolling the import.
+
+  **中文：** `<pdk>_ngspice` 这批 oracle 类按设计只在导入其所属模块时注册（裸
+  `import circuitopt` 一个都不注册，有测试钉住这点）。而
+  `adapter_for_model_types` 对"已注册但没有 ngspice 适配器"和"类根本不存在"都返回
+  `None`，于是没导入模块的 deck 掉进 FreePDK45 渲染器，收到
+  `mixed FreePDK45/other-model ngspice analysis is not supported`——让人在一个只绑
+  了一个 PDK 的 deck 里去找第二个 PDK。TSMC28 oracle 测试死了 13 天没人看出来，就
+  是被这句话误导的。渲染器现在区分两种情形，并把
+  `engine_crosscheck.ensure_oracle_registered` 提为公开接口，调用方不必再自己手写
+  那行导入。
+
+- **AC, noise and transient rejected a non-contiguous input array / AC、噪声与瞬态
+  拒收非连续输入数组**
+
+  **English:** The compiled entry points borrow a contiguous float64 buffer, and
+  `np.asarray(x, float)` does not supply one — handed an array that is already
+  float64 it returns the same strided view. Any caller reading its frequencies
+  or its time base from a column of a 2-D table (`raw[:, 0]` out of an ngspice
+  rawfile, most obviously) hit `ValueError: frequencies must be a contiguous
+  float64 array` from `ac_solve`, a silent demotion to the scalar path from the
+  BSIM4 noise batch, and — via `integration_rows`, the fixed-grid solve and the
+  adaptive solve, all three of which borrow `tgrid` — a bare "Rust fixed-grid
+  transient failed" from `transient`, with the real cause buried in a captured
+  `grid_error`. `transient` now normalises once at its entry point rather than
+  at the three call sites, so it cannot drift as compiled paths are added.
+  Probed afterwards over the whole public surface: `ac_solve`,
+  `noise_analysis`, `transient` (time base and input waveform), `pac_solve` and
+  `pnoise_solve` all accept a strided array and return bit-identical answers.
+
+  **中文：** 编译入口借用的是连续 float64 缓冲，而 `np.asarray(x, float)` 给不了
+  ——传进去的若本来就是 float64，返回的仍是那个跨步视图。凡是从二维表某一列取频率
+  或时间基的调用方（最典型的是 ngspice rawfile 的 `raw[:, 0]`）：在 `ac_solve` 会撞
+  上 `ValueError: frequencies must be a contiguous float64 array`，在 BSIM4 噪声批量
+  会被静默降级到标量路径，在 `transient` 则因 `integration_rows`、定网格解、自适应解
+  三者都借用 `tgrid` 而得到一句光秃秃的 "Rust fixed-grid transient failed"，真因埋在
+  被捕获的 `grid_error` 里。`transient` 改为在入口处归一化一次而非在三个调用点各归一
+  化，后续新增编译路径也不会漂移。修完对整个公开接口做了探测：`ac_solve`、
+  `noise_analysis`、`transient`（时间基与输入波形）、`pac_solve`、`pnoise_solve`
+  全部接受跨步数组且结果逐位相同。
 
 ## [2.6.0] - 2026-07-28
 
@@ -3050,7 +3062,8 @@ Initial public release.
   **中文：** 新增 359 项测试，包括 Cadence 回归和字节门禁复现，并建立 lint、
   测试矩阵和字节门禁三类 CI 作业。
 
-[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.6.0...HEAD
+[Unreleased]: https://github.com/751K/circuit-optimization-lab/compare/v2.7.0...HEAD
+[2.7.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.6.0...v2.7.0
 [2.6.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.5.0...v2.6.0
 [2.5.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/751K/circuit-optimization-lab/compare/v2.3.0...v2.4.0
