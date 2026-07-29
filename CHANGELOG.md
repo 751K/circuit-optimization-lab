@@ -21,6 +21,27 @@ release checklist.
 
 ### Fixed / 修复
 
+- **The default test run no longer excludes 181 tests / 默认测试不再排除 181 个用例**
+
+  **English:** `addopts` dropped the `ngspice_oracle` and `heavy_e2e` markers —
+  16% of the suite — and CI runs a plain `pytest`, so those tests ran in no
+  automation at all and rotted: a `sar_explore` config broke on 2026-07-27 and
+  the TSMC28 native-vs-ngspice oracle on 2026-07-17, neither noticed. The
+  exclusion dated from v1.4.0 when the heavy conversions cost ~22 min; the
+  compiled kernels have since taken them to ~23 s and ~81 s against a 79 s
+  default run. Both markers are back in the default gate (still selectable by
+  name), and each test self-skips without its ngspice binary or PDK cards. Three
+  real defects surfaced and are fixed below; the restored TSMC28 oracle passes
+  (AC within 1%, integrated output noise within 2%).
+
+  **中文：** `addopts` 排掉了 `ngspice_oracle` 与 `heavy_e2e` 两个标记——占全套
+  16%——而 CI 跑的是裸 `pytest`，于是这些用例没有任何自动化在跑，也就烂掉了：一个
+  `sar_explore` 配置 2026-07-27 失效、TSMC28 原生对 ngspice 的交叉校验
+  2026-07-17 失效，都没人发现。排除是 v1.4.0 时定的，当时重型转换要 ~22 分钟；编译
+  内核落地后它们已降到 ~23 s 和 ~81 s，而默认套件本身 79 s。两个标记重回默认门
+  （仍可按名选跑），缺 ngspice 或 PDK 卡时逐条自跳过。由此暴露并修掉三个真缺陷（见
+  下）；恢复运行的 TSMC28 oracle 通过（AC 1% 内、积分输出噪声 2% 内）。
+
 - **A subsampled SAR explore scored on DNL silently rejected every candidate /
   子采样 SAR 探索按 DNL 打分会静默清空候选集**
 

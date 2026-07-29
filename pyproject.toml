@@ -144,16 +144,22 @@ packages = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-m 'not ngspice_oracle and not heavy_e2e'"
+# No marker is excluded by default. `ngspice_oracle` and `heavy_e2e` were, back
+# when the heavy conversions cost ~22 min (2026-07-17, v1.4.0); the SAR
+# de-replay, compiled kernels and batched device evaluation since have taken
+# them to ~23 s and ~81 s against a 79 s default run, so the exclusion bought
+# nothing and cost a gate. Both suites ran in NO automation -- CI runs a plain
+# `pytest` -- and rotted: a sar_explore config broke on 2026-07-27 and the
+# TSMC28 native-vs-ngspice oracle on 2026-07-17, neither noticed. Each test
+# self-skips without its ngspice binary or PDK cards, so a machine that lacks
+# them is unaffected. Select a subset with `pytest -m heavy_e2e` as before.
 markers = [
     "cadence_regression: tests that compare against archived Cadence/Spectre references",
-    "ngspice_oracle: optional tests that launch ngspice or validate its oracle-only workflows",
+    "ngspice_oracle: tests that launch ngspice or validate its oracle-only workflows",
     "slow_regression: slower regression tests that still run by default",
-    # heavy_e2e: complete SAR/ADC conversions on the native silicon backend
-    # (minutes each on a machine with PDK cards; they made the default suite
-    # take ~22 min). Run explicitly: pytest -m heavy_e2e. Assigned centrally
-    # in tests/conftest.py.
-    "heavy_e2e: heavyweight end-to-end silicon conversion regressions, excluded from the default run",
+    # heavy_e2e: complete SAR/ADC conversions on the native silicon backend.
+    # Assigned centrally in tests/conftest.py.
+    "heavy_e2e: heavyweight end-to-end silicon conversion regressions",
 ]
 
 [tool.ruff]

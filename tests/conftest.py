@@ -3,15 +3,15 @@
 Central assignment of the ``heavy_e2e`` marker (see pyproject.toml).
 
 These tests run complete SAR/ADC conversions on the native silicon BSIM4
-backend — legitimate end-to-end regressions, but minutes each on a machine
-with PDK cards installed. Measured 2026-07-17 on the v1.4.0 tree: the 25
-slowest of them accounted for ~1200 s of a 1312 s default run. They are
-excluded from the default suite via ``addopts`` and run explicitly with::
+backend. They cost minutes each on the v1.4.0 tree (2026-07-17: the 25 slowest
+accounted for ~1200 s of a 1312 s run), which is why they were once excluded
+from the default suite; the compiled kernels have since taken the whole set to
+~23 s and the exclusion is gone. The marker remains for selecting them::
 
     pytest -m heavy_e2e
 
 Keeping the list here (rather than per-file ``pytestmark``) gives one
-reviewable inventory of everything the default suite skips.
+reviewable inventory of the heavyweight set.
 """
 from __future__ import annotations
 

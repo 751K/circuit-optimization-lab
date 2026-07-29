@@ -533,7 +533,8 @@ Opus 403 中断率纳入排期余量（worktree + commit-early 已是既定实�
 
 - 本机 2026-07-17 无 cargo；R1 装 rustup 后，**所有后续 agent 任务书的环境
   事实卡必须写死 cargo/maturin 绝对路径**（沿用 `agent-brief-env-card` 惯例）。
-- venv：`.venv/bin/python`（3.12.9）；默认 pytest 排除 `ngspice_oracle`；
+- venv：`.venv/bin/python`（3.12.9）；默认 pytest 跑全量（2026-07-30 起不再排除
+  `ngspice_oracle`/`heavy_e2e`，缺 ngspice 或 PDK 时逐条自跳过）；
   byte-gate 命令 `python -m circuitopt.calibration --all`。
 - 器件/内核常数（阻尼 5.0、vtol 1e-8、gmin 1e-12、LTE 常数表、gear2 系数、
   stall-accept 条件等）在盘点报告与源码注释均有出处，转写时**逐条对照抄**，

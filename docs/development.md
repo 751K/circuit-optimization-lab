@@ -61,29 +61,29 @@ pytest -q
 ruff check .
 ```
 
-The default pytest configuration excludes external simulator oracles. Normal
-PDK tests exercise the in-process C BSIM path and should pass even when
-`NGSPICE_BIN` points to a nonexistent executable. Run the optional comparison
-suite explicitly when changing compact-model equations, card parsing, or an
-oracle adapter:
+`pytest -q` runs everything — no marker is excluded. Each test that needs an
+external payload self-skips without it: normal PDK tests exercise the
+in-process C BSIM path and pass even when `NGSPICE_BIN` points to a nonexistent
+executable, and the ngspice comparison workflows skip when no ngspice binary or
+local PDK cards are present. On a fully provisioned machine the whole suite is
+about three and a half minutes.
+
+Two markers remain, for *selecting* a subset rather than skipping one:
 
 ```bash
-pytest -q -m ngspice_oracle
+pytest -q -m ngspice_oracle   # ngspice comparison workflows (~81 s)
+pytest -q -m heavy_e2e        # complete SAR/ADC silicon conversions (~23 s)
 ```
 
-That marker includes ngspice comparison workflows and may require local PDK
-payloads. It is intentionally outside the routine test gate
-because full-circuit subprocess campaigns are much slower than native tests.
+Run those two by name when changing compact-model equations, card parsing, an
+oracle adapter, the SAR/ADC workflow, the transient solver, or the native BSIM4
+backend. The `heavy_e2e` inventory lives in `tests/conftest.py`.
 
-The default run also excludes `heavy_e2e`: complete SAR/ADC conversions on the
-native silicon backend (minutes per test on a machine with FreePDK45 cards —
-they made the default suite take ~22 min instead of ~2 min). The inventory
-lives in `tests/conftest.py`. Run them explicitly when touching the SAR/ADC
-workflow, the transient solver, or the native BSIM4 backend:
-
-```bash
-pytest -q -m heavy_e2e
-```
+Both were once excluded from the default run, back when the heavy conversions
+cost ~22 min. The compiled kernels have since taken them to the times above, so
+the exclusion bought nothing — and while it stood, two of these tests broke and
+stayed broken for days, because nothing (CI included) ran them. Keep them in
+the default gate.
 
 Documentation:
 
